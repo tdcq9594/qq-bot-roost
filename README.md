@@ -10,7 +10,7 @@
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
 <img src="https://img.shields.io/badge/self--test-45%20passed-brightgreen" alt="自检 45 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
-<img src="https://img.shields.io/badge/license-MIT-green" alt="MIT">
+<img src="https://img.shields.io/badge/license-Non--Commercial-red" alt="禁止商用">
 
 [快速开始](#3-分钟跑起来) ｜ [写插件](docs/插件开发规范.md) ｜ [外部插件协议](docs/插件协议.md) ｜ [配置参考](docs/配置参考.md) ｜ [常见问题](docs/常见问题.md) ｜ [贡献](CONTRIBUTING.md)
 
@@ -392,11 +392,7 @@ mock 模式下：直接输入文本 = 模拟一条群 @ 消息；`!as <openid>` 
 
 ## 贡献
 
-欢迎 Issue 和 PR。动手前请读 [贡献指南](CONTRIBUTING.md)，有一条硬要求：
-
-> **改功能前先去 GitHub 搜同类实现，优先复用现成方案。** 确实没有合适的，才自己设计。
-
-其他规范：
+欢迎 Issue 和 PR。动手前请读 [贡献指南](CONTRIBUTING.md)。
 
 | 文档 | 内容 |
 |------|------|
@@ -408,6 +404,13 @@ mock 模式下：直接输入文本 = 模拟一条群 @ 消息；`!as <openid>` 
 
 ## 许可
 
-[MIT](LICENSE) © qq-bot-roost contributors
+**源码公开，但禁止商业使用。** 完整条款见 [LICENSE](LICENSE)。
+
+- 个人使用、学习、研究、非营利项目：随便用、随便改
+- 商业用途（出售、收费服务、集成进商业产品等）：需另行获得授权
+
+> 严格说这**不属于 OSI 定义的开源**（开源许可证不允许限制使用领域），
+> 准确说法是「源码公开（source-available）」。如果你要把它用在商业场景，
+> 请联系作者谈授权。
 
 你可以自由使用、修改、分发、商用，保留版权声明即可。

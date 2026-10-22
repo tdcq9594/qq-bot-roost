@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "description": "栖 Roost：零依赖的 QQ 官方机器人框架，填 AppID/AppSecret 即连，插件可写任意语言",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/tdcq9594/qq-bot-roost.git"

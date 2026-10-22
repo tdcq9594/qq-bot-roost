@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        提新功能前，请先说明**你搜过哪些现成方案**——这是本项目的硬要求，见 [贡献指南](../../CONTRIBUTING.md)。
+        先说清场景和痛点，比直接提「加个 xxx 功能」更容易被采纳。
 
   - type: textarea
     id: problem
@@ -23,19 +23,6 @@ body:
     attributes:
       label: 你期望的方案
       placeholder: 描述你希望它怎么工作，越具体越好。
-    validations:
-      required: true
-
-  - type: textarea
-    id: prior-art
-    attributes:
-      label: 调研过的现成方案
-      description: |
-        你搜过哪些项目？它们怎么做的？为什么不直接用它们的方案？
-        如果没搜到，也请写明你搜了什么关键词。
-      placeholder: |
-        例如：搜了 AstrBot / Koishi 的群级配置实现，AstrBot 用 xxxx 方式，
-        但它是 Python 且依赖较多，不适用于本项目，所以建议自己实现 yyyy。
     validations:
       required: true
 

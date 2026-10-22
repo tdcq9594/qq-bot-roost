@@ -1,21 +1,94 @@
-MIT License
+qq-bot-roost（栖 Roost）非商业许可协议 v1.0
 
-Copyright (c) 2026 qq-bot-roost contributors
+版权所有 (c) 2026 tdcq9594
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+保留所有权利。除本协议明确授予的权利外，不授予任何其他权利。
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+================================================================
+一、许可授予
+================================================================
+
+在遵守本协议全部条款的前提下，任何自然人或组织均可免费：
+
+  1. 使用本软件，用于个人学习、研究、试验或非营利目的；
+  2. 复制本软件；
+  3. 修改本软件，并基于修改结果创作衍生作品；
+  4. 分发本软件的原版或修改版。
+
+================================================================
+二、禁止商业使用
+================================================================
+
+不得将本软件（含原版、修改版及衍生作品）用于任何商业目的。
+
+「商业目的」包括但不限于：
+
+  1. 出售、出租、许可本软件，或就其收取任何形式的费用；
+  2. 将本软件作为收费服务、收费产品或收费功能的一部分提供；
+  3. 将本软件集成进以营利为目的的产品、系统或服务；
+  4. 通过本软件直接或间接获取广告收入、佣金、订阅费或其他商业收益；
+  5. 在商业组织内部用于其主营业务或经营活动。
+
+企业内部出于评估、测试目的的非生产性使用，不视为商业使用。
+
+================================================================
+三、使用条件
+================================================================
+
+分发本软件或其任何部分时，必须同时满足：
+
+  1. 保留声明：完整保留本版权声明与本许可协议，不得删除或修改；
+  2. 沿用本协议：修改版和衍生作品必须继续适用本协议，不得改用更宽松的许可；
+  3. 标明修改：须明确说明你对原作品做了哪些修改；
+  4. 不得背书：不得暗示原作者为你的产品或修改版提供担保或背书。
+
+================================================================
+四、商业授权
+================================================================
+
+如需将本软件用于商业目的，必须事先取得版权所有人的书面授权。
+请通过项目仓库的 Issue 或仓库主页公布的联系方式提出申请。
+
+================================================================
+五、免责声明
+================================================================
+
+本软件按「现状」提供，不附带任何明示或默示的担保，包括但不限于对适销性、
+特定用途适用性、所有权和不侵权的担保。
+
+在任何情况下，作者或版权持有人均不对因本软件或本软件的使用或其他交易
+而产生的任何索赔、损害或其他责任负责，无论是合同诉讼、侵权行为还是其他方式，
+也无论是否已被告知此类损害的可能性。
+
+================================================================
+六、协议终止
+================================================================
+
+你违反本协议任何条款时，本协议授予你的全部权利立即自动终止。
+
+终止后，你必须停止使用本软件，并销毁你所持有的全部副本（含修改版）。
+终止不影响版权持有人就此前发生的违约行为追究责任。
+
+================================================================
+七、协议效力
+================================================================
+
+本协议构成双方就本软件达成的完整约定。本协议任何条款被认定无效或不可执行时，
+不影响其余条款的效力。
+
+----------------------------------------------------------------
+English Summary (for reference only; the Chinese text above prevails)
+
+Copyright (c) 2026 tdcq9594. All rights reserved.
+
+Permission is granted, free of charge, to use, copy, modify and distribute
+this software FOR NONCOMMERCIAL PURPOSES ONLY, provided that this notice is
+kept intact, derivative works are distributed under the same terms, changes
+are disclosed, and no endorsement by the original author is implied.
+
+COMMERCIAL USE OF ANY KIND IS PROHIBITED without prior written permission
+from the copyright holder.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+IMPLIED. IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+OTHER LIABILITY ARISING FROM THE USE OF THE SOFTWARE.
