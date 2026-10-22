@@ -38,7 +38,7 @@ export class QQApi {
     }
 
     if (res.status === 401 && !retried) {
-      log.warn('接口返回 401，刷新 token 后重试');
+      log.warn('接口返回 401，刷新访问凭证后重试');
       await this.tokens.refresh();
       return this.#request(method, path, body, { retried: true });
     }

@@ -49,7 +49,7 @@ async function readBody(req, limit = 1024 * 256) {
  * 可视化面板。
  *
  * 默认只监听 127.0.0.1，不对外暴露。
- * 设置 webui.token 后，所有 /api/* 请求需要带 X-Token 头或 ?token=。
+ * 设置 webui.accessKey 后，所有 /api/* 请求需要带 X-Access-Key 头或 ?key=。
  */
 export function startWebServer({ cfg, plugins, groups, getGateway, tokens, api, saveConfig, onConfigApplied }) {
   const wc = cfg.webui ?? {};
@@ -60,13 +60,13 @@ export function startWebServer({ cfg, plugins, groups, getGateway, tokens, api, 
 
   const host = wc.host || '127.0.0.1';
   const port = Number(wc.port) || 8080;
-  const token = wc.token || '';
+  const accessKey = wc.accessKey || wc.token || '';
 
   const sseClients = new Set();
 
   const statusPayload = () =>
     runtime.snapshot({
-      tokenExpiresIn: Math.max(0, Math.round(((tokens?.expiresAt ?? 0) - Date.now()) / 1000)),
+      credentialExpiresIn: Math.max(0, Math.round(((tokens?.expiresAt ?? 0) - Date.now()) / 1000)),
       plugins: plugins.list(),
       cfg,
     });
@@ -93,9 +93,14 @@ export function startWebServer({ cfg, plugins, groups, getGateway, tokens, api, 
   statusTimer.unref?.();
 
   const authorized = (req, url) => {
-    if (!token) return true;
-    const h = req.headers['x-token'];
-    return h === token || url.searchParams.get('token') === token;
+    if (!accessKey) return true;
+    // 兼容旧的 X-Token / ?token= 写法
+    const given =
+      req.headers['x-access-key'] ||
+      req.headers['x-token'] ||
+      url.searchParams.get('key') ||
+      url.searchParams.get('token');
+    return given === accessKey;
   };
 
   const server = http.createServer(async (req, res) => {
@@ -105,7 +110,7 @@ export function startWebServer({ cfg, plugins, groups, getGateway, tokens, api, 
     try {
       // ---------------- API ----------------
       if (pathname.startsWith('/api/')) {
-        if (!authorized(req, url)) return json(res, 401, { error: 'token 无效' });
+        if (!authorized(req, url)) return json(res, 401, { error: '访问密钥无效' });
 
         // 状态
         if (pathname === '/api/status' && req.method === 'GET') {
@@ -228,7 +233,10 @@ export function startWebServer({ cfg, plugins, groups, getGateway, tokens, api, 
           await getGateway?.()?.restart();
           return json(res, 200, { ok: true });
         }
-        if (pathname === '/api/token/refresh' && req.method === 'POST') {
+        if (
+          (pathname === '/api/credential/refresh' || pathname === '/api/token/refresh') &&
+          req.method === 'POST'
+        ) {
           await tokens?.refresh();
           return json(res, 200, { ok: true });
         }
@@ -307,7 +315,7 @@ export function startWebServer({ cfg, plugins, groups, getGateway, tokens, api, 
 
   server.listen(port, host, () => {
     const shown = host === '0.0.0.0' ? 'localhost' : host;
-    log.info(`可视化面板: http://${shown}:${port}${token ? '/?token=' + token : ''}`);
+    log.info(`可视化面板: http://${shown}:${port}${accessKey ? '/?key=' + accessKey : ''}`);
   });
 
   return {

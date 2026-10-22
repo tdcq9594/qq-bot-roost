@@ -3,17 +3,18 @@
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 
-// token 从 URL 取一次，之后存 localStorage，避免刷新丢失
-const urlToken = new URLSearchParams(location.search).get('token');
-if (urlToken) localStorage.setItem('qqbot_token', urlToken);
-const TOKEN = localStorage.getItem('qqbot_token') || '';
+// 面板访问密钥从 URL 取一次，之后存 localStorage，避免刷新丢失
+const params = new URLSearchParams(location.search);
+const urlKey = params.get('key') || params.get('token');
+if (urlKey) localStorage.setItem('qqbot_key', urlKey);
+const ACCESS_KEY = localStorage.getItem('qqbot_key') || '';
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
     ...opts,
     headers: {
       'Content-Type': 'application/json',
-      ...(TOKEN ? { 'X-Token': TOKEN } : {}),
+      ...(ACCESS_KEY ? { 'X-Access-Key': ACCESS_KEY } : {}),
       ...(opts.headers || {}),
     },
   });
@@ -77,7 +78,9 @@ function renderStatus(s) {
 
   $('#c-conn').textContent = s.connected ? '在线' : '离线';
   $('#c-uptime').textContent = fmtDuration(s.uptimeMs);
-  $('#c-token').textContent = s.tokenExpiresIn ? `${Math.floor(s.tokenExpiresIn / 60)} 分` : '-';
+  $('#c-cred').textContent = s.credentialExpiresIn
+    ? `${Math.floor(s.credentialExpiresIn / 60)} 分`
+    : '-';
   $('#c-mem').textContent = `${s.memoryMB} MB`;
   $('#c-recv').textContent = s.counters.recv;
   $('#c-sent').textContent = s.counters.sent;
@@ -135,9 +138,9 @@ $('#btnReconnect').addEventListener('click', async (e) => {
   finally { setTimeout(() => { e.target.disabled = false; pollStatus(); }, 1200); }
 });
 
-$('#btnRefreshToken').addEventListener('click', async (e) => {
+$('#btnRefreshCred').addEventListener('click', async (e) => {
   e.target.disabled = true;
-  try { await api('/api/token/refresh', { method: 'POST' }); alert('Token 已刷新'); }
+  try { await api('/api/credential/refresh', { method: 'POST' }); alert('凭证已刷新'); }
   catch (err) { alert('刷新失败: ' + err.message); }
   finally { e.target.disabled = false; }
 });
@@ -188,7 +191,7 @@ function fillForm(c) {
 
   f.webuiHost.value = c.webui?.host || '127.0.0.1';
   f.webuiPort.value = c.webui?.port ?? 8080;
-  f.webuiToken.value = c.webui?.token || '';
+  f.webuiAccessKey.value = c.webui?.accessKey || '';
   f.logLevel.value = c.logLevel || 'info';
 }
 
@@ -230,7 +233,7 @@ $('#cfgForm').addEventListener('submit', async (e) => {
     webui: {
       host: f.webuiHost.value.trim() || '127.0.0.1',
       port: Number(f.webuiPort.value) || 8080,
-      token: f.webuiToken.value.trim(),
+      accessKey: f.webuiAccessKey.value.trim(),
     },
   };
 
@@ -486,7 +489,7 @@ async function initLogs() {
 /* ---------------- SSE ---------------- */
 
 function connectStream() {
-  const qs = TOKEN ? `?token=${encodeURIComponent(TOKEN)}` : '';
+  const qs = ACCESS_KEY ? `?key=${encodeURIComponent(ACCESS_KEY)}` : '';
   const es = new EventSource(`/api/stream${qs}`);
   es.addEventListener('status', (ev) => {
     try { renderStatus(JSON.parse(ev.data)); } catch {}

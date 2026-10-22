@@ -3,7 +3,7 @@ import { createLogger } from './logger.js';
 const log = createLogger('token');
 
 /**
- * AccessToken 管理。
+ * 访问凭证管理（官方称 AccessToken）。
  * 官方说明：有效期 7200 秒，不会自动续期；到期前 60 秒内再次获取会拿到新 token。
  * 因此这里提前 120 秒刷新，留足余量。
  */
@@ -51,16 +51,16 @@ export class TokenManager {
     try {
       data = JSON.parse(text);
     } catch {
-      throw new Error(`获取 AccessToken 失败（HTTP ${res.status}）: ${text.slice(0, 200)}`);
+      throw new Error(`获取访问凭证失败（HTTP ${res.status}）: ${text.slice(0, 200)}`);
     }
     if (!data.access_token) {
-      throw new Error(`获取 AccessToken 失败: ${text.slice(0, 300)}`);
+      throw new Error(`获取访问凭证失败: ${text.slice(0, 300)}`);
     }
     // 文档里 expires_in 是字符串，做一次兼容
     const ttl = Number(data.expires_in) || 7200;
     this.token = data.access_token;
     this.expiresAt = Date.now() + ttl * 1000;
-    log.info(`已获取 AccessToken，有效期 ${ttl}s`);
+    log.info(`已获取访问凭证，有效期 ${ttl}s`);
     return this.token;
   }
 

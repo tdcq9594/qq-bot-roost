@@ -22,7 +22,7 @@ const DEFAULTS = {
     enabled: true,
     host: '127.0.0.1',
     port: 8080,
-    token: '',
+    accessKey: '', // 面板访问密钥，留空则不校验
   },
 
   // 群/用户白名单：enabled 为 true 时只响应名单内的来源
@@ -65,6 +65,12 @@ export async function loadConfig() {
     if (e.code !== 'ENOENT') throw new Error(`config.json 解析失败: ${e.message}`);
   }
   const cfg = deepMerge(DEFAULTS, fileCfg);
+
+  // 兼容旧配置：以前这个字段叫 webui.token
+  if (!cfg.webui.accessKey && cfg.webui.token) {
+    cfg.webui.accessKey = cfg.webui.token;
+    delete cfg.webui.token;
+  }
 
   // 环境变量优先级最高，方便容器部署
   if (process.env.QQ_BOT_APPID) cfg.appId = process.env.QQ_BOT_APPID;

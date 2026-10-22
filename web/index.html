@@ -34,7 +34,7 @@
     <div class="cards">
       <div class="card"><div class="k">连接状态</div><div class="v" id="c-conn">-</div></div>
       <div class="card"><div class="k">运行时长</div><div class="v" id="c-uptime">-</div></div>
-      <div class="card"><div class="k">Token 剩余</div><div class="v" id="c-token">-</div></div>
+      <div class="card"><div class="k">凭证有效期</div><div class="v" id="c-cred">-</div></div>
       <div class="card"><div class="k">内存占用</div><div class="v" id="c-mem">-</div></div>
       <div class="card"><div class="k">收到消息</div><div class="v" id="c-recv">0</div></div>
       <div class="card"><div class="k">发出消息</div><div class="v" id="c-sent">0</div></div>
@@ -70,7 +70,7 @@
         </dl>
         <div class="btn-row">
           <button class="btn" id="btnReconnect">重连网关</button>
-          <button class="btn" id="btnRefreshToken">刷新 Token</button>
+          <button class="btn" id="btnRefreshCred">刷新凭证</button>
         </div>
       </div>
     </div>
@@ -132,7 +132,7 @@
         <div class="grid2">
           <label>监听地址<input name="webuiHost" placeholder="127.0.0.1"></label>
           <label>端口<input name="webuiPort" type="number"></label>
-          <label>访问 token（留空则不校验）<input name="webuiToken"></label>
+          <label>面板访问密钥（留空则不校验）<input name="webuiAccessKey"></label>
           <label>日志级别
             <select name="logLevel">
               <option value="debug">debug</option>

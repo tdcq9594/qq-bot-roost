@@ -67,7 +67,7 @@ export const runtime = {
     return Date.now() - this.startedAt;
   },
 
-  snapshot({ tokenExpiresIn = 0, plugins = [], cfg = {} } = {}) {
+  snapshot({ credentialExpiresIn = 0, plugins = [], cfg = {} } = {}) {
     return {
       connected: this.connected,
       botName: this.botName,
@@ -85,7 +85,7 @@ export const runtime = {
       events: [...this.eventCounts.entries()]
         .map(([name, count]) => ({ name, count }))
         .sort((a, b) => b.count - a.count),
-      tokenExpiresIn,
+      credentialExpiresIn,
       plugins: plugins.map((p) => ({
         id: p.id,
         name: p.name,
