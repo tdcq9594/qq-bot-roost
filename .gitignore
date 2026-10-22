@@ -13,6 +13,11 @@ logs/
 **/node_modules/
 **/.deps.json
 
+# 插件目录：插件从市场安装（github.com/tdcq9594/qq-bot-roost-plugins），
+# 属于运行内容而不是框架代码，不入库。
+# 自己写的插件想版本管理，就在 plugins/ 里单独 git init。
+plugins/
+
 # 通用
 *.log
 *.tmp
