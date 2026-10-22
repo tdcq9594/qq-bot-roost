@@ -56,14 +56,28 @@ function shortId(id) {
 
 /* ---------------- Tab ---------------- */
 
+function activateTab(name) {
+  const btn = $$('.tab').find((b) => b.dataset.tab === name);
+  if (!btn) return;
+  $$('.tab').forEach((b) => b.classList.toggle('active', b === btn));
+  $$('.panel').forEach((p) => p.classList.toggle('active', p.id === `tab-${name}`));
+  if (name === 'plugins') loadPlugins();
+  if (name === 'config') loadConfig();
+  if (name === 'groups') loadGroups();
+}
+
 $$('.tab').forEach((btn) => {
   btn.addEventListener('click', () => {
-    $$('.tab').forEach((b) => b.classList.toggle('active', b === btn));
-    $$('.panel').forEach((p) => p.classList.toggle('active', p.id === `tab-${btn.dataset.tab}`));
-    if (btn.dataset.tab === 'plugins') loadPlugins();
-    if (btn.dataset.tab === 'config') loadConfig();
-    if (btn.dataset.tab === 'groups') loadGroups();
+    activateTab(btn.dataset.tab);
+    // 记进地址栏，刷新后还停在这一页，也方便直接分享 /#config
+    history.replaceState(null, '', `#${btn.dataset.tab}`);
   });
+});
+
+// 支持直接打开 /#config 这类地址
+window.addEventListener('hashchange', () => {
+  const name = location.hash.slice(1);
+  if (name) activateTab(name);
 });
 
 /* ---------------- 概览 ---------------- */
@@ -691,4 +705,6 @@ function connectStream() {
   bindIntentsUI();
   loadConfig();
   loadGroups();
+  const initial = location.hash.slice(1);
+  if (initial) activateTab(initial);
 })();

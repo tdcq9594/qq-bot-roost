@@ -230,23 +230,51 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 .intent-list { display: grid; gap: 8px; }
 
 .intent-item {
-  display: flex; align-items: flex-start; gap: 10px;
-  padding: 10px 12px;
-  border: 1px solid var(--border); border-radius: 9px;
-  background: #fff; cursor: pointer;
-  transition: border-color .15s, background .15s;
+  /* 关键：显式覆盖全局 label 的 column 布局，否则勾选框会被挤到上面 */
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 11px 14px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: #fff;
+  cursor: pointer;
+  transition: border-color .15s, background .15s, box-shadow .15s;
 }
-.intent-item:hover { border-color: #cfd4dc; background: #fafbfc; }
-.intent-item:has(input:checked) { border-color: #b9cdfb; background: #f7f9ff; }
-.intent-item input[type=checkbox] { margin-top: 3px; flex: none; }
+.intent-item:hover { border-color: #c9d0da; background: #fbfcfd; }
+.intent-item:has(input:checked) {
+  border-color: #b9cdfb;
+  background: #f6f9ff;
+  box-shadow: inset 3px 0 0 var(--primary);
+}
+.intent-item input[type=checkbox] {
+  /* 全局 input 是 width:100%，这里必须收回 */
+  width: 16px;
+  height: 16px;
+  margin: 1px 0 0;
+  flex: none;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
 
-.intent-body { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
-.intent-name { font-size: 13.5px; font-weight: 600; color: var(--text); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.intent-events { font-size: 12.5px; color: var(--muted); line-height: 1.5; }
-.intent-note { font-size: 12px; color: var(--warn); }
+.intent-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;
+  min-width: 0;
+}
+.intent-name {
+  font-size: 13.5px; font-weight: 600; color: var(--text);
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  line-height: 1.45;
+}
+.intent-events { font-size: 12.5px; color: var(--muted); line-height: 1.55; }
+.intent-note { font-size: 12px; color: var(--warn); line-height: 1.5; }
 .intent-value {
-  font-family: var(--mono); font-size: 11.5px; color: #a8aeb6;
-  flex: none; padding-top: 3px;
+  font-family: var(--mono); font-size: 11.5px; color: #b3b9c1;
+  flex: none; padding-top: 2px; min-width: 74px; text-align: right;
 }
 
 .tag-need, .tag-free {
