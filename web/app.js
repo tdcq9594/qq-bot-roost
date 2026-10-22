@@ -61,6 +61,7 @@ $$('.tab').forEach((btn) => {
     $$('.panel').forEach((p) => p.classList.toggle('active', p.id === `tab-${btn.dataset.tab}`));
     if (btn.dataset.tab === 'plugins') loadPlugins();
     if (btn.dataset.tab === 'config') loadConfig();
+    if (btn.dataset.tab === 'groups') loadGroups();
   });
 });
 
@@ -155,7 +156,10 @@ function fillForm(c) {
   f.appSecret.placeholder = c.appSecretSet ? '已设置，留空则不修改' : '请输入 AppSecret';
   f.baseUrl.value = c.baseUrl || '';
   f.commandPrefix.value = c.commandPrefix || '/';
-  f.owners.value = (c.owners || []).join('\n');
+
+  owners = [...(c.owners || [])];
+  renderOwners();
+  $('#autoOwner').checked = c.autoOwnerOnInvite !== false;
 
   const preset = INTENT_PRESETS.includes(String(c.intents)) ? String(c.intents) : 'custom';
   $('#intentsPreset').value = preset;
@@ -199,7 +203,6 @@ $('#cfgForm').addEventListener('submit', async (e) => {
     baseUrl: f.baseUrl.value.trim(),
     commandPrefix: f.commandPrefix.value.trim() || '/',
     intents: Number(f.intents.value),
-    owners: lines(f.owners.value),
     logLevel: f.logLevel.value,
     whitelist: {
       enabled: f.whitelistEnabled.checked,
@@ -278,6 +281,126 @@ async function loadPlugins() {
   }
 }
 
+/* ---------------- 主人与群组 ---------------- */
+
+let owners = [];
+
+function renderOwners() {
+  const wrap = $('#ownerChips');
+  if (!wrap) return;
+  if (!owners.length) {
+    wrap.innerHTML = '<span class="hint">还没有主人。机器人被拉进群后会自动把邀请人设为主人，也可以手动添加。</span>';
+    return;
+  }
+  wrap.innerHTML = owners
+    .map((o) => `<span class="chip" data-id="${o}">${shortId(o)}<button class="chip-x" title="移除">×</button></span>`)
+    .join('');
+  wrap.querySelectorAll('.chip-x').forEach((btn) => {
+    btn.addEventListener('click', () => removeOwner(btn.closest('.chip').dataset.id));
+  });
+}
+
+async function saveOwners() {
+  await api('/api/config', { method: 'PUT', body: JSON.stringify({ owners }) });
+}
+
+async function addOwner() {
+  const input = $('#ownerInput');
+  const v = input.value.trim();
+  if (!v) return;
+  if (owners.includes(v)) { input.value = ''; return; }
+  owners.push(v);
+  await saveOwners();
+  input.value = '';
+  renderOwners();
+  pollStatus();
+}
+
+async function removeOwner(id) {
+  owners = owners.filter((x) => x !== id);
+  await saveOwners();
+  renderOwners();
+  pollStatus();
+}
+
+$('#btnAddOwner')?.addEventListener('click', addOwner);
+$('#ownerInput')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); addOwner(); }
+});
+
+$('#autoOwner')?.addEventListener('change', async (e) => {
+  try {
+    await api('/api/config', {
+      method: 'PUT',
+      body: JSON.stringify({ autoOwnerOnInvite: e.target.checked }),
+    });
+  } catch (err) {
+    alert('保存失败: ' + err.message);
+    e.target.checked = !e.target.checked;
+  }
+});
+
+async function loadGroups() {
+  const body = $('#groupBody');
+  if (!body) return;
+  try {
+    renderGroups(await api('/api/groups'));
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="6" class="empty">加载失败: ${e.message}</td></tr>`;
+  }
+}
+
+function renderGroups(list) {
+  const body = $('#groupBody');
+  if (!list.length) {
+    body.innerHTML = '<tr><td colspan="6" class="empty">还没有群。把机器人拉进群后这里会自动出现。</td></tr>';
+    return;
+  }
+  body.innerHTML = list
+    .map((g) => `
+      <tr data-id="${g.groupOpenid}">
+        <td class="mono" title="${g.groupOpenid}">${shortId(g.groupOpenid)}</td>
+        <td class="mono" title="${g.inviterOpenid || ''}">${g.inviterOpenid ? shortId(g.inviterOpenid) : '-'}</td>
+        <td><input class="inline-input admin-input" value="${g.adminOpenid || ''}" placeholder="未设置"></td>
+        <td><span class="badge ${g.enabled ? 'on' : 'off'}">${g.enabled ? '在用' : '已移出'}</span></td>
+        <td>${g.lastActiveAt ? fmtAgo(g.lastActiveAt) : '-'}</td>
+        <td class="num">
+          <button class="btn small" data-act="save">保存</button>
+          <button class="btn small danger" data-act="del">删除</button>
+        </td>
+      </tr>`)
+    .join('');
+
+  body.querySelectorAll('button[data-act]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const tr = btn.closest('tr');
+      const id = tr.dataset.id;
+      btn.disabled = true;
+      try {
+        if (btn.dataset.act === 'save') {
+          const val = tr.querySelector('.admin-input').value.trim();
+          await api(`/api/groups/${encodeURIComponent(id)}`, {
+            method: 'PUT',
+            body: JSON.stringify({ adminOpenid: val }),
+          });
+        } else {
+          if (!confirm('确定删除这个群的记录？机器人不会退群，只是忘掉它的配置。')) {
+            btn.disabled = false;
+            return;
+          }
+          await api(`/api/groups/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        }
+        await loadGroups();
+      } catch (e) {
+        alert('操作失败: ' + e.message);
+        btn.disabled = false;
+      }
+    });
+  });
+}
+
+$('#btnReloadGroups')?.addEventListener('click', loadGroups);
+
 /* ---------------- 日志 ---------------- */
 
 const logView = $('#logView');
@@ -351,4 +474,5 @@ function connectStream() {
   connectStream();
   setInterval(pollStatus, 5000);
   loadConfig();
+  loadGroups();
 })();

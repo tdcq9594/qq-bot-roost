@@ -51,7 +51,7 @@ async function readBody(req, limit = 1024 * 256) {
  * 默认只监听 127.0.0.1，不对外暴露。
  * 设置 webui.token 后，所有 /api/* 请求需要带 X-Token 头或 ?token=。
  */
-export function startWebServer({ cfg, plugins, getGateway, tokens, api, saveConfig, onConfigApplied }) {
+export function startWebServer({ cfg, plugins, groups, getGateway, tokens, api, saveConfig, onConfigApplied }) {
   const wc = cfg.webui ?? {};
   if (wc.enabled === false) {
     log.info('可视化面板已禁用（config.json → webui.enabled = false）');
@@ -155,6 +155,9 @@ export function startWebServer({ cfg, plugins, getGateway, tokens, api, saveConf
           if (body.dedupWindowSec !== undefined) {
             cfg.dedupWindowSec = Math.max(0, Number(body.dedupWindowSec) || 0);
           }
+          if (body.autoOwnerOnInvite !== undefined) {
+            cfg.autoOwnerOnInvite = Boolean(body.autoOwnerOnInvite);
+          }
           if (body.webui && typeof body.webui === 'object') {
             cfg.webui = { ...cfg.webui, ...body.webui };
           }
@@ -182,6 +185,26 @@ export function startWebServer({ cfg, plugins, getGateway, tokens, api, saveConf
           else if (action === 'disable') ok = await plugins.setEnabled(id, false);
           else ok = await plugins.reload(id);
           return json(res, ok ? 200 : 500, { ok, error: ok ? undefined : '操作失败，看日志' });
+        }
+
+        // 群档案
+        if (pathname === '/api/groups' && req.method === 'GET') {
+          return json(res, 200, await groups.list());
+        }
+        const gm = pathname.match(/^\/api\/groups\/([^/]+)$/);
+        if (gm && (req.method === 'PUT' || req.method === 'DELETE')) {
+          const id = decodeURIComponent(gm[1]);
+          if (req.method === 'DELETE') {
+            await groups.remove(id);
+            return json(res, 200, { ok: true });
+          }
+          const body = await readBody(req);
+          const patch = {};
+          if (body.adminOpenid !== undefined) patch.adminOpenid = String(body.adminOpenid).trim();
+          if (body.enabled !== undefined) patch.enabled = Boolean(body.enabled);
+          if (body.note !== undefined) patch.note = String(body.note);
+          const g = await groups.upsert(id, patch);
+          return json(res, 200, g);
         }
 
         // 日志

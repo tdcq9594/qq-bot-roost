@@ -20,6 +20,7 @@
     <button class="tab active" data-tab="overview">概览</button>
     <button class="tab" data-tab="config">配置</button>
     <button class="tab" data-tab="plugins">插件</button>
+    <button class="tab" data-tab="groups">群组</button>
     <button class="tab" data-tab="logs">日志</button>
   </nav>
   <div class="status-pill" id="connPill">
@@ -107,9 +108,6 @@
         <label class="full" id="intentsCustomWrap" style="display:none">自定义 intents
           <input name="intents" type="number">
         </label>
-        <label class="full">主人 openid（逗号或换行分隔）
-          <textarea name="owners" rows="2" placeholder="在群里发 /whoami 可查"></textarea>
-        </label>
       </div>
 
       <div class="box">
@@ -161,6 +159,67 @@
         <span class="hint">插件放在 plugins/ 目录下，改完点重载即可生效</span>
       </div>
       <div id="pluginList" class="plugin-list"></div>
+    </div>
+  </section>
+
+  <!-- 群组 -->
+  <section id="tab-groups" class="panel">
+    <div class="box">
+      <div class="box-hd">
+        <h3>机器人主人</h3>
+        <span class="hint">主人可以使用全部管理命令</span>
+      </div>
+      <div id="ownerChips" class="chips"></div>
+      <div class="form-inline" style="margin-top:12px">
+        <input id="ownerInput" placeholder="填 openid，回车添加">
+        <button class="btn primary" id="btnAddOwner">添加</button>
+      </div>
+      <div class="hint" style="margin-top:8px">
+        不知道 openid？在群里 @机器人 发 /whoami，或用上面的「活跃会话」看。
+      </div>
+    </div>
+
+    <div class="box">
+      <div class="box-hd">
+        <h3>入群策略</h3>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="autoOwner">
+        机器人被拉进群时，自动把邀请人设为主人（仅在主人列表为空时生效）
+      </label>
+      <div class="hint" style="margin-top:8px">
+        官方接口查不到「群主」，能拿到的只有「谁把机器人拉进群」。
+        这个人通常是群主或管理员，所以用它作为该群管理者的默认值。
+      </div>
+    </div>
+
+    <div class="box">
+      <div class="box-hd">
+        <h3>群列表</h3>
+        <div class="btn-row" style="margin:0">
+          <button class="btn small" id="btnReloadGroups">刷新</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>群 openid</th>
+              <th>邀请者</th>
+              <th>本群管理者</th>
+              <th>状态</th>
+              <th>最后活跃</th>
+              <th class="num">操作</th>
+            </tr>
+          </thead>
+          <tbody id="groupBody">
+            <tr><td colspan="6" class="empty">还没有群。把机器人拉进群后这里会自动出现。</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="hint" style="margin-top:8px">
+        本群管理者可以使用管理命令（启用/禁用/重载插件），但只限本群。
+      </div>
     </div>
   </section>
 

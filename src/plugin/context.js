@@ -106,7 +106,7 @@ class PluginStorage {
 /**
  * 插件上下文：插件能用的全部能力都在这里，不暴露内部实现。
  */
-export function createContext({ meta, registry, api, cfg, isOwner }) {
+export function createContext({ meta, registry, api, cfg, groups, isOwner }) {
   const id = meta.id;
   const logger = createLogger(`plugin:${id}`);
   const disposers = [];
@@ -169,9 +169,19 @@ export function createContext({ meta, registry, api, cfg, isOwner }) {
       if (typeof fn === 'function') disposers.push(fn);
     },
 
-    /** 当前消息的发送者是否为机器人主人 */
+    /** 当前消息的发送者是否为机器人主人（全局） */
     isOwner(userId) {
       return isOwner(userId);
+    },
+
+    /** 某人是否是指定群的管理者（默认是邀请机器人入群的人） */
+    async isGroupAdmin(groupOpenid, userId) {
+      return groups ? groups.isAdmin(groupOpenid, userId) : false;
+    },
+
+    /** 读取群档案（邀请者、管理者、是否启用等） */
+    async getGroup(groupOpenid) {
+      return groups ? groups.get(groupOpenid) : null;
     },
 
     /** 内部：卸载时统一清理 */

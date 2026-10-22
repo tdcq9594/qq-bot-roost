@@ -9,6 +9,7 @@ import { buildMessage, isMessageEvent } from './message.js';
 import { Registry } from './plugin/context.js';
 import { PluginManager } from './plugin/loader.js';
 import { runtime } from './runtime.js';
+import { GroupStore } from './groups.js';
 import { startWebServer } from './web/server.js';
 
 const log = createLogger('core');
@@ -218,7 +219,7 @@ function registerCoreCommands(registry, { cfg, plugins }) {
 /* 事件分发                                                            */
 /* ------------------------------------------------------------------ */
 
-function createDispatcher({ registry, api, cfg, plugins, guards }) {
+function createDispatcher({ registry, api, cfg, plugins, guards, groups }) {
   const isOwner = (uid) => cfg.owners.includes(uid);
 
   return async function dispatch(eventName, d) {
@@ -226,6 +227,20 @@ function createDispatcher({ registry, api, cfg, plugins, guards }) {
     runtime.messageEvent = eventName;
 
     if (!isMessageEvent(eventName)) {
+      // 入群 / 退群：维护群档案，并在必要时自动认主
+      if (eventName === 'GROUP_ADD_ROBOT') {
+        const gid = d?.group_openid;
+        const inviter = d?.op_member_openid || '';
+        await groups.onAdded(gid, inviter);
+        if (cfg.autoOwnerOnInvite && !cfg.owners.length && inviter) {
+          cfg.owners.push(inviter);
+          await saveConfig(cfg);
+          log.info(`已自动把邀请人 ${inviter} 设为机器人主人（可在面板修改）`);
+        }
+      } else if (eventName === 'GROUP_DEL_ROBOT') {
+        await groups.onRemoved(d?.group_openid);
+      }
+
       for (const l of registry.listeners.get(eventName) ?? []) {
         try {
           await l.handler(d, { event: eventName, api });
@@ -242,12 +257,15 @@ function createDispatcher({ registry, api, cfg, plugins, guards }) {
     runtime.touchChat(msg.chatId, msg.kind);
 
     if (!guards.check(msg)) return;
+    if (msg.kind === 'group' && msg.groupId) await groups.touch(msg.groupId);
 
     if (msg.isCommand) {
       const entry = registry.commands.get(msg.command);
       if (entry) {
-        if (entry.admin && !isOwner(msg.userId)) {
-          return msg.reply('这个命令只有机器人主人能用。发 /whoami 查看自己的 openid。');
+        const groupAdmin =
+          msg.kind === 'group' ? await groups.isAdmin(msg.groupId, msg.userId) : false;
+        if (entry.admin && !isOwner(msg.userId) && !groupAdmin) {
+          return msg.reply('这个命令只有机器人主人或本群管理员能用。发 /whoami 查看自己的 openid。');
         }
         const required = (entry.pattern?.match(/<[^>]+>/g) ?? []).length;
         if (msg.args.length < required) {
@@ -302,24 +320,43 @@ function createMockApi() {
   };
 }
 
-async function runMock(cfg, registry, plugins) {
+async function runMock(cfg, registry, plugins, groups) {
   console.log('\n=== Mock 模式 ===');
   console.log('不连接 QQ，用本地假消息验证插件逻辑。输入内容回车发送，Ctrl+C 退出。\n');
 
   const guards = createGuards(cfg);
-  const dispatch = createDispatcher({ registry, api: createMockApi(), cfg, plugins, guards });
-  const fakeUser = cfg.owners[0] ?? 'mock-user-openid';
+  const dispatch = createDispatcher({ registry, api: createMockApi(), cfg, plugins, guards, groups });
+  const currentUser = () => cfg.owners[0] ?? 'mock-user-openid';
   const fakeGroup = 'mock-group-openid';
   let seq = 0;
 
-  const feed = (line) =>
-    dispatch('GROUP_AT_MESSAGE_CREATE', {
+  // 普通文本 = 一条群 @ 消息；以 ! 开头 = 模拟系统事件
+  //   !addbot <群openid> <邀请人openid>   模拟机器人被拉进群
+  //   !delbot <群openid>                  模拟机器人被移出群
+  const feed = async (line) => {
+    const t = line.trim();
+    if (t.startsWith('!addbot')) {
+      const [, gid = fakeGroup, inviter = 'mock-inviter'] = t.split(/\s+/);
+      console.log(`[模拟] 机器人被 ${inviter} 拉进群 ${gid}`);
+      return dispatch('GROUP_ADD_ROBOT', {
+        group_openid: gid,
+        op_member_openid: inviter,
+        timestamp: String(Date.now()),
+      });
+    }
+    if (t.startsWith('!delbot')) {
+      const [, gid = fakeGroup] = t.split(/\s+/);
+      console.log(`[模拟] 机器人被移出群 ${gid}`);
+      return dispatch('GROUP_DEL_ROBOT', { group_openid: gid, timestamp: String(Date.now()) });
+    }
+    return dispatch('GROUP_AT_MESSAGE_CREATE', {
       id: `mock-${++seq}`,
       content: line,
       group_openid: fakeGroup,
-      author: { member_openid: fakeUser },
+      author: { member_openid: currentUser() },
       timestamp: String(Date.now()),
     });
+  };
 
   if (!process.stdin.isTTY) {
     const chunks = [];
@@ -330,6 +367,7 @@ async function runMock(cfg, registry, plugins) {
       console.log(`你> ${line}`);
       await feed(line);
     }
+    await groups.flush();
     return;
   }
 
@@ -346,6 +384,7 @@ async function runMock(cfg, registry, plugins) {
     await feed(line);
   }
   rl.close();
+  await groups.flush();
 }
 
 /* ------------------------------------------------------------------ */
@@ -358,6 +397,7 @@ async function main() {
   runtime.startedAt = Date.now();
 
   const registry = new Registry();
+  const groups = new GroupStore();
   let tokens = null;
   let api = null;
 
@@ -389,6 +429,7 @@ async function main() {
     registry,
     api,
     cfg,
+    groups,
     isOwner: (uid) => cfg.owners.includes(uid),
   });
 
@@ -401,6 +442,7 @@ async function main() {
   const web = startWebServer({
     cfg,
     plugins,
+    groups,
     getGateway: () => gateway,
     tokens,
     api,
@@ -419,7 +461,7 @@ async function main() {
       });
       return new Promise(() => {});
     }
-    await runMock(cfg, registry, plugins);
+    await runMock(cfg, registry, plugins, groups);
     web?.close();
     return;
   }
@@ -429,7 +471,7 @@ async function main() {
   }
 
   const guards = createGuards(cfg);
-  const dispatch = createDispatcher({ registry, api, cfg, plugins, guards });
+  const dispatch = createDispatcher({ registry, api, cfg, plugins, guards, groups });
 
   gateway = new Gateway({
     api,
@@ -443,10 +485,11 @@ async function main() {
 
   await gateway.start();
 
-  const shutdown = () => {
+  const shutdown = async () => {
     log.info('正在退出...');
     gateway.stop();
     web?.close();
+    await groups.flush().catch(() => {});
     process.exit(0);
   };
   process.on('SIGINT', shutdown);

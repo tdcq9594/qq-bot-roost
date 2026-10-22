@@ -40,6 +40,9 @@ const DEFAULTS = {
 
   // 去重窗口（秒），同一 msg id 只处理一次
   dedupWindowSec: 120,
+
+  // 机器人入群时，自动把「邀请人」设为主人（owners 为空时才生效）
+  autoOwnerOnInvite: true,
 };
 
 function deepMerge(base, extra) {
@@ -86,6 +89,7 @@ export async function saveConfig(cfg) {
     whitelist: cfg.whitelist,
     rateLimit: cfg.rateLimit,
     dedupWindowSec: cfg.dedupWindowSec,
+    autoOwnerOnInvite: cfg.autoOwnerOnInvite,
   };
   await fs.writeFile(CONFIG_PATH, JSON.stringify(out, null, 2) + '\n', 'utf8');
 }
