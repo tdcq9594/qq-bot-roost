@@ -109,15 +109,24 @@ export class PluginStorage {
     this.timer = null;
     /** key -> 该 key 的更新队列尾，保证 update() 串行 */
     this.locks = new Map();
+    this.loading = null;
   }
 
   async #load() {
     if (this.data) return this.data;
-    try {
-      this.data = JSON.parse(await fs.readFile(this.file, 'utf8'));
-    } catch {
-      this.data = {};
+    // 并发保护：多个命令同时进来时，只读一次文件。
+    // 不加这个的话，每个调用都会 await readFile 然后各自赋值 this.data，
+    // 后赋值的覆盖前面的，写到不同对象上 → 丢数据。
+    if (!this.loading) {
+      this.loading = (async () => {
+        try {
+          this.data = JSON.parse(await fs.readFile(this.file, 'utf8'));
+        } catch {
+          this.data = {};
+        }
+      })();
     }
+    await this.loading;
     return this.data;
   }
 
