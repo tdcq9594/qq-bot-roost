@@ -33,6 +33,8 @@ const GLOBAL_DEFAULTS = {
 
   plugins: {
     autoInstallDeps: true,
+    /** 插件市场索引地址，换成你自己的插件仓库即可 */
+    marketUrl: 'https://raw.githubusercontent.com/tdcq9594/qq-bot-roost-plugins/main/index.json',
   },
 };
 

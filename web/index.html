@@ -251,9 +251,24 @@
     <div class="box">
       <div class="box-hd">
         <h3>已安装插件</h3>
-        <span class="hint">插件放在 plugins/ 目录下，改完点重载即可生效</span>
+        <div class="plugin-tools">
+          <span class="hint">往 plugins/ 里放了新插件，点「刷新」即可加载，不用重启</span>
+          <button class="btn small" id="btnRescanPlugins">刷新</button>
+          <button class="btn small" id="btnLoadMarket">插件市场</button>
+        </div>
       </div>
       <div id="pluginList" class="plugin-list"></div>
+    </div>
+
+    <div class="box" id="marketBox" hidden>
+      <div class="box-hd">
+        <h3>插件市场</h3>
+        <div class="plugin-tools">
+          <span class="hint" id="marketMeta">加载中…</span>
+          <button class="btn small" id="btnRefreshMarket">重新获取</button>
+        </div>
+      </div>
+      <div id="marketList" class="plugin-list"></div>
     </div>
   </section>
 

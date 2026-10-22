@@ -907,6 +907,121 @@ async function loadEvents() {
     .join('');
 }
 
+/* ---------------- 插件刷新与市场 ---------------- */
+
+/** 重新扫描 plugins/ 目录，加载新放进去的、卸载已删除的 */
+async function rescanPlugins() {
+  const btn = $('#btnRescanPlugins');
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '刷新中…';
+  try {
+    const r = await api('/api/plugins/rescan', { method: 'POST', body: '{}' });
+    const parts = [];
+    if (r.added?.length) parts.push(`新加载：${r.added.join('、')}`);
+    if (r.removed?.length) parts.push(`已卸载：${r.removed.join('、')}`);
+    const msg = parts.join('\n') || '没有发现新插件';
+    await loadPlugins();
+    await confirmDialog({ title: '刷新完成', message: msg, okText: '知道了' });
+  } catch (e) {
+    await confirmDialog({ title: '刷新失败', message: e.message, okText: '知道了' });
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+}
+
+async function loadMarket() {
+  const box = $('#marketBox');
+  const list = $('#marketList');
+  const meta = $('#marketMeta');
+  box.hidden = false;
+  meta.textContent = '获取中…';
+  list.innerHTML = '<div class="empty">正在从 GitHub 获取插件列表…</div>';
+
+  let d;
+  try {
+    d = await api('/api/market');
+  } catch (e) {
+    meta.textContent = '获取失败';
+    list.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`;
+    return;
+  }
+
+  meta.textContent = `${d.repo} · 更新于 ${d.updated || '未知'}`;
+  if (!d.plugins.length) {
+    list.innerHTML = '<div class="empty">市场里还没有插件</div>';
+    return;
+  }
+
+  list.innerHTML = d.plugins
+    .map(
+      (p) => `
+      <div class="plugin">
+        <div class="info">
+          <div class="name">${escapeHtml(p.name || p.id)}
+            <span class="hint">v${escapeHtml(p.version || '0.0.0')}</span>
+          </div>
+          <div class="meta">
+            ${escapeHtml(p.id)}
+            <span class="kind-tag ${p.runtime === 'node' ? 'int' : 'ext'}">
+              ${p.runtime === 'node' ? '内建 · node' : '外部 · ' + escapeHtml(p.runtime || '')}
+            </span>
+            ${p.author ? `<span class="hint">by ${escapeHtml(p.author)}</span>` : ''}
+            ${p.description ? '<br>' + escapeHtml(p.description) : ''}
+            ${(p.tags || []).length ? '<br><span class="hint">' + p.tags.map(escapeHtml).join(' / ') + '</span>' : ''}
+          </div>
+        </div>
+        ${
+          p.installed
+            ? '<span class="badge on">已安装</span>'
+            : `<button class="btn small primary" data-install="${escapeHtml(p.id)}">安装</button>`
+        }
+      </div>`,
+    )
+    .join('');
+
+  $$('[data-install]').forEach((b) => {
+    b.addEventListener('click', () => installFromMarket(b.dataset.install, b));
+  });
+}
+
+async function installFromMarket(id, btn) {
+  const ok = await confirmDialog({
+    title: `安装插件「${id}」`,
+    message:
+      '插件代码会从 GitHub 拉下来，并**在当前进程里运行**。\n\n' +
+      '只装你信得过的来源——它能读到机器人的全部数据。',
+    okText: '确认安装',
+  });
+  if (!ok) return;
+
+  btn.disabled = true;
+  btn.textContent = '安装中…';
+  try {
+    const r = await api('/api/market/install', { method: 'POST', body: JSON.stringify({ id }) });
+    await loadPlugins();
+    await loadMarket();
+    await confirmDialog({
+      title: '安装完成',
+      message: r.added?.length ? `已加载：${r.added.join('、')}` : '插件已安装，但没能自动加载，看日志找原因',
+      okText: '知道了',
+    });
+  } catch (e) {
+    await confirmDialog({ title: '安装失败', message: e.message, okText: '知道了' });
+    btn.disabled = false;
+    btn.textContent = '安装';
+  }
+}
+
+$('#btnRescanPlugins')?.addEventListener('click', rescanPlugins);
+$('#btnRefreshMarket')?.addEventListener('click', loadMarket);
+$('#btnLoadMarket')?.addEventListener('click', () => {
+  const box = $('#marketBox');
+  if (box.hidden) loadMarket();
+  else box.hidden = true;
+});
+
 /* ---------------- 主人与群组 ---------------- */
 
 let owners = [];

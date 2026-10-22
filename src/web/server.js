@@ -2,10 +2,11 @@ import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { ROOT } from '../config.js';
-import { botPaths, listBotIds, rel } from '../paths.js';
+import { DIRS, botPaths, listBotIds, rel } from '../paths.js';
 import { createLogger, recentLogs, onLog, getLevel, setLevel } from '../logger.js';
 import { runtime } from '../runtime.js';
 import { EVENT_NAMES, INTENT_META, describeIntents, groupEvents } from '../events.js';
+import { fetchIndex, installPlugin, mergeWithInstalled } from '../plugin/market.js';
 
 const log = createLogger('webui');
 const WEB_ROOT = path.join(ROOT, 'web');
@@ -358,6 +359,63 @@ export async function startWebServer({
         }
 
         // 群档案
+        /* ---------------- 插件市场 ---------------- */
+
+        // 重新扫描插件目录，加载新放进去的、卸载已删除的
+        if (pathname === '/api/plugins/rescan' && req.method === 'POST') {
+          const r = await plugins.rescan();
+          return json(res, 200, { ok: true, ...r, plugins: plugins.list() });
+        }
+
+        // 拉取插件市场索引，并标出哪些已安装
+        if (pathname === '/api/market' && req.method === 'GET') {
+          const url2 = url.searchParams.get('source') || globalCfg.plugins?.marketUrl || undefined;
+          try {
+            const idx = await fetchIndex(url2);
+            const installedIds = new Set(plugins.loaded.keys());
+            // 目录里存在但没加载成功的也算「已装」
+            try {
+              for (const d of await fs.readdir(DIRS.plugins, { withFileTypes: true })) {
+                if (d.isDirectory()) installedIds.add(d.name);
+              }
+            } catch {}
+            return json(res, 200, {
+              repo: idx.repo,
+              updated: idx.updated,
+              source: url2 || 'default',
+              plugins: mergeWithInstalled(idx.plugins, installedIds),
+            });
+          } catch (e) {
+            return json(res, 502, { error: e.message });
+          }
+        }
+
+        // 一键安装
+        if (pathname === '/api/market/install' && req.method === 'POST') {
+          const body = await readBody(req);
+          const id = String(body.id ?? '').trim();
+          if (!id) return json(res, 400, { error: '缺少插件 id' });
+          try {
+            const src = globalCfg.plugins?.marketUrl || undefined;
+            const idx = await fetchIndex(src);
+            const entry = idx.plugins.find((p) => p.id === id);
+            if (!entry) return json(res, 404, { error: `市场里没有 ${id}` });
+
+            const r = await installPlugin({
+              entry,
+              pluginsDir: DIRS.plugins,
+              repo: idx.repo,
+              branch: idx.branch || 'main',
+              exists: (pid) => plugins.loaded.has(pid),
+            });
+            // 装完立刻扫一遍，用户不用重启
+            const scanned = await plugins.rescan();
+            return json(res, 200, { ok: true, id: r.id, ...scanned });
+          } catch (e) {
+            return json(res, 400, { error: e.message });
+          }
+        }
+
         if (pathname === '/api/groups' && req.method === 'GET') {
           return json(res, 200, await groups.list());
         }

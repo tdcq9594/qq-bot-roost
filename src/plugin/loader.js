@@ -99,6 +99,56 @@ export class PluginManager {
     log.info(`插件加载完成，共 ${this.loaded.size} 个`);
   }
 
+  /**
+   * 重新扫描插件目录：加载新放进来的，卸载已经被删掉的。
+   * 面板的「刷新」按钮用它，不用重启进程。
+   * @returns {Promise<{added:string[], removed:string[]}>}
+   */
+  async rescan({ filter = null } = {}) {
+    await this.#readState();
+    if (filter) this.filter = filter;
+    const use = this.filter ?? (() => true);
+
+    let entries = [];
+    try {
+      entries = await fs.readdir(this.dir, { withFileTypes: true });
+    } catch {
+      return { added: [], removed: [] };
+    }
+
+    const allIds = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+    // 号段要按全量重算，否则新插件拿不到号段
+    this.allocations = allocateLevels(allIds);
+
+    const added = [];
+    const removed = [];
+
+    for (const id of allIds) {
+      if (this.loaded.has(id)) continue;
+      if (!use(id)) continue;
+      if (this.state[id] === false) continue;
+      try {
+        await this.load(id);
+        added.push(id);
+      } catch (e) {
+        this.errors.set(id, e.message);
+        log.error(`加载插件 ${id} 失败: ${e.message}`);
+      }
+    }
+
+    for (const id of [...this.loaded.keys()]) {
+      if (allIds.includes(id)) continue;
+      try {
+        await this.unload(id);
+        removed.push(id);
+      } catch {}
+    }
+
+    if (added.length) log.info(`新加载插件: ${added.join('、')}`);
+    if (removed.length) log.info(`插件目录已消失，已卸载: ${removed.join('、')}`);
+    return { added, removed };
+  }
+
   async #detectKind(dir) {
     try {
       await fs.access(path.join(dir, 'plugin.json'));
