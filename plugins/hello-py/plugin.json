@@ -1,0 +1,9 @@
+{
+  "id": "hello-py",
+  "name": "Python 示例",
+  "version": "1.0.0",
+  "description": "演示用 Python 写插件：命令、参数、权限等级、被动关键词",
+  "runtime": "python",
+  "entry": "main.py",
+  "protocol": 1
+}

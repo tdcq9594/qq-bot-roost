@@ -515,7 +515,14 @@ async function loadPlugins() {
       <div class="plugin" data-id="${escapeHtml(p.id)}">
         <div class="info">
           <div class="name">${escapeHtml(p.name || p.id)} <span class="hint">v${escapeHtml(p.version || '0.0.0')}</span></div>
-          <div class="meta">${escapeHtml(p.id)}${p.description ? ' · ' + escapeHtml(p.description) : ''}</div>
+          <div class="meta">
+            ${escapeHtml(p.id)}
+            <span class="kind-tag ${p.kind === 'external' ? 'ext' : 'int'}">
+              ${p.kind === 'external' ? '外部 · ' + escapeHtml(p.runtime) : '内建 · node'}
+            </span>
+            ${p.pid ? `<span class="hint">pid ${p.pid}</span>` : ''}
+            ${p.description ? '<br>' + escapeHtml(p.description) : ''}
+          </div>
           ${p.error ? `<div class="err">加载失败: ${escapeHtml(p.error)}</div>` : ''}
           ${p.menuMissing ? '<div class="err">未提供指令菜单，用户看不到它能做什么</div>' : ''}
         </div>

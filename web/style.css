@@ -481,3 +481,13 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 .lg-chip.warn  { background: var(--warn-soft); color: var(--warn-text); }
 .lg-chip.error { background: var(--err-soft); color: var(--err); }
 .lg-sep { width: 1px; height: 14px; background: var(--border); }
+
+/* ---------- 插件类型标签 ---------- */
+.kind-tag {
+  display: inline-block; margin-left: 6px;
+  font-size: 10.5px; font-weight: 600;
+  padding: 1px 6px; border-radius: 4px;
+  font-family: var(--mono);
+}
+.kind-tag.int { background: var(--primary-soft); color: var(--primary); }
+.kind-tag.ext { background: var(--c-teal-soft); color: var(--c-teal); }

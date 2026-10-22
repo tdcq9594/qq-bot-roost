@@ -3,6 +3,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createLogger } from '../logger.js';
 import { createContext } from './context.js';
+import { SubprocessPlugin } from './subprocess.js';
 import { DATA_DIR } from '../config.js';
 import { allocateLevels } from '../levels.js';
 
@@ -10,14 +11,13 @@ const log = createLogger('plugins');
 const STATE_FILE = path.join(DATA_DIR, 'plugins.json');
 
 /**
- * 插件管理器。
+ * 插件管理器
  *
- * 约定：一个插件 = plugins/ 下的一个文件夹，内含 index.js，默认导出：
- *   export default {
- *     id: 'echo', name: '回声', version: '1.0.0', description: '...',
- *     setup(ctx) { ... }   // 在这里注册命令/监听
- *   }
+ * 两种插件并存：
+ *   1. 内建插件 —— 目录下有 index.js，用 ESM 直接 import 到主进程（最快）
+ *   2. 外部插件 —— 目录下有 plugin.json，启动为独立子进程，可用任意语言
  *
+ * 外部插件通过 stdin/stdout 的 NDJSON 通信，协议见 src/plugin/protocol.js。
  * 启用状态存在 data/plugins.json，删掉文件夹即等于卸载。
  */
 export class PluginManager {
@@ -26,14 +26,13 @@ export class PluginManager {
     this.registry = registry;
     this.api = api;
     this.cfg = cfg;
-    this.isOwner = isOwner;
     this.groups = groups;
     this.roles = roles;
-    this.loaded = new Map(); // id -> { meta, ctx, dir }
+    this.isOwner = isOwner;
+    this.loaded = new Map(); // id -> { meta, ctx?, host?, dir, kind, menuMissing }
     this.state = {}; // id -> enabled
     this.errors = new Map(); // id -> 错误信息
-    // 插件等级号段分配：id -> { base, end, index }
-    this.allocations = new Map();
+    this.allocations = new Map(); // id -> { base, end, index }
   }
 
   async #readState() {
@@ -49,7 +48,8 @@ export class PluginManager {
     await fs.writeFile(STATE_FILE, JSON.stringify(this.state, null, 2), 'utf8');
   }
 
-  /** 扫描目录，加载所有启用的插件 */
+  /* ---------------- 扫描与加载 ---------------- */
+
   async scan() {
     await this.#readState();
     let entries = [];
@@ -60,14 +60,13 @@ export class PluginManager {
       return;
     }
 
-    // 先把所有插件目录收集起来，统一分配等级号段（按 id 排序，重启后不变）
     const ids = entries.filter((e) => e.isDirectory()).map((e) => e.name);
     this.allocations = allocateLevels(ids);
     if (ids.length) {
-      const table = [...this.allocations.entries()]
-        .map(([id, a]) => `${id}:${a.base}-${a.end}`)
-        .join('  ');
-      log.info(`等级号段分配 ${table}`);
+      log.info(
+        '等级号段分配 ' +
+          [...this.allocations.entries()].map(([id, a]) => `${id}:${a.base}-${a.end}`).join('  '),
+      );
     }
 
     for (const id of ids) {
@@ -80,27 +79,27 @@ export class PluginManager {
     log.info(`插件加载完成，共 ${this.loaded.size} 个`);
   }
 
-  async load(id) {
-    const dir = path.join(this.dir, id);
-    const candidates = ['index.js', 'index.mjs', 'main.js'];
-    let entryFile = null;
-    for (const c of candidates) {
+  async #detectKind(dir) {
+    try {
+      await fs.access(path.join(dir, 'plugin.json'));
+      return 'external';
+    } catch {}
+    for (const f of ['index.js', 'index.mjs', 'main.js']) {
       try {
-        await fs.access(path.join(dir, c));
-        entryFile = path.join(dir, c);
-        break;
+        await fs.access(path.join(dir, f));
+        return 'internal';
       } catch {}
     }
-    if (!entryFile) {
-      log.warn(`插件 ${id} 缺少 index.js，跳过`);
-      return false;
-    }
+    return null;
+  }
+
+  async load(id) {
+    const dir = path.join(this.dir, id);
 
     if (!this.allocations.has(id)) {
       try {
         const dirs = await fs.readdir(this.dir, { withFileTypes: true });
         const next = allocateLevels(dirs.filter((e) => e.isDirectory()).map((e) => e.name));
-        // 新增插件可能让其它插件的号段整体后移，已配好的权限会对不上
         for (const [pid, alloc] of next) {
           const prev = this.allocations.get(pid);
           if (prev && prev.base !== alloc.base) {
@@ -114,43 +113,16 @@ export class PluginManager {
       } catch {}
     }
 
+    const kind = await this.#detectKind(dir);
+    if (!kind) {
+      log.warn(`插件 ${id} 既没有 plugin.json 也没有 index.js，跳过`);
+      return false;
+    }
+
     try {
-      // 加时间戳绕过 ESM 缓存，实现热重载
-      const url = `${pathToFileURL(entryFile).href}?t=${Date.now()}`;
-      const mod = await import(url);
-      const meta = mod.default ?? mod.plugin;
-      if (!meta || typeof meta.setup !== 'function') {
-        throw new Error('默认导出必须是 { id, setup(ctx) } 形式的对象');
-      }
-      meta.id = meta.id ?? id;
-
-      this.registry.clearPlugin(meta.id);
-      const ctx = createContext({
-        meta,
-        registry: this.registry,
-        api: this.api,
-        cfg: this.cfg,
-        groups: this.groups,
-        roles: this.roles,
-        levels: this.allocations.get(id) ?? null,
-        isOwner: this.isOwner,
-      });
-
-      await meta.setup(ctx);
-
-      // 规范要求：每个插件都要能给出自己的指令列表
-      const menuMissing = !this.registry.hasMenu(meta.id);
-      if (menuMissing) {
-        log.warn(
-          `插件 ${meta.id} 没有提供任何指令菜单：既没注册命令，也没调用 ctx.menu()。` +
-            `请在 setup 里补上，否则用户看不到它能做什么。`,
-        );
-      }
-
-      this.loaded.set(meta.id, { meta, ctx, dir, menuMissing });
-      this.errors.delete(meta.id);
-      log.info(`已加载插件 ${meta.id} (${meta.name ?? ''})`);
-      return true;
+      return kind === 'external'
+        ? await this.#loadExternal(id, dir)
+        : await this.#loadInternal(id, dir);
     } catch (e) {
       this.errors.set(id, e.message);
       log.error(`插件 ${id} 加载失败: ${e.message}`);
@@ -158,19 +130,158 @@ export class PluginManager {
     }
   }
 
+  /* ---------------- 内建插件（ESM） ---------------- */
+
+  async #loadInternal(id, dir) {
+    let entryFile = null;
+    for (const c of ['index.js', 'index.mjs', 'main.js']) {
+      try {
+        await fs.access(path.join(dir, c));
+        entryFile = path.join(dir, c);
+        break;
+      } catch {}
+    }
+
+    // 加时间戳绕过 ESM 缓存，实现热重载
+    const url = `${pathToFileURL(entryFile).href}?t=${Date.now()}`;
+    const mod = await import(url);
+    const meta = mod.default ?? mod.plugin;
+    if (!meta || typeof meta.setup !== 'function') {
+      throw new Error('默认导出必须是 { id, setup(ctx) } 形式的对象');
+    }
+    meta.id = meta.id ?? id;
+
+    this.registry.clearPlugin(meta.id);
+    const ctx = createContext({
+      meta,
+      registry: this.registry,
+      api: this.api,
+      cfg: this.cfg,
+      groups: this.groups,
+      roles: this.roles,
+      levels: this.allocations.get(id) ?? null,
+      isOwner: this.isOwner,
+    });
+
+    await meta.setup(ctx);
+
+    const menuMissing = !this.registry.hasMenu(meta.id);
+    if (menuMissing) {
+      log.warn(
+        `插件 ${meta.id} 没有提供任何指令菜单：既没注册命令，也没调用 ctx.menu()。` +
+          `请在 setup 里补上，否则用户看不到它能做什么。`,
+      );
+    }
+
+    this.loaded.set(meta.id, { meta, ctx, dir, kind: 'internal', menuMissing });
+    this.errors.delete(meta.id);
+    log.info(`已加载内建插件 ${meta.id} (${meta.name ?? ''})`);
+    return true;
+  }
+
+  /* ---------------- 外部插件（子进程，任意语言） ---------------- */
+
+  async #loadExternal(id, dir) {
+    const raw = JSON.parse(await fs.readFile(path.join(dir, 'plugin.json'), 'utf8'));
+    const meta = {
+      id: raw.id ?? id,
+      name: raw.name ?? id,
+      version: raw.version ?? '0.0.0',
+      description: raw.description ?? '',
+    };
+
+    this.registry.clearPlugin(meta.id);
+
+    const host = new SubprocessPlugin({
+      dir,
+      manifest: { ...raw, id: meta.id },
+      allocation: this.allocations.get(id) ?? null,
+      cfg: this.cfg,
+      roles: this.roles,
+      isOwner: this.isOwner,
+    });
+
+    await host.start(); // 失败会抛错，由 load() 捕获
+
+    const prefix = this.cfg.commandPrefix || '/';
+    for (const c of host.commands) {
+      const pattern = String(c.pattern ?? c.name ?? '').trim();
+      const name = pattern.split(/\s+/)[0];
+      if (!name) continue;
+      this.registry.addCommand(
+        meta.id,
+        name,
+        {
+          desc: c.desc ?? '',
+          usage: c.usage ?? `${prefix}${pattern}`,
+          pattern,
+          admin: Boolean(c.admin),
+          globalAdmin: Boolean(c.globalAdmin),
+          plugin: meta.name,
+        },
+        async (msg) => {
+          await host.handle(msg);
+        },
+      );
+    }
+
+    // 非命令消息：插件声明了 listen 才转发，避免无谓的进程通信
+    if (host.listen.includes('message')) {
+      this.registry.addListener(meta.id, 'message', async (msg) => {
+        await host.handle(msg);
+      });
+    }
+
+    for (const sec of host.menus) {
+      this.registry.addMenuSection(meta.id, meta, sec.title, sec.items ?? []);
+    }
+    if (host.levels.length) {
+      this.registry.addMenuSection(
+        meta.id,
+        meta,
+        '权限等级',
+        host.levels.map((l) => ({ text: String(l.level), desc: l.name ?? '' })),
+      );
+    }
+
+    const menuMissing = !this.registry.hasMenu(meta.id);
+    if (menuMissing) {
+      log.warn(`外部插件 ${meta.id} 的 ready 里没有 commands / menus，用户看不到它能做什么`);
+    }
+
+    this.loaded.set(meta.id, { meta, host, dir, kind: 'external', menuMissing });
+    this.errors.delete(meta.id);
+    log.info(
+      `已加载外部插件 ${meta.id} (${meta.name}) · ${host.status.runtime} · pid ${host.status.pid} · ${host.commands.length} 条命令`,
+    );
+    return true;
+  }
+
+  /* ---------------- 卸载与重载 ---------------- */
+
   async unload(id) {
     const item = this.loaded.get(id);
     if (!item) return false;
-    try {
-      await item.meta.teardown?.(item.ctx);
-    } catch (e) {
-      log.warn(`插件 ${id} teardown 出错: ${e.message}`);
+
+    if (item.kind === 'external') {
+      try {
+        await item.host.stop();
+      } catch (e) {
+        log.warn(`插件 ${id} 停止进程出错: ${e.message}`);
+      }
+    } else {
+      try {
+        await item.meta.teardown?.(item.ctx);
+      } catch (e) {
+        log.warn(`插件 ${id} teardown 出错: ${e.message}`);
+      }
+      try {
+        item.ctx.dispose?.();
+      } catch (e) {
+        log.warn(`插件 ${id} 资源清理出错: ${e.message}`);
+      }
     }
-    try {
-      item.ctx.dispose?.();
-    } catch (e) {
-      log.warn(`插件 ${id} 资源清理出错: ${e.message}`);
-    }
+
     this.registry.clearPlugin(id);
     this.loaded.delete(id);
     log.info(`已卸载插件 ${id}`);
@@ -193,10 +304,25 @@ export class PluginManager {
     return this.state[id] !== false;
   }
 
+  /** 退出前调用：停掉所有外部插件进程，否则子进程会挂住主进程 */
+  async shutdown() {
+    const entries = [...this.loaded.entries()];
+    for (const [id, item] of entries) {
+      if (item.kind !== 'external') continue;
+      try {
+        await item.host.stop();
+        log.debug(`已停止外部插件 ${id}`);
+      } catch (e) {
+        log.warn(`停止外部插件 ${id} 失败: ${e.message}`);
+      }
+    }
+  }
+
   list() {
     const ids = new Set([...this.loaded.keys(), ...Object.keys(this.state)]);
     return [...ids].map((id) => {
       const item = this.loaded.get(id);
+      const ext = item?.kind === 'external' ? item.host.status : null;
       return {
         id,
         name: item?.meta?.name ?? id,
@@ -204,8 +330,12 @@ export class PluginManager {
         description: item?.meta?.description ?? '',
         enabled: this.isEnabled(id),
         loaded: Boolean(item),
+        kind: item?.kind ?? 'internal',
+        runtime: ext?.runtime ?? 'node',
+        processState: ext?.state ?? null,
+        pid: ext?.pid ?? null,
         menuMissing: Boolean(item?.menuMissing),
-        error: this.errors.get(id) ?? '',
+        error: this.errors.get(id) ?? ext?.error ?? '',
       };
     });
   }

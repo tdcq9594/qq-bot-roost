@@ -878,14 +878,16 @@ async function main() {
   if (MOCK) {
     if (SERVE) {
       log.info('mock + serve：只跑面板，Ctrl+C 退出');
-      process.on('SIGINT', () => {
+      process.on('SIGINT', async () => {
         web?.close();
+        await plugins.shutdown().catch(() => {});
         process.exit(0);
       });
       return new Promise(() => {});
     }
     await runMock(cfg, registry, plugins, groups, roles);
     web?.close();
+    await plugins.shutdown();
     return;
   }
 
@@ -914,6 +916,7 @@ async function main() {
     log.info('正在退出...');
     gateway.stop();
     web?.close();
+    await plugins.shutdown().catch(() => {});
     await groups.flush().catch(() => {});
     await roles.flush().catch(() => {});
     process.exit(0);
