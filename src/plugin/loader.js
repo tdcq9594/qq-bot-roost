@@ -105,7 +105,17 @@ export class PluginManager {
       });
 
       await meta.setup(ctx);
-      this.loaded.set(meta.id, { meta, ctx, dir });
+
+      // 规范要求：每个插件都要能给出自己的指令列表
+      const menuMissing = !this.registry.hasMenu(meta.id);
+      if (menuMissing) {
+        log.warn(
+          `插件 ${meta.id} 没有提供任何指令菜单：既没注册命令，也没调用 ctx.menu()。` +
+            `请在 setup 里补上，否则用户看不到它能做什么。`,
+        );
+      }
+
+      this.loaded.set(meta.id, { meta, ctx, dir, menuMissing });
       this.errors.delete(meta.id);
       log.info(`已加载插件 ${meta.id} (${meta.name ?? ''})`);
       return true;
@@ -162,6 +172,7 @@ export class PluginManager {
         description: item?.meta?.description ?? '',
         enabled: this.isEnabled(id),
         loaded: Boolean(item),
+        menuMissing: Boolean(item?.menuMissing),
         error: this.errors.get(id) ?? '',
       };
     });

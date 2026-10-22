@@ -461,6 +461,7 @@ async function loadPlugins() {
           <div class="name">${p.name || p.id} <span class="hint">v${p.version || '0.0.0'}</span></div>
           <div class="meta">${p.id}${p.description ? ' · ' + p.description : ''}</div>
           ${p.error ? `<div class="err">加载失败: ${p.error}</div>` : ''}
+          ${p.menuMissing ? '<div class="err">未提供指令菜单，用户看不到它能做什么</div>' : ''}
         </div>
         <span class="badge ${p.loaded ? 'on' : p.enabled ? '' : 'off'}">
           ${p.loaded ? '运行中' : p.enabled ? '未加载' : '已禁用'}

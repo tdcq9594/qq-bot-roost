@@ -44,6 +44,18 @@ export default {
       await msg.reply(['🏆 排行榜', ...lines].join('\n'));
     });
 
+    // 补充非命令玩法：命令会自动进菜单的「指令」组，
+    // 这里把不靠斜杠触发的玩法补进去，用户才看得到
+    ctx.menu('玩法', [
+      { text: '掷骰子', desc: '群里直接说这三个字，不用加前缀' },
+      { text: 'roll', desc: '同上，英文写法' },
+    ]);
+
+    ctx.menu('说明', [
+      { text: '每个玩家的次数与最高值单独记录' },
+      { text: '数据存在 data/plugins/dice.json' },
+    ]);
+
     // 被动触发：群里有人直接说「掷骰子」，不用 @ 也不用命令前缀
     ctx.on('message', async (msg) => {
       if (msg.isCommand) return;

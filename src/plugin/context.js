@@ -11,6 +11,8 @@ export class Registry {
   constructor() {
     this.commands = new Map(); // name -> { pluginId, desc, usage, admin, handler }
     this.listeners = new Map(); // eventName -> [{ pluginId, handler }]
+    // pluginId -> { id, title, desc, sections: [{ title, items: [{ text, desc, isCommand }] }] }
+    this.menus = new Map();
   }
 
   clearPlugin(id) {
@@ -22,6 +24,53 @@ export class Registry {
       if (kept.length) this.listeners.set(event, kept);
       else this.listeners.delete(event);
     }
+    this.menus.delete(id);
+  }
+
+  /** 取（或建）某插件的菜单 */
+  ensureMenu(pluginId, meta = {}) {
+    if (!this.menus.has(pluginId)) {
+      this.menus.set(pluginId, {
+        id: pluginId,
+        title: meta.name ?? pluginId,
+        desc: meta.description ?? '',
+        version: meta.version ?? '',
+        sections: [],
+      });
+    }
+    const m = this.menus.get(pluginId);
+    // 元信息可能后到，补一下
+    if (meta.name) m.title = meta.name;
+    if (meta.description) m.desc = meta.description;
+    if (meta.version) m.version = meta.version;
+    return m;
+  }
+
+  /** 往某插件的菜单里加一组条目 */
+  addMenuSection(pluginId, meta, title, items) {
+    const menu = this.ensureMenu(pluginId, meta);
+    const name = title || '其它';
+    let sec = menu.sections.find((x) => x.title === name);
+    if (!sec) {
+      sec = { title: name, items: [] };
+      menu.sections.push(sec);
+    }
+    for (const it of items) {
+      const text = typeof it === 'string' ? it : it.text ?? it.cmd ?? '';
+      if (!text) continue;
+      sec.items.push({
+        text,
+        desc: (typeof it === 'object' && it.desc) || '',
+        isCommand: Boolean(typeof it === 'object' && it.cmd) || false,
+      });
+    }
+    return sec;
+  }
+
+  /** 该插件是否提供了菜单（有命令也算） */
+  hasMenu(pluginId) {
+    const m = this.menus.get(pluginId);
+    return Boolean(m && m.sections.some((s) => s.items.length));
   }
 
   addCommand(pluginId, name, meta, handler) {
@@ -31,6 +80,14 @@ export class Registry {
       throw new Error(`命令 "${name}" 已被插件 ${owner} 注册`);
     }
     this.commands.set(key, { pluginId, name: key, ...meta, handler });
+
+    // 命令自动进菜单的「指令」分组，插件不用重复声明
+    this.addMenuSection(
+      pluginId,
+      { name: meta.plugin },
+      '指令',
+      [{ cmd: meta.pattern ?? key, desc: meta.desc ?? '' }],
+    );
   }
 
   addListener(pluginId, event, handler) {
@@ -111,6 +168,9 @@ export function createContext({ meta, registry, api, cfg, groups, isOwner }) {
   const logger = createLogger(`plugin:${id}`);
   const disposers = [];
 
+  // 先占位，保证即使插件没注册任何命令，菜单里也有它的条目
+  registry.ensureMenu(id, meta);
+
   const ctx = {
     id,
     name: meta.name ?? id,
@@ -137,6 +197,19 @@ export function createContext({ meta, registry, api, cfg, groups, isOwner }) {
         admin: Boolean(meta2?.admin),
         plugin: meta.name ?? id,
       }, handler);
+    },
+
+    /**
+     * 追加菜单分组。命令会自动进「指令」组，这里用来补充非命令玩法，
+     * 比如游戏里的「攻击」「背包」，或者关键词触发。
+     *
+     *   ctx.menu('玩法', [
+     *     { text: '攻击', desc: '对当前目标发起攻击' },
+     *     { text: '直接说「掷骰子」', desc: '不用加前缀也能触发' },
+     *   ])
+     */
+    menu(title, items) {
+      registry.addMenuSection(id, meta, title, items ?? []);
     },
 
     /** 监听原始事件（GROUP_AT_MESSAGE_CREATE 等），或 'message' 统一入口 */
