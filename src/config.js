@@ -33,6 +33,8 @@ const GLOBAL_DEFAULTS = {
 
   plugins: {
     autoInstallDeps: true,
+    /** Go 插件用的 go 可执行文件路径，留空则用 PATH 里的 go 或 GO_BIN 环境变量 */
+    goBin: '',
     /** 插件市场索引地址，换成你自己的插件仓库即可 */
     marketUrl: 'https://raw.githubusercontent.com/tdcq9594/qq-bot-roost-plugins/main/index.json',
   },

@@ -22,10 +22,12 @@ const log = createLogger('plugins');
  * 启用状态存在 data/plugins.json，删掉文件夹即等于卸载。
  */
 export class PluginManager {
-  constructor({ pluginsDir, paths, registry, api, cfg, groups, roles, outbound, session, pipeline, isOwner }) {
+  constructor({ pluginsDir, paths, registry, api, cfg, goBin, groups, roles, outbound, session, pipeline, isOwner }) {
     this.dir = pluginsDir;
     // 该机器人的全套路径（配置/数据/日志），多机器人下互不干扰
     this.paths = paths;
+    // 全局配置里的 go 可执行文件路径（机器人配置里没有这一项）
+    this.goBin = goBin;
     this.registry = registry;
     this.api = api;
     this.cfg = cfg;
@@ -335,6 +337,7 @@ export class PluginManager {
       dataDir: this.paths.pluginDataDirFor(meta.id),
       // 有 venv 就用 venv 里的解释器，没有就用探测到的系统解释器
       pythonPath: deps.python ?? null,
+      goPath: this.goBin,
       allocation: this.allocations.get(id) ?? null,
       cfg: this.cfg,
       roles: this.roles,

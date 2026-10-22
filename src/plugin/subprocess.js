@@ -17,7 +17,7 @@ import { scopeOf, LEVEL, NO_PERM } from '../roles.js';
  *   - 进程崩溃时结束所有挂起请求，并按次数上限自动重启
  */
 export class SubprocessPlugin {
-  constructor({ dir, manifest, pythonPath = null, botId = '-', dataDir = null, allocation, cfg, roles, isOwner }) {
+  constructor({ dir, manifest, pythonPath = null, goPath = null, botId = '-', dataDir = null, allocation, cfg, roles, isOwner }) {
     this.dir = dir;
     this.manifest = manifest;
     this.id = manifest.id;
@@ -26,6 +26,7 @@ export class SubprocessPlugin {
     this.dataDir = dataDir ?? null;
     // 依赖安装器解析出的解释器（可能是插件目录里的 .venv），没有就用系统默认
     this.pythonPath = pythonPath;
+    this.goPath = goPath;
     this.allocation = allocation ?? { base: 10, end: 19 };
     this.cfg = cfg;
     this.roles = roles;
@@ -176,15 +177,24 @@ export class SubprocessPlugin {
     const entry = m.entry ?? '';
     const runtime = (m.runtime ?? '').toLowerCase();
     const py = this.pythonPath || 'python';
+    // Go 是编译型，直接用 `go run` 跑源码，省掉手动编译一步。
+    // 想要更快可以用 runtime: "exec" + 预先 go build 好的二进制。
+    const go = this.goPath || process.env.GO_BIN || 'go';
     const map = {
       python: [py, [entry]],
       python3: [this.pythonPath || 'python3', [entry]],
       node: [process.execPath, [entry]],
       nodejs: [process.execPath, [entry]],
+      go: [go, ['run', entry]],
+      golang: [go, ['run', entry]],
       exec: [path.join(this.dir, entry), []],
     };
     const picked = map[runtime];
-    if (!picked) throw new Error(`plugin.json 缺少 command 或 runtime（支持 python/node/exec）`);
+    if (!picked) {
+      throw new Error(
+        `plugin.json 缺少 command 或 runtime（支持 python / node / go / exec）`,
+      );
+    }
     return { command: picked[0], args: picked[1] };
   }
 

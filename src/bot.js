@@ -130,6 +130,7 @@ export class BotRuntime {
       registry: this.registry,
       api: this.api,
       cfg,
+      goBin: this.globalCfg.plugins?.goBin || null,
       groups: this.groups,
       roles: this.roles,
       outbound: this.outbound,
