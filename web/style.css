@@ -174,12 +174,57 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
   border-radius: 8px; padding: 10px 12px;
   font-family: var(--mono); font-size: 12.5px; line-height: 1.7;
 }
-.log-line { white-space: pre-wrap; word-break: break-all; }
-.log-line .t { color: #b0b6bd; margin-right: 8px; }
-.log-line .tag { color: #6a7480; margin-right: 6px; }
-.log-line.warn { color: var(--warn); }
-.log-line.error { color: var(--err); }
-.log-line.debug { color: #9aa1a9; }
+/* 每条日志：时间 | 级别徽章 | 模块标签 | 正文 */
+.log-line {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 1px 6px; margin: 0 -6px;
+  border-radius: 4px;
+  white-space: pre-wrap; word-break: break-all;
+}
+.log-line:hover { background: #f2f5f9; }
+
+.log-line .t { flex: none; width: 78px; color: #b6bcc4; }
+
+.log-line .lv {
+  flex: none; min-width: 46px; text-align: center;
+  font-size: 10.5px; font-weight: 600; letter-spacing: .4px;
+  line-height: 17px; padding: 0 5px; border-radius: 4px;
+  background: #eef0f3; color: #8b929a;
+}
+.log-line.info .lv  { background: #e8f1ff; color: #2f6feb; }
+.log-line.warn .lv  { background: #fff2e0; color: #b56a12; }
+.log-line.error .lv { background: #fdecee; color: #d03050; }
+
+.log-line .tag {
+  flex: none;
+  font-size: 11.5px; padding: 0 6px; border-radius: 4px;
+  background: #f2f4f7; color: #6a7480;
+}
+.log-line .tag::before { content: ''; }
+
+/* 模块色 */
+.tag-gateway { background: #e6f6f4; color: #0e8f83; }
+.tag-api     { background: #e8f1ff; color: #2563c9; }
+.tag-core    { background: #f1ecfd; color: #6b46c1; }
+.tag-webui   { background: #eef1f5; color: #5b7089; }
+.tag-plugins { background: #e9f6ee; color: #2c7a4b; }
+.tag-roles   { background: #fdf3e3; color: #a8641a; }
+.tag-groups  { background: #e6f5f7; color: #0f7b8a; }
+.tag-message { background: #e8f4fb; color: #1d7fb8; }
+.tag-token   { background: #eff2f6; color: #64748b; }
+.tag-plugin  { background: #fceef5; color: #b3417a; }
+.tag-other   { background: #f2f4f7; color: #6a7480; }
+
+/* 正文：先按级别给底色，再按内容类型覆盖 */
+.log-line .m { flex: 1; color: var(--text); }
+.log-line.debug .m { color: #9aa1a9; }
+.log-line.warn .m  { color: #a35f10; }
+.log-line.error .m { color: var(--err); }
+
+.log-line .m.msg-in  { color: #2f6feb; }
+.log-line .m.msg-ok  { color: #15803d; }
+.log-line .m.msg-err { color: #d03050; font-weight: 500; }
+.log-line .m.msg-cmd { color: #6b46c1; }
 
 @media (max-width: 860px) {
   .topbar { flex-wrap: wrap; height: auto; padding: 10px 14px; gap: 10px; }
@@ -305,3 +350,25 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 
 .perm-legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); }
 .perm-legend b { color: var(--primary); font-family: var(--mono); margin-right: 4px; }
+
+/* ---------- 日志图例 ---------- */
+.log-legend {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 8px 12px; margin-bottom: 10px;
+  background: #f8f9fb; border-radius: 8px;
+  font-size: 12px; color: var(--muted);
+}
+.log-legend > span { display: inline-flex; align-items: center; gap: 6px; }
+.lg-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.lg-dot.in  { background: #2f6feb; }
+.lg-dot.ok  { background: #15803d; }
+.lg-dot.err { background: #d03050; }
+.lg-dot.cmd { background: #6b46c1; }
+.lg-chip {
+  font-family: var(--mono); font-size: 10.5px; font-weight: 600;
+  padding: 0 5px; border-radius: 4px; line-height: 16px;
+}
+.lg-chip.info  { background: #e8f1ff; color: #2f6feb; }
+.lg-chip.warn  { background: #fff2e0; color: #b56a12; }
+.lg-chip.error { background: #fdecee; color: #d03050; }
+.lg-sep { width: 1px; height: 14px; background: var(--border); }

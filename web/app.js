@@ -704,13 +704,40 @@ $('#btnAddRole')?.addEventListener('click', async () => {
 
 const logView = $('#logView');
 const LEVEL_ORDER = { debug: 10, info: 20, warn: 30, error: 40 };
+const LEVEL_LABEL = { debug: 'DEBUG', info: 'INFO', warn: 'WARN', error: 'ERROR' };
 let logBuf = [];
+
+/** 模块名 → 颜色类（plugin:dice 这类取前缀 plugin） */
+function tagClass(tag) {
+  if (!tag) return '';
+  const base = String(tag).split(':')[0];
+  const known = ['gateway', 'api', 'core', 'webui', 'plugins', 'roles', 'groups', 'message', 'token', 'plugin'];
+  return known.includes(base) ? `tag-${base}` : 'tag-other';
+}
+
+/** 按内容判断消息类型，决定正文颜色 */
+function msgClass(text) {
+  const s = String(text ?? '');
+  if (/失败|错误|出错|异常|超时|拒绝|无效|不正确|无法|error|failed/i.test(s)) return 'msg-err';
+  if (/^收到\s/.test(s)) return 'msg-in';
+  if (/已就绪|已连接|已恢复|成功|已加载|已启用|已禁用|已设为|已设置|已保存|已重载|已移除/.test(s)) {
+    return 'msg-ok';
+  }
+  if (/(^|[\s：:])[\/][a-z]/i.test(s)) return 'msg-cmd';
+  return '';
+}
 
 function logLine(e) {
   const el = document.createElement('div');
   el.className = `log-line ${e.level}`;
   el.dataset.level = e.level;
-  el.innerHTML = `<span class="t">${e.time}</span>${e.tag ? `<span class="tag">[${e.tag}]</span>` : ''}${escapeHtml(e.msg)}`;
+
+  const lv = `<span class="lv">${LEVEL_LABEL[e.level] ?? e.level}</span>`;
+  const tag = e.tag ? `<span class="tag ${tagClass(e.tag)}">${escapeHtml(e.tag)}</span>` : '';
+  const cls = msgClass(e.msg);
+  const body = `<span class="m${cls ? ' ' + cls : ''}">${escapeHtml(e.msg)}</span>`;
+
+  el.innerHTML = `<span class="t">${e.time}</span>${lv}${tag}${body}`;
   return el;
 }
 
