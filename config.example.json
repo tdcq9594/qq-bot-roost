@@ -5,5 +5,21 @@
   "intents": 33554432,
   "owners": [],
   "commandPrefix": "/",
-  "logLevel": "info"
+  "logLevel": "info",
+  "webui": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 8080,
+    "token": ""
+  },
+  "whitelist": {
+    "enabled": false,
+    "groups": [],
+    "users": []
+  },
+  "rateLimit": {
+    "enabled": true,
+    "perChatPerMinute": 30
+  },
+  "dedupWindowSec": 120
 }

@@ -16,7 +16,43 @@ const DEFAULTS = {
   owners: [],
   commandPrefix: '/',
   logLevel: 'info',
+
+  // 可视化面板
+  webui: {
+    enabled: true,
+    host: '127.0.0.1',
+    port: 8080,
+    token: '',
+  },
+
+  // 群/用户白名单：enabled 为 true 时只响应名单内的来源
+  whitelist: {
+    enabled: false,
+    groups: [],
+    users: [],
+  },
+
+  // 限流：每个会话每分钟最多处理多少条
+  rateLimit: {
+    enabled: true,
+    perChatPerMinute: 30,
+  },
+
+  // 去重窗口（秒），同一 msg id 只处理一次
+  dedupWindowSec: 120,
 };
+
+function deepMerge(base, extra) {
+  const out = { ...base };
+  for (const [k, v] of Object.entries(extra ?? {})) {
+    if (v && typeof v === 'object' && !Array.isArray(v) && typeof base[k] === 'object' && !Array.isArray(base[k])) {
+      out[k] = deepMerge(base[k], v);
+    } else if (v !== undefined) {
+      out[k] = v;
+    }
+  }
+  return out;
+}
 
 export async function loadConfig() {
   let fileCfg = {};
@@ -25,7 +61,8 @@ export async function loadConfig() {
   } catch (e) {
     if (e.code !== 'ENOENT') throw new Error(`config.json 解析失败: ${e.message}`);
   }
-  const cfg = { ...DEFAULTS, ...fileCfg };
+  const cfg = deepMerge(DEFAULTS, fileCfg);
+
   // 环境变量优先级最高，方便容器部署
   if (process.env.QQ_BOT_APPID) cfg.appId = process.env.QQ_BOT_APPID;
   if (process.env.QQ_BOT_SECRET) cfg.appSecret = process.env.QQ_BOT_SECRET;
@@ -45,6 +82,10 @@ export async function saveConfig(cfg) {
     owners: cfg.owners,
     commandPrefix: cfg.commandPrefix,
     logLevel: cfg.logLevel,
+    webui: cfg.webui,
+    whitelist: cfg.whitelist,
+    rateLimit: cfg.rateLimit,
+    dedupWindowSec: cfg.dedupWindowSec,
   };
   await fs.writeFile(CONFIG_PATH, JSON.stringify(out, null, 2) + '\n', 'utf8');
 }
@@ -55,7 +96,7 @@ export async function ensureCredentials(cfg) {
 
   if (!stdin.isTTY) {
     throw new Error(
-      '缺少 AppID / AppSecret。请在 config.json 中填写，或设置环境变量 QQ_BOT_APPID / QQ_BOT_SECRET。',
+      '缺少 AppID / AppSecret。请在 config.json 中填写，或设置环境变量 QQ_BOT_APPID / QQ_BOT_SECRET，或打开可视化面板配置。',
     );
   }
 

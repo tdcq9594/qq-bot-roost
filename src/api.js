@@ -1,32 +1,42 @@
+import fs from 'node:fs/promises';
 import { createLogger } from './logger.js';
+import { runtime } from './runtime.js';
 
 const log = createLogger('api');
 
+/** 富媒体类型，对应官方 file_type */
+export const FILE_TYPE = { IMAGE: 1, VIDEO: 2, VOICE: 3, FILE: 4 };
+
 /**
  * QQ 开放平台 HTTP API 封装。
- * 鉴权头格式固定为 "QQBot {access_token}"。
+ * 鉴权头固定为 "QQBot {access_token}"。
  */
 export class QQApi {
   constructor({ tokenManager, baseUrl }) {
     this.tokens = tokenManager;
     this.baseUrl = baseUrl;
-    // msg_id -> 已用的 msg_seq，被动回复同一消息时必须递增
+    // msg_id -> 已用的 msg_seq。被动回复同一消息时必须递增，否则会失败
     this.seqMap = new Map();
   }
 
   async #request(method, path, body, { retried = false } = {}) {
     const token = await this.tokens.get();
-    const res = await fetch(`${this.baseUrl}${path}`, {
-      method,
-      headers: {
-        Authorization: `QQBot ${token}`,
-        'Content-Type': 'application/json',
-        'X-Union-Appid': this.tokens.appId,
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
+    let res;
+    try {
+      res = await fetch(`${this.baseUrl}${path}`, {
+        method,
+        headers: {
+          Authorization: `QQBot ${token}`,
+          'Content-Type': 'application/json',
+          'X-Union-Appid': this.tokens.appId,
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+    } catch (e) {
+      runtime.bump('errors');
+      throw new Error(`网络错误 ${method} ${path}: ${e.message}`);
+    }
 
-    // token 失效：刷新后重试一次
     if (res.status === 401 && !retried) {
       log.warn('接口返回 401，刷新 token 后重试');
       await this.tokens.refresh();
@@ -42,6 +52,7 @@ export class QQApi {
     }
 
     if (!res.ok) {
+      runtime.bump('errors');
       const msg = data?.message || data?.msg || text.slice(0, 300);
       const err = new Error(`HTTP ${res.status} ${method} ${path}: ${msg}`);
       err.status = res.status;
@@ -51,45 +62,76 @@ export class QQApi {
     return data;
   }
 
-  /** 网关地址。返回 { url, shards, session_start_limit } */
+  /* ---------------- 基础信息 ---------------- */
+
   getGateway() {
     return this.#request('GET', '/gateway/bot');
   }
 
+  /** 当前机器人信息 */
+  getMe() {
+    return this.#request('GET', '/users/@me');
+  }
+
+  /* ---------------- 消息发送 ---------------- */
+
   /**
-   * 发送群消息。
-   * @param {string} groupOpenid 群 openid
-   * @param {object} opts { content, msgType, msgId, markdown, keyboard, media, ark }
+   * 发送群消息
+   * @param {string} groupOpenid
+   * @param {object} opts content / msgType / msgId / markdown / keyboard / media / ark
    */
   async sendGroup(groupOpenid, opts = {}) {
-    const payload = this.#buildPayload(opts);
-    return this.#request('POST', `/v2/groups/${groupOpenid}/messages`, payload);
+    const r = await this.#request('POST', `/v2/groups/${groupOpenid}/messages`, this.#payload(opts));
+    runtime.bump('sent');
+    return r;
   }
 
-  /** 发送单聊消息 */
   async sendC2C(openid, opts = {}) {
-    const payload = this.#buildPayload(opts);
-    return this.#request('POST', `/v2/users/${openid}/messages`, payload);
+    const r = await this.#request('POST', `/v2/users/${openid}/messages`, this.#payload(opts));
+    runtime.bump('sent');
+    return r;
   }
 
-  /** 上传/发送群聊富媒体（图片、视频、语音） */
-  postGroupFile(groupOpenid, { fileType = 1, url, srvSendMsg = false }) {
-    return this.#request('POST', `/v2/groups/${groupOpenid}/files`, {
-      file_type: fileType,
-      url,
-      srv_send_msg: srvSendMsg,
-    });
+  /* ---------------- 富媒体 ---------------- */
+
+  /**
+   * 上传富媒体。
+   * @param {'group'|'c2c'} scene
+   * @param {string} target group_openid 或 user openid
+   * @param {object} opts { fileType, url?, fileData?(base64) }
+   * @returns {Promise<{file_uuid:string, file_info:string, ttl:number}>}
+   */
+  uploadMedia(scene, target, { fileType = FILE_TYPE.IMAGE, url, fileData } = {}) {
+    const path =
+      scene === 'group' ? `/v2/groups/${target}/files` : `/v2/users/${target}/files`;
+    const body = { file_type: fileType, srv_send_msg: false };
+    if (url) body.url = url;
+    if (fileData) body.file_data = fileData;
+    return this.#request('POST', path, body);
   }
 
-  postC2CFile(openid, { fileType = 1, url, srvSendMsg = false }) {
-    return this.#request('POST', `/v2/users/${openid}/files`, {
-      file_type: fileType,
-      url,
-      srv_send_msg: srvSendMsg,
-    });
+  /** 从本地文件读取并上传（自动转 base64） */
+  async uploadLocalFile(scene, target, filePath, fileType = FILE_TYPE.IMAGE) {
+    const buf = await fs.readFile(filePath);
+    return this.uploadMedia(scene, target, { fileType, fileData: buf.toString('base64') });
   }
 
-  #buildPayload({ content, msgType = 0, msgId, markdown, keyboard, media, ark }) {
+  /** 上传后再以 msg_type=7 发出（被动回复） */
+  async sendMedia(scene, target, { fileType, url, fileData, msgId }) {
+    const up = await this.uploadMedia(scene, target, { fileType, url, fileData });
+    if (!up?.file_info) throw new Error('上传成功但未返回 file_info');
+    const opts = {
+      msgType: 7,
+      content: ' ',
+      media: { file_info: up.file_info },
+      msgId,
+    };
+    return scene === 'group' ? this.sendGroup(target, opts) : this.sendC2C(target, opts);
+  }
+
+  /* ---------------- 内部 ---------------- */
+
+  #payload({ content, msgType = 0, msgId, markdown, keyboard, media, ark }) {
     const payload = { msg_type: msgType, content: content ?? '' };
     if (msgId) {
       payload.msg_id = msgId;
@@ -112,10 +154,8 @@ export class QQApi {
     const cur = this.seqMap.get(msgId) ?? 0;
     const next = cur + 1;
     this.seqMap.set(msgId, next);
-    // 防止无限增长：超过 2000 条清一次最老的
     if (this.seqMap.size > 2000) {
-      const oldest = this.seqMap.keys().next().value;
-      this.seqMap.delete(oldest);
+      this.seqMap.delete(this.seqMap.keys().next().value);
     }
     return next;
   }

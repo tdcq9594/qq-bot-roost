@@ -1,4 +1,5 @@
 import { createLogger } from './logger.js';
+import { runtime } from './runtime.js';
 
 const log = createLogger('gateway');
 
@@ -64,6 +65,16 @@ export class Gateway {
     return this.readyPromise;
   }
 
+  /** 供 WebUI 使用：断开后立刻重连 */
+  async restart() {
+    this.stop();
+    this.sessionId = '';
+    this.lastSeq = null;
+    this.attempt = 0;
+    await new Promise((r) => setTimeout(r, 300));
+    await this.#connect();
+  }
+
   stop() {
     this.stopped = true;
     this.#clearTimers();
@@ -87,6 +98,7 @@ export class Gateway {
       const gw = await this.api.getGateway();
       url = gw?.url;
       if (!url) throw new Error('网关接口未返回 url');
+      runtime.gatewayUrl = url;
       log.info(`网关地址: ${url}`);
     } catch (e) {
       log.error('获取网关地址失败:', e.message);
@@ -113,7 +125,9 @@ export class Gateway {
     ws.addEventListener('close', (ev) => {
       this.#clearTimers();
       this.ready = false;
+      runtime.connected = false;
       if (this.stopped) return;
+      runtime.reconnectCount += 1;
       const hint = CLOSE_HINTS[ev.code];
       log.warn(`WebSocket 关闭 code=${ev.code} reason=${ev.reason || '-'}`);
       if (hint) log.error(`原因: ${hint}`);
@@ -162,11 +176,16 @@ export class Gateway {
           this.attempt = 0;
           this.ready = true;
           const name = p.d?.user?.username ?? '未知';
+          runtime.connected = true;
+          runtime.botName = name;
+          runtime.botId = p.d?.user?.id ?? '';
+          runtime.sessionId = this.sessionId;
           log.info(`已就绪，机器人: ${name}`);
           this.readyResolve?.(this);
         } else if (t === 'RESUMED') {
           this.ready = true;
           this.attempt = 0;
+          runtime.connected = true;
           log.info('会话已恢复');
           this.readyResolve?.(this);
         } else {
@@ -204,6 +223,7 @@ export class Gateway {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = setInterval(() => {
       this.#send({ op: OP.HEARTBEAT, d: this.lastSeq });
+      runtime.lastHeartbeatAt = Date.now();
     }, interval);
   }
 

@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QQ 机器人控制台</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">Q</span>
+    <div>
+      <div class="title">QQ 机器人控制台</div>
+      <div class="sub" id="botName">未连接</div>
+    </div>
+  </div>
+  <nav class="tabs">
+    <button class="tab active" data-tab="overview">概览</button>
+    <button class="tab" data-tab="config">配置</button>
+    <button class="tab" data-tab="plugins">插件</button>
+    <button class="tab" data-tab="logs">日志</button>
+  </nav>
+  <div class="status-pill" id="connPill">
+    <span class="dot" id="connDot"></span><span id="connText">连接中</span>
+  </div>
+</header>
+
+<main>
+  <!-- 概览 -->
+  <section id="tab-overview" class="panel active">
+    <div class="cards">
+      <div class="card"><div class="k">连接状态</div><div class="v" id="c-conn">-</div></div>
+      <div class="card"><div class="k">运行时长</div><div class="v" id="c-uptime">-</div></div>
+      <div class="card"><div class="k">Token 剩余</div><div class="v" id="c-token">-</div></div>
+      <div class="card"><div class="k">内存占用</div><div class="v" id="c-mem">-</div></div>
+      <div class="card"><div class="k">收到消息</div><div class="v" id="c-recv">0</div></div>
+      <div class="card"><div class="k">发出消息</div><div class="v" id="c-sent">0</div></div>
+      <div class="card"><div class="k">命令命中</div><div class="v" id="c-cmd">0</div></div>
+      <div class="card"><div class="k">错误 / 拦截</div><div class="v" id="c-err">0</div></div>
+    </div>
+
+    <div class="row">
+      <div class="box grow">
+        <div class="box-hd">
+          <h3>活跃会话</h3>
+          <span class="hint">按消息数排序，最多 20 条</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>openid</th><th>类型</th><th class="num">消息数</th><th>最后活跃</th></tr></thead>
+            <tbody id="chatBody"><tr><td colspan="4" class="empty">暂无数据</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="box">
+        <div class="box-hd"><h3>运行信息</h3></div>
+        <dl class="kv">
+          <dt>机器人 ID</dt><dd id="i-botid">-</dd>
+          <dt>网关</dt><dd id="i-gw" class="mono">-</dd>
+          <dt>会话 ID</dt><dd id="i-session" class="mono">-</dd>
+          <dt>intents</dt><dd id="i-intents">-</dd>
+          <dt>命令前缀</dt><dd id="i-prefix">-</dd>
+          <dt>重连次数</dt><dd id="i-reconn">0</dd>
+          <dt>Node</dt><dd id="i-node">-</dd>
+        </dl>
+        <div class="btn-row">
+          <button class="btn" id="btnReconnect">重连网关</button>
+          <button class="btn" id="btnRefreshToken">刷新 Token</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="box">
+      <div class="box-hd"><h3>发送消息（调试）</h3></div>
+      <div class="form-inline">
+        <select id="sendScene"><option value="group">群聊</option><option value="c2c">私聊</option></select>
+        <input id="sendTarget" placeholder="群 openid 或用户 openid">
+        <input id="sendContent" placeholder="要发送的内容">
+        <button class="btn primary" id="btnSend">发送</button>
+      </div>
+      <div class="hint" id="sendHint">主动消息有频次限制，仅建议调试用。</div>
+    </div>
+  </section>
+
+  <!-- 配置 -->
+  <section id="tab-config" class="panel">
+    <form id="cfgForm">
+      <div class="box">
+        <div class="box-hd"><h3>连接凭证</h3><span class="hint">保存后若 AppID 变化会自动重连</span></div>
+        <div class="grid2">
+          <label>AppID<input name="appId" placeholder="机器人 AppID"></label>
+          <label>AppSecret<input name="appSecret" type="password" placeholder="留空则不修改"></label>
+          <label>API 地址<input name="baseUrl"></label>
+          <label>命令前缀<input name="commandPrefix" maxlength="3"></label>
+        </div>
+        <label class="full">intents
+          <select name="intentsPreset" id="intentsPreset">
+            <option value="33554432">33554432 — 群聊 @ + 私聊（推荐）</option>
+            <option value="1073741824">1073741824 — 频道 @消息</option>
+            <option value="33554434">33554434 — 群聊 + 频道成员</option>
+            <option value="custom">自定义…</option>
+          </select>
+        </label>
+        <label class="full" id="intentsCustomWrap" style="display:none">自定义 intents
+          <input name="intents" type="number">
+        </label>
+        <label class="full">主人 openid（逗号或换行分隔）
+          <textarea name="owners" rows="2" placeholder="在群里发 /whoami 可查"></textarea>
+        </label>
+      </div>
+
+      <div class="box">
+        <div class="box-hd"><h3>行为控制</h3></div>
+        <div class="grid2">
+          <label class="switch"><input type="checkbox" name="whitelistEnabled"> 启用白名单</label>
+          <label class="switch"><input type="checkbox" name="rateLimitEnabled"> 启用限流</label>
+          <label>每分钟每会话上限<input name="perChatPerMinute" type="number" min="1"></label>
+          <label>去重窗口（秒）<input name="dedupWindowSec" type="number" min="0"></label>
+        </div>
+        <label class="full">白名单群 openid（每行一个）
+          <textarea name="whitelistGroups" rows="2"></textarea>
+        </label>
+        <label class="full">白名单用户 openid（每行一个）
+          <textarea name="whitelistUsers" rows="2"></textarea>
+        </label>
+      </div>
+
+      <div class="box">
+        <div class="box-hd"><h3>面板与日志</h3></div>
+        <div class="grid2">
+          <label>监听地址<input name="webuiHost" placeholder="127.0.0.1"></label>
+          <label>端口<input name="webuiPort" type="number"></label>
+          <label>访问 token（留空则不校验）<input name="webuiToken"></label>
+          <label>日志级别
+            <select name="logLevel">
+              <option value="debug">debug</option>
+              <option value="info">info</option>
+              <option value="warn">warn</option>
+              <option value="error">error</option>
+            </select>
+          </label>
+        </div>
+        <div class="hint">修改监听地址或端口需要重启进程才生效。</div>
+      </div>
+
+      <div class="sticky-actions">
+        <span id="cfgMsg" class="hint"></span>
+        <button type="submit" class="btn primary">保存配置</button>
+      </div>
+    </form>
+  </section>
+
+  <!-- 插件 -->
+  <section id="tab-plugins" class="panel">
+    <div class="box">
+      <div class="box-hd">
+        <h3>已安装插件</h3>
+        <span class="hint">插件放在 plugins/ 目录下，改完点重载即可生效</span>
+      </div>
+      <div id="pluginList" class="plugin-list"></div>
+    </div>
+  </section>
+
+  <!-- 日志 -->
+  <section id="tab-logs" class="panel">
+    <div class="box">
+      <div class="box-hd">
+        <h3>实时日志</h3>
+        <div class="btn-row">
+          <select id="logLevelFilter">
+            <option value="debug">全部</option>
+            <option value="info">info 及以上</option>
+            <option value="warn">warn 及以上</option>
+            <option value="error">仅 error</option>
+          </select>
+          <label class="switch small"><input type="checkbox" id="autoScroll" checked> 自动滚动</label>
+          <button class="btn small" id="btnClearLog">清屏</button>
+        </div>
+      </div>
+      <div id="logView" class="log-view"></div>
+    </div>
+  </section>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>

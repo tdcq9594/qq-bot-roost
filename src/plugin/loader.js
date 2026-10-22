@@ -122,6 +122,11 @@ export class PluginManager {
     } catch (e) {
       log.warn(`插件 ${id} teardown 出错: ${e.message}`);
     }
+    try {
+      item.ctx.dispose?.();
+    } catch (e) {
+      log.warn(`插件 ${id} 资源清理出错: ${e.message}`);
+    }
     this.registry.clearPlugin(id);
     this.loaded.delete(id);
     log.info(`已卸载插件 ${id}`);

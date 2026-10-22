@@ -8,11 +8,14 @@ import { Gateway } from './gateway.js';
 import { buildMessage, isMessageEvent } from './message.js';
 import { Registry } from './plugin/context.js';
 import { PluginManager } from './plugin/loader.js';
+import { runtime } from './runtime.js';
+import { startWebServer } from './web/server.js';
 
 const log = createLogger('core');
 const args = new Set(process.argv.slice(2));
 const MOCK = args.has('--mock');
 const CHECK_ONLY = args.has('--check');
+const SERVE = args.has('--serve');
 
 if (args.has('--help') || args.has('-h')) {
   console.log(`
@@ -22,20 +25,89 @@ QQ 机器人内核
   node src/main.js              连接 QQ，正常跑
   node src/main.js --check      只验证 AppID/AppSecret 和网关，不常驻
   node src/main.js --mock       不连 QQ，用本地假消息开发插件
+  node src/main.js --mock --serve   只启动可视化面板，不读标准输入（调界面用）
   node src/main.js --help       看这个帮助
 
 配置:
-  config.json                   AppID / AppSecret / intents / owners
+  config.json                   AppID / AppSecret / intents / owners / webui
   环境变量                       QQ_BOT_APPID / QQ_BOT_SECRET / QQ_BOT_OWNERS
+  可视化面板                     默认 http://127.0.0.1:8080
 `);
   process.exit(0);
+}
+
+/* ------------------------------------------------------------------ */
+/* 消息前置检查：去重、限流、白名单                                      */
+/* ------------------------------------------------------------------ */
+
+function createGuards(cfg) {
+  const seen = new Map(); // msgId -> ts
+  const rate = new Map(); // chatId -> { count, start }
+
+  return {
+    /** 返回 true 表示应当继续处理 */
+    check(msg) {
+      // 1) 去重：同一条消息可能因重连被重复投递
+      const win = (cfg.dedupWindowSec ?? 0) * 1000;
+      if (win > 0 && msg.id) {
+        const now = Date.now();
+        const hit = seen.get(msg.id);
+        if (hit && now - hit < win) {
+          runtime.bump('dedup');
+          return false;
+        }
+        seen.set(msg.id, now);
+        if (seen.size > 1000) {
+          for (const [k, t] of seen) {
+            if (now - t > win) seen.delete(k);
+            else break;
+          }
+        }
+      }
+
+      // 2) 白名单
+      const wl = cfg.whitelist ?? {};
+      if (wl.enabled) {
+        const okGroup = msg.kind === 'group' && (wl.groups ?? []).includes(msg.groupId);
+        const okUser = (wl.users ?? []).includes(msg.userId);
+        if (!okGroup && !okUser) {
+          runtime.bump('rejected');
+          log.debug(`白名单拦截: kind=${msg.kind} group=${msg.groupId} user=${msg.userId}`);
+          return false;
+        }
+      }
+
+      // 3) 限流：每个会话每分钟上限
+      const rl = cfg.rateLimit ?? {};
+      if (rl.enabled && msg.chatId) {
+        const limit = Math.max(1, rl.perChatPerMinute ?? 30);
+        const now = Date.now();
+        const rec = rate.get(msg.chatId) ?? { count: 0, start: now };
+        if (now - rec.start > 60_000) {
+          rec.count = 0;
+          rec.start = now;
+        }
+        rec.count += 1;
+        rate.set(msg.chatId, rec);
+        if (rec.count > limit) {
+          runtime.bump('limited');
+          if (rec.count === limit + 1) {
+            msg.reply(`本会话每分钟最多 ${limit} 条，请稍后再试。`).catch(() => {});
+          }
+          return false;
+        }
+      }
+
+      return true;
+    },
+  };
 }
 
 /* ------------------------------------------------------------------ */
 /* 核心命令：不依赖任何插件，保证机器人一启动就能用                      */
 /* ------------------------------------------------------------------ */
 
-function registerCoreCommands(registry, { cfg, plugins, registryRef }) {
+function registerCoreCommands(registry, { cfg, plugins }) {
   const P = cfg.commandPrefix || '/';
   const isOwner = (uid) => cfg.owners.includes(uid);
 
@@ -52,17 +124,14 @@ function registerCoreCommands(registry, { cfg, plugins, registryRef }) {
     const lines = ['可用命令：'];
     for (const [plugin, cmds] of groups) {
       lines.push(`\n【${plugin}】`);
-      for (const c of cmds) {
-        lines.push(`  ${P}${c.name}${c.desc ? '  — ' + c.desc : ''}`);
-      }
+      for (const c of cmds) lines.push(`  ${P}${c.name}${c.desc ? '  — ' + c.desc : ''}`);
     }
-    lines.push(`\n插件共 ${plugins.loaded.size} 个，发 ${P}plugins 查看`);
+    lines.push(`\n插件 ${plugins.loaded.size} 个，发 ${P}plugins 查看`);
     await msg.reply(lines.join('\n'));
   });
 
   core('ping', { desc: '测试机器人是否在线' }, async (msg) => {
-    const t = Date.now();
-    await msg.reply(`pong（${Date.now() - t}ms）`);
+    await msg.reply(`pong（运行 ${Math.floor(runtime.uptimeMs / 1000)} 秒）`);
   });
 
   core('whoami', { desc: '查看自己的 openid（配置主人用）' }, async (msg) => {
@@ -77,7 +146,7 @@ function registerCoreCommands(registry, { cfg, plugins, registryRef }) {
 
   core('claim', { desc: '认领机器人主人身份（仅在未设置主人时可用）' }, async (msg) => {
     if (cfg.owners.length > 0) {
-      return msg.reply('已经设置过主人了。如需变更，请直接改 config.json 的 owners 字段。');
+      return msg.reply('已经设置过主人了。如需变更，请改 config.json 的 owners，或在面板里配置。');
     }
     cfg.owners.push(msg.userId);
     await saveConfig(cfg);
@@ -95,20 +164,18 @@ function registerCoreCommands(registry, { cfg, plugins, registryRef }) {
       lines.push(`${p.loaded ? '●' : '○'} ${p.id}${ver} [${flag}]${desc}`);
       if (p.error) lines.push(`    错误: ${p.error}`);
     }
-    if (isOwner(msg.userId)) {
-      lines.push(`\n管理: ${P}enable <id> / ${P}disable <id> / ${P}reload <id>`);
-    }
+    if (isOwner(msg.userId)) lines.push(`\n管理: ${P}enable <id> / ${P}disable <id> / ${P}reload <id>`);
     await msg.reply(lines.join('\n'));
   });
 
-  core('enable', { desc: '启用插件', admin: true, usage: `${P}enable <插件id>` }, async (msg) => {
+  core('enable', { desc: '启用插件', admin: true }, async (msg) => {
     const id = msg.args[0];
     if (!id) return msg.reply(`用法: ${P}enable <插件id>`);
     const ok = await plugins.setEnabled(id, true);
     await msg.reply(ok ? `已启用 ${id}` : `启用失败，查看日志或 ${P}plugins 看错误`);
   });
 
-  core('disable', { desc: '禁用插件', admin: true, usage: `${P}disable <插件id>` }, async (msg) => {
+  core('disable', { desc: '禁用插件', admin: true }, async (msg) => {
     const id = msg.args[0];
     if (!id) return msg.reply(`用法: ${P}disable <插件id>`);
     await plugins.setEnabled(id, false);
@@ -127,22 +194,43 @@ function registerCoreCommands(registry, { cfg, plugins, registryRef }) {
     }
     await msg.reply(`已重载 ${n} 个插件`);
   });
+
+  core('status', { desc: '查看运行状态' }, async (msg) => {
+    const s = runtime.snapshot({ plugins: plugins.list(), cfg });
+    const up = Math.floor(s.uptimeMs / 1000);
+    const d = Math.floor(up / 86400);
+    const h = Math.floor((up % 86400) / 3600);
+    const m = Math.floor((up % 3600) / 60);
+    await msg.reply(
+      [
+        `连接: ${s.connected ? '在线' : '离线'}`,
+        `运行: ${d ? d + '天' : ''}${h ? h + '小时' : ''}${m}分`,
+        `收到 ${s.counters.recv} 条 / 发出 ${s.counters.sent} 条`,
+        `命令 ${s.counters.commands} 次 / 错误 ${s.counters.errors} 次`,
+        `插件 ${s.plugins.filter((p) => p.loaded).length}/${s.plugins.length} 运行中`,
+        `内存 ${s.memoryMB} MB`,
+      ].join('\n'),
+    );
+  });
 }
 
 /* ------------------------------------------------------------------ */
 /* 事件分发                                                            */
 /* ------------------------------------------------------------------ */
 
-function createDispatcher({ registry, api, cfg, plugins }) {
+function createDispatcher({ registry, api, cfg, plugins, guards }) {
   const isOwner = (uid) => cfg.owners.includes(uid);
 
   return async function dispatch(eventName, d) {
+    runtime.lastEventAt = Date.now();
+    runtime.messageEvent = eventName;
+
     if (!isMessageEvent(eventName)) {
-      // 非消息事件（入群、加好友等）直接抛给监听者
       for (const l of registry.listeners.get(eventName) ?? []) {
         try {
           await l.handler(d, { event: eventName, api });
         } catch (e) {
+          runtime.bump('errors');
           log.error(`监听器 ${l.pluginId} 处理 ${eventName} 出错:`, e.message);
         }
       }
@@ -150,40 +238,41 @@ function createDispatcher({ registry, api, cfg, plugins }) {
     }
 
     const msg = buildMessage(eventName, d, { api, cfg });
+    runtime.bump('recv');
+    runtime.touchChat(msg.chatId, msg.kind);
 
-    // 1) 命令优先
+    if (!guards.check(msg)) return;
+
     if (msg.isCommand) {
       const entry = registry.commands.get(msg.command);
       if (entry) {
         if (entry.admin && !isOwner(msg.userId)) {
           return msg.reply('这个命令只有机器人主人能用。发 /whoami 查看自己的 openid。');
         }
-        // 必填参数校验：模式里 <xxx> 的个数
         const required = (entry.pattern?.match(/<[^>]+>/g) ?? []).length;
         if (msg.args.length < required) {
           return msg.reply(`参数不够\n用法: ${entry.usage}`);
         }
+        runtime.bump('commands');
         try {
           await entry.handler(msg, { args: msg.args, raw: msg.content });
         } catch (e) {
+          runtime.bump('errors');
           log.error(`命令 ${entry.name}（插件 ${entry.pluginId}）执行出错:`, e.stack || e.message);
           await msg.reply(`执行出错: ${e.message}`).catch(() => {});
         }
         return;
       }
-      // 未知命令：给个提示，避免用户以为机器人死了
       const P = cfg.commandPrefix || '/';
-      return msg
-        .reply(`没有这个命令：${P}${msg.command}\n发 ${P}help 查看全部命令`)
-        .catch(() => {});
+      return msg.reply(`没有这个命令：${P}${msg.command}\n发 ${P}help 查看全部命令`).catch(() => {});
     }
 
-    // 2) 其余交给监听者：先 'message' 统一入口，再原始事件名
     for (const evt of ['message', eventName]) {
       for (const l of registry.listeners.get(evt) ?? []) {
         try {
           await l.handler(msg);
         } catch (e) {
+          runtime.bump('errors');
           log.error(`监听器 ${l.pluginId} 处理 ${evt} 出错:`, e.stack || e.message);
         }
       }
@@ -197,6 +286,7 @@ function createDispatcher({ registry, api, cfg, plugins }) {
 
 function createMockApi() {
   const echo = (scene) => async (target, body) => {
+    runtime.bump('sent');
     console.log(`\n→ [${scene} ${target}] ${body?.content ?? JSON.stringify(body)}`);
     return { id: 'mock', timestamp: Date.now() };
   };
@@ -205,7 +295,10 @@ function createMockApi() {
     sendC2C: echo('私聊'),
     postGroupFile: async () => ({ file_info: 'mock' }),
     postC2CFile: async () => ({ file_info: 'mock' }),
+    uploadMedia: async () => ({ file_info: 'mock', ttl: 0 }),
+    uploadLocalFile: async () => ({ file_info: 'mock', ttl: 0 }),
     getGateway: async () => ({ url: 'wss://mock' }),
+    getMe: async () => ({ username: 'mock-bot', id: '0' }),
   };
 }
 
@@ -213,7 +306,8 @@ async function runMock(cfg, registry, plugins) {
   console.log('\n=== Mock 模式 ===');
   console.log('不连接 QQ，用本地假消息验证插件逻辑。输入内容回车发送，Ctrl+C 退出。\n');
 
-  const dispatch = createDispatcher({ registry, api: createMockApi(), cfg, plugins });
+  const guards = createGuards(cfg);
+  const dispatch = createDispatcher({ registry, api: createMockApi(), cfg, plugins, guards });
   const fakeUser = cfg.owners[0] ?? 'mock-user-openid';
   const fakeGroup = 'mock-group-openid';
   let seq = 0;
@@ -227,7 +321,6 @@ async function runMock(cfg, registry, plugins) {
       timestamp: String(Date.now()),
     });
 
-  // 管道输入（自动化测试）：一次性读完，逐行处理
   if (!process.stdin.isTTY) {
     const chunks = [];
     for await (const chunk of process.stdin) chunks.push(chunk);
@@ -262,10 +355,11 @@ async function runMock(cfg, registry, plugins) {
 async function main() {
   const cfg = await loadConfig();
   setLevel(cfg.logLevel);
+  runtime.startedAt = Date.now();
 
   const registry = new Registry();
-  let api = null;
   let tokens = null;
+  let api = null;
 
   if (!MOCK) {
     await ensureCredentials(cfg);
@@ -286,33 +380,58 @@ async function main() {
       log.info(`自检通过，网关: ${gw.url}`);
       return;
     }
-  } else if (CHECK_ONLY) {
-    log.info('mock 模式下 --check 无意义，已跳过');
-    return;
+  } else {
+    api = createMockApi();
   }
 
   const plugins = new PluginManager({
     pluginsDir: path.join(ROOT, 'plugins'),
     registry,
-    api: api ?? createMockApi(),
+    api,
     cfg,
     isOwner: (uid) => cfg.owners.includes(uid),
   });
 
-  registerCoreCommands(registry, { cfg, plugins, registryRef: registry });
+  registerCoreCommands(registry, { cfg, plugins });
   await plugins.scan();
 
+  let gateway = null;
+
+  // 可视化面板（mock 模式也可用，方便调界面）
+  const web = startWebServer({
+    cfg,
+    plugins,
+    getGateway: () => gateway,
+    tokens,
+    api,
+    saveConfig,
+    onConfigApplied: async () => {
+      if (gateway) await gateway.restart();
+    },
+  });
+
   if (MOCK) {
+    if (SERVE) {
+      log.info('mock + serve：只跑面板，Ctrl+C 退出');
+      process.on('SIGINT', () => {
+        web?.close();
+        process.exit(0);
+      });
+      return new Promise(() => {});
+    }
     await runMock(cfg, registry, plugins);
+    web?.close();
     return;
   }
 
   if (!cfg.owners.length) {
-    log.warn('尚未设置主人。请在群里 @机器人 发送 /claim 认领，或手动填写 config.json 的 owners。');
+    log.warn('尚未设置主人。在群里 @机器人 发 /claim 认领，或在可视化面板里配置 owners。');
   }
 
-  const dispatch = createDispatcher({ registry, api, cfg, plugins });
-  const gateway = new Gateway({
+  const guards = createGuards(cfg);
+  const dispatch = createDispatcher({ registry, api, cfg, plugins, guards });
+
+  gateway = new Gateway({
     api,
     tokens,
     intents: cfg.intents,
@@ -320,13 +439,14 @@ async function main() {
   });
 
   log.info(`配置: ${CONFIG_PATH}`);
-  log.info(`intents=${cfg.intents}（${cfg.intents === 1 << 25 ? '群聊@ + 私聊' : '自定义'}）`);
+  log.info(`intents=${cfg.intents}${cfg.intents === 1 << 25 ? '（群聊@ + 私聊）' : ''}`);
 
   await gateway.start();
 
   const shutdown = () => {
     log.info('正在退出...');
     gateway.stop();
+    web?.close();
     process.exit(0);
   };
   process.on('SIGINT', shutdown);

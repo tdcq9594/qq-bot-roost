@@ -1,4 +1,5 @@
 import { createLogger } from './logger.js';
+import { FILE_TYPE } from './api.js';
 
 const log = createLogger('message');
 
@@ -20,7 +21,7 @@ function stripMention(content) {
 }
 
 /**
- * 把官方事件体统一成一个好用的 Message 对象，插件只跟它打交道。
+ * 把官方事件体统一成好用的 Message 对象，插件只跟它打交道。
  */
 export function buildMessage(eventName, d, { api, cfg }) {
   const kind = MESSAGE_EVENTS[eventName] ?? 'unknown';
@@ -50,6 +51,7 @@ export function buildMessage(eventName, d, { api, cfg }) {
     event: eventName,
     groupId,
     userId,
+    chatId: groupId || userId,
     content,
     raw: d,
     isCommand,
@@ -65,49 +67,57 @@ export function buildMessage(eventName, d, { api, cfg }) {
     msg.args = rest;
   }
 
-  // 统一的回复入口。被动回复必须在 5 分钟内，且同一 msg_id 的 msg_seq 要递增（api 层已处理）
-  msg.reply = (text, opts = {}) => {
-    if (text === undefined || text === null || text === '') return Promise.resolve(null);
-    const body = { content: String(text), msgId: msg.id, ...opts };
-    if (kind === 'group') return api.sendGroup(groupId, body);
-    if (kind === 'c2c') return api.sendC2C(userId, body);
-    return Promise.resolve(null); // 频道消息暂不走 v2 接口
-  };
-
-  // 主动推送：不带 msg_id，属于主动消息（有频次限制）
-  msg.push = (text, opts = {}) => {
-    const body = { content: String(text), ...opts };
+  // 底层发送：group 走群接口，c2c 走单聊接口
+  const send = (opts, passive) => {
+    const body = passive ? { msgId: msg.id, ...opts } : { ...opts };
     if (kind === 'group') return api.sendGroup(groupId, body);
     if (kind === 'c2c') return api.sendC2C(userId, body);
     return Promise.resolve(null);
   };
 
-  /** 发图片：先上传拿到 file_info，再以 msg_type=7 发送 */
-  msg.replyImage = async (imageUrl) => {
-    try {
-      if (kind === 'group') {
-        const up = await api.postGroupFile(groupId, { fileType: 1, url: imageUrl, srvSendMsg: false });
-        return api.sendGroup(groupId, {
-          msgId: msg.id,
-          msgType: 7,
-          content: ' ',
-          media: { file_info: up?.file_info },
-        });
-      }
-      if (kind === 'c2c') {
-        const up = await api.postC2CFile(userId, { fileType: 1, url: imageUrl, srvSendMsg: false });
-        return api.sendC2C(userId, {
-          msgId: msg.id,
-          msgType: 7,
-          content: ' ',
-          media: { file_info: up?.file_info },
-        });
-      }
-    } catch (e) {
-      log.error('发送图片失败:', e.message);
-    }
-    return null;
+  /** 被动回复（带 msg_id，5 分钟内有效，msg_seq 自动递增） */
+  msg.reply = (text, opts = {}) => {
+    if (text === undefined || text === null || text === '') return Promise.resolve(null);
+    return send({ content: String(text), ...opts }, true);
   };
+
+  /** 主动推送（不带 msg_id，有频次限制） */
+  msg.push = (text, opts = {}) => {
+    if (text === undefined || text === null || text === '') return Promise.resolve(null);
+    return send({ content: String(text), ...opts }, false);
+  };
+
+  /** Markdown 消息（可带按钮 keyboard） */
+  msg.replyMarkdown = (markdown, keyboard) =>
+    send({ markdown, keyboard }, true).catch((e) => {
+      log.error('发送 Markdown 失败:', e.message);
+      return null;
+    });
+
+  /** 发富媒体：上传后以 msg_type=7 发送 */
+  const replyMedia = async (fileType, source, { local = false } = {}) => {
+    if (!source) return null;
+    try {
+      const scene = kind === 'group' ? 'group' : 'c2c';
+      const target = kind === 'group' ? groupId : userId;
+      if (scene !== 'group' && scene !== 'c2c') return null;
+
+      const up = local
+        ? await api.uploadLocalFile(scene, target, source, fileType)
+        : await api.uploadMedia(scene, target, { fileType, url: source });
+      if (!up?.file_info) throw new Error('未返回 file_info');
+
+      return await send({ msgType: 7, content: ' ', media: { file_info: up.file_info } }, true);
+    } catch (e) {
+      log.error(`发送富媒体(type=${fileType}) 失败:`, e.message);
+      return null;
+    }
+  };
+
+  msg.replyImage = (src, opts) => replyMedia(FILE_TYPE.IMAGE, src, opts);
+  msg.replyVideo = (src, opts) => replyMedia(FILE_TYPE.VIDEO, src, opts);
+  msg.replyVoice = (src, opts) => replyMedia(FILE_TYPE.VOICE, src, opts);
+  msg.replyFile = (src, opts) => replyMedia(FILE_TYPE.FILE, src, opts);
 
   return msg;
 }

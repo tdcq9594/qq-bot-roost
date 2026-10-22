@@ -109,6 +109,7 @@ class PluginStorage {
 export function createContext({ meta, registry, api, cfg, isOwner }) {
   const id = meta.id;
   const logger = createLogger(`plugin:${id}`);
+  const disposers = [];
 
   const ctx = {
     id,
@@ -118,18 +119,18 @@ export function createContext({ meta, registry, api, cfg, isOwner }) {
     api,
     logger,
     storage: new PluginStorage(id),
+    prefix: cfg.commandPrefix || '/',
 
     /**
-     * 注册命令。用法：
-     *   ctx.command('echo <内容>', { desc: '回声' }, async (msg) => { ... })
-     * 处理函数的第二个参数是解析好的参数对象 { 内容: '...' } 与 msg.args 原数组
+     * 注册命令。命令名取第一个词，后面的是用法提示，仅用于帮助展示与必填校验。
+     *   ctx.command('echo <内容...>', { desc: '回声' }, async (msg, { args }) => { ... })
      */
     command(name, meta2, handler) {
       if (typeof meta2 === 'function') {
         handler = meta2;
         meta2 = {};
       }
-      registry.addCommand(id, name.split(/\s+/)[0], {
+      registry.addCommand(id, String(name).trim().split(/\s+/)[0], {
         desc: meta2?.desc ?? '',
         usage: meta2?.usage ?? `${cfg.commandPrefix}${name}`,
         pattern: String(name).trim(),
@@ -143,12 +144,47 @@ export function createContext({ meta, registry, api, cfg, isOwner }) {
       registry.addListener(id, event, handler);
     },
 
+    /**
+     * 定时任务。返回停止函数；插件卸载时会自动清理，不会残留。
+     *   ctx.schedule('daily-reset', 60_000, () => { ... })
+     */
+    schedule(name, everyMs, fn) {
+      if (typeof name === 'function') {
+        fn = name;
+        everyMs = 60_000;
+        name = 'task';
+      }
+      const timer = setInterval(() => {
+        Promise.resolve()
+          .then(fn)
+          .catch((e) => logger.error(`定时任务 ${name} 出错:`, e.message));
+      }, Math.max(1000, everyMs));
+      timer.unref?.();
+      disposers.push(() => clearInterval(timer));
+      return () => clearInterval(timer);
+    },
+
+    /** 注册卸载时要执行的回调（关连接、清定时器等） */
+    onTeardown(fn) {
+      if (typeof fn === 'function') disposers.push(fn);
+    },
+
     /** 当前消息的发送者是否为机器人主人 */
     isOwner(userId) {
       return isOwner(userId);
     },
 
-    prefix: cfg.commandPrefix || '/',
+    /** 内部：卸载时统一清理 */
+    dispose() {
+      for (const fn of disposers.splice(0)) {
+        try {
+          fn();
+        } catch (e) {
+          logger.warn('清理资源出错:', e.message);
+        }
+      }
+      this.storage.flush().catch(() => {});
+    },
   };
 
   return ctx;
