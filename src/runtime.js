@@ -30,6 +30,9 @@ export const runtime = {
   /** 各类事件收到多少次。全为 0 说明平台压根没推事件过来 */
   eventCounts: new Map(),
 
+  /** 最近一条原始事件，排查字段结构用 */
+  lastRaw: null,
+
   bumpEvent(name) {
     if (!name) return;
     this.eventCounts.set(name, (this.eventCounts.get(name) ?? 0) + 1);
@@ -77,6 +80,7 @@ export const runtime = {
       reconnectCount: this.reconnectCount,
       counters: { ...this.counters },
       chats: [...this.perChat.values()].sort((a, b) => b.count - a.count).slice(0, 20),
+      lastRaw: this.lastRaw,
       events: [...this.eventCounts.entries()]
         .map(([name, count]) => ({ name, count }))
         .sort((a, b) => b.count - a.count),

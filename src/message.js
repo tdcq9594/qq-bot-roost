@@ -5,7 +5,10 @@ const log = createLogger('message');
 
 /** 事件名 → 消息来源类型 */
 const MESSAGE_EVENTS = {
+  // 官方文档写的是 GROUP_AT_MESSAGE_CREATE，但平台实际会下发 GROUP_MESSAGE_CREATE
+  // （可能是新版事件名 / 全量群消息权限），两者载荷结构一致，都要认
   GROUP_AT_MESSAGE_CREATE: 'group',
+  GROUP_MESSAGE_CREATE: 'group',
   C2C_MESSAGE_CREATE: 'c2c',
   AT_MESSAGE_CREATE: 'guild',
   DIRECT_MESSAGE_CREATE: 'dm',
@@ -18,6 +21,11 @@ export function isMessageEvent(name) {
 /** 去掉频道消息里的 @机器人 前缀，如 "<@!123456> /help" */
 function stripMention(content) {
   return String(content ?? '').replace(/^\s*<@!?\d+>\s*/, '').trim();
+}
+
+/** 正文里是否 @ 了机器人（新版群消息事件可能是全量消息，需要自己判断） */
+function hasMention(raw) {
+  return /<@!?\d+>/.test(String(raw ?? ''));
 }
 
 /**
@@ -44,6 +52,7 @@ export function buildMessage(eventName, d, { api, cfg }) {
   const content = stripMention(d.content);
   const prefix = cfg.commandPrefix || '/';
   const isCommand = content.startsWith(prefix);
+  const mentioned = hasMention(d.content);
 
   const msg = {
     id: d.id ?? '',
@@ -54,6 +63,7 @@ export function buildMessage(eventName, d, { api, cfg }) {
     chatId: groupId || userId,
     content,
     raw: d,
+    mentioned,
     isCommand,
     command: '',
     args: [],

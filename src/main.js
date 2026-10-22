@@ -13,6 +13,18 @@ import { GroupStore } from './groups.js';
 import { startWebServer } from './web/server.js';
 
 const log = createLogger('core');
+
+/** 已知的系统事件，其余的在 debug 级别打印一下，避免新事件被静默吞掉 */
+const KNOWN_SYSTEM_EVENTS = new Set([
+  'GROUP_ADD_ROBOT',
+  'GROUP_DEL_ROBOT',
+  'FRIEND_ADD',
+  'FRIEND_DEL',
+  'C2C_MSG_REJECT',
+  'C2C_MSG_RECEIVE',
+  'GROUP_MSG_REJECT',
+  'GROUP_MSG_RECEIVE',
+]);
 const args = new Set(process.argv.slice(2));
 const MOCK = args.has('--mock');
 const CHECK_ONLY = args.has('--check');
@@ -226,8 +238,19 @@ function createDispatcher({ registry, api, cfg, plugins, guards, groups }) {
     runtime.lastEventAt = Date.now();
     runtime.messageEvent = eventName;
     runtime.bumpEvent(eventName);
+    // 只留最近一条，截断防止把大对象塞进状态里
+    try {
+      const raw = JSON.stringify(d);
+      runtime.lastRaw = { name: eventName, at: Date.now(), payload: raw.slice(0, 1500) };
+    } catch {
+      runtime.lastRaw = { name: eventName, at: Date.now(), payload: '<无法序列化>' };
+    }
 
     if (!isMessageEvent(eventName)) {
+      // 未知事件不再静默丢弃，留个线索
+      if (!KNOWN_SYSTEM_EVENTS.has(eventName)) {
+        log.debug(`收到未处理的事件 ${eventName}: ${JSON.stringify(d).slice(0, 300)}`);
+      }
       // 入群 / 退群：维护群档案，并在必要时自动认主
       if (eventName === 'GROUP_ADD_ROBOT') {
         const gid = d?.group_openid;
@@ -259,6 +282,11 @@ function createDispatcher({ registry, api, cfg, plugins, guards, groups }) {
 
     // 先登记群，再做拦截：被限流/白名单拦掉的消息也说明这个群存在
     if (msg.kind === 'group' && msg.groupId) await groups.touch(msg.groupId);
+
+    // GROUP_MESSAGE_CREATE 有可能是全量群消息（不只 @），
+    // 只处理「@了机器人」或「带命令前缀」的，避免对群里每句话都响应
+    if (msg.kind === 'group' && !msg.mentioned && !msg.isCommand) return;
+
     if (!guards.check(msg)) return;
 
     if (msg.isCommand) {
