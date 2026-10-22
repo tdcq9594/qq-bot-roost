@@ -10,7 +10,7 @@ import { Registry } from './plugin/context.js';
 import { PluginManager } from './plugin/loader.js';
 import { runtime } from './runtime.js';
 import { GroupStore } from './groups.js';
-import { RoleStore, LEVEL, levelName, parseLevel, parseScope, scopeOf } from './roles.js';
+import { RoleStore, LEVEL, NO_PERM, levelName, parseLevel, parseScope, scopeOf } from './roles.js';
 import { startWebServer } from './web/server.js';
 
 const log = createLogger('core');
@@ -172,7 +172,7 @@ function registerCoreCommands(registry, { cfg, plugins, tokens, roles }) {
     const coreCmds = [...registry.commands.values()].filter((c) => c.pluginId === '__core');
     lines.push('\n【内核】');
     for (const c of coreCmds) {
-      if (c.admin && myLv < LEVEL.admin) continue;
+      if (c.admin && myLv > LEVEL.admin) continue;
       lines.push(`  ${P}${c.name}${c.desc ? '  ' + c.desc : ''}`);
     }
 
@@ -300,7 +300,7 @@ function registerCoreCommands(registry, { cfg, plugins, tokens, roles }) {
     if (!sub) {
       const members = await roles.scopeMembers(scope);
       const lines = [`作用域: ${scope}`, `你的等级: ${levelName(myLevel)}`];
-      const list = Object.entries(members).sort((a, b) => b[1] - a[1]);
+      const list = Object.entries(members).sort((a, b) => a[1] - b[1]);
       if (list.length) {
         lines.push('\n本作用域管理员：');
         for (const [oid, lv] of list) lines.push(`  ${brief(oid)}  ${levelName(lv)}`);
@@ -308,7 +308,7 @@ function registerCoreCommands(registry, { cfg, plugins, tokens, roles }) {
         lines.push('\n本作用域还没有配置管理员');
       }
       lines.push(
-        `\n等级: admin(管理员) > manager(协管) > helper(助手)`,
+        `\n等级（数字越小权限越高）: 0 主人 / 1 管理员 / 2 协管 / 3 助手 / 4+ 自定义`,
         `作用域: here(默认) / global / group:<id> / channel:<id> / feature:<插件>`,
         `设置: ${P}admin set <openid> <等级> [作用域]`,
       );
@@ -347,11 +347,11 @@ function registerCoreCommands(registry, { cfg, plugins, tokens, roles }) {
     if (sub === 'list') {
       const target = rest[0] ? parseScope(rest[0], msg) : scope;
       if (!target) return msg.reply(`作用域写法不对: ${rest[0]}`);
-      if ((await levelOf(msg.userId, target)) < LEVEL.manager) {
+      if ((await levelOf(msg.userId, target)) > LEVEL.manager) {
         return msg.reply('需要该作用域的协管及以上权限');
       }
       const members = await roles.scopeMembers(target);
-      const list = Object.entries(members).sort((a, b) => b[1] - a[1]);
+      const list = Object.entries(members).sort((a, b) => a[1] - b[1]);
       if (!list.length) return msg.reply(`${target} 下没有配置管理员`);
       return msg.reply(
         [`${target}：`, ...list.map(([oid, lv]) => `  ${brief(oid)}  ${levelName(lv)}`)].join('\n'),
@@ -363,23 +363,25 @@ function registerCoreCommands(registry, { cfg, plugins, tokens, roles }) {
       const [openid, lvText, scopeText] = rest;
       const lv = parseLevel(lvText);
       if (!openid || lv === null) {
-        return msg.reply(`用法: ${P}admin set <openid> <admin|manager|helper> [作用域]`);
+        return msg.reply(
+          `用法: ${P}admin set <openid> <等级> [作用域]\n等级: 1 管理员 / 2 协管 / 3 助手 / 4 及以上自定义`,
+        );
       }
       const target = scopeText ? parseScope(scopeText, msg) : scope;
       if (!target) return msg.reply(`作用域写法不对: ${scopeText}`);
       if (lv === LEVEL.owner) return msg.reply('主人只能在 config.json 的 owners 里设置');
 
       const actor = await levelOf(msg.userId, target);
-      if (actor < LEVEL.manager) {
+      if (actor > LEVEL.manager) {
         return msg.reply(`需要协管及以上权限才能设置（当前 ${levelName(actor)}）`);
       }
-      // 核心规则：只能授予严格低于自己的等级
-      if (lv >= actor) {
-        return msg.reply(`不能授予不低于自己的等级（你是 ${levelName(actor)}）`);
+      // 核心规则：数字越小权限越高，所以只能授予「数字更大」的等级
+      if (lv <= actor) {
+        return msg.reply(`不能授予同级或更高的权限（你当前是 ${levelName(actor)}）`);
       }
       const cur = await roles.levelIn(target, openid);
-      if (cur >= actor) {
-        return msg.reply(`对方当前是 ${levelName(cur)}，不低于你，无法修改`);
+      if (cur <= actor) {
+        return msg.reply(`对方当前是 ${levelName(cur)}，权限不低于你，无法修改`);
       }
 
       await roles.set(target, openid, lv);
@@ -394,9 +396,9 @@ function registerCoreCommands(registry, { cfg, plugins, tokens, roles }) {
       if (!target) return msg.reply(`作用域写法不对: ${scopeText}`);
 
       const cur = await roles.levelIn(target, openid);
-      if (!cur) return msg.reply('该用户在这个作用域没有权限');
+      if (cur >= NO_PERM) return msg.reply('该用户在这个作用域没有权限');
       const actor = await levelOf(msg.userId, target);
-      if (actor <= cur) return msg.reply('不能移除同级或更高级别的管理员');
+      if (actor >= cur) return msg.reply('不能移除同级或更高权限的管理员');
 
       await roles.remove(target, openid);
       return msg.reply(`已移除 ${brief(openid)} 在 ${target} 的权限`);
@@ -554,7 +556,7 @@ function createDispatcher({ registry, api, cfg, plugins, guards, groups, roles }
         let allowed = true;
         if (entry.admin) {
           const lv = await roles.effective(scope, msg.userId, { owners: cfg.owners });
-          allowed = lv >= LEVEL.admin;
+          allowed = lv <= LEVEL.admin;
           if (!allowed) {
             return msg.reply(
               `需要管理员权限才能用这个命令（你当前是${levelName(lv)}）。\n发 ${cfg.commandPrefix || '/'}admin me 查看自己的权限。`,
@@ -565,7 +567,7 @@ function createDispatcher({ registry, api, cfg, plugins, guards, groups, roles }
           const gl = cfg.owners.includes(msg.userId)
             ? LEVEL.owner
             : await roles.levelIn('global', msg.userId);
-          if (gl < LEVEL.admin) {
+          if (gl > LEVEL.admin) {
             return msg.reply('这个命令影响全局，需要「全局管理员」权限。');
           }
         }

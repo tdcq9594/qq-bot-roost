@@ -18,41 +18,38 @@ const FILE = path.join(DATA_DIR, 'roles.json');
  *     user:<用户openid>   某人的私聊
  *     feature:<插件id>    某个功能（插件）的管理权
  *
- *   等级 level —— 「能管谁」
- *     100 owner    主人（只来自 config.json 的 owners，不可通过命令授予）
- *      80 admin    管理员：可管理本作用域内的 manager / helper
- *      60 manager  协管：可管理本作用域内的 helper
- *      40 helper   助手：只能使用被授权的功能，不能管人
+ *   等级 level —— 「能管谁」，**数字越小权限越高**
+ *     0    主人（只来自 config.json 的 owners，不可通过命令授予）
+ *     1    管理员
+ *     2    协管
+ *     3    助手
+ *     4+   自定义层级，数字越大权限越低
+ *     99   无权限（普通成员）
  *
- * 有效等级 = max(全局等级, 当前作用域等级)
- * 例：某人是全局 admin(80)，在任何一个群里都是 80；
- *     某人只是 A 群的 manager(60)，在 B 群就是 0。
+ * 有效等级 = min(全局等级, 当前作用域等级)   ← 越小越高，所以取更小的那个
+ * 例：某人是全局 1，在任何一个群里都是 1；
+ *     某人只是 A 群的 2，在 B 群就是 99（无权限）。
  */
 export const LEVEL = {
-  owner: 100,
-  admin: 80,
-  manager: 60,
-  helper: 40,
+  owner: 0,
+  admin: 1,
+  manager: 2,
+  helper: 3,
 };
 
-export const LEVEL_NAME = {
-  100: '主人',
-  80: '管理员',
-  60: '协管',
-  40: '助手',
-  0: '普通成员',
-};
+/** 无任何权限时的等级值 */
+export const NO_PERM = 99;
 
-/** 命令里可以写的等级别名 */
+/** 名字 → 等级 */
 const LEVEL_ALIAS = {
-  owner: 100,
-  admin: 80,
-  manager: 60,
-  helper: 40,
-  主人: 100,
-  管理员: 80,
-  协管: 60,
-  助手: 40,
+  owner: 0,
+  admin: 1,
+  manager: 2,
+  helper: 3,
+  主人: 0,
+  管理员: 1,
+  协管: 2,
+  助手: 3,
 };
 
 export function parseLevel(input) {
@@ -60,11 +57,22 @@ export function parseLevel(input) {
   const s = String(input).trim().toLowerCase();
   if (s in LEVEL_ALIAS) return LEVEL_ALIAS[s];
   const n = Number(s);
-  return Number.isFinite(n) && n >= 0 && n <= 100 ? n : null;
+  if (!Number.isInteger(n) || n < 0 || n >= NO_PERM) return null;
+  return n;
 }
 
 export function levelName(n) {
-  return LEVEL_NAME[n] ?? (n > 0 ? `${n}级` : '普通成员');
+  if (n === 0) return '主人';
+  if (n === 1) return '管理员';
+  if (n === 2) return '协管';
+  if (n === 3) return '助手';
+  if (n === NO_PERM || n === undefined || n === null) return '普通成员';
+  return `${n} 级管理`;
+}
+
+/** 等级是否达到要求（数字越小越高） */
+export function atLeast(level, need) {
+  return level <= need;
 }
 
 /** 从消息推断当前作用域 */
@@ -85,6 +93,9 @@ export function parseScope(input, msg) {
   return null;
 }
 
+/** 旧版本用的是 100/80/60/40，读取时转成新的 0/1/2/3 */
+const LEGACY_MAP = { 100: 0, 80: 1, 60: 2, 40: 3 };
+
 export class RoleStore {
   constructor() {
     this.data = null; // { "<scope>": { "<openid>": level } }
@@ -98,6 +109,21 @@ export class RoleStore {
       this.data = JSON.parse(await fs.readFile(FILE, 'utf8'));
     } catch {
       this.data = {};
+    }
+
+    // 兼容旧数据：把 100/80/60/40 迁移成 0/1/2/3
+    let migrated = false;
+    for (const members of Object.values(this.data)) {
+      for (const [oid, lv] of Object.entries(members)) {
+        if (lv >= 40 && LEGACY_MAP[lv] !== undefined) {
+          members[oid] = LEGACY_MAP[lv];
+          migrated = true;
+        }
+      }
+    }
+    if (migrated) {
+      log.info('已把旧版权限等级迁移为「0 最高」格式');
+      this.#scheduleSave();
     }
     return this.data;
   }
@@ -130,20 +156,20 @@ export class RoleStore {
     return { ...(d[scope] ?? {}) };
   }
 
-  /** 某人某作用域的等级（不含全局继承） */
+  /** 某人某作用域的等级（不含全局继承），没有则 NO_PERM */
   async levelIn(scope, openid) {
     const d = await this.#load();
-    return d[scope]?.[openid] ?? 0;
+    return d[scope]?.[openid] ?? NO_PERM;
   }
 
-  /** 有效等级 = max(全局, 当前作用域) */
+  /** 有效等级 = min(全局, 当前作用域)，越小权限越高 */
   async effective(scope, openid, { owners = [] } = {}) {
-    if (!openid) return 0;
+    if (!openid) return NO_PERM;
     if (owners.includes(openid)) return LEVEL.owner;
     const d = await this.#load();
-    const g = d.global?.[openid] ?? 0;
-    const s = scope === 'global' ? 0 : d[scope]?.[openid] ?? 0;
-    return Math.max(g, s);
+    const g = d.global?.[openid] ?? NO_PERM;
+    const s = scope === 'global' ? NO_PERM : d[scope]?.[openid] ?? NO_PERM;
+    return Math.min(g, s);
   }
 
   async set(scope, openid, level) {
@@ -152,7 +178,7 @@ export class RoleStore {
     if (!d[scope]) d[scope] = {};
     d[scope][openid] = level;
     this.#scheduleSave();
-    log.info(`设置权限 ${scope} ${openid} = ${levelName(level)}`);
+    log.info(`设置权限 ${scope} ${openid} = ${levelName(level)}(${level})`);
     return true;
   }
 
@@ -170,9 +196,10 @@ export class RoleStore {
     const d = await this.#load();
     const out = [];
     for (const [scope, members] of Object.entries(d)) {
-      if (members[openid]) out.push({ scope, level: members[openid] });
+      if (members[openid] !== undefined) out.push({ scope, level: members[openid] });
     }
-    return out.sort((a, b) => b.level - a.level);
+    // 数字小的权限高，升序排前面
+    return out.sort((a, b) => a.level - b.level);
   }
 
   /** 列出所有已配置的作用域及其人数 */

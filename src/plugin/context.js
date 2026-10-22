@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createLogger } from '../logger.js';
 import { DATA_DIR } from '../config.js';
-import { scopeOf, LEVEL, levelName } from '../roles.js';
+import { scopeOf, LEVEL, NO_PERM, levelName } from '../roles.js';
 
 /**
  * 全局注册表：所有插件注册的命令和事件监听都放这里。
@@ -250,17 +250,17 @@ export function createContext({ meta, registry, api, cfg, groups, roles, isOwner
 
     /**
      * 当前消息发送者的权限等级（数字）。
-     * 100 主人 / 80 管理员 / 60 协管 / 40 助手 / 0 普通成员
+     * 0 主人 / 1 管理员 / 2 协管 / 3 助手 / 99 普通成员（数字越小权限越高）
      */
     async levelOf(msg) {
-      if (!roles) return isOwner(msg?.userId) ? LEVEL.owner : 0;
+      if (!roles) return isOwner(msg?.userId) ? LEVEL.owner : NO_PERM;
       return roles.effective(scopeOf(msg), msg?.userId, { owners: cfg.owners });
     },
 
-    /** 当前消息发送者是否达到某等级，默认要求管理员 */
+    /** 当前消息发送者是否达到某等级，默认要求管理员（数字越小越高） */
     async can(msg, need = 'admin') {
       const want = typeof need === 'number' ? need : LEVEL[need] ?? LEVEL.admin;
-      return (await this.levelOf(msg)) >= want;
+      return (await this.levelOf(msg)) <= want;
     },
 
     /** 当前作用域（group:xxx / channel:xxx / user:xxx / global） */

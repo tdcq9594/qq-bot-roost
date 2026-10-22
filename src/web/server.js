@@ -237,8 +237,11 @@ export function startWebServer({ cfg, plugins, groups, roles, getGateway, tokens
           const scope = String(body.scope || '').trim();
           const openid = String(body.openid || '').trim();
           const level = Number(body.level);
-          if (!scope || !openid || !level) return json(res, 400, { error: '缺少参数' });
-          if (level === 100) return json(res, 400, { error: '主人只能在 config.json 设置' });
+          if (!scope || !openid || !Number.isInteger(level)) {
+            return json(res, 400, { error: '缺少参数或等级不是整数' });
+          }
+          if (level === 0) return json(res, 400, { error: '主人只能在 config.json 设置' });
+          if (level < 1 || level > 98) return json(res, 400, { error: '等级需在 1-98 之间' });
           await roles.set(scope, openid, level);
           return json(res, 200, { ok: true });
         }

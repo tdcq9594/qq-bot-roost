@@ -289,10 +289,13 @@
         <span class="hint">作用域决定「在哪管」，等级决定「能管谁」；只能授予低于自己的等级</span>
       </div>
       <div class="perm-legend">
-        <span><b>100</b> 主人（config.json）</span>
-        <span><b>80</b> 管理员</span>
-        <span><b>60</b> 协管</span>
-        <span><b>40</b> 助手</span>
+        <span class="hint" style="margin-right:6px">数字越小权限越高：</span>
+        <span><b>0</b> 主人（config.json）</span>
+        <span><b>1</b> 管理员</span>
+        <span><b>2</b> 协管</span>
+        <span><b>3</b> 助手</span>
+        <span><b>4+</b> 自定义层级</span>
+        <span><b>99</b> 无权限</span>
       </div>
       <div class="perm-legend" style="margin-top:6px">
         <span><b>global</b> 全局</span>
@@ -309,11 +312,9 @@
         <input id="roleScope" list="scopeList" placeholder="作用域，如 group:xxx / global">
         <datalist id="scopeList"></datalist>
         <input id="roleOpenid" placeholder="openid">
-        <select id="roleLevel">
-          <option value="80">管理员 80</option>
-          <option value="60">协管 60</option>
-          <option value="40">助手 40</option>
-        </select>
+        <input id="roleLevel" type="number" min="1" max="98" value="2"
+               style="width:120px" title="数字越小权限越高">
+        <span class="hint">等级（1 管理员 / 2 协管 / 3 助手 / 4+ 自定义）</span>
         <button class="btn primary" id="btnAddRole">保存</button>
       </div>
       <div class="hint" style="margin-top:8px">

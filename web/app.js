@@ -652,7 +652,8 @@ $('#groupInput')?.addEventListener('keydown', (e) => {
 
 /* ---------------- 权限 ---------------- */
 
-const LEVEL_TEXT = { 100: '主人', 80: '管理员', 60: '协管', 40: '助手' };
+const LEVEL_TEXT = { 0: '主人', 1: '管理员', 2: '协管', 3: '助手' };
+const levelText = (n) => LEVEL_TEXT[n] ?? (n >= 99 ? '普通成员' : `${n} 级管理`);
 
 async function loadRoles() {
   const body = $('#roleBody');
@@ -679,7 +680,7 @@ async function loadRoles() {
         <tr>
           <td class="mono">${r.scope}</td>
           <td class="mono" title="${r.openid}">${shortId(r.openid)}</td>
-          <td>${LEVEL_TEXT[r.level] ?? r.level} <span class="hint">${r.level}</span></td>
+          <td>${levelText(r.level)} <span class="hint">${r.level}</span></td>
           <td class="num"><button class="btn small danger" data-scope="${r.scope}" data-openid="${r.openid}">移除</button></td>
         </tr>`,
       )
