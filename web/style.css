@@ -170,6 +170,45 @@ body {
 [data-theme="dark"] .icon-btn .ic-sun { display: block; }
 [data-theme="dark"] .icon-btn .ic-moon { display: none; }
 
+/* 关闭程序按钮：平时低调，悬停才显红，避免误点 */
+.icon-btn-danger:hover {
+  background: var(--err-soft);
+  color: var(--err);
+  border-color: var(--err-border);
+}
+
+/* ---------- 确认弹窗 ---------- */
+.modal-mask {
+  position: fixed; inset: 0; z-index: 100;
+  display: grid; place-items: center;
+  background: rgba(15, 18, 23, .42);
+  backdrop-filter: blur(2px);
+  animation: modal-fade .12s ease-out;
+}
+.modal-mask[hidden] { display: none; }
+.modal {
+  width: min(420px, calc(100vw - 32px));
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, .22);
+  padding: 20px;
+  animation: modal-pop .14s ease-out;
+}
+.modal-title {
+  margin: 0 0 10px; font-size: 15px; font-weight: 600; color: var(--text);
+}
+.modal-body {
+  font-size: 13.5px; line-height: 1.7; color: var(--text-2);
+  white-space: pre-wrap; word-break: break-word;
+}
+.modal-body b { color: var(--text); }
+.modal-actions {
+  display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px;
+}
+@keyframes modal-fade { from { opacity: 0 } to { opacity: 1 } }
+@keyframes modal-pop { from { opacity: 0; transform: translateY(6px) scale(.98) } to { opacity: 1; transform: none } }
+
 /* ---------- 布局 ---------- */
 main { max-width: 1180px; margin: 0 auto; padding: 20px; }
 .panel { display: none; }
@@ -292,10 +331,18 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 }
 .log-line:hover { background: var(--log-hover); }
 
-.log-line .t { flex: none; width: 78px; color: var(--log-time); }
+/* 时间列：HH:MM:SS.mmm 共 12 字符，宽度要够且不能折行，
+   否则会继承容器的 word-break: break-all 把毫秒拆到下一行 */
+.log-line .t {
+  flex: none; width: 92px;
+  color: var(--log-time);
+  white-space: nowrap; word-break: keep-all;
+  font-variant-numeric: tabular-nums;
+}
 
 .log-line .lv {
   flex: none; min-width: 46px; text-align: center;
+  white-space: nowrap;
   font-size: 10.5px; font-weight: 600; letter-spacing: .4px;
   line-height: 17px; padding: 0 5px; border-radius: 4px;
   background: var(--panel-3); color: var(--muted);
@@ -491,3 +538,210 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 }
 .kind-tag.int { background: var(--primary-soft); color: var(--primary); }
 .kind-tag.ext { background: var(--c-teal-soft); color: var(--c-teal); }
+
+/* ============================================================
+   事件订阅与接收
+   ------------------------------------------------------------
+   三种状态：未订阅（灰）/ 已订阅等待中（蓝）/ 收到过（绿）
+   ============================================================ */
+.event-summary {
+  display: grid; gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  margin-bottom: 14px;
+}
+.ev-stat {
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.ev-stat b { font-size: 20px; color: var(--text); font-variant-numeric: tabular-nums; }
+.ev-stat span { font-size: 12px; color: var(--muted); }
+
+.event-legend {
+  display: flex; gap: 16px; flex-wrap: wrap;
+  font-size: 12px; color: var(--muted);
+  padding: 0 2px 10px;
+}
+.event-legend span { display: inline-flex; align-items: center; gap: 6px; }
+
+.ev-dot {
+  flex: none; width: 8px; height: 8px; border-radius: 50%;
+  display: inline-block; background: var(--faint);
+}
+.ev-dot.on  { background: var(--primary); }
+.ev-dot.hit { background: var(--ok); }
+.ev-dot.off { background: var(--border-strong); }
+
+.event-groups { display: flex; flex-direction: column; gap: 14px; }
+.ev-group-hd {
+  font-size: 12.5px; font-weight: 600; color: var(--text-2);
+  padding: 0 2px 6px; display: flex; align-items: center; gap: 8px;
+}
+.ev-group-hd span {
+  font-size: 11px; font-weight: 500; color: var(--muted);
+  background: var(--panel-3); border-radius: 20px; padding: 1px 8px;
+}
+
+.ev-row {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 6px 10px; border-radius: 6px;
+  border: 1px solid transparent;
+}
+.ev-row:hover { background: var(--panel-2); border-color: var(--border); }
+.ev-row.off { opacity: .55; }
+
+.ev-name {
+  flex: none; width: 230px;
+  font-family: var(--mono); font-size: 12px;
+  color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ev-row.hit .ev-name { color: var(--ok); font-weight: 600; }
+.ev-row.off .ev-name { color: var(--muted); }
+
+.ev-desc { flex: 1; font-size: 12.5px; color: var(--text-2); min-width: 0; }
+.ev-meta {
+  display: block; font-size: 11px; color: var(--faint);
+  font-style: normal; margin-top: 1px;
+}
+.ev-right { flex: none; text-align: right; font-size: 11.5px; }
+.ev-count { color: var(--ok); font-weight: 600; margin-right: 6px; }
+.ev-ago { color: var(--muted); }
+.ev-never { color: var(--faint); }
+
+@media (max-width: 720px) {
+  .ev-name { width: auto; max-width: 45%; }
+  .ev-desc { display: none; }
+}
+
+/* ============================================================
+   机器人切换器
+   ------------------------------------------------------------
+   参考 AstrBot 的 ConfigProfileMenu：触发按钮显示当前项，
+   下拉里放搜索 + 列表 + 底部「新建」；增删走弹窗。
+   ============================================================ */
+.bot-switch { position: relative; flex: none; }
+
+.bot-trigger {
+  display: flex; align-items: center; gap: 8px;
+  height: 34px; padding: 0 10px 0 12px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel); color: var(--text);
+  cursor: pointer; font-size: 13px; font-weight: 500;
+  max-width: 220px;
+  transition: background-color .15s, border-color .15s;
+}
+.bot-trigger:hover { background: var(--panel-3); border-color: var(--border-strong); }
+.bot-trigger .bot-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot-chev { width: 15px; height: 15px; flex: none; color: var(--muted); }
+
+.bot-dot {
+  flex: none; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--faint);
+}
+.bot-dot.on  { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.bot-dot.off { background: var(--err); }
+
+.bot-menu {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 60;
+  width: 300px; padding: 6px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,.16);
+}
+.bot-menu[hidden] { display: none; }
+
+.bot-search {
+  width: 100%; height: 30px; margin-bottom: 4px;
+  padding: 0 9px; font-size: 12.5px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--panel-2); color: var(--text);
+  outline: none;
+}
+.bot-search:focus { border-color: var(--primary-border); background: var(--panel); }
+.bot-search[hidden] { display: none; }
+
+.bot-list { max-height: 320px; overflow: auto; }
+.bot-item {
+  display: flex; align-items: center; gap: 9px;
+  padding: 7px 8px; border-radius: 7px; cursor: pointer;
+}
+.bot-item:hover { background: var(--panel-2); }
+.bot-item.active { background: var(--primary-soft); }
+.bot-item-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.bot-item-main b {
+  font-size: 13px; font-weight: 500; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.bot-item-main i { font-size: 11px; color: var(--muted); font-style: normal; }
+.bot-check { flex: none; color: var(--primary); font-size: 13px; font-weight: 700; }
+
+.bot-del {
+  flex: none; width: 24px; height: 24px; padding: 0;
+  display: grid; place-items: center;
+  border: none; border-radius: 6px; background: transparent;
+  color: var(--faint); cursor: pointer; opacity: .35;
+  transition: opacity .12s, background-color .12s, color .12s;
+}
+.bot-item:hover .bot-del { opacity: 1; }
+.bot-del:hover { background: var(--err-soft); color: var(--err); }
+.bot-del svg { width: 15px; height: 15px; }
+
+.bot-empty { padding: 14px; text-align: center; font-size: 12.5px; color: var(--muted); }
+.bot-empty[hidden] { display: none; }
+
+.bot-menu-foot { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 4px; }
+.bot-menu-foot button {
+  display: flex; align-items: center; gap: 7px; width: 100%;
+  padding: 7px 8px; border: none; border-radius: 7px;
+  background: transparent; color: var(--text-2);
+  font-size: 12.5px; cursor: pointer; text-align: left;
+}
+.bot-menu-foot button:hover { background: var(--panel-2); color: var(--text); }
+.bot-menu-foot svg { width: 14px; height: 14px; }
+
+/* 新建机器人表单 */
+.bot-form { display: flex; flex-direction: column; gap: 10px; }
+.bot-form label { display: flex; flex-direction: column; gap: 4px; }
+.bot-form label > span { font-size: 12px; color: var(--text-2); font-weight: 500; }
+.bot-form input {
+  height: 32px; padding: 0 10px; font-size: 13px;
+  border: 1px solid var(--border); border-radius: 7px;
+  background: var(--panel-2); color: var(--text); outline: none;
+}
+.bot-form input:focus { border-color: var(--primary-border); background: var(--panel); }
+.bot-form label > i { font-size: 11px; color: var(--muted); font-style: normal; }
+.bot-form-err {
+  font-size: 12.5px; color: var(--err);
+  background: var(--err-soft); border: 1px solid var(--err-border);
+  border-radius: 7px; padding: 7px 10px;
+}
+.bot-form-err[hidden] { display: none; }
+
+@media (max-width: 860px) {
+  .bot-trigger { max-width: 130px; }
+  .bot-menu { width: min(300px, calc(100vw - 28px)); }
+}
+
+/* 日志搜索框 */
+.log-search {
+  height: 26px; width: 150px; padding: 0 9px;
+  font-size: 12px; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--panel-2);
+  color: var(--text); outline: none;
+}
+.log-search:focus { border-color: var(--primary-border); background: var(--panel); width: 190px; }
+.log-search::placeholder { color: var(--faint); }
+@media (max-width: 860px) {
+  .log-search { width: 100px; }
+  .log-search:focus { width: 130px; }
+}
+
+/* 日志页筛选条：标题独占一行，筛选控件另起一行 */
+.log-toolbar {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.log-toolbar > * { flex: none; }
+.log-toolbar label.switch { white-space: nowrap; }
+.log-toolbar select { height: 26px; padding: 0 6px; font-size: 12px; border-radius: 6px; }
+/* 全局 input/select 是 width:100%，筛选条里要收回来 */
+.log-toolbar select { width: auto; min-width: 104px; }

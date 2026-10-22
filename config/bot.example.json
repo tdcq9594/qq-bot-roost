@@ -1,0 +1,22 @@
+{
+  "logLevel": "info",
+  "cooldownHint": true,
+
+  "webui": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 15207,
+    "accessKey": "",
+    "portTries": 20,
+    "openBrowser": true
+  },
+
+  "logs": {
+    "enabled": true,
+    "maxBytes": 5242880
+  },
+
+  "plugins": {
+    "autoInstallDeps": true
+  }
+}

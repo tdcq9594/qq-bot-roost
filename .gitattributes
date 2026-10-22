@@ -1,0 +1,12 @@
+# 默认：仓库里统一 LF
+# 注意：gitattributes 是**后匹配的规则覆盖前面的**，所以具体规则必须写在通用规则之后
+* text=auto eol=lf
+
+# Windows 批处理必须是 CRLF，否则 cmd.exe 解析带括号的多行块会失败（双击没反应）
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 图片按二进制处理，别做换行转换
+*.png binary
+*.jpg binary
+*.ico binary

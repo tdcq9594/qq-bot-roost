@@ -1,10 +1,25 @@
-# 运行时配置与数据，不入库
+# 运行时配置：含 AppSecret，绝对不能入库
+config/bot.json
+config/bots/
+# 旧版本的配置位置，迁移后留着也不会入库
 config.json
+
+# 运行时数据与日志（含每个机器人独立的 data/bots/<id>/ 和 logs/bots/<id>/）
 data/
-node_modules/
+logs/
+
+# 插件依赖（自动安装生成，可重建）
+.venv/
+**/node_modules/
+**/.deps.json
+
+# 通用
 *.log
+*.tmp
 .DS_Store
 Thumbs.db
 
-# 临时文件
-*.tmp
+# 本机的 node 路径覆盖（start.bat 用，每台机器不同，不入库）
+node-path.txt
+# 便携版 node 目录
+node/

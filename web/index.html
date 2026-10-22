@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>QQ 机器人控制台</title>
+<title>栖 Roost · 控制台</title>
 <script>
   // 在样式加载前定好主题，避免刷新时闪一下白
   (function () {
@@ -26,10 +26,35 @@
       <div class="sub" id="botName">未连接</div>
     </div>
   </div>
+  <div class="bot-switch" id="botSwitch">
+    <button class="bot-trigger" id="botTrigger" aria-haspopup="listbox" aria-expanded="false">
+      <span class="bot-dot" id="botDot"></span>
+      <span class="bot-name" id="botNameLabel">加载中…</span>
+      <svg class="bot-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M6 9l6 6 6-6"/>
+      </svg>
+    </button>
+    <div class="bot-menu" id="botMenu" hidden role="listbox">
+      <input class="bot-search" id="botSearch" placeholder="搜索机器人" hidden>
+      <div class="bot-list" id="botList"></div>
+      <div class="bot-empty" id="botEmpty" hidden>没有匹配的机器人</div>
+      <div class="bot-menu-foot">
+        <button type="button" id="botAddBtn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M12 5v14M5 12h14"/>
+          </svg>
+          新建机器人
+        </button>
+      </div>
+    </div>
+  </div>
+
   <nav class="tabs">
     <button class="tab active" data-tab="overview">概览</button>
     <button class="tab" data-tab="config">配置</button>
     <button class="tab" data-tab="plugins">插件</button>
+    <button class="tab" data-tab="events">事件</button>
     <button class="tab" data-tab="groups">群组</button>
     <button class="tab" data-tab="roles">权限</button>
     <button class="tab" data-tab="logs">日志</button>
@@ -43,6 +68,14 @@
          stroke-width="1.8" stroke-linecap="round">
       <circle cx="12" cy="12" r="4.2"/>
       <path d="M12 2.5v2M12 19.5v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M2.5 12h2M19.5 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/>
+    </svg>
+  </button>
+
+  <button class="icon-btn icon-btn-danger" id="btnShutdown" title="关闭程序" aria-label="关闭程序">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="1.8" stroke-linecap="round">
+      <path d="M12 3.2v8.4"/>
+      <path d="M6.6 6.6a8 8 0 1 0 10.8 0"/>
     </svg>
   </button>
 
@@ -224,6 +257,26 @@
     </div>
   </section>
 
+  <!-- 事件 -->
+  <section id="tab-events" class="panel">
+    <div class="box">
+      <div class="box-hd">
+        <h3>事件订阅与接收</h3>
+        <span class="hint">
+          官方事件全部可接收并转交插件。灰掉的是当前 intents 没订阅，
+          去「配置 → 事件订阅」勾上才会推送
+        </span>
+      </div>
+      <div id="eventSummary" class="event-summary"></div>
+      <div class="event-legend">
+        <span><b class="ev-dot on"></b>已订阅</span>
+        <span><b class="ev-dot off"></b>未订阅</span>
+        <span><b class="ev-dot hit"></b>收到过</span>
+      </div>
+      <div id="eventGroups" class="event-groups"></div>
+    </div>
+  </section>
+
   <!-- 群组 -->
   <section id="tab-groups" class="panel">
     <div class="box">
@@ -363,7 +416,16 @@
     <div class="box">
       <div class="box-hd">
         <h3>实时日志</h3>
-        <div class="btn-row">
+        <span class="hint">按来源和关键词筛选，不影响实时接收</span>
+      </div>
+      <div class="log-toolbar">
+          <input id="logSearch" class="log-search" placeholder="搜索日志" autocomplete="off">
+          <select id="logSourceFilter">
+            <option value="all">全部来源</option>
+            <option value="core">内核</option>
+            <option value="net">网关 / 接口</option>
+            <option value="plugin">插件</option>
+          </select>
           <select id="logLevelFilter">
             <option value="debug">全部</option>
             <option value="info">info 及以上</option>
@@ -372,7 +434,6 @@
           </select>
           <label class="switch small"><input type="checkbox" id="autoScroll" checked> 自动滚动</label>
           <button class="btn small" id="btnClearLog">清屏</button>
-        </div>
       </div>
       <div class="log-legend">
         <span><b class="lg-dot in"></b>收到消息</span>
@@ -390,6 +451,49 @@
     </div>
   </section>
 </main>
+
+<!-- 通用确认弹窗 -->
+<div class="modal-mask" id="modalMask" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <h3 class="modal-title" id="modalTitle">确认</h3>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-actions">
+      <button class="btn" id="modalCancel">取消</button>
+      <button class="btn danger" id="modalOk">确定</button>
+    </div>
+  </div>
+</div>
+
+<!-- 新建机器人 -->
+<div class="modal-mask" id="newBotMask" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="newBotTitle">
+    <h3 class="modal-title" id="newBotTitle">新建机器人</h3>
+    <div class="bot-form">
+      <label>
+        <span>ID</span>
+        <input id="nbId" placeholder="main-bot，小写字母数字短横线" autocomplete="off">
+        <i>用来做文件夹名，创建后不能改</i>
+      </label>
+      <label>
+        <span>显示名</span>
+        <input id="nbName" placeholder="留空则用 ID" autocomplete="off">
+      </label>
+      <label>
+        <span>AppID</span>
+        <input id="nbAppId" placeholder="q.qq.com 开发设置里的 AppID" autocomplete="off">
+      </label>
+      <label>
+        <span>AppSecret</span>
+        <input id="nbSecret" type="password" placeholder="AppSecret" autocomplete="off">
+      </label>
+      <div class="bot-form-err" id="nbErr" hidden></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" id="nbCancel">取消</button>
+      <button class="btn primary" id="nbOk">创建并连接</button>
+    </div>
+  </div>
+</div>
 
 <script src="/app.js"></script>
 </body>

@@ -16,16 +16,19 @@ import { scopeOf, LEVEL, NO_PERM } from '../roles.js';
  *   - 进程崩溃时结束所有挂起请求，并按次数上限自动重启
  */
 export class SubprocessPlugin {
-  constructor({ dir, manifest, allocation, cfg, roles, isOwner }) {
+  constructor({ dir, manifest, pythonPath = null, botId = '-', allocation, cfg, roles, isOwner }) {
     this.dir = dir;
     this.manifest = manifest;
     this.id = manifest.id;
+    this.botId = botId;
+    // 依赖安装器解析出的解释器（可能是插件目录里的 .venv），没有就用系统默认
+    this.pythonPath = pythonPath;
     this.allocation = allocation ?? { base: 10, end: 19 };
     this.cfg = cfg;
     this.roles = roles;
     this.isOwner = isOwner;
 
-    this.log = createLogger(`plugin:${this.id}`);
+    this.log = createLogger(`plugin:${this.botId}:${this.id}`);
     this.child = null;
     this.seq = 0;
     this.pending = new Map(); // seq -> { msg, resolve, timer, idle }
@@ -158,9 +161,10 @@ export class SubprocessPlugin {
     }
     const entry = m.entry ?? '';
     const runtime = (m.runtime ?? '').toLowerCase();
+    const py = this.pythonPath || 'python';
     const map = {
-      python: ['python', [entry]],
-      python3: ['python3', [entry]],
+      python: [py, [entry]],
+      python3: [this.pythonPath || 'python3', [entry]],
       node: [process.execPath, [entry]],
       nodejs: [process.execPath, [entry]],
       exec: [path.join(this.dir, entry), []],

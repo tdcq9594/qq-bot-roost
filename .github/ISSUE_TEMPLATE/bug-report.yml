@@ -1,0 +1,99 @@
+name: "🐛 报告 Bug"
+description: 提交一个问题报告，帮助我们定位和修复。
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请先看一眼 [常见问题](../../docs/常见问题.md)，很多问题那里已有答案。
+        **贴日志前务必把 AppSecret、AccessToken、openid 打码。**
+
+  - type: textarea
+    id: what
+    attributes:
+      label: 问题描述
+      description: 发生了什么？和你的预期有什么不同？
+      placeholder: 清晰具体地描述现象。比如「发 /help 没有任何回复，日志里出现 xxx」。
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 群里 @机器人 发 /xxx
+        2. 机器人回复 xxx
+        3. 再发 /yyy 就没有反应了
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志
+      description: 贴 `logs/bot.log` 最后 50 行。相关插件的问题请贴 `logs/plugins/<id>.log`。
+      render: text
+      placeholder: 把日志粘贴在这里（记得打码凭证）
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 用的哪个版本或 commit？请不要写「最新」。
+      placeholder: 例如 v0.1.0 / commit 1a2b3c4
+    validations:
+      required: true
+
+  - type: input
+    id: node
+    attributes:
+      label: Node.js 版本
+      description: 运行 `node -v` 的结果。
+      placeholder: 例如 v22.22.2
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      options:
+        - Windows
+        - Linux
+        - macOS
+        - 其他
+    validations:
+      required: true
+
+  - type: dropdown
+    id: how
+    attributes:
+      label: 运行方式
+      options:
+        - node src/main.js
+        - start.bat
+        - node src/main.js --mock
+        - 其他
+    validations:
+      required: true
+
+  - type: input
+    id: plugins
+    attributes:
+      label: 相关插件
+      description: 问题涉及哪些插件？没有就写「无」。
+      placeholder: 例如 dice、hello-py
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 确认
+      options:
+        - label: 我已确认日志和截图里没有 AppSecret、AccessToken、完整 openid
+          required: true
+        - label: 我已搜索过现有 Issue，没有重复
+          required: true

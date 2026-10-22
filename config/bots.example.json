@@ -1,29 +1,45 @@
 {
+  "name": "我的机器人",
+  "enabled": true,
+
   "appId": "",
   "appSecret": "",
   "baseUrl": "https://api.bot.qq.com",
   "intents": 33554432,
-  "owners": [],
   "commandPrefix": "/",
-  "logLevel": "info",
-  "webui": {
-    "enabled": true,
-    "host": "127.0.0.1",
-    "port": 15207,
-    "accessKey": ""
-  },
+  "owners": [],
+
   "whitelist": {
     "enabled": false,
     "groups": [],
     "users": []
   },
+
   "rateLimit": {
     "enabled": true,
     "perChatPerMinute": 30
   },
+
   "dedupWindowSec": 120,
+
   "messageLog": {
     "enabled": true,
     "muteKinds": []
+  },
+
+  "outbound": {
+    "perSec": 4,
+    "dailyActive": 20,
+    "downgradeToActive": true
+  },
+
+  "session": {
+    "stickySec": 180,
+    "promptTimeoutSec": 120
+  },
+
+  "plugins": {
+    "mode": "include",
+    "list": []
   }
 }

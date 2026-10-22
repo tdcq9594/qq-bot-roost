@@ -1,55 +1,105 @@
-# QQ 机器人内核（插件式 + 可视化面板）
+<div align="center">
 
-填 **AppID + AppSecret** 就能连上 QQ 官方机器人，功能全部通过插件扩展，带一个网页控制台。
-**零依赖**——只用 Node.js 内置能力（`fetch` + 原生 `WebSocket` + `http`），不需要 `npm install`。
+# 栖 Roost
 
-```bash
-node src/main.js
-```
+> `qq-bot-roost` · 倦飞之鸟，终有一栖
 
-打开 <http://127.0.0.1:15207> 就能在网页上配置和看状态。
+**填 AppID + AppSecret 就能连上 QQ 官方机器人。零依赖，插件可写任意语言，自带可视化面板。**
+
+<img src="https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white" alt="Node.js 22+">
+<img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
+<img src="https://img.shields.io/badge/self--test-45%20passed-brightgreen" alt="自检 45 项">
+<img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
+<img src="https://img.shields.io/badge/license-MIT-green" alt="MIT">
+
+[快速开始](#3-分钟跑起来) ｜ [写插件](docs/插件开发规范.md) ｜ [外部插件协议](docs/插件协议.md) ｜ [配置参考](docs/配置参考.md) ｜ [常见问题](docs/常见问题.md) ｜ [贡献](CONTRIBUTING.md)
+
+</div>
+
+![插件页](docs/images/plugins.png)
+
+用 Node.js 从零实现 QQ 开放平台 v2 协议，**不依赖任何第三方包**——装个 Node 22 就能跑，不需要 `npm install`。
+
+官方接口比第三方协议严格得多：被动回复只有 5 分钟、同一会话每秒最多 5 条、主动消息每会话每天 20 条。
+这些限制框架已经统一兜住，写插件时不用算时间、不用管额度，调 `msg.reply()` 就行。
+
+插件有两种形态，互不影响：
+
+| | 内建插件 | 外部插件 |
+|---|---|---|
+| 识别 | 目录下有 `index.js` | 目录下有 `plugin.json` |
+| 语言 | JavaScript | **任意语言** |
+| 运行 | 主进程内 | 独立子进程 |
+| 单条开销 | ~0.13 ms | ~0.09 ms（同机实测） |
+| 启动开销 | 2 ms | 400 ms（Python） |
+| 崩溃影响 | 拖垮主进程 | 只影响自己，自动重启 |
+
+---
+
+## 适合 / 不适合
+
+**适合**
+
+- 在 QQ 群里跑自己的玩法：文字游戏、群管工具、查询机器人
+- 想用 Python / Go 写插件，但不想被单一语言的框架绑死
+- 不想维护一堆第三方依赖，希望部署就是「复制文件夹 + 跑起来」
+
+**不适合**
+
+- 需要同时接入微信 / 飞书 / Telegram —— 本项目只做 QQ，
+  多平台可以看 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 或 [Koishi](https://github.com/koishijs/koishi)
+- 需要大模型对话、知识库、Agent —— 这里只管「消息进、消息出」，AI 能力自己接
+- 需要踢人 / 禁言 / 撤回他人消息 —— 官方接口没开放，**做不到**
 
 ---
 
 ## 特性
 
-**连接层**
-- 填凭证即连，首启向导自动写入 `config.json`
+**官方接口这一层**
+
+- 出站调度器统一处理 5 分钟窗口、每秒 5 条限速、主动消息每日额度、断线拒发、审核中识别
+- 被动回复自动维护 `msg_seq`（同一 msg_id 递增，官方硬要求）
+- 免@粘性：@ 过一次后 N 分钟内该会话免@也算对话
+- 多轮对话：`ctx.prompt()` 问一句等回答，文字游戏的基础
+- 中间件管道：去重、白名单、限流、命令冷却都可插拔
+
+**连接与容错**
+
 - 访问凭证自动获取、提前 120 秒刷新、401 自动重试
 - WebSocket 心跳、指数退避重连、`Resume` 补发断线期间的事件
 - 关闭码翻译成人话（`4014` → 提示去开通群聊能力）
+- **实例互斥**：同一个 AppID 重复启动会被拒绝并给出 PID，避免两进程互踢（4902）
 
-**消息层**
-- 群聊 / 私聊统一抽象成 `Message`，插件不用关心底层差异
-- 被动回复自动维护 `msg_seq`（同一 msg_id 递增，官方硬要求）
-- 支持文本、Markdown + 按钮、图片、视频、语音、文件
-- 去重、限流、群/用户白名单，三层前置拦截
+**事件**
 
-**群与权限**
-- 机器人被拉进群时自动登记群档案，记录邀请人
-- 邀请人和群主默认成为**该群**管理员（1 级），只影响这一个群，不会变成全局主人
-- 群主和邀请人默认获得该群**管理员**（1 级），能在本群用管理命令，管不到别的群
-- 全局主人只能手动配：config.json 的 `owners`，或首次启动用认领码 `/claim <码>`
+- 官方 **43 个事件全部登记并转交插件**，含频道、成员、表情、论坛、音频、审核、互动
+- 消息类事件包装成 `Message`，其余保留官方原始结构
+- 框架不认识的未知事件**也照样转发**，只是日志提示补登记
+- 面板「事件」页显示每个事件的订阅状态、接收次数、最后收到时间
 
-**插件层**
-- 目录即插件，扔进 `plugins/` 即可
-- **两种插件**：内建（JS，同进程，最快）/ 外部（任意语言，独立子进程）
-- 外部插件崩溃不影响主程序，自动重启（每分钟限 3 次）
+**插件**
+
+- 目录即插件，扔进 `plugins/` 即可；热重载不用重启
 - 同一会话串行、跨会话并行，插件不用自己加锁
-- 热重载，改完代码不用重启进程
-- 独立 JSON 存储，卸载自动清理定时器
-- 一个插件崩了不影响其他插件和主程序
+- 独立配置、独立日志、独立存档，卸载自动清理定时器和中间件
+- 第三方依赖自动装进插件目录的隔离环境，不污染系统
+
+**权限**
+
+- 5 种作用域 × 数字等级（0 主人 / 1 管理员 / 2 群管 / 3 助手 / 10+ 插件区）
+- 一个人在不同群、不同插件里可以有完全不同的权限，互不干扰
+- 只能授予数字更大的等级，不能给自己或同级提权
 
 **可视化面板**
-- 实时状态、活跃会话、收发统计
-- 在线改配置，改完即时生效（改 AppID 会自动重连）
-- 插件启停 / 重载
-- 实时日志流（SSE），可调级别、过滤
-- 调试用的主动发消息入口
+
+- 6 个页签：概览 / 配置 / 插件 / 群组 / 权限 / 日志
+- 实时日志流（SSE），按级别和来源着色
+- 日间 / 夜间主题，跟随系统或手动切换
+- 启动自动开浏览器，端口被占用自动顺延，右上角一键关闭
 
 ---
 
-## 一、5 分钟跑起来
+## 3 分钟跑起来
 
 ### 1. 装 Node.js 22+
 
@@ -57,9 +107,9 @@ node src/main.js
 node -v      # 需要 >= 22
 ```
 
-> 必须 22+：用到了内置的全局 `WebSocket`，不用装 `ws`。
+> 用到了 Node 22 内置的全局 `WebSocket`，所以不用装 `ws`，也不需要 `npm install`。
 
-### 2. 去开放平台拿凭证
+### 2. 拿凭证
 
 1. <https://q.qq.com> → 创建机器人
 2. 「开发设置」里拿到 **AppID** 和 **AppSecret**
@@ -68,45 +118,57 @@ node -v      # 需要 >= 22
 ### 3. 启动
 
 ```bash
-cd bot
 node src/main.js
 ```
 
-首次运行提示输入 AppID / AppSecret。Windows 下也可以双击 `start.bat`。
+Windows 下也可以双击 `start.bat`（它会检查 Node 版本并给出提示）。首次运行会提示输入 AppID / AppSecret，
+之后自动建好 `config/` `logs/` `data/` 并打开浏览器面板。
 
 看到这两行就成功了：
 
 ```
-14:03:12.345 INFO  [gateway] 已就绪，机器人: 你的机器人名
-14:03:12.346 INFO  [webui] 可视化面板: http://127.0.0.1:15207
+INFO  [gateway] 已就绪，机器人: 你的机器人名
+INFO  [webui] 可视化面板: http://127.0.0.1:15207/
 ```
 
 ### 4. 认领主人
 
-把机器人拉进群，先看启动日志里的「认领码: XXXXXX」，然后 @它 发送 `/claim XXXXXX`。
+把机器人拉进群，看启动日志里的「认领码: XXXXXX」，然后 @它 发送 `/claim XXXXXX`。
 
-> 为什么要认领码：没有它的话，`owners` 为空时群里**任何人**发 `/claim` 都能成为主人。
+> 为什么要认领码：`owners` 为空时，群里**任何人**发 `/claim` 都能成为主人。
 > 认领码每次启动随机生成，只打印在控制台和面板日志里。
-也可以直接在面板的「群组」页增删主人。
+
+也可以直接在面板「群组」页增删主人。
 
 ---
 
-## 二、可视化面板
+## 可视化面板
 
 默认 <http://127.0.0.1:15207>，**只监听 127.0.0.1，不对外暴露**。
-右上角图标可切换**日间 / 夜间模式**；没手动选过时跟随系统主题，选择记在 localStorage。
+
+顶栏可以切换机器人，一个面板管全部：
+
+![机器人切换器](docs/images/bot-switcher.png)
+
+![概览页](docs/images/overview.png)
 
 | 页签 | 能做什么 |
 |------|----------|
-| 概览 | 连接状态、运行时长、凭证有效期、内存、收发统计、活跃会话 Top20、重连/刷新凭证、调试发消息 |
-| 配置 | 凭证、intents、命令前缀、白名单、限流、去重窗口、消息日志、日志级别、面板端口/访问密钥 |
-| 插件 | 列表、启用/禁用/重载、加载错误提示 |
+| 概览 | 连接状态、运行时长、凭证有效期、内存、收发统计、活跃会话 Top20、重连 / 刷新凭证、调试发消息 |
+| 配置 | 凭证、intents 勾选、命令前缀、白名单、限流、去重窗口、消息日志、日志级别、面板端口 / 密钥 |
+| 插件 | 列表、启用 / 禁用 / 重载、加载错误提示 |
+| 事件 | **43 个官方事件的订阅状态与接收计数**，一眼看出哪个事件没收到 |
 | 群组 | 全局主人增删、群档案（邀请人 / 群主 / 状态）、手动登记群 |
 | 权限 | 等级与作用域说明、按作用域增删管理员、已授权列表 |
-| 日志 | SSE 实时流，按级别过滤，自动滚动 |
+| 日志 | SSE 实时流，按级别和来源过滤，支持关键词搜索 |
 
-**要对外开放**：改 `config.json` 的 `webui.host` 为 `0.0.0.0`，**务必同时设置 `webui.accessKey`**，
-否则任何人都能改你的机器人配置。改 host/port 需要重启进程。
+事件页把官方 43 个事件全列出来，灰掉的是当前 intents 没订阅的：
+
+![事件页](docs/images/events.png)
+
+日志按来源着色，可按级别和来源过滤，也能搜关键词：
+
+![日志页](docs/images/logs.png)
 
 **没有凭证也想看界面**：
 
@@ -114,354 +176,238 @@ node src/main.js
 node src/main.js --mock --serve
 ```
 
-### 关于「默认主人是群主」
-
-QQ 官方 v2 接口**没有**查询群主或群成员的能力。能拿到的唯一信号是
-`GROUP_ADD_ROBOT` 事件里的 `op_member_openid`，也就是把机器人拉进群的那个人，
-实践中通常就是群主或管理员。
-
-所以这里的实现是：
-
-1. 机器人入群 → 记录该群档案，把邀请人设为「本群管理者」
-2. **不会**顺带把人设成全局主人——那是把最高权限交给一个可能不相干的人
-3. 之后在面板「权限」页按 `group:<群openid>` 作用域调整；全局主人在「群组」页增删
-
-### 为什么面板里看不到我的群
-
-**官方没有「查询机器人所在群列表」的接口**——群聊连成员列表都没有，
-唯一的列表接口 `/users/@me/guilds` 是频道（guild），不是群。
-
-所以群只能靠事件**被动发现**，事件来源有两个：
-
-| 事件 | 触发条件 |
-|------|----------|
-| `GROUP_ADD_ROBOT` | 机器人在**运行期间**被拉进群 |
-| `GROUP_AT_MESSAGE_CREATE` / `GROUP_MESSAGE_CREATE` | 有人在群里 **@机器人** 说话 |
-
-排查顺序：
-
-1. 群里 **@机器人** 发一句话（不 @ 不会有任何推送）
-2. 确认这个群在开放平台「沙箱配置」里——**开发中的机器人只收沙箱群的消息**
-3. 机器人是在它运行**期间**被拉进群的吗？离线时入群的事件会永久丢失
-4. 看面板「运行信息 → 事件统计」：显示「一条都没收到」说明平台压根没推事件
-5. 已知群 openid 时，可以在「群组」页底部**手动登记**
+**要对外开放**：改 `webui.host` 为 `0.0.0.0`，**务必同时设置 `webui.accessKey`**，
+否则任何人都能改你的机器人配置。
 
 ---
 
-## 三、命令
+## 命令速查
 
 | 命令 | 说明 |
 |------|------|
-| `/help` | **全局菜单**：内核指令 + 所有插件入口 |
-| `/help <插件id>` | 查看该插件的**下级菜单**（指令 + 玩法 + 说明） |
-| `/menu` | 同 `/help`，菜单的快捷别名 |
-| `/status` | 运行状态：连接、运行时长、凭证剩余、消息量、插件数、内存 |
-| `/stats` | 详细统计：收发/命令/错误/拦截数、活跃会话、事件计数 |
-| `/plugins` | 插件列表、运行状态、菜单条数 |
-| `/admin` | 权限总览（当前作用域的管理员 + 自己的等级） |
-| `/admin me` | 查看自己在各作用域的权限 |
-| `/admin set <openid> <等级> [作用域]` | 设置管理员，**上级可设下级** |
-| `/admin del <openid> [作用域]` | 移除权限 |
-| `/admin list [作用域]` | 列出某作用域的管理员 |
-| `/admin whois <openid>` | 查某人在各作用域（含各插件）的权限 |
-| `/admin scopes` | 列出所有已配置的作用域 |
-| `/admin levels` | 等级空间与插件号段分配 |
-| `/enable <id>` | 启用插件（**全局**管理员） |
-| `/disable <id>` | 禁用插件（**全局**管理员） |
-| `/reload [id]` | 热重载（**全局**管理员） |
+| `/help` | 全局菜单：内置指令 + 所有插件入口 |
+| `/help <插件id>` | 看某个插件的下级菜单（指令 + 玩法 + 说明） |
+| `/status` | 运行状态：连接、凭证剩余、消息量、**主动消息额度、免@窗口剩余** |
+| `/stats` | 详细统计：收发 / 命令 / 错误 / 拦截数、活跃会话、事件计数 |
+| `/plugins` | 插件列表与运行状态 |
+| `/admin` | 权限总览；`me` / `list` / `set` / `del` / `whois` / `scopes` / `levels` |
+| `/enable` `/disable` `/reload [id]` | 插件管理（需全局管理员） |
 | `/whoami` | 查自己的 openid / 群 openid |
-| `/claim <认领码>` | 认领主人身份，认领码见启动日志（`owners` 为空时可用） |
+| `/claim <认领码>` | 认领主人身份（`owners` 为空时可用） |
 | `/ping` | 连通性测试 |
+
+权限相关的完整说明见 [docs/权限模型.md](docs/权限模型.md)。
 
 ---
 
-## 四、写插件
+## 写插件
 
-在 `plugins/` 下建文件夹，放 `index.js`：
+在 `plugins/` 下建个文件夹，放 `index.js`：
 
 ```js
 export default {
   id: 'hello',
   name: '打招呼',
   version: '1.0.0',
-  description: '最小示例',
+
+  // 默认配置，会自动生成 config/bots/<机器人id>/plugins/hello.json 给用户改
+  config: { greeting: '你好' },
 
   setup(ctx) {
     ctx.command('hello <名字>', { desc: '打个招呼' }, async (msg, { args }) => {
-      await msg.reply(`你好，${args[0]}！`);
+      await msg.reply(`${ctx.config.greeting}，${args[0]}！`);
     });
 
-    ctx.on('message', async (msg) => {
-      if (msg.content === '在吗') await msg.reply('在的');
+    // 多轮对话：问一句等回答
+    ctx.command('pick', { desc: '选一个' }, async (msg) => {
+      const ans = await ctx.prompt(msg, '用哪个技能？\n1 蓝银缠绕\n2 昊天锤');
+      if (ans) await msg.reply(`你选了「${ans.content}」`);
     });
   },
 };
 ```
 
-发 `/reload` 生效。完整约定见 **[docs/插件开发规范.md](docs/插件开发规范.md)**。
+发 `/reload hello` 立即生效。完整约定见 **[插件开发规范](docs/插件开发规范.md)**。
 
-### 想用 Python / Go / Rust 写？
+**想用 Python / Go / Rust？** 放一个 `plugin.json` 而不是 `index.js`，
+插件会以独立子进程启动，通过 stdin/stdout 的 NDJSON 通信：
 
-放一个 `plugin.json` 而不是 `index.js`，插件就会以**独立子进程**启动，
-通过 stdin/stdout 的 NDJSON 通信。协议见 **[docs/插件协议.md](docs/插件协议.md)**。
-
-| | 内建（index.js） | 外部（plugin.json） |
-|---|---|---|
-| 语言 | 只能 JS | 任意语言 |
-| 单条开销 | ~0.13 ms | ~0.09 ms（同机实测） |
-| 启动开销 | 2 ms | 400 ms（Python） |
-| 崩溃影响 | 拖垮主进程 | 只影响自己，自动重启 |
-
-参考实现：`plugins/hello-py/`（Python）。
-
-### 能力速查
-
-| 成员 | 说明 |
-|------|------|
-| `ctx.command(模式, 选项, 函数)` | 注册命令，`<必填>` 会自动校验 |
-| `ctx.on(事件, 函数)` | 监听 `message` 或原始事件 |
-| `ctx.menu(分组, 条目)` | 补充非命令玩法，命令会自动进菜单 |
-| `ctx.schedule(名称, 毫秒, 函数)` | 定时任务，卸载时自动清理 |
-| `ctx.storage.get/set/all` | 插件私有存储 |
-| `ctx.api` | 原始 HTTP API |
-| `msg.reply/push/replyMarkdown/replyImage/replyVideo/replyVoice/replyFile` | 各种发送方式 |
-
----
-
-## 五、配置项
-
-`config.json`（面板改完自动写回）：
-
-```jsonc
+```json
 {
-  "appId": "",                    // 机器人 AppID
-  "appSecret": "",                // 机器人 AppSecret
-  "baseUrl": "https://api.bot.qq.com",
-  "intents": 33554432,            // 事件订阅位掩码，见下表
-  "owners": [],                   // 主人 openid 列表
-  "commandPrefix": "/",
-  "logLevel": "info",
-
-  "webui": {
-    "enabled": true,
-    "host": "127.0.0.1",          // 对外暴露时改 0.0.0.0 并设 accessKey
-    "port": 15207,
-    "accessKey": ""               // 非空则 /api/* 需要鉴权（请求头 X-Access-Key 或 ?key=）
-  },
-
-  "whitelist": {                  // 开启后只响应名单内来源
-    "enabled": false,
-    "groups": [],
-    "users": []
-  },
-
-  "rateLimit": {
-    "enabled": true,
-    "perChatPerMinute": 30        // 每会话每分钟上限
-  },
-
-  "dedupWindowSec": 120,          // 同一条消息的去重窗口
-
-  "messageLog": {                 // 收到的消息是否写进日志
-    "enabled": true,
-    "muteKinds": []               // 屏蔽的来源：group / c2c / guild / dm
-  }
+  "id": "hello-py",
+  "name": "Python 示例",
+  "runtime": "python",
+  "entry": "main.py",
+  "config": { "greeting": "你好" }
 }
 ```
 
-环境变量优先级最高：`QQ_BOT_APPID` / `QQ_BOT_SECRET` / `QQ_BOT_BASE_URL` / `QQ_BOT_OWNERS`。
+有第三方依赖就放 `requirements.txt`，首次加载会自动装进插件目录的 `.venv`。
+协议细节见 **[外部插件协议](docs/插件协议.md)**，参考实现见 `plugins/hello-py/`。
 
-### 权限模型
+### 常用能力
 
-两个维度：**作用域**（在哪管）+ **等级**（能管谁）。
-
-**数字越小权限越高**，和 Unix 优先级一个思路：
-
-| 等级 | 值 | 能授予的下级 |
-|------|----|------|
-| 主人 | 0 | 1 及以上（只能在 config.json 配） |
-| 管理员 | 1 | 2 及以上 |
-| 群管 | 2 | 3 及以上 |
-| 助手 | 3 | 4 及以上 |
-| 内核预留 | 4 ~ 9 | 以后扩展用 |
-| 插件区 | 10 ~ 998 | 主程序按插件 id 分配号段，每插件 10 个号位 |
-| 无权限 | 9999 | — |
-
-**等级空间分区**：0-3 内核独占（插件只读），4-9 预留，10 起是插件区。
-启动时按插件 id 排序分配，`dice` 拿 10-19、`echo` 拿 20-29，重启后不变。
-插件在号段内自定义自己的等级，不会和内核对撞。用 `/admin levels` 查看分配结果。
-
-**一个人可以同时拥有多个权限**，互不干扰：
-
-```
-/admin whois 8C7419D4...
-  openid: 8C7419D4...
-  全局: 无
-  各作用域：
-    group:xxx     群管（2）
-    feature:dice  插件等级 10（10）
-    feature:echo  插件等级 20（20）
-```
-
-意思是：这个人在 A 群是群管（2），在 dice 里有插件等级 10（最高档），在 echo 里是插件等级 20。
-每个插件只看自己那一段，权限不会串。
-
-| 作用域 | 含义 |
-|--------|------|
-| `global` | 全局 |
-| `group:<openid>` | 某个群 |
-| `channel:<id>` | 某个频道 |
-| `user:<openid>` | 某人私聊 |
-| `feature:<插件id>` | 某功能的管理权 |
-
-**有效等级 = min(全局, 当前作用域)**（取数字更小的那个）。
-插件里再叠加一层 `feature:<插件id>`，取 `min(全局, 当前会话, 本插件)`，
-所以「只被授予某插件权限的人」也能通过该插件自己的检查。
-规则：只能授予**数字更大**的等级，也就是只能给比自己权限低的人授权，
-同级和更高权限都动不了。
-
-群主（报文里 `member_role=owner`）和邀请机器人入群的人，会自动获得该群的管理员（1 级）。
-
-```
-/admin set 8C7419D4... 2              # 设为本群群管
-/admin set 8C7419D4... 3 group:xxx    # 指定某个群
-/admin set 8C7419D4... 1 global       # 全局管理员
-/admin set 8C7419D4... 5 feature:dice # 只管掷骰子，5 级
-```
-
-### intents 是什么
-
-一个**位掩码**，每一位代表一类事件，把需要的位加起来就是 `intents` 的值。
-面板「配置 → 事件订阅」已经做成勾选式，不用自己算；这里只是备查。
-
-| 位 | 值 | 名称 | 能收到什么 | 权限 |
-|----|----|------|-----------|------|
-| 25 | 33554432 | 群聊与私聊 | 群里 @机器人、私聊、入群/退群、加好友 | 需开通群聊能力 |
-| 0 | 1 | 频道基础 | 频道/子频道增删改 | 默认可用 |
-| 30 | 1073741824 | 频道 @消息 | 频道里 @机器人 | 默认可用 |
-| 1 | 2 | 频道成员 | 成员加入/变更/离开 | 默认可用 |
-| 9 | 512 | 频道全量消息 | 频道内所有消息 | 需申请，仅私域 |
-| 10 | 1024 | 表情表态 | 消息表情增删 | 需申请 |
-| 12 | 4096 | 频道私信 | 私信机器人 | 需申请 |
-| 26 | 67108864 | 互动事件 | 按钮点击回调 | 需申请 |
-| 27 | 134217728 | 消息审核 | 审核通过/不通过 | 需申请 |
-| 28 | 268435456 | 论坛事件 | 主题/帖子/评论 | 需申请，仅私域 |
-| 29 | 536870912 | 音频动作 | 上麦/下麦等 | 需申请 |
-
-**关键**：勾了没权限的位，WebSocket 鉴权会被拒并直接断开（关闭码 `4014`）。
-所以只勾你确实申请到的。默认 `33554432` 就够了。
+| 成员 | 说明 |
+|------|------|
+| `ctx.command(模式, 选项, 函数)` | 注册命令，`<必填>` 自动校验，命令自动进菜单 |
+| `ctx.on(事件, 函数)` | 监听 `message` 或原始事件 |
+| `ctx.prompt(msg, 提示, 选项?)` | **问一句等回答**，多轮对话核心 |
+| `ctx.push(会话id, 文本)` | 主动推送（受每日额度限制） |
+| `ctx.use(名称, 中间件)` | 注册中间件，可拦截消息 |
+| `ctx.menu(分组, 条目)` | 补充非命令玩法 |
+| `ctx.schedule(名称, 毫秒, 函数)` | 定时任务，卸载时自动清理 |
+| `ctx.storage.get/set/all` | 插件私有存档 |
+| `ctx.config` / `ctx.setConfig()` | 插件配置读写 |
+| `ctx.can` / `ctx.levelOf` / `ctx.scopeOf` | 权限判断 |
+| `msg.reply` / `push` / `replyMarkdown` / `replyImage` / … | 各种发送方式 |
 
 ---
 
-## 六、目录结构
+## 目录结构
 
 ```
 bot/
-├── config.json            运行时生成
-├── start.bat              Windows 一键启动
+├── config/                     用户可改的配置
+│   ├── bot.json                全局配置：面板、日志、插件依赖策略
+│   ├── bot.example.json        全局配置模板
+│   └── bots/
+│       ├── main.json           机器人 A 的连接配置
+│       └── main/               机器人 A 的插件配置
+│           └── plugins/<id>.json
+├── data/                       运行时数据，不要手改
+│   └── bots/<id>/              每个机器人独立，openid 不通用
+│       ├── groups.json         群档案
+│       ├── roles.json          权限
+│       ├── quota.json          主动消息额度账本
+│       ├── plugins.json        插件启用状态
+│       └── plugins/<id>.json   插件存档
+├── logs/
+│   ├── bot.log                 全局日志
+│   └── bots/<id>/
+│       ├── bot.log             该机器人的日志
+│       └── plugins/<id>.log
+├── plugins/                    插件代码，所有机器人共享一份，不复制
 ├── src/
-│   ├── main.js            入口：装配、核心命令、事件分发、前置拦截
-│   ├── config.js          配置加载与首启向导
-│   ├── runtime.js         运行时状态（面板的数据源）
-│   ├── groups.js          群档案（邀请人、群主、管理者、启用状态）
-│   ├── roles.js           权限存储（作用域 × 等级）
-│   ├── levels.js          等级空间分区与号段分配
-│   ├── token.js           访问凭证管理（官方称 AccessToken）
-│   ├── api.js             HTTP API（消息/富媒体）
-│   ├── gateway.js         WebSocket 网关
-│   ├── message.js         事件 → 统一 Message
-│   ├── logger.js          日志 + 环形缓冲 + 订阅
-│   ├── web/server.js      面板服务端（REST + SSE）
-│   └── plugin/
-│       ├── loader.js      扫描/加载/卸载/热重载（内建 + 外部）
-│       ├── context.js     注册表 + 插件上下文 + 存储
-│       ├── subprocess.js  外部插件宿主（子进程 + 管道）
-│       └── protocol.js    外部插件协议常量
-├── web/                   面板前端（原生 JS/CSS，无构建）
-│   ├── index.html
-│   ├── style.css
-│   └── app.js
-├── plugins/
-│   ├── echo/              内建示例：命令 + 消息监听
-│   ├── dice/              内建示例：参数 + 玩家数据持久化
-│   └── hello-py/          外部示例：Python 写的插件
-├── docs/
-│   ├── 插件开发规范.md    内建插件（JS）的写法
-│   ├── 插件协议.md        外部插件（任意语言）的协议
-│   └── 代码自查记录.md
-└── data/                  运行时数据（插件存储、启用状态）
+│   ├── main.js                 入口：环境检查、迁移、装配、启动
+│   ├── bot.js                  BotRuntime：一个机器人的完整运行时
+│   ├── paths.js                全项目路径的唯一来源（按机器人参数化）
+│   ├── config.js               全局配置 + 机器人配置 + 迁移
+│   ├── events.js               43 个官方事件的登记表
+│   ├── outbound.js             出站调度器：窗口 / 限速 / 额度 / 降级
+│   ├── pipeline.js             中间件管道
+│   ├── session.js              多轮对话 + 免@粘性
+│   ├── instance.js             实例互斥，防止同一 AppID 双开
+│   ├── gateway.js              WebSocket 网关
+│   ├── api.js                  HTTP API
+│   ├── message.js              事件 → 统一 Message
+│   ├── roles.js                权限存储
+│   ├── logger.js               日志：控制台 + 落盘 + 轮转
+│   ├── web/server.js           面板服务端（REST + SSE）
+│   └── plugin/                 插件加载、配置、依赖、子进程宿主
+├── test/selftest.mjs           框架自检（45 项）
+├── web/                        面板前端（原生 JS/CSS，无构建）
+└── docs/
 ```
 
----
+**为什么数据必须按机器人隔离**：**openid 是每个机器人独立的**——同一个用户在不同机器人下的
+openid 完全不同。共享 `roles.json` 等于所有权限记录全部对不上。这不是设计偏好，是硬约束。
 
-### 事件名的一个坑
-
-官方文档写的是 `GROUP_AT_MESSAGE_CREATE`，但平台实际下发的是 **`GROUP_MESSAGE_CREATE`**
-（推测是新增的「全量群消息」事件，或新版事件名）。两者载荷结构一致，代码里都认。
-
-`GROUP_MESSAGE_CREATE` 有可能是**群里所有消息**而不只是 @ 机器人的。
-内核的处理方式是「**先给插件机会，没人理才丢弃**」：
-
-1. 群消息一律先登记群档案
-2. 命令（带前缀）走命令路由
-3. 其余消息全部交给插件的 `message` 监听
-4. 有插件回应了（发了消息，或 `return true`）→ 这条消息就算被消费
-5. 没有任何插件回应 → 判定为噪音，静默丢弃，不产生任何输出
-
-这样既能让「掷骰子」「打卡」这类关键词玩法在不 @ 的情况下生效，
-也不会让机器人对群里每句话都插话。
-
-> 插件想表达「这条我管了」有两种方式：调用 `msg.reply()` 等发送方法，
-> 或者处理函数 `return true`。
+**为什么插件代码共享**：`plugins/` 只有一份代码，每个机器人按自己的配置决定启用哪些，
+加载时各建一套命令表和上下文。改一次代码，所有机器人同时生效。
 
 ---
 
-## 七、实现要点（对照官方文档）
+## 文档
 
-| 环节 | 实现 |
+| 文档 | 内容 |
 |------|------|
-| 获取凭证 | `POST /app/getAppAccessToken`，`{appId, clientSecret}` |
-| 鉴权头 | `Authorization: QQBot {access_token}` |
-| 提前刷新 | 有效期 7200s，提前 120s 刷新；401 强制刷新重试一次 |
-| 网关 | `GET /gateway/bot` → `wss://...` |
-| 握手 | `op10 Hello` → `op2 Identify`（`token: "QQBot xxx"`） |
-| 心跳 | 按 `heartbeat_interval` 发 `op1`，带最新 `s` |
-| 断线 | 指数退避，有 session 走 `op6 Resume` 补事件 |
-| 发群消息 | `POST /v2/groups/{group_openid}/messages` |
-| 发私聊 | `POST /v2/users/{openid}/messages` |
-| 富媒体 | `POST /v2/{groups,users}/.../files`，`file_type` 1图 2视频 3语音 4文件 |
-| 被动回复 | 带 `msg_id`，`msg_seq` 同一 msg_id 递增 |
-| 默认 intents | `1 << 25` = `GROUP_AND_C2C_EVENT` |
+| [插件开发规范](docs/插件开发规范.md) | 内建插件（JS）的写法、ctx 全部能力、发布要求 |
+| [外部插件协议](docs/插件协议.md) | 任意语言插件的 NDJSON 协议、时序、示例 |
+| [配置参考](docs/配置参考.md) | 全部配置字段、环境变量、intents 位表 |
+| [权限模型](docs/权限模型.md) | 作用域 × 等级、号段分配、授权规则 |
+| [官方接口限制](docs/官方接口限制.md) | 官方限制清单、免@粘性原理、实现要点对照 |
+| [常见问题](docs/常见问题.md) | 收不到消息、发不出去、面板打不开、数据在哪 |
+| [事件与接口清单](docs/事件与接口清单.md) | 官方 43 个事件、72 个接口的覆盖审计 |
+| [架构说明](docs/架构说明.md) | 进程模型、数据隔离、事件流、插件加载、面板多机器人实现 |
+| [同类项目调研](docs/GitHub同类项目调研.md) | 与 AstrBot / NoneBot2 / Koishi / ZeroBot 的对比 |
 
-### 常见报错
+---
 
-| 现象 | 原因 |
+## 开发
+
+```bash
+npm test              # 框架自检，31 项
+node src/main.js --mock          # 不连 QQ，命令行发假消息调插件
+node src/main.js --mock --serve  # 只开面板，调界面
+node src/main.js --check         # 只验证凭证和网关
+```
+
+mock 模式下：直接输入文本 = 模拟一条群 @ 消息；`!as <openid>` 切换发送者；
+`!addbot <群openid> <邀请人openid>` 模拟入群。
+
+---
+
+## 已知限制
+
+- **群列表 / 群成员列表**：官方没有查询接口，只能靠事件被动发现
+- **踢人 / 禁言 / 撤回他人消息**：官方未开放，做不到
+- **单进程**：插件与框架同进程，插件里写死循环会拖垮整个机器人
+- **存储是 JSON**：适合中小规模，大型游戏存档建议插件里直接接 SQLite
+- **面板无登录态**：只有访问密钥校验，没有会话，别直接暴露到公网
+
+细节和应对方式见 [docs/官方接口限制.md](docs/官方接口限制.md)。
+
+---
+
+## 致谢
+
+这个项目站在不少人的肩膀上。以下项目**没有直接复用代码**，但架构、协议理解和文档写法上参考了它们：
+
+**架构与设计**
+
+- [AstrBot](https://github.com/AstrBotDevs/AstrBot) —— 插件元数据、配置 Schema 的思路，以及 WebUI 的信息组织方式
+- [NoneBot2](https://github.com/nonebot/nonebot2) —— 事件响应器分层，README 的「适合 / 不适合」写法
+- [Koishi](https://github.com/koishijs/koishi) —— 中间件洋葱模型、插件生命周期与副作用回收
+- [ZeroBot-Plugin](https://github.com/FloatTech/ZeroBot-Plugin) —— 包即插件的组织方式、多级开关与优先级规则
+
+**协议与接口**
+
+- [botgo](https://github.com/tencent-connect/botgo)（腾讯官方 Go SDK）—— 核对 HTTP 接口路径与事件清单的第一手依据
+- [botpy](https://github.com/tencent-connect/botpy)（腾讯官方 Python SDK）
+- [QQ 机器人官方文档](https://bot.q.qq.com/wiki/) —— 所有协议细节的最终来源
+
+**经验教训**
+
+- [OneBot](https://github.com/botuniverse/onebot) —— 它 2023 年冻结的教训，是我们坚持直连官方接口的原因
+- [nonebot_plugin_xiuxian_2](https://github.com/QingMuCat/nonebot_plugin_xiuxian_2) —— 文字游戏玩法的模块划分参考
+
+**贡献者**
+
+<!-- 仓库公开后把下面这行的 owner/repo 填上，就会自动显示头像墙 -->
+<!-- <a href="https://github.com/OWNER/REPO/graphs/contributors"><img src="https://contrib.rocks/image?repo=OWNER/REPO" alt="contributors"></a> -->
+
+*（等仓库公开后，这里会自动显示所有贡献者）*
+
+---
+
+## 贡献
+
+欢迎 Issue 和 PR。动手前请读 [贡献指南](CONTRIBUTING.md)，有一条硬要求：
+
+> **改功能前先去 GitHub 搜同类实现，优先复用现成方案。** 确实没有合适的，才自己设计。
+
+其他规范：
+
+| 文档 | 内容 |
 |------|------|
-| `4014 intents 无权限` | 没开通群聊能力，或 intents 填错 |
-| `10004 机器人不存在` | AppID 错了 |
-| 回复发不出去 | 超过 5 分钟被动回复窗口，或 `msg_seq` 重复 |
-| 收不到群消息 | 机器人没被 @，或群未授权 |
-| 面板打不开 | 端口被占用，看日志里的 `EADDRINUSE` |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | 开发环境、代码风格、提交信息、PR 要求 |
+| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | 行为准则 |
+| [SECURITY.md](SECURITY.md) | 漏洞上报方式、部署时必须自己守住的三件事 |
 
 ---
 
-## 八、已知限制
+## 许可
 
-- **群主识别**：消息报文里 `author.member_role` 为 `owner` 的就是群主（只授予该群管理员），
-  机器人收到该人消息时会自动记下来，比「谁邀请机器人」更准。没发过言的群主识别不到。
-- **群列表仍无接口**：官方没有「机器人所在群列表」，只能靠事件被动发现。
-- **单进程**：插件与内核同进程，插件里写死循环会拖垮整个机器人。后续可换 `worker_threads`。
-- **频道消息只收不发**：`guild` 场景没接 v2 发送接口，主要面向群聊/私聊。
-- **未做分片**：单连接够用；进几千个群再考虑 `shard`。
-- **存储是 JSON**：适合中小规模。斗罗那种玩家存档建议插件里直接接 SQLite。
-- **面板无登录态**：只有访问密钥校验，没有会话。别直接暴露到公网。
+[MIT](LICENSE) © qq-bot-roost contributors
 
----
-
-## 九、下一步
-
-- 把游戏逻辑包成插件，数据层换 SQLite
-- 群级配置（每群独立开关插件、独立数值）
-- 插件清单 `plugin.json` + 版本号，支持在线安装
-- 面板增加「模拟消息」入口，不连 QQ 也能测插件
-- 多机器人实例（一个进程跑多个 AppID）
+你可以自由使用、修改、分发、商用，保留版权声明即可。

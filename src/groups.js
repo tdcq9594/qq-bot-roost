@@ -1,10 +1,8 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { DATA_DIR } from './config.js';
 import { createLogger } from './logger.js';
 
 const log = createLogger('groups');
-const FILE = path.join(DATA_DIR, 'groups.json');
 
 /**
  * 群信息存储。
@@ -25,7 +23,9 @@ const FILE = path.join(DATA_DIR, 'groups.json');
  * }
  */
 export class GroupStore {
-  constructor() {
+  /** @param {string} file 该机器人的群档案文件路径 */
+  constructor(file) {
+    this.file = file;
     this.data = null;
     this.dirty = false;
     this.timer = null;
@@ -34,7 +34,7 @@ export class GroupStore {
   async #load() {
     if (this.data) return this.data;
     try {
-      this.data = JSON.parse(await fs.readFile(FILE, 'utf8'));
+      this.data = JSON.parse(await fs.readFile(this.file, 'utf8'));
     } catch {
       this.data = {};
     }
@@ -55,8 +55,8 @@ export class GroupStore {
     }
     if (!this.dirty) return;
     this.dirty = false;
-    await fs.mkdir(DATA_DIR, { recursive: true });
-    await fs.writeFile(FILE, JSON.stringify(this.data, null, 2), 'utf8');
+    await fs.mkdir(path.dirname(this.file), { recursive: true });
+    await fs.writeFile(this.file, JSON.stringify(this.data, null, 2), 'utf8');
   }
 
   async all() {

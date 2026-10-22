@@ -71,12 +71,16 @@ export const runtime = {
   /** 各类事件收到多少次。全为 0 说明平台压根没推事件过来 */
   eventCounts: new Map(),
 
+  /** 各类事件最后一次收到的时间，面板显示「多久以前」用 */
+  eventLastAt: new Map(),
+
   /** 最近一条原始事件，排查字段结构用 */
   lastRaw: null,
 
   bumpEvent(name) {
     if (!name) return;
     this.eventCounts.set(name, (this.eventCounts.get(name) ?? 0) + 1);
+    this.eventLastAt.set(name, Date.now());
   },
 
   bump(key, n = 1) {

@@ -1,11 +1,10 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { DATA_DIR } from './config.js';
+import { PATHS } from './paths.js';
 import { createLogger } from './logger.js';
 import { NO_PERM as LEVELS_NO_PERM, describeLevel, PLUGIN_START } from './levels.js';
 
 const log = createLogger('roles');
-const FILE = path.join(DATA_DIR, 'roles.json');
 
 /**
  * 权限模型
@@ -20,7 +19,7 @@ const FILE = path.join(DATA_DIR, 'roles.json');
  *     feature:<插件id>    某个功能（插件）的管理权
  *
  *   等级 level —— 「能管谁」，**数字越小权限越高**
- *     0    主人（只来自 config.json 的 owners，不可通过命令授予）
+ *     0    主人（只来自 config/bot.json 的 owners，不可通过命令授予）
  *     1    管理员
  *     2    群管
  *     3    助手
@@ -102,7 +101,9 @@ const LEGACY_MAP = { 100: 0, 80: 1, 60: 2, 40: 3 };
 const DATA_VERSION = 2;
 
 export class RoleStore {
-  constructor() {
+  /** @param {string} file 该机器人的数据文件路径 */
+  constructor(file) {
+    this.file = file;
     this.data = null; // { "<scope>": { "<openid>": level } }
     this.dirty = false;
     this.timer = null;
@@ -125,7 +126,7 @@ export class RoleStore {
   async #load() {
     if (this.data) return this.data;
     try {
-      this.data = JSON.parse(await fs.readFile(FILE, 'utf8'));
+      this.data = JSON.parse(await fs.readFile(this.file, 'utf8'));
     } catch {
       this.data = {};
     }
@@ -168,8 +169,8 @@ export class RoleStore {
     }
     if (!this.dirty) return;
     this.dirty = false;
-    await fs.mkdir(DATA_DIR, { recursive: true });
-    await fs.writeFile(FILE, JSON.stringify(this.data, null, 2), 'utf8');
+    await fs.mkdir(path.dirname(this.file), { recursive: true });
+    await fs.writeFile(this.file, JSON.stringify(this.data, null, 2), 'utf8');
   }
 
   async all() {

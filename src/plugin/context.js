@@ -1,7 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createLogger } from '../logger.js';
-import { DATA_DIR } from '../config.js';
 import { scopeOf, LEVEL, NO_PERM, levelName } from '../roles.js';
 
 /**
@@ -101,8 +100,9 @@ export class Registry {
 
 /** 每个插件一个简单的 JSON 键值存储，游戏存档之类可以直接用 */
 class PluginStorage {
-  constructor(pluginId) {
-    this.file = path.join(DATA_DIR, 'plugins', `${pluginId}.json`);
+  /** @param {string} file 该插件在该机器人下的存档文件 */
+  constructor(file) {
+    this.file = file;
     this.data = null;
     this.dirty = false;
     this.timer = null;
@@ -166,9 +166,10 @@ class PluginStorage {
 /**
  * 插件上下文：插件能用的全部能力都在这里，不暴露内部实现。
  */
-export function createContext({ meta, registry, api, cfg, groups, roles, levels, isOwner }) {
+export function createContext({ meta, paths, registry, api, cfg, config, configStore, groups, roles, levels, outbound, session, pipeline, isOwner }) {
   const id = meta.id;
-  const logger = createLogger(`plugin:${id}`);
+  // 日志 tag 带机器人 id，多机器人下同名插件的日志不会串
+  const logger = createLogger(`plugin:${paths?.id ?? '-'}:${id}`);
   const disposers = [];
 
   // 先占位，保证即使插件没注册任何命令，菜单里也有它的条目
@@ -178,11 +179,29 @@ export function createContext({ meta, registry, api, cfg, groups, roles, levels,
     id,
     name: meta.name ?? id,
     version: meta.version ?? '0.0.0',
-    config: meta.config ?? {},
+    // 已与默认值合并的用户配置，来自 config/plugins/<id>.json
+    config: config ?? meta.config ?? {},
     api,
     logger,
-    storage: new PluginStorage(id),
+    storage: new PluginStorage(paths.pluginData(id)),
     prefix: cfg.commandPrefix || '/',
+
+    /**
+     * 改自己的配置并立刻落盘（只改传入的键，其余保留）。
+     *   await ctx.setConfig({ welcome: '欢迎' });
+     */
+    async setConfig(patch) {
+      if (!configStore) throw new Error('当前环境不支持写插件配置');
+      const next = await configStore.set(patch);
+      // 原地更新，插件里已经拿到的 ctx.config 引用也跟着变
+      if (this.config && typeof this.config === 'object') {
+        for (const k of Object.keys(this.config)) delete this.config[k];
+        Object.assign(this.config, next);
+        return this.config;
+      }
+      this.config = next;
+      return next;
+    },
 
     /* ---------------- 权限等级 ---------------- */
 
@@ -284,6 +303,103 @@ export function createContext({ meta, registry, api, cfg, groups, roles, levels,
     /** 注册卸载时要执行的回调（关连接、清定时器等） */
     onTeardown(fn) {
       if (typeof fn === 'function') disposers.push(fn);
+    },
+
+    /* ---------------- 多轮对话与主动发送 ---------------- */
+
+    /**
+     * 问一句、等回答。文字游戏的多轮交互全靠它。
+     *
+     *   const ans = await ctx.prompt(msg, '用哪个技能？\n1 蓝银缠绕 2 昊天锤');
+     *   if (!ans) return;                 // 超时，prompt 已经提示过了
+     *   if (ans.content === '1') { ... }
+     *
+     * @param {object} msg   触发本次交互的消息
+     * @param {string} [text] 要发给用户的提示，省略则只等待
+     * @param {object} [opts]
+     * @param {'user'|'chat'} [opts.from] 只认这个人，还是这个会话里谁都算
+     * @param {number} [opts.timeoutMs]
+     * @param {string|false} [opts.onTimeout] 超时提示语，false 表示不提示
+     * @returns {Promise<object|null>} 用户的下一条消息，超时为 null
+     */
+    async prompt(msg, text, opts = {}) {
+      if (!session) throw new Error('当前环境不支持多轮对话');
+      if (text) await msg.reply(text);
+
+      const timeoutMs =
+        opts.timeoutMs ?? Math.max(1000, (cfg.session?.promptTimeoutSec ?? 120) * 1000);
+      const answer = await session.wait({
+        chatId: msg.chatId,
+        userId: msg.userId,
+        from: opts.from ?? 'user',
+        timeoutMs,
+      });
+
+      if (!answer && opts.onTimeout !== false) {
+        const hint =
+          typeof opts.onTimeout === 'string' ? opts.onTimeout : '等太久没收到回复，这次先取消了。';
+        // 用户可能已经离开，发不出去也无所谓
+        await msg.reply(hint).catch(() => {});
+      }
+      return answer;
+    },
+
+    /** 只等待，不主动发提示（用于「上一条已经问过了」的场景） */
+    wait(msg, opts = {}) {
+      if (!session) throw new Error('当前环境不支持多轮对话');
+      return session.wait({
+        chatId: msg.chatId,
+        userId: msg.userId,
+        from: opts.from ?? 'user',
+        timeoutMs: opts.timeoutMs ?? Math.max(1000, (cfg.session?.promptTimeoutSec ?? 120) * 1000),
+      });
+    },
+
+    /** 取消某人当前的等待 */
+    cancelWait(msg) {
+      session?.cancel(msg.chatId, msg.userId);
+    },
+
+    /**
+     * 主动推送一条消息（不依赖用户触发）。
+     * 注意：受每日额度限制，额度用完会抛错，定时任务请自行 catch。
+     *
+     *   await ctx.push(groupOpenid, '今天的魂兽森林刷新了')
+     */
+    push(chatId, text, { kind = 'group' } = {}) {
+      if (!outbound) throw new Error('当前环境不支持主动推送');
+      return outbound.send({
+        kind,
+        target: chatId,
+        chatKey: `${kind}:${chatId}`,
+        payload: { content: String(text ?? '') },
+      });
+    },
+
+    /** 这个会话还剩多少条主动消息额度 */
+    async quotaLeft(chatId, kind = 'group') {
+      if (!outbound) return 0;
+      const used = (await outbound.quotaSnapshot())[`${kind}:${chatId}`] ?? 0;
+      return Math.max(0, outbound.dailyActive - used);
+    },
+
+    /** 该会话是否处在免@窗口内（用户刚 @ 过，接下来不用每句都 @） */
+    isSticky(chatId) {
+      return Boolean(session?.isSticky(chatId));
+    },
+
+    /**
+     * 注册一个中间件。在命令/消息到达本插件之前执行，
+     * 不调用 next() 就能把消息拦下来。
+     *
+     *   ctx.use('反垃圾', async (ctx, next) => {
+     *     if (ctx.msg.content.includes('广告')) return;
+     *     await next();
+     *   });
+     */
+    use(name, fn) {
+      if (!pipeline) throw new Error('当前环境不支持中间件');
+      pipeline.use(`${id}:${name}`, fn, { pluginId: id });
     },
 
     /** 当前消息的发送者是否为机器人主人（全局） */

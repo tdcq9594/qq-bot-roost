@@ -20,7 +20,7 @@ const CLOSE_HINTS = {
   4010: '连接地址不合法',
   4011: '机器人尚未上线或未开通该能力',
   4012: '版本号不合法',
-  4013: 'intents 参数无效，检查 config.json 的 intents',
+  4013: 'intents 参数无效，检查 config/bot.json 的 intents',
   4014: 'intents 无权限：到 q.qq.com 管理端申请「群聊」能力，或把 intents 改成 33554432',
   4914: '机器人已下架',
   4915: '机器人已被封禁',

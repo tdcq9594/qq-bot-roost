@@ -19,7 +19,7 @@ export class QQApi {
     this.seqMap = new Map();
   }
 
-  async #request(method, path, body, { retried = false } = {}) {
+  async #request(method, path, body, { retried = false, headers } = {}) {
     const token = await this.tokens.get();
     let res;
     try {
@@ -31,6 +31,7 @@ export class QQApi {
           Authorization: `QQBot ${token}`,
           'Content-Type': 'application/json',
           'X-Union-Appid': this.tokens.appId,
+          ...(headers ?? {}),
         },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
@@ -43,7 +44,7 @@ export class QQApi {
     if (res.status === 401 && !retried) {
       log.warn('接口返回 401，刷新访问凭证后重试');
       await this.tokens.refresh();
-      return this.#request(method, path, body, { retried: true });
+      return this.#request(method, path, body, { retried: true, headers });
     }
 
     const text = await res.text();
@@ -130,6 +131,40 @@ export class QQApi {
       msgId,
     };
     return scene === 'group' ? this.sendGroup(target, opts) : this.sendC2C(target, opts);
+  }
+
+  /* ---------------- 撤回 ---------------- */
+
+  /**
+   * 撤回群消息。只能撤回机器人自己发的。
+   * DELETE /v2/groups/{group_openid}/messages/{message_id}
+   */
+  retractGroupMessage(groupOpenid, messageId) {
+    return this.#request('DELETE', `/v2/groups/${groupOpenid}/messages/${messageId}`);
+  }
+
+  /**
+   * 撤回私聊消息。
+   * DELETE /v2/users/{openid}/messages/{message_id}
+   */
+  retractC2CMessage(openid, messageId) {
+    return this.#request('DELETE', `/v2/users/${openid}/messages/${messageId}`);
+  }
+
+  /* ---------------- 互动 ---------------- */
+
+  /**
+   * 互动回执。收到 INTERACTION_CREATE 后**必须**调用，
+   * 否则客户端上的按钮会一直转圈。
+   *
+   * PUT /interactions/{interaction_id}，需要带 X-Callback-AppID 头
+   * @param {string} interactionId
+   * @param {number} code 0 = 成功
+   */
+  putInteraction(interactionId, code = 0) {
+    return this.#request('PUT', `/interactions/${interactionId}`, { code }, {
+      headers: { 'X-Callback-AppID': this.tokens.appId },
+    });
   }
 
   /* ---------------- 内部 ---------------- */

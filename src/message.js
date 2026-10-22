@@ -1,21 +1,15 @@
 import { createLogger } from './logger.js';
 import { FILE_TYPE } from './api.js';
+import { messageKindOf, EVENTS } from './events.js';
 
 const log = createLogger('message');
 
-/** 事件名 → 消息来源类型 */
-const MESSAGE_EVENTS = {
-  // 官方文档写的是 GROUP_AT_MESSAGE_CREATE，但平台实际会下发 GROUP_MESSAGE_CREATE
-  // （可能是新版事件名 / 全量群消息权限），两者载荷结构一致，都要认
-  GROUP_AT_MESSAGE_CREATE: 'group',
-  GROUP_MESSAGE_CREATE: 'group',
-  C2C_MESSAGE_CREATE: 'c2c',
-  AT_MESSAGE_CREATE: 'guild',
-  DIRECT_MESSAGE_CREATE: 'dm',
-};
-
+/**
+ * 事件 → 会话类型 的映射来自 src/events.js 的登记表，
+ * 那里维护了官方全部 42 个事件，只有标了 message 的才会规范化成 Message。
+ */
 export function isMessageEvent(name) {
-  return name in MESSAGE_EVENTS;
+  return Boolean(messageKindOf(name));
 }
 
 /**
@@ -48,8 +42,8 @@ function detectMention(d) {
 /**
  * 把官方事件体统一成好用的 Message 对象，插件只跟它打交道。
  */
-export function buildMessage(eventName, d, { api, cfg }) {
-  const kind = MESSAGE_EVENTS[eventName] ?? 'unknown';
+export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
+  const kind = messageKindOf(eventName) ?? 'unknown';
 
   let groupId = '';
   let userId = '';
@@ -71,23 +65,34 @@ export function buildMessage(eventName, d, { api, cfg }) {
   const prefix = cfg.commandPrefix || '/';
   const isCommand = content.startsWith(prefix);
   const mentioned = detectMention(d);
+  const chatId = groupId || userId;
+  const receivedAt = Date.now();
+
+  // 没 @ 也不算命令，但可能处在免@窗口内 —— 此时同样算「在跟机器人说话」
+  const sticky = Boolean(session?.isSticky(chatId));
+  const addressed = mentioned || isCommand || sticky;
 
   const msg = {
     id: d.id ?? '',
     kind,
     event: eventName,
+    // 事件元信息（属于哪个 intent、中文说明），来自 src/events.js
+    eventMeta: EVENTS[eventName] ?? null,
     groupId,
     userId,
     userName,
-    chatId: groupId || userId,
+    chatId,
     content,
     raw: d,
     mentioned,
+    sticky,
+    addressed,
     isCommand,
+    receivedAt, // 被动回复窗口从这里开始算，出站调度器要用
     replied: false, // 任何发送动作都会置为 true，供内核判断「有没有插件回应」
     command: '',
     args: [],
-    at: Number(d.timestamp) || Date.now(),
+    at: Number(d.timestamp) || receivedAt,
   };
 
   if (isCommand) {
@@ -97,12 +102,24 @@ export function buildMessage(eventName, d, { api, cfg }) {
     msg.args = rest;
   }
 
-  // 底层发送：group 走群接口，c2c 走单聊接口
+  // 底层发送：group 走群接口，c2c 走单聊接口。
+  // 一律经过 outbound，由它处理 5 分钟窗口、每秒限速、主动消息额度。
   const send = (opts, passive) => {
-    const body = passive ? { msgId: msg.id, ...opts } : { ...opts };
     if (kind !== 'group' && kind !== 'c2c') return Promise.resolve(null);
+    const body = passive ? { msgId: msg.id, ...opts } : { ...opts };
     msg.replied = true;
-    return kind === 'group' ? api.sendGroup(groupId, body) : api.sendC2C(userId, body);
+
+    if (!outbound) {
+      // 兜底：没有调度器（例如早期调用方）就直接发
+      return kind === 'group' ? api.sendGroup(groupId, body) : api.sendC2C(userId, body);
+    }
+    return outbound.send({
+      kind,
+      target: kind === 'group' ? groupId : userId,
+      chatKey: `${kind}:${chatId}`,
+      payload: body,
+      receivedAt,
+    });
   };
 
   /** 被动回复（带 msg_id，5 分钟内有效，msg_seq 自动递增） */

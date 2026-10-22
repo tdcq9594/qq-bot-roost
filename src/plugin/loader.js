@@ -1,14 +1,15 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { createLogger } from '../logger.js';
+import { createLogger, attachLogFile, detachLogFile } from '../logger.js';
 import { createContext } from './context.js';
 import { SubprocessPlugin } from './subprocess.js';
-import { DATA_DIR } from '../config.js';
+import { rel } from '../paths.js';
 import { allocateLevels } from '../levels.js';
+import { PluginConfig } from './config.js';
+import { ensurePluginDeps } from './deps.js';
 
 const log = createLogger('plugins');
-const STATE_FILE = path.join(DATA_DIR, 'plugins.json');
 
 /**
  * 插件管理器
@@ -21,13 +22,18 @@ const STATE_FILE = path.join(DATA_DIR, 'plugins.json');
  * 启用状态存在 data/plugins.json，删掉文件夹即等于卸载。
  */
 export class PluginManager {
-  constructor({ pluginsDir, registry, api, cfg, groups, roles, isOwner }) {
+  constructor({ pluginsDir, paths, registry, api, cfg, groups, roles, outbound, session, pipeline, isOwner }) {
     this.dir = pluginsDir;
+    // 该机器人的全套路径（配置/数据/日志），多机器人下互不干扰
+    this.paths = paths;
     this.registry = registry;
     this.api = api;
     this.cfg = cfg;
     this.groups = groups;
     this.roles = roles;
+    this.outbound = outbound;
+    this.session = session;
+    this.pipeline = pipeline;
     this.isOwner = isOwner;
     this.loaded = new Map(); // id -> { meta, ctx?, host?, dir, kind, menuMissing }
     this.state = {}; // id -> enabled
@@ -37,21 +43,29 @@ export class PluginManager {
 
   async #readState() {
     try {
-      this.state = JSON.parse(await fs.readFile(STATE_FILE, 'utf8'));
+      this.state = JSON.parse(await fs.readFile(this.paths.pluginState, 'utf8'));
     } catch {
       this.state = {};
     }
   }
 
   async #writeState() {
-    await fs.mkdir(DATA_DIR, { recursive: true });
-    await fs.writeFile(STATE_FILE, JSON.stringify(this.state, null, 2), 'utf8');
+    await fs.mkdir(path.dirname(this.paths.pluginState), { recursive: true });
+    await fs.writeFile(this.paths.pluginState, JSON.stringify(this.state, null, 2), 'utf8');
   }
 
   /* ---------------- 扫描与加载 ---------------- */
 
-  async scan() {
+  /**
+   * 扫描并加载插件。
+   * @param {object} [opts]
+   * @param {(id:string)=>boolean} [opts.filter] 插件过滤：返回 false 的不加载。
+   *        每个机器人可以用不同的 filter，实现「不同机器人启用不同插件」。
+   *        只影响启动扫描，手动 /reload 单个插件不受它限制。
+   */
+  async scan({ filter = () => true } = {}) {
     await this.#readState();
+    this.filter = filter;
     let entries = [];
     try {
       entries = await fs.readdir(this.dir, { withFileTypes: true });
@@ -60,9 +74,15 @@ export class PluginManager {
       return;
     }
 
-    const ids = entries.filter((e) => e.isDirectory()).map((e) => e.name);
-    this.allocations = allocateLevels(ids);
-    if (ids.length) {
+    const allIds = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+    // 号段分配必须基于**全部**插件，否则不同机器人看到的等级号段会不一致
+    this.allocations = allocateLevels(allIds);
+
+    const ids = allIds.filter((id) => filter(id));
+    const skipped = allIds.filter((id) => !filter(id));
+    if (skipped.length) log.info(`本机器人未启用: ${skipped.join('、')}`);
+
+    if (allIds.length) {
       log.info(
         '等级号段分配 ' +
           [...this.allocations.entries()].map(([id, a]) => `${id}:${a.base}-${a.end}`).join('  '),
@@ -149,17 +169,44 @@ export class PluginManager {
     if (!meta || typeof meta.setup !== 'function') {
       throw new Error('默认导出必须是 { id, setup(ctx) } 形式的对象');
     }
-    meta.id = meta.id ?? id;
+    // 统一以目录名为插件 id：loaded / errors / allocations / registry 四处都按它索引，
+    // 允许自报 id 会导致「加载成功但错误记录残留」这类问题。
+    if (meta.id && meta.id !== id) {
+      log.warn(`插件目录 ${id} 里声明的 id 是 ${meta.id}，与目录名不一致，以目录名为准`);
+    }
+    meta.id = id;
+
+    // 每个插件一份自己的日志文件：logs/bots/<机器人>/plugins/<id>.log
+    if (this.cfg.logs?.enabled !== false) {
+      await attachLogFile(`plugin:${this.paths.id}/${meta.id}`, this.paths.pluginLog(meta.id), {
+        maxBytes: this.cfg.logs?.maxBytes,
+      });
+    }
+
+    // 每个插件一份自己的配置文件：config/bots/<机器人>/plugins/<id>.json
+    const configStore = new PluginConfig({
+      id: meta.id,
+      defaults: meta.config ?? {},
+      file: this.paths.pluginConfig(meta.id),
+      log,
+    });
+    const config = await configStore.load();
 
     this.registry.clearPlugin(meta.id);
     const ctx = createContext({
       meta,
+      paths: this.paths,
       registry: this.registry,
       api: this.api,
       cfg: this.cfg,
+      config,
+      configStore,
       groups: this.groups,
       roles: this.roles,
       levels: this.allocations.get(id) ?? null,
+      outbound: this.outbound,
+      session: this.session,
+      pipeline: this.pipeline,
       isOwner: this.isOwner,
     });
 
@@ -183,18 +230,50 @@ export class PluginManager {
 
   async #loadExternal(id, dir) {
     const raw = JSON.parse(await fs.readFile(path.join(dir, 'plugin.json'), 'utf8'));
+    if (raw.id && raw.id !== id) {
+      log.warn(`插件目录 ${id} 的 plugin.json 声明 id 为 ${raw.id}，与目录名不一致，以目录名为准`);
+    }
     const meta = {
-      id: raw.id ?? id,
+      id, // 以目录名为准，保证各处索引一致
       name: raw.name ?? id,
       version: raw.version ?? '0.0.0',
       description: raw.description ?? '',
     };
 
+    // 每个插件一份自己的日志文件：logs/bots/<机器人>/plugins/<id>.log
+    if (this.cfg.logs?.enabled !== false) {
+      await attachLogFile(`plugin:${this.paths.id}/${id}`, this.paths.pluginLog(id), {
+        maxBytes: this.cfg.logs?.maxBytes,
+      });
+    }
+
+    // 开箱即用：缺依赖就装进插件目录里的隔离环境，装不上直接报清楚原因
+    const deps = await ensurePluginDeps({
+      dir,
+      manifest: raw,
+      log,
+      enabled: this.cfg.plugins?.autoInstallDeps !== false,
+    });
+    for (const w of deps.warnings) log.warn(`插件 ${id}: ${w}`);
+    if (deps.installed.length) log.info(`插件 ${id} 已自动安装：${deps.installed.join('、')}`);
+
+    // 每个插件一份自己的配置文件：config/bots/<机器人>/plugins/<id>.json
+    const configStore = new PluginConfig({
+      id,
+      defaults: raw.config ?? {},
+      file: this.paths.pluginConfig(id),
+      log,
+    });
+    const config = await configStore.load();
+
     this.registry.clearPlugin(meta.id);
 
     const host = new SubprocessPlugin({
       dir,
-      manifest: { ...raw, id: meta.id },
+      manifest: { ...raw, id: meta.id, config },
+      botId: this.paths.id,
+      // 有 venv 就用 venv 里的解释器，没有就用探测到的系统解释器
+      pythonPath: deps.python ?? null,
       allocation: this.allocations.get(id) ?? null,
       cfg: this.cfg,
       roles: this.roles,
@@ -283,6 +362,10 @@ export class PluginManager {
     }
 
     this.registry.clearPlugin(id);
+    // 插件注册的中间件也要一起摘掉，否则卸载后它还挡着别人的消息
+    this.pipeline?.removeByPlugin?.(id);
+    // 关掉它的日志文件句柄，免得句柄泄漏
+    detachLogFile(`plugin:${this.paths.id}/${id}`);
     this.loaded.delete(id);
     log.info(`已卸载插件 ${id}`);
     return true;

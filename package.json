@@ -1,15 +1,34 @@
 {
-  "name": "qq-bot-core",
+  "name": "qq-bot-roost",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
-  "description": "QQ 官方机器人内核：填 AppID/AppSecret 即连，插件式扩展",
+  "description": "栖 Roost：零依赖的 QQ 官方机器人框架，填 AppID/AppSecret 即连，插件可写任意语言",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tdcq9594/qq-bot-roost.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tdcq9594/qq-bot-roost/issues"
+  },
+  "homepage": "https://github.com/tdcq9594/qq-bot-roost#readme",
+  "keywords": [
+    "qq-bot",
+    "qqbot",
+    "bot-framework",
+    "qq-official-bot",
+    "roost",
+    "multi-bot",
+    "plugin",
+    "zero-dependency"
+  ],
   "engines": {
     "node": ">=22"
   },
   "scripts": {
     "start": "node src/main.js",
     "mock": "node src/main.js --mock",
-    "check": "node src/main.js --check"
+    "check": "node src/main.js --check",
+    "test": "node test/selftest.mjs"
   }
 }

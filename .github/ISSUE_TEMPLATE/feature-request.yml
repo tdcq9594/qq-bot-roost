@@ -1,0 +1,70 @@
+name: "✨ 功能建议"
+description: 提出新功能或改进想法。
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提新功能前，请先说明**你搜过哪些现成方案**——这是本项目的硬要求，见 [贡献指南](../../CONTRIBUTING.md)。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你想解决什么问题
+      description: 先说场景和痛点，不要直接说「加个 xxx 功能」。
+      placeholder: |
+        例如：我运营 20 个群，想给不同群设不同的欢迎语，现在只能全局统一，改一次要手动同步。
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: 你期望的方案
+      placeholder: 描述你希望它怎么工作，越具体越好。
+    validations:
+      required: true
+
+  - type: textarea
+    id: prior-art
+    attributes:
+      label: 调研过的现成方案
+      description: |
+        你搜过哪些项目？它们怎么做的？为什么不直接用它们的方案？
+        如果没搜到，也请写明你搜了什么关键词。
+      placeholder: |
+        例如：搜了 AstrBot / Koishi 的群级配置实现，AstrBot 用 xxxx 方式，
+        但它是 Python 且依赖较多，不适用于本项目，所以建议自己实现 yyyy。
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 考虑过的替代方案
+      description: 有没有别的做法？为什么不选它们？
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: 影响范围
+      description: 这个改动会碰到哪部分？
+      options:
+        - 内核（连接 / 分发 / 权限）
+        - 插件系统 / 插件 API
+        - 可视化面板
+        - 文档
+        - 不确定
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 确认
+      options:
+        - label: 我已搜索过现有 Issue，没有重复
+          required: true
+        - label: 我理解破坏性变更需要提供迁移方式
+          required: true

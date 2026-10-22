@@ -2,56 +2,105 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import readline from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
+import { ROOT, DIRS, PATHS, botPaths, ensureDirs, listBotIds, rel } from './paths.js';
 
-export const ROOT = path.resolve(import.meta.dirname, '..');
-export const CONFIG_PATH = path.join(ROOT, 'config.json');
-export const DATA_DIR = path.join(ROOT, 'data');
+// 兼容旧的导入方式
+export { ROOT, PATHS, DIRS };
+export const CONFIG_PATH = PATHS.globalConfig;
 
-const DEFAULTS = {
+/* ------------------------------------------------------------------ */
+/* 两套默认值                                                          */
+/* ------------------------------------------------------------------ */
+
+/** 全局配置：管进程本身（面板、日志、插件依赖策略） */
+const GLOBAL_DEFAULTS = {
+  logLevel: 'info',
+  cooldownHint: true,
+
+  webui: {
+    enabled: true,
+    host: '127.0.0.1',
+    port: 15207,
+    accessKey: '',
+    portTries: 20,
+    openBrowser: true,
+  },
+
+  logs: {
+    enabled: true,
+    maxBytes: 5 * 1024 * 1024,
+  },
+
+  plugins: {
+    autoInstallDeps: true,
+  },
+};
+
+/** 机器人配置：管连接与行为，每个机器人一份 */
+const BOT_DEFAULTS = {
+  name: '',
+  enabled: true,
+
   appId: '',
   appSecret: '',
   baseUrl: 'https://api.bot.qq.com',
   // GROUP_AND_C2C_EVENT = 1 << 25，群聊 @机器人 + 私聊消息
   intents: 1 << 25,
-  owners: [],
   commandPrefix: '/',
-  logLevel: 'info',
+  owners: [],
 
-  // 可视化面板
-  webui: {
-    enabled: true,
-    host: '127.0.0.1',
-    port: 15207,
-    accessKey: '', // 面板访问密钥，留空则不校验
-  },
-
-  // 群/用户白名单：enabled 为 true 时只响应名单内的来源
   whitelist: {
     enabled: false,
     groups: [],
     users: [],
   },
 
-  // 限流：每个会话每分钟最多处理多少条
   rateLimit: {
     enabled: true,
     perChatPerMinute: 30,
   },
 
-  // 去重窗口（秒），同一 msg id 只处理一次
   dedupWindowSec: 120,
 
-  // 收到的消息是否写进日志；muteKinds 里的来源类型不记录
   messageLog: {
     enabled: true,
-    muteKinds: [], // group / c2c / guild / dm
+    muteKinds: [],
+  },
+
+  outbound: {
+    perSec: 4,
+    dailyActive: 20,
+    downgradeToActive: true,
+  },
+
+  session: {
+    stickySec: 180,
+    promptTimeoutSec: 120,
+  },
+
+  /**
+   * 启用哪些插件。三态：
+   *   all     — 全部启用，新装插件自动生效
+   *   include — 只启用 list 里的
+   *   exclude — 除了 list 里的都启用
+   * 默认 include：新机器人默认不启用任何插件，避免误触发。
+   */
+  plugins: {
+    mode: 'include',
+    list: [],
   },
 };
 
 function deepMerge(base, extra) {
   const out = { ...base };
   for (const [k, v] of Object.entries(extra ?? {})) {
-    if (v && typeof v === 'object' && !Array.isArray(v) && typeof base[k] === 'object' && !Array.isArray(base[k])) {
+    if (
+      v &&
+      typeof v === 'object' &&
+      !Array.isArray(v) &&
+      typeof base[k] === 'object' &&
+      !Array.isArray(base[k])
+    ) {
       out[k] = deepMerge(base[k], v);
     } else if (v !== undefined) {
       out[k] = v;
@@ -60,63 +109,283 @@ function deepMerge(base, extra) {
   return out;
 }
 
-export async function loadConfig() {
-  let fileCfg = {};
+async function readJson(file) {
   try {
-    fileCfg = JSON.parse(await fs.readFile(CONFIG_PATH, 'utf8'));
+    return JSON.parse(await fs.readFile(file, 'utf8'));
   } catch (e) {
-    if (e.code !== 'ENOENT') throw new Error(`config.json 解析失败: ${e.message}`);
+    if (e.code === 'ENOENT') return null;
+    throw new Error(`${rel(file)} 解析失败: ${e.message}`);
   }
-  const cfg = deepMerge(DEFAULTS, fileCfg);
+}
 
-  // 兼容旧配置：以前这个字段叫 webui.token
+async function writeJson(file, data) {
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(data, null, 2) + '\n', 'utf8');
+  await fs.rename(tmp, file);
+}
+
+const exists = (p) =>
+  fs.access(p).then(
+    () => true,
+    () => false,
+  );
+
+/* ------------------------------------------------------------------ */
+/* 全局配置                                                            */
+/* ------------------------------------------------------------------ */
+
+export async function loadGlobalConfig() {
+  await ensureDirs();
+  const file = (await readJson(PATHS.globalConfig)) ?? {};
+  const cfg = deepMerge(GLOBAL_DEFAULTS, file);
+
+  // 兼容旧字段：webui.token → webui.accessKey
   if (!cfg.webui.accessKey && cfg.webui.token) {
     cfg.webui.accessKey = cfg.webui.token;
     delete cfg.webui.token;
   }
+  return cfg;
+}
 
-  // 环境变量优先级最高，方便容器部署
-  if (process.env.QQ_BOT_APPID) cfg.appId = process.env.QQ_BOT_APPID;
-  if (process.env.QQ_BOT_SECRET) cfg.appSecret = process.env.QQ_BOT_SECRET;
-  if (process.env.QQ_BOT_BASE_URL) cfg.baseUrl = process.env.QQ_BOT_BASE_URL;
-  if (process.env.QQ_BOT_OWNERS) {
-    cfg.owners = process.env.QQ_BOT_OWNERS.split(',').map((s) => s.trim()).filter(Boolean);
+export async function saveGlobalConfig(cfg) {
+  await writeJson(PATHS.globalConfig, {
+    logLevel: cfg.logLevel,
+    cooldownHint: cfg.cooldownHint,
+    webui: cfg.webui,
+    logs: cfg.logs,
+    plugins: cfg.plugins,
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* 机器人配置                                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 读一个机器人的配置。返回的对象带 `id`。
+ * @param {string} id
+ */
+export async function loadBotConfig(id) {
+  const p = botPaths(id);
+  const file = await readJson(p.config);
+  if (!file) throw new Error(`机器人配置不存在: ${rel(p.config)}`);
+
+  const cfg = deepMerge(BOT_DEFAULTS, file);
+  cfg.id = id;
+  if (!cfg.name) cfg.name = id;
+
+  // 环境变量只在配置文件没写时才兜底，避免多机器人时互相串
+  if (!cfg.appId && process.env.QQ_BOT_APPID) cfg.appId = process.env.QQ_BOT_APPID;
+  if (!cfg.appSecret && process.env.QQ_BOT_SECRET) cfg.appSecret = process.env.QQ_BOT_SECRET;
+  if (!file.baseUrl && process.env.QQ_BOT_BASE_URL) cfg.baseUrl = process.env.QQ_BOT_BASE_URL;
+  if (!file.owners?.length && process.env.QQ_BOT_OWNERS) {
+    cfg.owners = process.env.QQ_BOT_OWNERS.split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
   }
   return cfg;
 }
 
-export async function saveConfig(cfg) {
-  const out = {
+export async function saveBotConfig(id, cfg) {
+  const p = botPaths(id);
+  await writeJson(p.config, {
+    name: cfg.name,
+    enabled: cfg.enabled !== false,
     appId: cfg.appId,
     appSecret: cfg.appSecret,
     baseUrl: cfg.baseUrl,
     intents: cfg.intents,
-    owners: cfg.owners,
     commandPrefix: cfg.commandPrefix,
-    logLevel: cfg.logLevel,
-    webui: cfg.webui,
+    owners: cfg.owners,
     whitelist: cfg.whitelist,
     rateLimit: cfg.rateLimit,
     dedupWindowSec: cfg.dedupWindowSec,
     messageLog: cfg.messageLog,
-  };
-  // 先写临时文件再改名，避免写一半断电把配置写坏
-  const tmp = `${CONFIG_PATH}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(out, null, 2) + '\n', 'utf8');
-  await fs.rename(tmp, CONFIG_PATH);
+    outbound: cfg.outbound,
+    session: cfg.session,
+    plugins: cfg.plugins,
+  });
 }
 
-/** 首次运行时引导输入 AppID / AppSecret */
-export async function ensureCredentials(cfg) {
+/** 读全部机器人配置（坏配置跳过，不阻塞其他机器人） */
+export async function loadAllBotConfigs() {
+  const ids = await listBotIds();
+  const out = [];
+  for (const id of ids) {
+    try {
+      out.push(await loadBotConfig(id));
+    } catch {
+      /* 坏配置跳过 */
+    }
+  }
+  return out;
+}
+
+/** 新建一个机器人配置 */
+export async function createBotConfig(id, patch = {}) {
+  const p = botPaths(id);
+  if (await exists(p.config)) throw new Error(`机器人 ${id} 已存在`);
+  const cfg = deepMerge(BOT_DEFAULTS, { ...patch, name: patch.name || id });
+  cfg.id = id;
+  await ensureDirs(id);
+  await saveBotConfig(id, cfg);
+  return cfg;
+}
+
+/* ------------------------------------------------------------------ */
+/* 迁移：单机器人 → 多机器人                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 搬一个文件，**校验通过才删原文件**。
+ * 任何一步失败都抛错，原文件保持不动。
+ */
+async function moveFile(from, to) {
+  if (!(await exists(from))) return false;
+  const buf = await fs.readFile(from);
+  await fs.mkdir(path.dirname(to), { recursive: true });
+  await fs.writeFile(to, buf);
+
+  // 校验：读回来必须逐字节一致，才敢删原件
+  const back = await fs.readFile(to);
+  if (!back.equals(buf)) throw new Error(`迁移校验失败: ${rel(from)} → ${rel(to)}`);
+  await fs.unlink(from);
+  return true;
+}
+
+/**
+ * 首次启动时把旧结构迁到多机器人结构。
+ *
+ * 用户要求「迁移后不保留旧文件」，所以顺序是：
+ *   读旧 → 写新 → 校验 → 删旧
+ * 任何一步失败就抛错中止，旧文件不会被破坏。
+ *
+ * @returns {Promise<{migrated:boolean, botId?:string, moved:string[]}>}
+ */
+export async function migrateToMultiBot() {
+  if (await exists(PATHS.migratedFlag)) return { migrated: false, moved: [] };
+
+  const existing = await listBotIds();
+  if (existing.length) {
+    await writeJson(PATHS.migratedFlag, { at: Date.now(), note: '已有机器人配置，跳过迁移' });
+    return { migrated: false, moved: [] };
+  }
+
+  // 找旧配置：优先 config/bot.json，其次根目录 config.json
+  let legacy = await readJson(PATHS.globalConfig);
+  if (!legacy) legacy = await readJson(PATHS.legacyConfig);
+
+  // 没有 appId 说明是全新安装
+  if (!legacy?.appId) {
+    await writeJson(PATHS.migratedFlag, { at: Date.now(), note: '全新安装，无需迁移' });
+    return { migrated: false, moved: [] };
+  }
+
+  const botId = 'main';
+  const p = botPaths(botId);
+  const moved = [];
+
+  // 1) 机器人配置
+  const botCfg = {
+    name: '默认机器人',
+    enabled: true,
+    appId: legacy.appId,
+    appSecret: legacy.appSecret,
+    baseUrl: legacy.baseUrl,
+    intents: legacy.intents,
+    commandPrefix: legacy.commandPrefix,
+    owners: legacy.owners,
+    whitelist: legacy.whitelist,
+    rateLimit: legacy.rateLimit,
+    dedupWindowSec: legacy.dedupWindowSec,
+    messageLog: legacy.messageLog,
+    outbound: legacy.outbound,
+    session: legacy.session,
+    // 老用户原本就在用的插件，迁移后保持全部启用——
+    // 不能因为默认值改成 include 就把人家在跑的插件悄悄停掉
+    plugins: { mode: 'all', list: [] },
+  };
+  await ensureDirs(botId);
+  await writeJson(p.config, deepMerge(BOT_DEFAULTS, botCfg));
+  moved.push(rel(p.config));
+
+  // 2) 数据文件
+  for (const [from, to] of [
+    [path.join(DIRS.data, 'groups.json'), p.groups],
+    [path.join(DIRS.data, 'roles.json'), p.roles],
+    [path.join(DIRS.data, 'quota.json'), p.quota],
+    [path.join(DIRS.data, 'plugins.json'), p.pluginState],
+  ]) {
+    if (await moveFile(from, to)) moved.push(rel(to));
+  }
+
+  // 3) 插件存档
+  for (const [dir, target, ext] of [
+    [path.join(DIRS.data, 'plugins'), p.pluginDataDir, '.json'],
+    [path.join(DIRS.logs, 'plugins'), p.pluginLogDir, '.log'],
+    [path.join(DIRS.config, 'plugins'), p.pluginConfigDir, '.json'],
+  ]) {
+    try {
+      const files = await fs.readdir(dir);
+      for (const f of files.filter((x) => x.endsWith(ext))) {
+        if (await moveFile(path.join(dir, f), path.join(target, f))) {
+          moved.push(rel(path.join(target, f)));
+        }
+      }
+    } catch {
+      /* 目录不存在，正常 */
+    }
+  }
+
+  // 4) 重写全局配置，只留全局字段
+  await writeJson(PATHS.globalConfig, {
+    logLevel: legacy.logLevel ?? GLOBAL_DEFAULTS.logLevel,
+    cooldownHint: legacy.cooldownHint ?? GLOBAL_DEFAULTS.cooldownHint,
+    webui: legacy.webui ?? GLOBAL_DEFAULTS.webui,
+    logs: legacy.logs ?? GLOBAL_DEFAULTS.logs,
+    plugins: legacy.plugins ?? GLOBAL_DEFAULTS.plugins,
+  });
+  moved.push(rel(PATHS.globalConfig));
+
+  // 5) 根目录旧配置如果还在，删掉
+  if (await exists(PATHS.legacyConfig)) await fs.unlink(PATHS.legacyConfig);
+
+  // 6) 清掉搬空了的旧目录
+  for (const d of [
+    path.join(DIRS.data, 'plugins'),
+    path.join(DIRS.logs, 'plugins'),
+    path.join(DIRS.config, 'plugins'),
+  ]) {
+    try {
+      const rest = await fs.readdir(d);
+      if (!rest.length) await fs.rmdir(d);
+    } catch {
+      /* 不存在就忽略 */
+    }
+  }
+
+  await writeJson(PATHS.migratedFlag, { at: Date.now(), botId, moved: moved.length });
+  return { migrated: true, botId, moved };
+}
+
+/* ------------------------------------------------------------------ */
+/* 凭证                                                                */
+/* ------------------------------------------------------------------ */
+
+/** 首启向导：给指定机器人补齐 AppID / AppSecret */
+export async function ensureBotCredentials(botId) {
+  const cfg = await loadBotConfig(botId);
   if (cfg.appId && cfg.appSecret) return cfg;
 
   if (!stdin.isTTY) {
     throw new Error(
-      '缺少 AppID / AppSecret。请在 config.json 中填写，或设置环境变量 QQ_BOT_APPID / QQ_BOT_SECRET，或打开可视化面板配置。',
+      `机器人 ${botId} 缺少 AppID / AppSecret。请在 ${rel(botPaths(botId).config)} 中填写，` +
+        `或打开可视化面板配置。`,
     );
   }
 
-  console.log('\n首次运行，请输入 QQ 开放平台的机器人凭证（在 q.qq.com 管理端可查看）\n');
+  console.log(`\n机器人 ${botId} 还没有凭证，请输入 QQ 开放平台的信息（在 q.qq.com 管理端可查看）\n`);
   const rl = readline.createInterface({ input: stdin, output: stdout });
   try {
     if (!cfg.appId) cfg.appId = (await rl.question('AppID: ')).trim();
@@ -126,7 +395,7 @@ export async function ensureCredentials(cfg) {
   }
 
   if (!cfg.appId || !cfg.appSecret) throw new Error('AppID 或 AppSecret 为空，已退出。');
-  await saveConfig(cfg);
-  console.log(`\n已保存到 ${CONFIG_PATH}\n`);
+  await saveBotConfig(botId, cfg);
+  console.log(`\n已保存到 ${rel(botPaths(botId).config)}\n`);
   return cfg;
 }

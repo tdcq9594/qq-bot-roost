@@ -1,32 +1,47 @@
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import process from 'node:process';
-import { loadConfig, ensureCredentials, saveConfig, ROOT, CONFIG_PATH } from './config.js';
-import { createLogger, setLevel, getLevel } from './logger.js';
-import { TokenManager } from './token.js';
-import { QQApi } from './api.js';
-import { Gateway } from './gateway.js';
-import { buildMessage, isMessageEvent } from './message.js';
-import { Registry } from './plugin/context.js';
-import { PluginManager } from './plugin/loader.js';
+import {
+  loadGlobalConfig,
+  saveGlobalConfig,
+  loadBotConfig,
+  loadAllBotConfigs,
+  saveBotConfig,
+  createBotConfig,
+  ensureBotCredentials,
+  migrateToMultiBot,
+} from './config.js';
+import { DIRS, PATHS, botPaths, listBotIds, ensureDirs, rel } from './paths.js';
+import { createLogger, setLevel, getLevel, attachLogFile, flushLogs } from './logger.js';
+import { BotRuntime } from './bot.js';
 import { runtime, sanitizePayload } from './runtime.js';
-import { GroupStore } from './groups.js';
-import { RoleStore, LEVEL, NO_PERM, levelName, parseLevel, parseScope, scopeOf } from './roles.js';
+import { LEVEL, NO_PERM, levelName, parseLevel, parseScope, scopeOf } from './roles.js';
+import { openBrowser } from './browser.js';
 import { startWebServer } from './web/server.js';
+
+/* ------------------------------------------------------------------ */
+/* 开箱即用：先把运行环境检查清楚，别让人对着莫名其妙的报错猜              */
+/* ------------------------------------------------------------------ */
+
+const MIN_NODE_MAJOR = 22;
+const nodeMajor = Number(process.versions.node.split('.')[0]);
+if (!Number.isFinite(nodeMajor) || nodeMajor < MIN_NODE_MAJOR) {
+  console.error(
+    `\n需要 Node.js ${MIN_NODE_MAJOR} 或更高版本，当前是 ${process.versions.node}。\n` +
+      `本项目用到了内置的全局 WebSocket 和 fetch，低版本跑不起来。\n` +
+      `去 https://nodejs.org/ 装一个 LTS 版本即可，不需要 npm install。\n`,
+  );
+  process.exit(1);
+}
 
 const log = createLogger('core');
 
-/** 已知的系统事件，其余的在 debug 级别打印一下，避免新事件被静默吞掉 */
-const KNOWN_SYSTEM_EVENTS = new Set([
-  'GROUP_ADD_ROBOT',
-  'GROUP_DEL_ROBOT',
-  'FRIEND_ADD',
-  'FRIEND_DEL',
-  'C2C_MSG_REJECT',
-  'C2C_MSG_RECEIVE',
-  'GROUP_MSG_REJECT',
-  'GROUP_MSG_RECEIVE',
-]);
+/**
+ * 已知的系统事件不再单独维护一份白名单——全部事件登记在 src/events.js。
+ * 这里只保留一个提示：收到登记表里没有的事件时，说明官方加了新事件，
+ * 需要补登记（但不影响转发给插件）。
+ */
 const args = new Set(process.argv.slice(2));
 const MOCK = args.has('--mock');
 const CHECK_ONLY = args.has('--check');
@@ -37,14 +52,23 @@ if (args.has('--help') || args.has('-h')) {
 QQ 机器人内核
 
 用法:
-  node src/main.js              连接 QQ，正常跑
+  node src/main.js              连接 QQ，正常跑（会自动打开面板）
+  node src/main.js --no-open    同上，但不自动开浏览器
   node src/main.js --check      只验证 AppID/AppSecret 和网关，不常驻
   node src/main.js --mock       不连 QQ，用本地假消息开发插件
   node src/main.js --mock --serve   只启动可视化面板，不读标准输入（调界面用）
+  node src/main.js --force      已经有实例在跑时，强行再开一个（不推荐）
   node src/main.js --help       看这个帮助
 
+同一个 AppID 默认只允许一个实例，重复启动会拒绝并给出 PID。
+面板端口被占用时会自动顺延（默认最多试 20 个），实际地址看启动日志。
+
 配置:
-  config.json                   AppID / AppSecret / intents / owners / webui
+  config/bot.json               本体配置（AppID / AppSecret / intents / owners / webui）
+  config/plugins/<插件id>.json   插件配置，首次加载自动生成
+  logs/bot.log                  本体日志（含所有插件输出）
+  logs/plugins/<插件id>.log      单个插件的日志
+  data/                         运行时数据（存档、权限、额度），不要手改
   环境变量                       QQ_BOT_APPID / QQ_BOT_SECRET / QQ_BOT_OWNERS
   可视化面板                     默认 http://127.0.0.1:15207
 `);
@@ -52,87 +76,16 @@ QQ 机器人内核
 }
 
 /* ------------------------------------------------------------------ */
-/* 消息前置检查：去重、限流、白名单                                      */
+/* 消息前置检查已迁到 src/pipeline.js（可插拔中间件），这里不再硬编码    */
 /* ------------------------------------------------------------------ */
-
-function createGuards(cfg) {
-  const seen = new Map(); // msgId -> ts
-  const rate = new Map(); // chatId -> { count, start }
-
-  return {
-    /** 返回 true 表示应当继续处理 */
-    check(msg) {
-      // 1) 去重：同一条消息可能因重连被重复投递
-      const win = (cfg.dedupWindowSec ?? 0) * 1000;
-      if (win > 0 && msg.id) {
-        const now = Date.now();
-        const hit = seen.get(msg.id);
-        if (hit && now - hit < win) {
-          runtime.bump('dedup');
-          return false;
-        }
-        seen.set(msg.id, now);
-        if (seen.size > 1000) {
-          for (const [k, t] of seen) {
-            if (now - t > win) seen.delete(k);
-            else break;
-          }
-        }
-      }
-
-      // 2) 白名单
-      const wl = cfg.whitelist ?? {};
-      if (wl.enabled) {
-        const okGroup = msg.kind === 'group' && (wl.groups ?? []).includes(msg.groupId);
-        const okUser = (wl.users ?? []).includes(msg.userId);
-        if (!okGroup && !okUser) {
-          runtime.bump('rejected');
-          log.debug(`白名单拦截: kind=${msg.kind} group=${msg.groupId} user=${msg.userId}`);
-          return false;
-        }
-      }
-
-      // 3) 限流：每个会话每分钟上限。
-      //    只对「@机器人」或「带命令前缀」的消息生效——
-      //    普通聊天会先交给插件判断，不该因为闲聊把额度耗光。
-      const rl = cfg.rateLimit ?? {};
-      const addressed = msg.mentioned || msg.isCommand;
-      if (rl.enabled && msg.chatId && addressed) {
-        const limit = Math.max(1, rl.perChatPerMinute ?? 30);
-        const now = Date.now();
-        const rec = rate.get(msg.chatId) ?? { count: 0, start: now };
-        if (now - rec.start > 60_000) {
-          rec.count = 0;
-          rec.start = now;
-        }
-        rec.count += 1;
-        rate.set(msg.chatId, rec);
-
-        // 会话可能很多，定期清掉过期的窗口，避免 Map 无限增长
-        if (rate.size > 500) {
-          for (const [k, v] of rate) {
-            if (now - v.start > 60_000) rate.delete(k);
-          }
-        }
-        if (rec.count > limit) {
-          runtime.bump('limited');
-          if (rec.count === limit + 1) {
-            msg.reply(`本会话每分钟最多 ${limit} 条，请稍后再试。`).catch(() => {});
-          }
-          return false;
-        }
-      }
-
-      return true;
-    },
-  };
-}
 
 /* ------------------------------------------------------------------ */
 /* 核心命令：不依赖任何插件，保证机器人一启动就能用                      */
 /* ------------------------------------------------------------------ */
 
-function registerCoreCommands(registry, { cfg, plugins, tokens, roles, claim }) {
+function registerCoreCommands(rt) {
+  const { cfg, registry, plugins, tokens, roles, claim, outbound, session, id } = rt;
+  const save = () => saveBotConfig(id, cfg);
   const P = cfg.commandPrefix || '/';
   const isOwner = (uid) => cfg.owners.includes(uid);
 
@@ -232,7 +185,7 @@ function registerCoreCommands(registry, { cfg, plugins, tokens, roles, claim }) 
 
   core('claim', { desc: '认领主人身份，需要启动日志里的认领码', usage: `${P}claim <认领码>` }, async (msg) => {
     if (cfg.owners.length > 0) {
-      return msg.reply('已经设置过主人了。如需变更，请改 config.json 的 owners，或在面板里配置。');
+      return msg.reply('已经设置过主人了。如需变更，请改 config/bot.json 的 owners，或在面板里配置。');
     }
     if (!claim.code) {
       return msg.reply('当前没有可用的认领码，请重启机器人后再试。');
@@ -248,8 +201,8 @@ function registerCoreCommands(registry, { cfg, plugins, tokens, roles, claim }) 
     }
     cfg.owners.push(msg.userId);
     claim.code = '';
-    await saveConfig(cfg);
-    await msg.reply(`已把你设为主人：${msg.userId}\n已写入 config.json，重启后依然有效。`);
+    await save();
+    await msg.reply(`已把你设为主人：${msg.userId}\n已写入该机器人的配置文件，重启后依然有效。`);
   });
 
   /** 运行状态总览 */
@@ -275,6 +228,25 @@ function registerCoreCommands(registry, { cfg, plugins, tokens, roles, claim }) 
 
     lines.push(`消息: 收 ${runtime.counters.recv} / 发 ${runtime.counters.sent} / 命令 ${runtime.counters.commands}`);
     lines.push(`插件: ${running}/${list.length} 运行中`);
+
+    // 官方接口的额度与窗口状态，出问题时能一眼看出是哪里卡住
+    if (outbound) {
+      const q = await outbound.quotaSnapshot();
+      const used = q[`${msg.kind}:${msg.chatId}`] ?? 0;
+      lines.push(
+        `本会话主动消息: ${used}/${outbound.dailyActive} 条（今日）` +
+          `${used >= outbound.dailyActive ? ' · 已用完，需等用户 @ 才能继续' : ''}`,
+      );
+      if (outbound.stats.degraded) lines.push(`被动超窗降级: ${outbound.stats.degraded} 次`);
+      if (outbound.stats.expired) lines.push(`回复过期被拒: ${outbound.stats.expired} 次`);
+    }
+    if (session) {
+      const s = session.snapshot();
+      const remain = session.stickyRemain(msg.chatId);
+      if (remain > 0) lines.push(`免@窗口: 还剩 ${remain} 秒`);
+      if (s.pending) lines.push(`等待中的多轮对话: ${s.pending} 个`);
+    }
+
     lines.push(`内存: ${Math.round(process.memoryUsage().rss / 1048576)} MB`);
     await msg.reply(lines.join('\n'));
   });
@@ -450,7 +422,7 @@ function registerCoreCommands(registry, { cfg, plugins, tokens, roles, claim }) 
       }
       const target = scopeText ? parseScope(scopeText, msg) : scope;
       if (!target) return msg.reply(`作用域写法不对: ${scopeText}`);
-      if (lv === LEVEL.owner) return msg.reply('主人只能在 config.json 的 owners 里设置');
+      if (lv === LEVEL.owner) return msg.reply('主人只能在 config/bot.json 的 owners 里设置');
 
       const actor = await levelOf(msg.userId, target);
       if (actor > LEVEL.manager) {
@@ -541,225 +513,78 @@ function registerCoreCommands(registry, { cfg, plugins, tokens, roles, claim }) 
 }
 
 /* ------------------------------------------------------------------ */
-/* 事件分发                                                            */
-/* ------------------------------------------------------------------ */
-
-/** 把收到的消息写进日志，可按来源类型屏蔽 */
-function logIncoming(msg, cfg) {
-  const ml = cfg.messageLog ?? {};
-  if (ml.enabled === false) return;
-  if ((ml.muteKinds ?? []).includes(msg.kind)) return;
-
-  const content = msg.content.length > 120 ? msg.content.slice(0, 120) + '…' : msg.content;
-  const who = msg.userName
-    ? `${msg.userName}(${msg.userId.slice(0, 8)})`
-    : msg.userId.slice(0, 8) || '-';
-  const where = msg.groupId ? msg.groupId.slice(0, 10) : '-';
-  log.info(`收到 ${msg.kind} 会话:${where} 来自:${who} 内容:${content || '(空)'}`);
-}
-
-function createDispatcher({ registry, api, cfg, plugins, guards, groups, roles }) {
-  const isOwner = (uid) => cfg.owners.includes(uid);
-
-  return async function dispatch(eventName, d) {
-    runtime.lastEventAt = Date.now();
-    runtime.messageEvent = eventName;
-    runtime.bumpEvent(eventName);
-    // 只留最近一条，截断防止把大对象塞进状态里
-    // 只有 debug 级别才保留完整（已脱敏）报文；平时只留摘要，省一次深拷贝
-    if (getLevel() === 'debug') {
-      runtime.lastRaw = {
-        name: eventName,
-        at: Date.now(),
-        payload: sanitizePayload(d).slice(0, 1500),
-      };
-    } else {
-      runtime.lastRaw = {
-        name: eventName,
-        at: Date.now(),
-        payload: JSON.stringify({
-          content: String(d?.content ?? '').slice(0, 200),
-          group_openid: d?.group_openid ?? '',
-          user: d?.author?.member_openid ?? d?.author?.user_openid ?? '',
-          id: d?.id ?? '',
-        }).slice(0, 600),
-      };
-    }
-
-    if (!isMessageEvent(eventName)) {
-      // 未知事件不再静默丢弃，留个线索
-      if (!KNOWN_SYSTEM_EVENTS.has(eventName)) {
-        log.debug(`收到未处理的事件 ${eventName}: ${sanitizePayload(d).slice(0, 300)}`);
-      }
-      // 入群 / 退群：维护群档案；入群时给邀请人授予本群管理员
-      if (eventName === 'GROUP_ADD_ROBOT') {
-        const gid = d?.group_openid;
-        const inviter = d?.op_member_openid || '';
-        await groups.onAdded(gid, inviter);
-        // 邀请人默认成为「该群」管理员（1 级），只影响这一个群。
-        // 不再顺带把人设成全局主人——那是把最高权限给了一个可能不相干的人。
-        if (inviter && gid) {
-          const gScope = `group:${gid}`;
-          if ((await roles.levelIn(gScope, inviter)) >= NO_PERM) {
-            await roles.set(gScope, inviter, LEVEL.admin);
-            log.info(`邀请人 ${inviter} 已设为 ${gScope} 的管理员`);
-          }
-        }
-      } else if (eventName === 'GROUP_DEL_ROBOT') {
-        await groups.onRemoved(d?.group_openid);
-      }
-
-      for (const l of registry.listeners.get(eventName) ?? []) {
-        try {
-          await l.handler(d, { event: eventName, api });
-        } catch (e) {
-          runtime.bump('errors');
-          log.error(`监听器 ${l.pluginId} 处理 ${eventName} 出错:`, e.message);
-        }
-      }
-      return;
-    }
-
-    const msg = buildMessage(eventName, d, { api, cfg });
-    runtime.bump('recv');
-    runtime.touchChat(msg.chatId, msg.kind);
-
-    // 先登记群，再做拦截：被限流/白名单拦掉的消息也说明这个群存在
-    if (msg.kind === 'group' && msg.groupId) await groups.touch(msg.groupId);
-
-    // 报文里带 member_role=owner 的就是群主，比「谁邀请机器人」更准
-    if (msg.kind === 'group' && msg.raw?.author?.member_role === 'owner') {
-      await groups.setOwner(msg.groupId, msg.userId);
-      const gScope = `group:${msg.groupId}`;
-      if ((await roles.levelIn(gScope, msg.userId)) >= NO_PERM) {
-        await roles.set(gScope, msg.userId, LEVEL.admin);
-        log.info(`群主 ${msg.userId} 自动获得 ${gScope} 的管理员权限`);
-      }
-    }
-
-    logIncoming(msg, cfg);
-
-    if (!guards.check(msg)) return;
-
-    if (msg.isCommand) {
-      const entry = registry.commands.get(msg.command);
-      if (entry) {
-        // 鉴权：本会话等级只算一次，命令判定和插件共用
-        const scope = scopeOf(msg);
-        if (entry.admin || entry.globalAdmin) {
-          const lv = await roles.effective(scope, msg.userId, { owners: cfg.owners });
-          if (entry.admin && lv > LEVEL.admin) {
-            return msg.reply(
-              `需要管理员权限才能用这个命令（你当前是${levelName(lv)}）。\n` +
-                `发 ${cfg.commandPrefix || '/'}admin me 查看自己的权限。`,
-            );
-          }
-          if (entry.globalAdmin) {
-            // 全局命令要求「全局」等级，不能拿某个群的等级来顶
-            const gl = cfg.owners.includes(msg.userId)
-              ? LEVEL.owner
-              : await roles.levelIn('global', msg.userId);
-            if (gl > LEVEL.admin) {
-              return msg.reply('这个命令影响全局，需要「全局管理员」权限。');
-            }
-          }
-        }
-        const required = (entry.pattern?.match(/<[^>]+>/g) ?? []).length;
-        if (msg.args.length < required) {
-          return msg.reply(`参数不够\n用法: ${entry.usage}`);
-        }
-        runtime.bump('commands');
-        try {
-          await entry.handler(msg, { args: msg.args, raw: msg.content });
-        } catch (e) {
-          runtime.bump('errors');
-          log.error(`命令 ${entry.name}（插件 ${entry.pluginId}）执行出错:`, e.stack || e.message);
-          await msg.reply(`执行出错: ${e.message}`).catch(() => {});
-        }
-        return;
-      }
-      const P = cfg.commandPrefix || '/';
-      return msg.reply(`没有这个命令：${P}${msg.command}\n发 ${P}help 查看全部命令`).catch(() => {});
-    }
-
-    // 非命令消息：全部交给监听者判断，谁回应就留下，没人回应则静默丢弃。
-    // 这样关键词玩法、被动触发才能工作，也不会让机器人对群里每句话都插话。
-    let handled = false;
-    for (const evt of ['message', eventName]) {
-      for (const l of registry.listeners.get(evt) ?? []) {
-        try {
-          const ret = await l.handler(msg);
-          // 两种「我处理了」的表达：显式 return true，或者已经发过消息
-          if (ret === true || msg.replied) handled = true;
-        } catch (e) {
-          runtime.bump('errors');
-          log.error(`监听器 ${l.pluginId} 处理 ${evt} 出错:`, e.stack || e.message);
-        }
-      }
-    }
-    if (!handled) runtime.bump('ignored');
-  };
-}
-
-/* ------------------------------------------------------------------ */
 /* Mock 模式：没有凭证也能开发插件                                       */
 /* ------------------------------------------------------------------ */
 
-function createMockApi() {
+function createMockApi(botName) {
   const echo = (scene) => async (target, body) => {
     runtime.bump('sent');
-    console.log(`\n→ [${scene} ${target}] ${body?.content ?? JSON.stringify(body)}`);
+    console.log(`\n→ [${botName}] [${scene} ${target}] ${body?.content ?? JSON.stringify(body)}`);
     return { id: 'mock', timestamp: Date.now() };
   };
   return {
     sendGroup: echo('群'),
     sendC2C: echo('私聊'),
-    postGroupFile: async () => ({ file_info: 'mock' }),
-    postC2CFile: async () => ({ file_info: 'mock' }),
     uploadMedia: async () => ({ file_info: 'mock', ttl: 0 }),
     uploadLocalFile: async () => ({ file_info: 'mock', ttl: 0 }),
     getGateway: async () => ({ url: 'wss://mock' }),
     getMe: async () => ({ username: 'mock-bot', id: '0' }),
+    retractGroupMessage: async () => ({}),
+    retractC2CMessage: async () => ({}),
+    putInteraction: async () => ({}),
   };
 }
 
-async function runMock(cfg, registry, plugins, groups, roles) {
+/**
+ * mock 模式：从标准输入读假消息，喂给第一个机器人。
+ * 多机器人时想测哪个，用 !bot <id> 切换。
+ */
+async function runMock(runtimes) {
   console.log('\n=== Mock 模式 ===');
-  console.log('不连接 QQ，用本地假消息验证插件逻辑。输入内容回车发送，Ctrl+C 退出。\n');
+  console.log('不连接 QQ，用本地假消息验证插件逻辑。输入内容回车发送，Ctrl+C 退出。');
+  if (runtimes.length > 1) {
+    console.log(`可用机器人: ${runtimes.map((r) => r.id).join(' / ')}，用 !bot <id> 切换\n`);
+  } else {
+    console.log('');
+  }
 
-  const guards = createGuards(cfg);
-  const dispatch = createDispatcher({ registry, api: createMockApi(), cfg, plugins, guards, groups, roles });
-  let asUser = null; // !as 可以切换发送者，方便测多级权限
-  const currentUser = () => asUser ?? cfg.owners[0] ?? 'mock-user-openid';
+  let cur = runtimes[0];
+  let asUser = null;
+  const currentUser = () => asUser ?? cur.cfg.owners[0] ?? 'mock-user-openid';
   const fakeGroup = 'mock-group-openid';
   let seq = 0;
 
-  // 普通文本 = 一条群 @ 消息；以 ! 开头 = 模拟系统事件
-  //   !addbot <群openid> <邀请人openid>   模拟机器人被拉进群
-  //   !delbot <群openid>                  模拟机器人被移出群
   const feed = async (line) => {
     const t = line.trim();
+
+    if (t.startsWith('!bot')) {
+      const [, id] = t.split(/\s+/);
+      const next = runtimes.find((r) => r.id === id);
+      if (!next) return console.log(`[模拟] 没有机器人 ${id}，可用: ${runtimes.map((r) => r.id).join('/')}`);
+      cur = next;
+      return console.log(`[模拟] 当前机器人切换为 ${cur.id}`);
+    }
+    if (t.startsWith('!as')) {
+      const [, id] = t.split(/\s+/);
+      asUser = id || null;
+      return console.log(`[模拟] 发送者切换为 ${currentUser()}`);
+    }
     if (t.startsWith('!addbot')) {
       const [, gid = fakeGroup, inviter = 'mock-inviter'] = t.split(/\s+/);
-      console.log(`[模拟] 机器人被 ${inviter} 拉进群 ${gid}`);
-      return dispatch('GROUP_ADD_ROBOT', {
+      console.log(`[模拟] ${cur.id} 被 ${inviter} 拉进群 ${gid}`);
+      return cur.dispatch('GROUP_ADD_ROBOT', {
         group_openid: gid,
         op_member_openid: inviter,
         timestamp: String(Date.now()),
       });
     }
-    if (t.startsWith('!as')) {
-      const [, id] = t.split(/\s+/);
-      asUser = id || null;
-      console.log(`[模拟] 发送者切换为 ${currentUser()}`);
-      return;
-    }
     if (t.startsWith('!delbot')) {
       const [, gid = fakeGroup] = t.split(/\s+/);
-      console.log(`[模拟] 机器人被移出群 ${gid}`);
-      return dispatch('GROUP_DEL_ROBOT', { group_openid: gid, timestamp: String(Date.now()) });
+      console.log(`[模拟] ${cur.id} 被移出群 ${gid}`);
+      return cur.dispatch('GROUP_DEL_ROBOT', { group_openid: gid, timestamp: String(Date.now()) });
     }
-    return dispatch('GROUP_AT_MESSAGE_CREATE', {
+
+    return cur.dispatch('GROUP_AT_MESSAGE_CREATE', {
       id: `mock-${++seq}`,
       content: line,
       group_openid: fakeGroup,
@@ -768,17 +593,28 @@ async function runMock(cfg, registry, plugins, groups, roles) {
     });
   };
 
+  const send = (line) => {
+    Promise.resolve(feed(line)).catch((e) => log.error('mock 处理出错:', e.message));
+  };
+
   if (!process.stdin.isTTY) {
     const chunks = [];
     for await (const chunk of process.stdin) chunks.push(chunk);
     const lines = Buffer.concat(chunks).toString('utf8').split(/\r?\n/);
+    const jobs = [];
     for (const line of lines) {
       if (!line.trim()) continue;
       console.log(`你> ${line}`);
-      await feed(line);
+      if (line.trim().startsWith('!')) {
+        // 控制命令（!bot / !as / !addbot）必须按顺序执行，
+        // 否则「切机器人」会晚于后面那条消息生效
+        await feed(line).catch((e) => log.error('mock 出错:', e.message));
+      } else {
+        // 普通消息并发投递：否则命令里的 ctx.prompt() 会卡住输入循环
+        jobs.push(Promise.resolve(feed(line)).catch((e) => log.error('mock 出错:', e.message)));
+      }
     }
-    await groups.flush();
-    await roles.flush().catch(() => {});
+    await Promise.allSettled(jobs);
     return;
   }
 
@@ -792,11 +628,9 @@ async function runMock(cfg, registry, plugins, groups, roles) {
       break;
     }
     if (!line.trim()) continue;
-    await feed(line);
+    send(line);
   }
   rl.close();
-  await groups.flush();
-  await roles.flush().catch(() => {});
 }
 
 /* ------------------------------------------------------------------ */
@@ -804,123 +638,198 @@ async function runMock(cfg, registry, plugins, groups, roles) {
 /* ------------------------------------------------------------------ */
 
 async function main() {
-  const cfg = await loadConfig();
-  setLevel(cfg.logLevel);
+  const globalCfg = await loadGlobalConfig();
+  setLevel(globalCfg.logLevel);
   runtime.startedAt = Date.now();
 
-  const registry = new Registry();
-  const groups = new GroupStore();
-  const roles = new RoleStore();
-  // 未设置主人时生成一次性认领码，避免群里任何人抢先 /claim 成为主人
-  const claim = { code: '' };
-  let tokens = null;
-  let api = null;
-
-  if (!MOCK) {
-    await ensureCredentials(cfg);
-    tokens = new TokenManager(cfg);
-    api = new QQApi({ tokenManager: tokens, baseUrl: cfg.baseUrl });
-
-    log.info('正在验证凭证...');
-    try {
-      await tokens.verify();
-      log.info('凭证有效');
-    } catch (e) {
-      log.error(e.message);
-      process.exit(1);
-    }
-
-    if (CHECK_ONLY) {
-      const gw = await api.getGateway();
-      log.info(`自检通过，网关: ${gw.url}`);
-      return;
-    }
-  } else {
-    api = createMockApi();
+  if (globalCfg.logs?.enabled !== false) {
+    await attachLogFile('core', PATHS.coreLog, { maxBytes: globalCfg.logs?.maxBytes });
   }
 
-  const plugins = new PluginManager({
-    pluginsDir: path.join(ROOT, 'plugins'),
-    registry,
-    api,
-    cfg,
-    groups,
-    roles,
-    isOwner: (uid) => cfg.owners.includes(uid),
-  });
+  // 单机器人 → 多机器人结构迁移（只跑一次）
+  const mig = await migrateToMultiBot();
+  if (mig.migrated) {
+    log.info(`已迁移到多机器人结构：机器人 ${mig.botId}，搬移 ${mig.moved.length} 个文件`);
+  }
 
-  registerCoreCommands(registry, { cfg, plugins, tokens, roles, claim });
-  await plugins.scan();
+  let botCfgs = await loadAllBotConfigs();
 
-  let gateway = null;
+  // 全新安装：建一个默认机器人
+  if (!botCfgs.length) {
+    const id = 'main';
+    await ensureDirs(id);
+    await createBotConfig(id, { name: '默认机器人' });
+    log.info(`已创建默认机器人配置: ${rel(botPaths(id).config)}`);
+    botCfgs = [await loadBotConfig(id)];
+  }
 
-  // 可视化面板（mock 模式也可用，方便调界面）
-  const web = startWebServer({
-    cfg,
-    plugins,
-    groups,
-    roles,
-    getGateway: () => gateway,
-    tokens,
-    api,
-    saveConfig,
-    onConfigApplied: async () => {
-      if (gateway) await gateway.restart();
+  // 建运行时
+  const runtimes = [];
+  for (const cfg of botCfgs) {
+    if (cfg.enabled === false) {
+      log.info(`机器人 ${cfg.id}（${cfg.name}）已禁用，跳过`);
+      continue;
+    }
+    if (!MOCK && (!cfg.appId || !cfg.appSecret)) {
+      await ensureBotCredentials(cfg.id);
+    }
+    const rt = new BotRuntime({
+      cfg,
+      globalCfg,
+      mock: MOCK,
+      registerCore: (r) => registerCoreCommands(r),
+      makeMockApi: (r) => createMockApi(r.name),
+    });
+    await rt.init();
+    runtimes.push(rt);
+  }
+
+  if (!runtimes.length) {
+    log.error('没有可启动的机器人，检查 config/bots/*.json 里的 enabled');
+    process.exit(1);
+  }
+  log.info(`准备启动 ${runtimes.length} 个机器人: ${runtimes.map((r) => r.id).join('、')}`);
+
+  /* ---------------- 面板 ---------------- */
+
+  let web = null;
+
+  const shutdown = async () => {
+    if (shutdown.called) return;
+    shutdown.called = true;
+    log.info('正在退出...');
+    web?.close();
+    for (const rt of runtimes) await rt.stop().catch(() => {});
+    await flushLogs().catch(() => {});
+    process.exit(0);
+  };
+  shutdown.called = false;
+
+  // 面板现在支持切换机器人，不再固定展示第一个
+  if (runtimes.length > 1) {
+    log.info(`面板可切换的机器人: ${runtimes.map((r) => r.id).join('、')}`);
+  }
+
+  web = await startWebServer({
+    globalCfg,
+    runtimes,
+    saveBotConfig,
+    saveGlobalConfig,
+    onShutdown: shutdown,
+
+    /** 面板「新建机器人」 */
+    onBotAdd: async (id, patch) => {
+      if (!MOCK && (!patch.appId || !patch.appSecret)) {
+        throw new Error('AppID 和 AppSecret 都要填');
+      }
+
+      // 上次如果用 purge=false 删过，data 目录还在。
+      // 直接新建会**静默复用**旧存档（权限、群档案、插件进度全都回来），
+      // 这种"以为删干净了其实没删"最容易出事故，所以这里直接拦住。
+      let leftover = [];
+      try {
+        leftover = await fs.readdir(botPaths(id).data);
+      } catch {
+        leftover = [];
+      }
+      if (leftover.length) {
+        throw new Error(
+          `data/bots/${id} 还留着上次删除时保留的数据（${leftover.length} 项）。` +
+            `新建会复用这些存档。要干净重来就先删掉该目录；确实想接着用旧数据，` +
+            `请手动把它移到目标位置后再建。`,
+        );
+      }
+
+      const cfg = await createBotConfig(id, {
+        name: patch.name,
+        appId: patch.appId,
+        appSecret: patch.appSecret,
+      });
+      const rt = new BotRuntime({
+        cfg,
+        globalCfg,
+        mock: MOCK,
+        registerCore: (r) => registerCoreCommands(r),
+        makeMockApi: (r) => createMockApi(r.name),
+      });
+      await rt.init();
+      runtimes.push(rt);
+      await rt.start();
+      log.info(`新建机器人 ${id}（${rt.name}）：${rt.state}`);
+      return rt;
+    },
+
+    /** 面板「删除机器人」 */
+    onBotRemove: async (id, { purge }) => {
+      const i = runtimes.findIndex((r) => r.id === id);
+      if (i >= 0) {
+        await runtimes[i].stop().catch(() => {});
+        runtimes.splice(i, 1);
+      }
+      const p = botPaths(id);
+      await fs.unlink(p.config).catch(() => {});
+      // 插件配置目录（config/bots/<id>/）
+      await fs.rm(path.dirname(p.pluginConfigDir), { recursive: true, force: true }).catch(() => {});
+      if (purge) {
+        await fs.rm(p.data, { recursive: true, force: true }).catch(() => {});
+        await fs.rm(p.logDir, { recursive: true, force: true }).catch(() => {});
+      }
+      log.info(`已删除机器人 ${id}${purge ? '（含数据与日志）' : '（保留数据）'}`);
+      if (!purge) {
+        log.warn(
+          `data/bots/${id} 和 logs/bots/${id} 保留了。注意：再用同名 id 新建会被拒绝，` +
+            `需要先手动清理该目录——否则旧存档会被静默复用。`,
+        );
+      }
     },
   });
 
-  if (MOCK && !cfg.owners.length) {
-    // mock 模式用固定码，方便自动化测试
-    claim.code = 'TEST01';
-    log.warn(`尚未设置主人。认领码: ${claim.code}（mock 固定值）`);
+  if (web && !args.has('--no-open') && globalCfg.webui?.openBrowser !== false && (!MOCK || SERVE)) {
+    if (openBrowser(web.url)) log.info('已在浏览器中打开面板');
   }
 
+  /* ---------------- mock 模式 ---------------- */
+
   if (MOCK) {
+    for (const rt of runtimes) await rt.start();
+
     if (SERVE) {
       log.info('mock + serve：只跑面板，Ctrl+C 退出');
-      process.on('SIGINT', async () => {
-        web?.close();
-        await plugins.shutdown().catch(() => {});
-        process.exit(0);
-      });
+      process.on('SIGINT', shutdown);
+      process.on('SIGTERM', shutdown);
       return new Promise(() => {});
     }
-    await runMock(cfg, registry, plugins, groups, roles);
+    await runMock(runtimes);
     web?.close();
-    await plugins.shutdown();
+    for (const rt of runtimes) await rt.stop().catch(() => {});
+    await flushLogs().catch(() => {});
     return;
   }
 
-  if (!cfg.owners.length) {
-    claim.code = randomBytes(3).toString('hex').toUpperCase();
-    log.warn(`尚未设置主人。认领码: ${claim.code}`);
-    log.warn(`在群里 @机器人 发 /claim ${claim.code} 认领，或在面板里配置 owners。`);
+  /* ---------------- 真实启动 ---------------- */
+
+  log.info(`全局配置: ${rel(PATHS.globalConfig)}`);
+  if (globalCfg.logs?.enabled !== false) {
+    log.info(`日志: ${rel(PATHS.coreLog)} · 机器人日志在 ${rel(DIRS.botsLogs)}/<id>/`);
   }
 
-  const guards = createGuards(cfg);
-  const dispatch = createDispatcher({ registry, api, cfg, plugins, guards, groups, roles });
+  // 认领码：每个机器人各自生成，避免一个码能认领所有机器人
+  for (const rt of runtimes) {
+    if (!rt.cfg.owners.length) {
+      rt.claim.code = randomBytes(3).toString('hex').toUpperCase();
+      log.warn(`[${rt.id}] 尚未设置主人。认领码: ${rt.claim.code}`);
+      log.warn(`[${rt.id}] 在群里 @机器人 发 /claim ${rt.claim.code} 认领，或在面板里配置 owners。`);
+    }
+  }
 
-  gateway = new Gateway({
-    api,
-    tokens,
-    intents: cfg.intents,
-    onDispatch: dispatch,
-  });
+  await Promise.all(runtimes.map((rt) => rt.start()));
 
-  log.info(`配置: ${CONFIG_PATH}`);
-  log.info(`intents=${cfg.intents}${cfg.intents === 1 << 25 ? '（群聊@ + 私聊）' : ''}`);
+  const online = runtimes.filter((r) => r.online);
+  log.info(`已启动 ${online.length}/${runtimes.length} 个机器人`);
+  for (const rt of runtimes) {
+    if (!rt.online) log.error(`[${rt.id}] 未连上：${rt.lastError || '未知原因'}`);
+  }
 
-  await gateway.start();
-
-  const shutdown = async () => {
-    log.info('正在退出...');
-    gateway.stop();
-    web?.close();
-    await plugins.shutdown().catch(() => {});
-    await groups.flush().catch(() => {});
-    await roles.flush().catch(() => {});
-    process.exit(0);
-  };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 }

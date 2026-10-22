@@ -9,8 +9,15 @@ const urlKey = params.get('key') || params.get('token');
 if (urlKey) localStorage.setItem('qqbot_key', urlKey);
 const ACCESS_KEY = localStorage.getItem('qqbot_key') || '';
 
+// 当前正在看的机器人。所有 /api 请求都会带上 ?bot=<id>
+let CURRENT_BOT = localStorage.getItem('qqbot_bot') || '';
+
 async function api(path, opts = {}) {
-  const res = await fetch(path, {
+  let url = path;
+  if (CURRENT_BOT && !/[?&]bot=/.test(url)) {
+    url += (url.includes('?') ? '&' : '?') + 'bot=' + encodeURIComponent(CURRENT_BOT);
+  }
+  const res = await fetch(url, {
     ...opts,
     headers: {
       'Content-Type': 'application/json',
@@ -24,6 +31,260 @@ async function api(path, opts = {}) {
   if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
   return data;
 }
+
+/* ---------------- 通用确认弹窗 ---------------- */
+
+/**
+ * 弹一个确认框，返回 Promise<boolean>。
+ * 支持 Esc 取消、Enter 确认、点遮罩取消。
+ * message 用 innerHTML 渲染，调用方只传自己写死的文案，不要塞用户输入。
+ */
+function confirmDialog({ title = '确认', message = '', okText = '确定', danger = false } = {}) {
+  const mask = $('#modalMask');
+  const btnOk = $('#modalOk');
+  const btnCancel = $('#modalCancel');
+
+  $('#modalTitle').textContent = title;
+  $('#modalBody').innerHTML = message;
+  btnOk.textContent = okText;
+  btnOk.classList.toggle('danger', danger);
+  btnOk.hidden = false;
+  btnCancel.hidden = false;
+  mask.hidden = false;
+  btnCancel.focus();
+
+  return new Promise((resolve) => {
+    const cleanup = () => {
+      btnOk.removeEventListener('click', onOk);
+      btnCancel.removeEventListener('click', onCancel);
+      mask.removeEventListener('click', onMask);
+      document.removeEventListener('keydown', onKey);
+    };
+    const done = (v) => {
+      cleanup();
+      mask.hidden = true;
+      resolve(v);
+    };
+    const onOk = () => done(true);
+    const onCancel = () => done(false);
+    const onMask = (e) => {
+      if (e.target === mask) done(false);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') done(false);
+      else if (e.key === 'Enter') done(true);
+    };
+
+    btnOk.addEventListener('click', onOk);
+    btnCancel.addEventListener('click', onCancel);
+    mask.addEventListener('click', onMask);
+    document.addEventListener('keydown', onKey);
+  });
+}
+
+/* ---------------- 机器人切换器 ---------------- */
+
+let BOTS = [];
+
+function botById(id) {
+  return BOTS.find((b) => b.id === id) ?? null;
+}
+
+function updateBotTrigger() {
+  const cur = botById(CURRENT_BOT) ?? BOTS[0] ?? null;
+  $('#botNameLabel').textContent = cur ? cur.name : '无机器人';
+  const dot = $('#botDot');
+  dot.className = 'bot-dot' + (cur?.online ? ' on' : cur ? ' off' : '');
+  dot.title = cur?.online ? '在线' : '离线';
+}
+
+function renderBotMenu(keyword = '') {
+  const kw = keyword.trim().toLowerCase();
+  const items = BOTS.filter(
+    (b) => !kw || b.id.toLowerCase().includes(kw) || b.name.toLowerCase().includes(kw),
+  );
+
+  $('#botList').innerHTML = items
+    .map((b) => {
+      const active = b.id === (CURRENT_BOT || BOTS[0]?.id);
+      const stateText = b.online ? '在线' : b.state === 'error' ? '连接失败' : '离线';
+      return `
+        <div class="bot-item${active ? ' active' : ''}" data-id="${b.id}" role="option">
+          <span class="bot-dot ${b.online ? 'on' : 'off'}"></span>
+          <span class="bot-item-main">
+            <b>${escapeHtml(b.name)}</b>
+            <i>${b.id} · ${stateText} · ${b.plugins} 个插件</i>
+          </span>
+          ${active ? '<span class="bot-check">✓</span>' : ''}
+          <button class="bot-del" data-del="${b.id}" title="删除">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+              <path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/>
+            </svg>
+          </button>
+        </div>`;
+    })
+    .join('');
+
+  $('#botEmpty').hidden = items.length > 0;
+  // 项目多时才显示搜索框，少的时候别占地方
+  $('#botSearch').hidden = BOTS.length <= 3;
+
+  $$('.bot-item').forEach((el) => {
+    el.addEventListener('click', (e) => {
+      if (e.target.closest('.bot-del')) return;
+      selectBot(el.dataset.id);
+    });
+  });
+  $$('.bot-del').forEach((el) => {
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      deleteBot(el.dataset.del);
+    });
+  });
+}
+
+async function loadBots() {
+  try {
+    const d = await api('/api/bots');
+    BOTS = d.bots ?? [];
+    if (!CURRENT_BOT || !botById(CURRENT_BOT)) {
+      CURRENT_BOT = d.current ?? BOTS[0]?.id ?? '';
+      if (CURRENT_BOT) localStorage.setItem('qqbot_bot', CURRENT_BOT);
+    }
+    updateBotTrigger();
+    renderBotMenu($('#botSearch')?.value ?? '');
+  } catch (e) {
+    $('#botNameLabel').textContent = '加载失败';
+  }
+}
+
+function openBotMenu() {
+  $('#botMenu').hidden = false;
+  $('#botTrigger').setAttribute('aria-expanded', 'true');
+  renderBotMenu($('#botSearch')?.value ?? '');
+  if (!$('#botSearch').hidden) $('#botSearch').focus();
+}
+
+function closeBotMenu() {
+  $('#botMenu').hidden = true;
+  $('#botTrigger').setAttribute('aria-expanded', 'false');
+}
+
+async function selectBot(id) {
+  if (!id) return;
+  CURRENT_BOT = id;
+  localStorage.setItem('qqbot_bot', id);
+  closeBotMenu();
+  updateBotTrigger();
+  // 所有页签的数据都跟机器人走，重拉一遍
+  await pollStatus();
+  const tab = location.hash.slice(1) || 'overview';
+  if (tab === 'config') loadConfig();
+  if (tab === 'plugins') loadPlugins();
+  if (tab === 'events') loadEvents();
+  if (tab === 'groups') loadGroups();
+  if (tab === 'roles') loadRoles();
+  await loadBots();
+}
+
+async function deleteBot(id) {
+  const b = botById(id);
+  if (!b) return;
+  closeBotMenu();
+  const ok = await confirmDialog({
+    title: `删除机器人「${b.name}」`,
+    message:
+      `将删除 <b>${id}</b> 的配置、权限、群档案、插件存档和日志。\n\n` +
+      '<b>这个操作不可撤销。</b>插件代码不会被删，只删这个机器人的数据。',
+    okText: '确认删除',
+    danger: true,
+  });
+  if (!ok) return;
+
+  try {
+    await api('/api/bots/delete', { method: 'POST', body: JSON.stringify({ id, purge: true }) });
+  } catch (e) {
+    await confirmDialog({ title: '删除失败', message: e.message, okText: '知道了' });
+    return;
+  }
+  if (CURRENT_BOT === id) {
+    CURRENT_BOT = '';
+    localStorage.removeItem('qqbot_bot');
+  }
+  await loadBots();
+  if (CURRENT_BOT) await selectBot(CURRENT_BOT);
+}
+
+/* ---------------- 新建机器人 ---------------- */
+
+function openNewBot() {
+  closeBotMenu();
+  $('#nbId').value = '';
+  $('#nbName').value = '';
+  $('#nbAppId').value = '';
+  $('#nbSecret').value = '';
+  $('#nbErr').hidden = true;
+  $('#newBotMask').hidden = false;
+  $('#nbId').focus();
+}
+
+function closeNewBot() {
+  $('#newBotMask').hidden = true;
+}
+
+async function submitNewBot() {
+  const id = $('#nbId').value.trim();
+  const err = $('#nbErr');
+  err.hidden = true;
+
+  if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(id)) {
+    err.textContent = 'ID 只能用小写字母、数字、下划线、短横线，且不能以符号开头';
+    err.hidden = false;
+    return;
+  }
+
+  const btn = $('#nbOk');
+  btn.disabled = true;
+  btn.textContent = '创建中…';
+  try {
+    await api('/api/bots', {
+      method: 'POST',
+      body: JSON.stringify({
+        id,
+        name: $('#nbName').value.trim() || id,
+        appId: $('#nbAppId').value.trim(),
+        appSecret: $('#nbSecret').value.trim(),
+      }),
+    });
+    closeNewBot();
+    await loadBots();
+    await selectBot(id);
+  } catch (e) {
+    err.textContent = e.message;
+    err.hidden = false;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '创建并连接';
+  }
+}
+
+$('#botTrigger')?.addEventListener('click', () => {
+  if ($('#botMenu').hidden) openBotMenu();
+  else closeBotMenu();
+});
+$('#botSearch')?.addEventListener('input', (e) => renderBotMenu(e.target.value));
+$('#botAddBtn')?.addEventListener('click', openNewBot);
+$('#nbCancel')?.addEventListener('click', closeNewBot);
+$('#nbOk')?.addEventListener('click', submitNewBot);
+$('#newBotMask')?.addEventListener('click', (e) => {
+  if (e.target === $('#newBotMask')) closeNewBot();
+});
+document.addEventListener('click', (e) => {
+  if (!$('#botSwitch')?.contains(e.target)) closeBotMenu();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('#botMenu').hidden) closeBotMenu();
+});
 
 /* ---------------- 主题 ---------------- */
 
@@ -101,6 +362,7 @@ function activateTab(name) {
   $$('.tab').forEach((b) => b.classList.toggle('active', b === btn));
   $$('.panel').forEach((p) => p.classList.toggle('active', p.id === `tab-${name}`));
   if (name === 'plugins') loadPlugins();
+  if (name === 'events') loadEvents();
   if (name === 'config') loadConfig();
   if (name === 'groups') loadGroups();
   if (name === 'roles') loadRoles();
@@ -190,6 +452,42 @@ $('#btnReconnect').addEventListener('click', async (e) => {
   try { await api('/api/gateway/reconnect', { method: 'POST' }); }
   catch (err) { alert('重连失败: ' + err.message); }
   finally { setTimeout(() => { e.target.disabled = false; pollStatus(); }, 1200); }
+});
+
+/* ---------------- 关闭程序 ---------------- */
+
+$('#btnShutdown')?.addEventListener('click', async () => {
+  const ok = await confirmDialog({
+    title: '关闭机器人程序',
+    message:
+      '确定要关闭吗？\n\n' +
+      '机器人会从 QQ 下线，正在进行的对话会中断。\n' +
+      '存档、权限、主动消息额度都会保存，不会丢数据。\n\n' +
+      '<b>需要重新运行 node src/main.js 才能恢复。</b>',
+    okText: '关闭程序',
+    danger: true,
+  });
+  if (!ok) return;
+
+  const btn = $('#btnShutdown');
+  btn.disabled = true;
+  btn.style.opacity = '.5';
+
+  try {
+    await api('/api/shutdown', { method: 'POST', body: '{}' });
+  } catch {
+    // 进程退出时连接会断，请求报错属于正常现象，不用提示
+  }
+
+  // 盖一个「已关闭」的提示，免得用户对着不动的界面猜
+  $('#modalTitle').textContent = '程序已关闭';
+  $('#modalBody').innerHTML =
+    '机器人已经停止，这个页面可以关掉了。\n\n' +
+    '要重新启动，在 <b>bot</b> 目录再运行一次 <b>node src/main.js</b>，' +
+    '或用 <b>start.bat</b>。';
+  $('#modalOk').hidden = true;
+  $('#modalCancel').hidden = true;
+  $('#modalMask').hidden = false;
 });
 
 $('#btnRefreshCred').addEventListener('click', async (e) => {
@@ -553,6 +851,62 @@ async function loadPlugins() {
   }
 }
 
+/* ---------------- 事件订阅与接收 ---------------- */
+
+async function loadEvents() {
+  const sum = $('#eventSummary');
+  const wrap = $('#eventGroups');
+  if (!sum || !wrap) return;
+
+  let d;
+  try {
+    d = await api('/api/events');
+  } catch (e) {
+    sum.innerHTML = `<div class="empty">加载失败: ${e.message}</div>`;
+    return;
+  }
+
+  sum.innerHTML = `
+    <div class="ev-stat"><b>${d.total}</b><span>已登记事件</span></div>
+    <div class="ev-stat"><b>${d.enabled.length}</b><span>已订阅 intent</span></div>
+    <div class="ev-stat"><b>${d.received}</b><span>收到过的事件</span></div>
+    <div class="ev-stat"><b>${d.intents}</b><span>intents 掩码</span></div>
+  `;
+
+  wrap.innerHTML = d.groups
+    .map((g) => {
+      const rows = g.items
+        .map((it) => {
+          const cls = !it.subscribed ? 'off' : it.count > 0 ? 'hit' : 'on';
+          const meta = [
+            it.intentName,
+            it.message ? `→ Message(${it.message})` : '→ 原始 d',
+            it.doc ? '' : '文档未列出',
+          ]
+            .filter(Boolean)
+            .join(' · ');
+          const right =
+            it.count > 0
+              ? `<span class="ev-count">${it.count} 次</span><span class="ev-ago">${fmtAgo(it.lastAt)}</span>`
+              : `<span class="ev-never">${it.subscribed ? '等待中' : '未订阅'}</span>`;
+          return `
+            <div class="ev-row ${cls}">
+              <b class="ev-dot ${cls}"></b>
+              <code class="ev-name">${it.name}</code>
+              <span class="ev-desc">${it.desc}<i class="ev-meta">${meta}</i></span>
+              <span class="ev-right">${right}</span>
+            </div>`;
+        })
+        .join('');
+      return `
+        <div class="ev-group">
+          <div class="ev-group-hd">${g.group}<span>${g.items.length}</span></div>
+          ${rows}
+        </div>`;
+    })
+    .join('');
+}
+
 /* ---------------- 主人与群组 ---------------- */
 
 let owners = [];
@@ -792,29 +1146,67 @@ function escapeHtml(s) {
 }
 
 function applyFilter() {
+  renderLogs();
+}
+
+/* 日志来源分类：给「来源」下拉用 */
+function logSourceOf(e) {
+  const tag = e.tag ?? '';
+  if (tag.startsWith('plugin:') || tag === 'plugins') return 'plugin';
+  if (tag === 'gateway' || tag === 'api' || tag === 'token') return 'net';
+  return 'core';
+}
+
+function logMatches(e) {
   const min = LEVEL_ORDER[$('#logLevelFilter').value] ?? 0;
-  logView.querySelectorAll('.log-line').forEach((el) => {
-    el.style.display = (LEVEL_ORDER[el.dataset.level] ?? 0) >= min ? '' : 'none';
-  });
+  if ((LEVEL_ORDER[e.level] ?? 0) < min) return false;
+
+  const src = $('#logSourceFilter').value;
+  if (src !== 'all' && logSourceOf(e) !== src) return false;
+
+  const kw = ($('#logSearch').value ?? '').trim().toLowerCase();
+  if (kw) {
+    const hay = `${e.msg ?? ''} ${e.tag ?? ''}`.toLowerCase();
+    if (!hay.includes(kw)) return false;
+  }
+  return true;
+}
+
+/** 按当前过滤条件整页重绘（切换筛选时用） */
+function renderLogs() {
+  const atBottom = logView.scrollTop + logView.clientHeight >= logView.scrollHeight - 40;
+  logView.innerHTML = '';
+  for (const e of logBuf) {
+    if (logMatches(e)) logView.appendChild(logLine(e));
+  }
+  if ($('#autoScroll').checked && atBottom) logView.scrollTop = logView.scrollHeight;
 }
 
 function appendLog(e) {
   logBuf.push(e);
   if (logBuf.length > 600) logBuf.shift();
+  if (!logMatches(e)) return;
   const el = logLine(e);
-  const min = LEVEL_ORDER[$('#logLevelFilter').value] ?? 0;
-  if ((LEVEL_ORDER[e.level] ?? 0) < min) el.style.display = 'none';
   const atBottom = logView.scrollTop + logView.clientHeight >= logView.scrollHeight - 40;
   logView.appendChild(el);
   if ($('#autoScroll').checked && atBottom) logView.scrollTop = logView.scrollHeight;
 }
 
 $('#logLevelFilter').addEventListener('change', applyFilter);
+$('#logSourceFilter').addEventListener('change', applyFilter);
+// 输入防抖：每敲一个字就重绘 600 条日志会卡
+let logSearchTimer = null;
+$('#logSearch').addEventListener('input', () => {
+  clearTimeout(logSearchTimer);
+  logSearchTimer = setTimeout(applyFilter, 180);
+});
 $('#btnClearLog').addEventListener('click', () => { logBuf = []; logView.innerHTML = ''; });
 
 async function initLogs() {
   try {
     const list = await api('/api/logs?limit=300&level=debug');
+    // 缓冲区也要清，否则切换机器人后日志会重复堆叠
+    logBuf = [];
     logView.innerHTML = '';
     list.forEach(appendLog);
     logView.scrollTop = logView.scrollHeight;
@@ -824,6 +1216,9 @@ async function initLogs() {
 /* ---------------- SSE ---------------- */
 
 function connectStream() {
+  // 调试用：地址带 ?nosse 就不建 SSE。
+  // 无头浏览器截图时 SSE 长连接会让页面一直处于加载态，截不到渲染结果。
+  if (location.search.includes('nosse')) return;
   const qs = ACCESS_KEY ? `?key=${encodeURIComponent(ACCESS_KEY)}` : '';
   const es = new EventSource(`/api/stream${qs}`);
   es.addEventListener('status', (ev) => {
@@ -841,6 +1236,7 @@ function connectStream() {
 /* ---------------- 启动 ---------------- */
 
 (async function init() {
+  await loadBots(); // 先确定当前机器人，后面的请求都会带上 ?bot=
   await pollStatus();
   await initLogs();
   connectStream();
@@ -851,4 +1247,6 @@ function connectStream() {
   loadGroups();
   const initial = location.hash.slice(1);
   if (initial) activateTab(initial);
+  // 调试用：?openmenu 直接展开机器人下拉，方便截图和检查样式
+  if (location.search.includes('openmenu')) openBotMenu();
 })();
