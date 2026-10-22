@@ -59,7 +59,7 @@ export function startWebServer({ cfg, plugins, groups, roles, getGateway, tokens
   }
 
   const host = wc.host || '127.0.0.1';
-  const port = Number(wc.port) || 8080;
+  const port = Number(wc.port) || 15207;
   const accessKey = wc.accessKey || wc.token || '';
 
   const sseClients = new Set();

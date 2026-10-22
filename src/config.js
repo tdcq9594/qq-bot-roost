@@ -21,7 +21,7 @@ const DEFAULTS = {
   webui: {
     enabled: true,
     host: '127.0.0.1',
-    port: 8080,
+    port: 15207,
     accessKey: '', // 面板访问密钥，留空则不校验
   },
 

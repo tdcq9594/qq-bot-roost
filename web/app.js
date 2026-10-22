@@ -207,7 +207,7 @@ function fillForm(c) {
   f.muteDm.checked = mute.includes('dm');
 
   f.webuiHost.value = c.webui?.host || '127.0.0.1';
-  f.webuiPort.value = c.webui?.port ?? 8080;
+  f.webuiPort.value = c.webui?.port ?? 15207;
   f.webuiAccessKey.value = c.webui?.accessKey || '';
   f.logLevel.value = c.logLevel || 'info';
 }
@@ -441,7 +441,7 @@ $('#cfgForm').addEventListener('submit', async (e) => {
     },
     webui: {
       host: f.webuiHost.value.trim() || '127.0.0.1',
-      port: Number(f.webuiPort.value) || 8080,
+      port: Number(f.webuiPort.value) || 15207,
       accessKey: f.webuiAccessKey.value.trim(),
     },
   };

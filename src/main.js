@@ -46,7 +46,7 @@ QQ 机器人内核
 配置:
   config.json                   AppID / AppSecret / intents / owners / webui
   环境变量                       QQ_BOT_APPID / QQ_BOT_SECRET / QQ_BOT_OWNERS
-  可视化面板                     默认 http://127.0.0.1:8080
+  可视化面板                     默认 http://127.0.0.1:15207
 `);
   process.exit(0);
 }
