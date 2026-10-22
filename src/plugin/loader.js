@@ -39,6 +39,12 @@ export class PluginManager {
     this.state = {}; // id -> enabled
     this.errors = new Map(); // id -> 错误信息
     this.allocations = new Map(); // id -> { base, end, index }
+    /**
+     * 插件元信息缓存：id -> { name, version, description, kind, runtime }
+     * 插件被禁用 / 卸载后 loaded 里就没有了，但面板还要显示它的名字和版本，
+     * 所以这里单独留一份，不随 unload 清除。
+     */
+    this.meta = new Map();
   }
 
   async #readState() {
@@ -91,6 +97,8 @@ export class PluginManager {
 
     for (const id of ids) {
       if (this.state[id] === false) {
+        // 禁用中：不加载，但要读一下元信息，否则面板会显示成「版本 0 / 内建」
+        await this.#peekMeta(id);
         log.info(`跳过已禁用插件: ${id}`);
         continue;
       }
@@ -271,6 +279,7 @@ export class PluginManager {
     }
 
     this.loaded.set(meta.id, { meta, ctx, dir, kind: 'internal', menuMissing });
+    this.#cacheMeta(meta.id, meta, 'internal', 'node');
     this.errors.delete(meta.id);
     log.info(`已加载内建插件 ${meta.id} (${meta.name ?? ''})`);
     return true;
@@ -381,6 +390,7 @@ export class PluginManager {
     }
 
     this.loaded.set(meta.id, { meta, host, dir, kind: 'external', menuMissing });
+    this.#cacheMeta(meta.id, meta, 'external', raw.runtime || 'python');
     this.errors.delete(meta.id);
     log.info(
       `已加载外部插件 ${meta.id} (${meta.name}) · ${host.status.runtime} · pid ${host.status.pid} · ${host.commands.length} 条命令`,
@@ -453,20 +463,65 @@ export class PluginManager {
     }
   }
 
+  /** 记下元信息，供禁用后仍能在面板正确显示 */
+  #cacheMeta(id, meta, kind, runtime) {
+    this.meta.set(id, {
+      name: meta?.name || id,
+      version: meta?.version || '',
+      description: meta?.description || '',
+      kind,
+      runtime,
+    });
+  }
+
+  /**
+   * 只在需要显示时读一下元信息，不真正加载插件。
+   * 用于「禁用中」的插件——它们没进 loaded，但面板要显示名字、版本和类型。
+   */
+  async #peekMeta(id) {
+    if (this.meta.has(id)) return;
+    const dir = path.join(this.dir, id);
+
+    // 外部插件：plugin.json 就是元信息
+    try {
+      const raw = JSON.parse(await fs.readFile(path.join(dir, 'plugin.json'), 'utf8'));
+      this.#cacheMeta(id, raw, 'external', raw.runtime || 'python');
+      return;
+    } catch {
+      /* 不是外部插件，继续看内建 */
+    }
+
+    // 内建插件：读模块导出。只 import，不调 setup，所以不会注册任何命令
+    for (const f of ['index.js', 'index.mjs', 'main.js']) {
+      const p = path.join(dir, f);
+      try {
+        await fs.access(p);
+        // 加查询串避免和已加载的模块实例撞缓存
+        const mod = await import(`${pathToFileURL(p).href}?peek=${id}`);
+        this.#cacheMeta(id, mod.default ?? {}, 'internal', 'node');
+        return;
+      } catch {
+        /* 换下一个入口文件名 */
+      }
+    }
+  }
+
   list() {
-    const ids = new Set([...this.loaded.keys(), ...Object.keys(this.state)]);
+    const ids = new Set([...this.loaded.keys(), ...Object.keys(this.state), ...this.meta.keys()]);
     return [...ids].map((id) => {
       const item = this.loaded.get(id);
+      const cached = this.meta.get(id) ?? null;
       const ext = item?.kind === 'external' ? item.host.status : null;
       return {
         id,
-        name: item?.meta?.name ?? id,
-        version: item?.meta?.version ?? '',
-        description: item?.meta?.description ?? '',
+        name: item?.meta?.name ?? cached?.name ?? id,
+        version: item?.meta?.version ?? cached?.version ?? '',
+        description: item?.meta?.description ?? cached?.description ?? '',
         enabled: this.isEnabled(id),
         loaded: Boolean(item),
-        kind: item?.kind ?? 'internal',
-        runtime: ext?.runtime ?? 'node',
+        // 未加载时用缓存里的类型，别一律当成 internal
+        kind: item?.kind ?? cached?.kind ?? 'internal',
+        runtime: ext?.runtime ?? cached?.runtime ?? 'node',
         processState: ext?.state ?? null,
         pid: ext?.pid ?? null,
         menuMissing: Boolean(item?.menuMissing),
