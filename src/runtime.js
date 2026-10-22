@@ -111,11 +111,12 @@ export const runtime = {
     return Date.now() - this.startedAt;
   },
 
-  snapshot({ credentialExpiresIn = 0, plugins = [], cfg = {} } = {}) {
+  snapshot({ credentialExpiresIn = 0, plugins = [], cfg = {}, botId = null, botName = null } = {}) {
     return {
       connected: this.connected,
-      botName: this.botName,
-      botId: this.botId,
+      // 多机器人下 botId/botName 由调用方按当前选中的机器人传入
+      botName: botName ?? this.botName,
+      botId: botId ?? this.botId,
       gatewayUrl: this.gatewayUrl,
       sessionId: this.sessionId,
       uptimeMs: this.uptimeMs,

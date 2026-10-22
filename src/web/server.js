@@ -115,7 +115,8 @@ export async function startWebServer({
   const port = Number(wc.port) || 15207;
   const accessKey = wc.accessKey || wc.token || '';
 
-  const sseClients = new Set();
+  // res -> 这个连接正在看哪个机器人，状态推送时按各自的目标过滤
+  const sseClients = new Map();
 
   /**
    * 按 ?bot=<id> 选机器人，没传就用第一个。
@@ -136,12 +137,14 @@ export async function startWebServer({
       credentialExpiresIn: Math.max(0, Math.round(((rt?.tokens?.expiresAt ?? 0) - Date.now()) / 1000)),
       plugins: rt ? rt.plugins.list() : [],
       cfg: rt?.cfg ?? {},
+      botId: rt?.id ?? null,
+      botName: rt?.name ?? null,
     });
 
-  // 日志实时推送
+  // 日志实时推送：日志是全局的，所有连接都收到同一份
   const offLog = onLog((entry) => {
     const data = `event: log\ndata: ${JSON.stringify(entry)}\n\n`;
-    for (const res of sseClients) {
+    for (const res of sseClients.keys()) {
       try {
         res.write(data);
       } catch {}
@@ -264,7 +267,7 @@ export async function startWebServer({
 
         // 状态
         if (pathname === '/api/status' && req.method === 'GET') {
-          return json(res, 200, statusPayload());
+          return json(res, 200, statusPayload(rt));
         }
 
         // 配置读取（隐藏密钥）
@@ -451,7 +454,7 @@ export async function startWebServer({
             'Cache-Control': 'no-cache',
             Connection: 'keep-alive',
           });
-          res.write(`event: status\ndata: ${JSON.stringify(statusPayload())}\n\n`);
+          res.write(`event: status\ndata: ${JSON.stringify(statusPayload(rt))}\n\n`);
           sseClients.set(res, rt.id);
           const ping = setInterval(() => {
             try {
