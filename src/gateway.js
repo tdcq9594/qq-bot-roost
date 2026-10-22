@@ -120,7 +120,13 @@ export class Gateway {
       this.#handle(payload).catch((e) => log.error('处理下行消息出错:', e.message));
     });
 
-    ws.addEventListener('error', () => log.warn('WebSocket 错误'));
+    ws.addEventListener('error', (ev) => {
+      const err = ev?.error;
+      const detail = err
+        ? [err.code, err.message || err.errno || err.name].filter(Boolean).join(' ')
+        : ev?.message || '未知错误';
+      log.warn(`WebSocket 错误: ${detail}`);
+    });
 
     ws.addEventListener('close', (ev) => {
       this.#clearTimers();
@@ -136,6 +142,7 @@ export class Gateway {
   }
 
   async #handle(p) {
+    log.debug(`<< op=${p.op}${p.t ? ' t=' + p.t : ''}${p.s !== undefined ? ' s=' + p.s : ''}`);
     switch (p.op) {
       case OP.HELLO: {
         const interval = p.d?.heartbeat_interval ?? 45000;
@@ -229,7 +236,10 @@ export class Gateway {
 
   #send(obj) {
     if (this.ws?.readyState === 1) {
+      log.debug(`>> op=${obj.op}`);
       this.ws.send(JSON.stringify(obj));
+    } else {
+      log.warn(`发送 op=${obj.op} 失败：连接未就绪（readyState=${this.ws?.readyState}）`);
     }
   }
 
