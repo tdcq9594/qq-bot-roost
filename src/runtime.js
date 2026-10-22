@@ -22,6 +22,7 @@ export const runtime = {
     dedup: 0, // 被去重拦掉
     limited: 0, // 被限流拦掉
     rejected: 0, // 被白名单拦掉
+    ignored: 0, // 收到但没有任何插件回应，静默丢弃
   },
 
   /** 每个群/用户的消息计数，最多保留 200 个键 */

@@ -65,6 +65,7 @@ export function buildMessage(eventName, d, { api, cfg }) {
     raw: d,
     mentioned,
     isCommand,
+    replied: false, // 任何发送动作都会置为 true，供内核判断「有没有插件回应」
     command: '',
     args: [],
     at: Number(d.timestamp) || Date.now(),
@@ -80,9 +81,9 @@ export function buildMessage(eventName, d, { api, cfg }) {
   // 底层发送：group 走群接口，c2c 走单聊接口
   const send = (opts, passive) => {
     const body = passive ? { msgId: msg.id, ...opts } : { ...opts };
-    if (kind === 'group') return api.sendGroup(groupId, body);
-    if (kind === 'c2c') return api.sendC2C(userId, body);
-    return Promise.resolve(null);
+    if (kind !== 'group' && kind !== 'c2c') return Promise.resolve(null);
+    msg.replied = true;
+    return kind === 'group' ? api.sendGroup(groupId, body) : api.sendC2C(userId, body);
   };
 
   /** 被动回复（带 msg_id，5 分钟内有效，msg_seq 自动递增） */

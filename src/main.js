@@ -90,9 +90,12 @@ function createGuards(cfg) {
         }
       }
 
-      // 3) 限流：每个会话每分钟上限
+      // 3) 限流：每个会话每分钟上限。
+      //    只对「@机器人」或「带命令前缀」的消息生效——
+      //    普通聊天会先交给插件判断，不该因为闲聊把额度耗光。
       const rl = cfg.rateLimit ?? {};
-      if (rl.enabled && msg.chatId) {
+      const addressed = msg.mentioned || msg.isCommand;
+      if (rl.enabled && msg.chatId && addressed) {
         const limit = Math.max(1, rl.perChatPerMinute ?? 30);
         const now = Date.now();
         const rec = rate.get(msg.chatId) ?? { count: 0, start: now };
@@ -283,10 +286,6 @@ function createDispatcher({ registry, api, cfg, plugins, guards, groups }) {
     // 先登记群，再做拦截：被限流/白名单拦掉的消息也说明这个群存在
     if (msg.kind === 'group' && msg.groupId) await groups.touch(msg.groupId);
 
-    // GROUP_MESSAGE_CREATE 有可能是全量群消息（不只 @），
-    // 只处理「@了机器人」或「带命令前缀」的，避免对群里每句话都响应
-    if (msg.kind === 'group' && !msg.mentioned && !msg.isCommand) return;
-
     if (!guards.check(msg)) return;
 
     if (msg.isCommand) {
@@ -315,16 +314,22 @@ function createDispatcher({ registry, api, cfg, plugins, guards, groups }) {
       return msg.reply(`没有这个命令：${P}${msg.command}\n发 ${P}help 查看全部命令`).catch(() => {});
     }
 
+    // 非命令消息：全部交给监听者判断，谁回应就留下，没人回应则静默丢弃。
+    // 这样关键词玩法、被动触发才能工作，也不会让机器人对群里每句话都插话。
+    let handled = false;
     for (const evt of ['message', eventName]) {
       for (const l of registry.listeners.get(evt) ?? []) {
         try {
-          await l.handler(msg);
+          const ret = await l.handler(msg);
+          // 两种「我处理了」的表达：显式 return true，或者已经发过消息
+          if (ret === true || msg.replied) handled = true;
         } catch (e) {
           runtime.bump('errors');
           log.error(`监听器 ${l.pluginId} 处理 ${evt} 出错:`, e.stack || e.message);
         }
       }
     }
+    if (!handled) runtime.bump('ignored');
   };
 }
 
