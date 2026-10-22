@@ -188,7 +188,6 @@ function fillForm(c) {
 
   owners = [...(c.owners || [])];
   renderOwners();
-  $('#autoOwner').checked = c.autoOwnerOnInvite !== false;
 
   setIntents(c.intents);
 
@@ -555,25 +554,13 @@ $('#ownerInput')?.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); addOwner(); }
 });
 
-$('#autoOwner')?.addEventListener('change', async (e) => {
-  try {
-    await api('/api/config', {
-      method: 'PUT',
-      body: JSON.stringify({ autoOwnerOnInvite: e.target.checked }),
-    });
-  } catch (err) {
-    alert('保存失败: ' + err.message);
-    e.target.checked = !e.target.checked;
-  }
-});
-
 async function loadGroups() {
   const body = $('#groupBody');
   if (!body) return;
   try {
     renderGroups(await api('/api/groups'));
   } catch (e) {
-    body.innerHTML = `<tr><td colspan="7" class="empty">加载失败: ${e.message}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="6" class="empty">加载失败: ${e.message}</td></tr>`;
   }
 }
 
@@ -589,11 +576,9 @@ function renderGroups(list) {
         <td class="mono" title="${escapeHtml(g.groupOpenid)}">${escapeHtml(shortId(g.groupOpenid))}</td>
         <td class="mono" title="${escapeHtml(g.inviterOpenid || '')}">${g.inviterOpenid ? escapeHtml(shortId(g.inviterOpenid)) : '-'}</td>
         <td class="mono" title="${escapeHtml(g.ownerOpenid || '')}">${g.ownerOpenid ? escapeHtml(shortId(g.ownerOpenid)) : '-'}</td>
-        <td><input class="inline-input admin-input" value="${escapeHtml(g.adminOpenid || '')}" placeholder="未设置"></td>
         <td><span class="badge ${g.enabled ? 'on' : 'off'}">${g.enabled ? '在用' : '已移出'}</span></td>
         <td>${g.lastActiveAt ? fmtAgo(g.lastActiveAt) : '-'}</td>
         <td class="num">
-          <button class="btn small" data-act="save">保存</button>
           <button class="btn small danger" data-act="del">删除</button>
         </td>
       </tr>`)
@@ -601,23 +586,13 @@ function renderGroups(list) {
 
   body.querySelectorAll('button[data-act]').forEach((btn) => {
     btn.addEventListener('click', async () => {
-      const tr = btn.closest('tr');
-      const id = tr.dataset.id;
+      const id = btn.closest('tr').dataset.id;
+      if (!confirm('确定删除这个群的档案？机器人不会退群，只是忘掉这条记录（权限不受影响）。')) {
+        return;
+      }
       btn.disabled = true;
       try {
-        if (btn.dataset.act === 'save') {
-          const val = tr.querySelector('.admin-input').value.trim();
-          await api(`/api/groups/${encodeURIComponent(id)}`, {
-            method: 'PUT',
-            body: JSON.stringify({ adminOpenid: val }),
-          });
-        } else {
-          if (!confirm('确定删除这个群的记录？机器人不会退群，只是忘掉它的配置。')) {
-            btn.disabled = false;
-            return;
-          }
-          await api(`/api/groups/${encodeURIComponent(id)}`, { method: 'DELETE' });
-        }
+        await api(`/api/groups/${encodeURIComponent(id)}`, { method: 'DELETE' });
         await loadGroups();
       } catch (e) {
         alert('操作失败: ' + e.message);

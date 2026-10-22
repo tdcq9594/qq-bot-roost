@@ -335,12 +335,17 @@ export function createContext({ meta, registry, api, cfg, groups, roles, levels,
     /** 等级数字转名字 */
     levelName,
 
-    /** 某人是否是指定群的管理者（默认是邀请机器人入群的人） */
+    /**
+     * 某人是否是指定群的管理员及以上。
+     * 统一看 roles 的 group 作用域（群档案里不再存权限）。
+     */
     async isGroupAdmin(groupOpenid, userId) {
-      return groups ? groups.isAdmin(groupOpenid, userId) : false;
+      if (!roles) return false;
+      const lv = await roles.effective(`group:${groupOpenid}`, userId, { owners: cfg.owners });
+      return lv <= LEVEL.admin;
     },
 
-    /** 读取群档案（邀请者、管理者、是否启用等） */
+    /** 读取群档案（邀请者、群主、是否启用等，不含权限） */
     async getGroup(groupOpenid) {
       return groups ? groups.get(groupOpenid) : null;
     },

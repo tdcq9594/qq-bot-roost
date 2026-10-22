@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import process from 'node:process';
 import { loadConfig, ensureCredentials, saveConfig, ROOT, CONFIG_PATH } from './config.js';
 import { createLogger, setLevel, getLevel } from './logger.js';
@@ -131,7 +132,7 @@ function createGuards(cfg) {
 /* 核心命令：不依赖任何插件，保证机器人一启动就能用                      */
 /* ------------------------------------------------------------------ */
 
-function registerCoreCommands(registry, { cfg, plugins, tokens, roles }) {
+function registerCoreCommands(registry, { cfg, plugins, tokens, roles, claim }) {
   const P = cfg.commandPrefix || '/';
   const isOwner = (uid) => cfg.owners.includes(uid);
 
@@ -229,11 +230,24 @@ function registerCoreCommands(registry, { cfg, plugins, tokens, roles }) {
     await msg.reply(lines.join('\n'));
   });
 
-  core('claim', { desc: '认领机器人主人身份（仅在未设置主人时可用）' }, async (msg) => {
+  core('claim', { desc: '认领主人身份，需要启动日志里的认领码', usage: `${P}claim <认领码>` }, async (msg) => {
     if (cfg.owners.length > 0) {
       return msg.reply('已经设置过主人了。如需变更，请改 config.json 的 owners，或在面板里配置。');
     }
+    if (!claim.code) {
+      return msg.reply('当前没有可用的认领码，请重启机器人后再试。');
+    }
+    const input = String(msg.args[0] ?? '').trim().toUpperCase();
+    if (!input) {
+      return msg.reply(
+        `需要认领码。\n启动日志里有一行「认领码: XXXXXX」，面板「日志」页也能看到。\n用法: ${P}claim <认领码>`,
+      );
+    }
+    if (input !== claim.code) {
+      return msg.reply('认领码不正确。');
+    }
     cfg.owners.push(msg.userId);
+    claim.code = '';
     await saveConfig(cfg);
     await msg.reply(`已把你设为主人：${msg.userId}\n已写入 config.json，重启后依然有效。`);
   });
@@ -577,22 +591,19 @@ function createDispatcher({ registry, api, cfg, plugins, guards, groups, roles }
       if (!KNOWN_SYSTEM_EVENTS.has(eventName)) {
         log.debug(`收到未处理的事件 ${eventName}: ${sanitizePayload(d).slice(0, 300)}`);
       }
-      // 入群 / 退群：维护群档案，并在必要时自动认主
+      // 入群 / 退群：维护群档案；入群时给邀请人授予本群管理员
       if (eventName === 'GROUP_ADD_ROBOT') {
         const gid = d?.group_openid;
         const inviter = d?.op_member_openid || '';
         await groups.onAdded(gid, inviter);
-        // 邀请人默认成为该群管理员（本群作用域），不影响其它群
+        // 邀请人默认成为「该群」管理员（1 级），只影响这一个群。
+        // 不再顺带把人设成全局主人——那是把最高权限给了一个可能不相干的人。
         if (inviter && gid) {
           const gScope = `group:${gid}`;
-          if (!(await roles.levelIn(gScope, inviter))) {
+          if ((await roles.levelIn(gScope, inviter)) >= NO_PERM) {
             await roles.set(gScope, inviter, LEVEL.admin);
+            log.info(`邀请人 ${inviter} 已设为 ${gScope} 的管理员`);
           }
-        }
-        if (cfg.autoOwnerOnInvite && !cfg.owners.length && inviter) {
-          cfg.owners.push(inviter);
-          await saveConfig(cfg);
-          log.info(`已自动把邀请人 ${inviter} 设为机器人主人（可在面板修改）`);
         }
       } else if (eventName === 'GROUP_DEL_ROBOT') {
         await groups.onRemoved(d?.group_openid);
@@ -620,7 +631,7 @@ function createDispatcher({ registry, api, cfg, plugins, guards, groups, roles }
     if (msg.kind === 'group' && msg.raw?.author?.member_role === 'owner') {
       await groups.setOwner(msg.groupId, msg.userId);
       const gScope = `group:${msg.groupId}`;
-      if (!(await roles.levelIn(gScope, msg.userId))) {
+      if ((await roles.levelIn(gScope, msg.userId)) >= NO_PERM) {
         await roles.set(gScope, msg.userId, LEVEL.admin);
         log.info(`群主 ${msg.userId} 自动获得 ${gScope} 的管理员权限`);
       }
@@ -800,6 +811,8 @@ async function main() {
   const registry = new Registry();
   const groups = new GroupStore();
   const roles = new RoleStore();
+  // 未设置主人时生成一次性认领码，避免群里任何人抢先 /claim 成为主人
+  const claim = { code: '' };
   let tokens = null;
   let api = null;
 
@@ -836,7 +849,7 @@ async function main() {
     isOwner: (uid) => cfg.owners.includes(uid),
   });
 
-  registerCoreCommands(registry, { cfg, plugins, tokens, roles });
+  registerCoreCommands(registry, { cfg, plugins, tokens, roles, claim });
   await plugins.scan();
 
   let gateway = null;
@@ -856,6 +869,12 @@ async function main() {
     },
   });
 
+  if (MOCK && !cfg.owners.length) {
+    // mock 模式用固定码，方便自动化测试
+    claim.code = 'TEST01';
+    log.warn(`尚未设置主人。认领码: ${claim.code}（mock 固定值）`);
+  }
+
   if (MOCK) {
     if (SERVE) {
       log.info('mock + serve：只跑面板，Ctrl+C 退出');
@@ -871,7 +890,9 @@ async function main() {
   }
 
   if (!cfg.owners.length) {
-    log.warn('尚未设置主人。在群里 @机器人 发 /claim 认领，或在可视化面板里配置 owners。');
+    claim.code = randomBytes(3).toString('hex').toUpperCase();
+    log.warn(`尚未设置主人。认领码: ${claim.code}`);
+    log.warn(`在群里 @机器人 发 /claim ${claim.code} 认领，或在面板里配置 owners。`);
   }
 
   const guards = createGuards(cfg);

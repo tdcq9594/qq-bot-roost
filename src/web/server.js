@@ -175,9 +175,6 @@ export function startWebServer({ cfg, plugins, groups, roles, getGateway, tokens
           if (body.dedupWindowSec !== undefined) {
             cfg.dedupWindowSec = Math.max(0, Number(body.dedupWindowSec) || 0);
           }
-          if (body.autoOwnerOnInvite !== undefined) {
-            cfg.autoOwnerOnInvite = Boolean(body.autoOwnerOnInvite);
-          }
           if (body.messageLog && typeof body.messageLog === 'object') {
             cfg.messageLog = {
               enabled: body.messageLog.enabled !== false,
@@ -228,7 +225,6 @@ export function startWebServer({ cfg, plugins, groups, roles, getGateway, tokens
           }
           const body = await readBody(req);
           const patch = {};
-          if (body.adminOpenid !== undefined) patch.adminOpenid = String(body.adminOpenid).trim();
           if (body.enabled !== undefined) patch.enabled = Boolean(body.enabled);
           if (body.note !== undefined) patch.note = String(body.note);
           const g = await groups.upsert(id, patch);

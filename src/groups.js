@@ -16,8 +16,11 @@ const FILE = path.join(DATA_DIR, 'groups.json');
  * 数据结构：
  * {
  *   "<group_openid>": {
- *     groupOpenid, inviterOpenid, adminOpenid,
+ *     groupOpenid, inviterOpenid, ownerOpenid,
  *     enabled, addedAt, lastActiveAt, note
+ *
+ * 注意：这里**不存权限**。谁能在本群做什么，统一看 roles.json 的 group:<id> 作用域。
+ * 群档案只负责「这个群是什么情况」。
  *   }
  * }
  */
@@ -77,7 +80,6 @@ export class GroupStore {
       groupOpenid,
       inviterOpenid: '',
       ownerOpenid: '', // 官方报文里 member_role=owner 的人，最准
-      adminOpenid: '',
       enabled: true,
       addedAt: Date.now(),
       lastActiveAt: 0,
@@ -88,17 +90,14 @@ export class GroupStore {
     return d[groupOpenid];
   }
 
-  /** 机器人被拉进群：记录邀请者，并把管理者默认设为邀请者 */
+  /** 机器人被拉进群：只记录邀请者，权限由 roles 单独授予 */
   async onAdded(groupOpenid, inviterOpenid) {
     const cur = await this.get(groupOpenid);
-    const patch = {
+    const g = await this.upsert(groupOpenid, {
       inviterOpenid: inviterOpenid || cur?.inviterOpenid || '',
       enabled: true,
       addedAt: cur?.addedAt ?? Date.now(),
-    };
-    // 已有手动设置的管理者就不覆盖
-    if (!cur?.adminOpenid && inviterOpenid) patch.adminOpenid = inviterOpenid;
-    const g = await this.upsert(groupOpenid, patch);
+    });
     log.info(`机器人入群 ${groupOpenid}，邀请者 ${inviterOpenid || '未知'}`);
     return g;
   }
@@ -117,10 +116,6 @@ export class GroupStore {
     cur.lastActiveAt = Date.now();
     this.#scheduleSave();
     return cur;
-  }
-
-  async setAdmin(groupOpenid, openid) {
-    return this.upsert(groupOpenid, { adminOpenid: openid || '' });
   }
 
   /** 从消息报文里发现群主（author.member_role === 'owner'） */
@@ -142,11 +137,4 @@ export class GroupStore {
     this.#scheduleSave();
   }
 
-  /** 该用户是否是这个群的管理者（手动设置的管理者，或识别到的群主） */
-  async isAdmin(groupOpenid, userId) {
-    if (!groupOpenid || !userId) return false;
-    const g = await this.get(groupOpenid);
-    if (!g) return false;
-    return g.adminOpenid === userId || g.ownerOpenid === userId;
-  }
 }

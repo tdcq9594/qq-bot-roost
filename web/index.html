@@ -220,17 +220,15 @@
     </div>
 
     <div class="box">
-      <div class="box-hd">
-        <h3>入群策略</h3>
-      </div>
-      <label class="switch">
-        <input type="checkbox" id="autoOwner">
-        机器人被拉进群时，自动把邀请人设为主人（仅在主人列表为空时生效；设为本群管理员是自动的，不受此开关影响）
-      </label>
+      <div class="box-hd"><h3>入群后自动授予的权限</h3></div>
+      <ul class="tips">
+        <li><b>邀请人</b> → 该群管理员（1 级），只影响这一个群</li>
+        <li><b>群主</b> → 该群管理员（1 级）。群主发过言才能识别（报文里 member_role=owner）</li>
+        <li>两者都<b>不会</b>获得全局主人或全局管理员</li>
+      </ul>
       <div class="hint" style="margin-top:8px">
-        官方没有「查群主」接口。能确认的只有两条：谁把机器人拉进群、
-        以及消息报文里 member_role 为 owner 的人（即群主本人，但他要发过言才能识别）。
-        两者都会自动成为该群管理员，可在这里手动覆盖。
+        要调整或撤销，去「权限」页改对应的 <code>group:xxx</code> 作用域。
+        全局主人只能在 config.json 的 owners 里配，或首次启动时用认领码认领。
       </div>
     </div>
 
@@ -248,20 +246,19 @@
               <th>群 openid</th>
               <th>邀请者</th>
               <th>群主（识别）</th>
-              <th>本群管理者</th>
               <th>状态</th>
               <th>最后活跃</th>
               <th class="num">操作</th>
             </tr>
           </thead>
           <tbody id="groupBody">
-            <tr><td colspan="7" class="empty">还没有群。把机器人拉进群后这里会自动出现。</td></tr>
+            <tr><td colspan="6" class="empty">还没有群。把机器人拉进群后这里会自动出现。</td></tr>
           </tbody>
         </table>
       </div>
       <div class="hint" style="margin-top:8px">
-        本群管理员（1 级）能用本群范围内的管理命令（如 /admin）；
-        但启用/禁用/重载插件影响全局，需要「全局管理员」。
+        这里只显示群档案。谁能在这个群做什么，统一在「权限」页按
+        <code>group:&lt;群openid&gt;</code> 作用域配置。
       </div>
 
       <div class="divider"></div>

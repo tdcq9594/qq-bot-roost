@@ -22,7 +22,6 @@
     "perChatPerMinute": 30
   },
   "dedupWindowSec": 120,
-  "autoOwnerOnInvite": true,
   "messageLog": {
     "enabled": true,
     "muteKinds": []

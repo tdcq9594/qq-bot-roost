@@ -41,9 +41,6 @@ const DEFAULTS = {
   // 去重窗口（秒），同一 msg id 只处理一次
   dedupWindowSec: 120,
 
-  // 机器人入群时，自动把「邀请人」设为主人（owners 为空时才生效）
-  autoOwnerOnInvite: true,
-
   // 收到的消息是否写进日志；muteKinds 里的来源类型不记录
   messageLog: {
     enabled: true,
@@ -101,7 +98,6 @@ export async function saveConfig(cfg) {
     whitelist: cfg.whitelist,
     rateLimit: cfg.rateLimit,
     dedupWindowSec: cfg.dedupWindowSec,
-    autoOwnerOnInvite: cfg.autoOwnerOnInvite,
     messageLog: cfg.messageLog,
   };
   // 先写临时文件再改名，避免写一半断电把配置写坏
