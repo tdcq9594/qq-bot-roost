@@ -98,17 +98,41 @@
           <label>API 地址<input name="baseUrl"></label>
           <label>命令前缀<input name="commandPrefix" maxlength="3"></label>
         </div>
-        <label class="full">intents
-          <select name="intentsPreset" id="intentsPreset">
-            <option value="33554432">33554432 — 群聊 @ + 私聊（推荐）</option>
-            <option value="1073741824">1073741824 — 频道 @消息</option>
-            <option value="33554434">33554434 — 群聊 + 频道成员</option>
-            <option value="custom">自定义…</option>
-          </select>
-        </label>
-        <label class="full" id="intentsCustomWrap" style="display:none">自定义 intents
-          <input name="intents" type="number">
-        </label>
+        <div class="full intents-block">
+          <div class="intents-head">
+            <span class="intents-title">事件订阅（intents）</span>
+            <span class="hint">决定机器人能收到哪些事件。勾选即生效，下方实时算出数值。</span>
+          </div>
+
+          <div class="intent-group">
+            <div class="intent-group-title">群聊 / 私聊</div>
+            <div id="intentGroupChat" class="intent-list"></div>
+          </div>
+
+          <div class="intent-group">
+            <div class="intent-group-title">频道（guild）</div>
+            <div id="intentGroupGuild" class="intent-list"></div>
+          </div>
+
+          <div class="intents-summary">
+            <span>当前值 <b id="intentsValue">33554432</b></span>
+            <span class="hint" id="intentsDesc">群聊与私聊</span>
+          </div>
+
+          <div class="btn-row">
+            <button type="button" class="btn small" data-preset="chat">群聊 + 私聊（推荐）</button>
+            <button type="button" class="btn small" data-preset="guild">频道基础</button>
+            <button type="button" class="btn small" data-preset="all">全部基础</button>
+            <button type="button" class="btn small" data-preset="none">清空</button>
+          </div>
+
+          <label class="switch small" style="margin-top:12px">
+            <input type="checkbox" id="intentsAdvanced"> 高级：手动填写数值
+          </label>
+          <input name="intents" id="intentsManual" type="number" style="display:none;margin-top:8px">
+
+          <div class="intent-warn" id="intentsWarn"></div>
+        </div>
       </div>
 
       <div class="box">

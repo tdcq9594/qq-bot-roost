@@ -163,8 +163,6 @@ $('#btnSend').addEventListener('click', async (e) => {
 
 /* ---------------- 配置 ---------------- */
 
-const INTENT_PRESETS = ['33554432', '1073741824', '33554434'];
-
 function fillForm(c) {
   const f = $('#cfgForm');
   f.appId.value = c.appId || '';
@@ -177,10 +175,7 @@ function fillForm(c) {
   renderOwners();
   $('#autoOwner').checked = c.autoOwnerOnInvite !== false;
 
-  const preset = INTENT_PRESETS.includes(String(c.intents)) ? String(c.intents) : 'custom';
-  $('#intentsPreset').value = preset;
-  $('#intentsCustomWrap').style.display = preset === 'custom' ? '' : 'none';
-  f.intents.value = c.intents;
+  setIntents(c.intents);
 
   f.whitelistEnabled.checked = Boolean(c.whitelist?.enabled);
   f.whitelistGroups.value = (c.whitelist?.groups || []).join('\n');
@@ -195,6 +190,195 @@ function fillForm(c) {
   f.logLevel.value = c.logLevel || 'info';
 }
 
+/* ---------------- 事件订阅 intents ---------------- */
+
+const INTENTS = [
+  {
+    bit: 25, group: 'chat', name: '群聊与私聊', needsApply: true,
+    events: '群里 @机器人、私聊消息、机器人入群/退群、加好友/删好友',
+    note: '需要在开放平台开通「群聊」能力，否则连接会被拒（关闭码 4014）',
+  },
+  {
+    bit: 0, group: 'guild', name: '频道基础',
+    events: '频道创建/更新/删除、子频道创建/更新/删除',
+  },
+  {
+    bit: 30, group: 'guild', name: '频道 @消息',
+    events: '频道里 @机器人 的消息、频道消息被撤回',
+  },
+  {
+    bit: 1, group: 'guild', name: '频道成员',
+    events: '成员加入频道、成员资料变更、成员离开',
+  },
+  {
+    bit: 9, group: 'guild', name: '频道全量消息', needsApply: true,
+    events: '频道内所有消息（不只 @机器人），仅私域机器人可申请',
+  },
+  {
+    bit: 10, group: 'guild', name: '表情表态', needsApply: true,
+    events: '为消息添加/删除表情表态',
+  },
+  {
+    bit: 12, group: 'guild', name: '频道私信', needsApply: true,
+    events: '用户私信机器人、私信被撤回',
+  },
+  {
+    bit: 26, group: 'guild', name: '互动事件', needsApply: true,
+    events: '按钮等互动组件的点击回调',
+  },
+  {
+    bit: 27, group: 'guild', name: '消息审核', needsApply: true,
+    events: '消息审核通过 / 不通过',
+  },
+  {
+    bit: 28, group: 'guild', name: '论坛事件', needsApply: true,
+    events: '论坛主题、帖子、评论的增删，仅私域机器人',
+  },
+  {
+    bit: 29, group: 'guild', name: '音频动作', needsApply: true,
+    events: '音频开始/结束、上麦/下麦',
+  },
+];
+
+const KNOWN_MASK = INTENTS.reduce((m, it) => m | (1 << it.bit), 0);
+
+function intentValueOf(bit) {
+  return 1 << bit;
+}
+
+function renderIntents() {
+  for (const group of ['chat', 'guild']) {
+    const box = $(group === 'chat' ? '#intentGroupChat' : '#intentGroupGuild');
+    box.innerHTML = INTENTS.filter((it) => it.group === group)
+      .map(
+        (it) => `
+        <label class="intent-item" data-bit="${it.bit}">
+          <input type="checkbox" data-bit="${it.bit}">
+          <span class="intent-body">
+            <span class="intent-name">
+              ${it.name}
+              ${it.needsApply ? '<span class="tag-need">需申请</span>' : '<span class="tag-free">默认可用</span>'}
+            </span>
+            <span class="intent-events">${it.events}</span>
+            ${it.note ? `<span class="intent-note">${it.note}</span>` : ''}
+          </span>
+          <span class="intent-value">${intentValueOf(it.bit)}</span>
+        </label>`,
+      )
+      .join('');
+  }
+
+  $$('#intentGroupChat input[type=checkbox], #intentGroupGuild input[type=checkbox]').forEach((cb) => {
+    cb.addEventListener('change', () => {
+      if ($('#intentsAdvanced').checked) return; // 高级模式下不联动
+      updateIntentsValue();
+    });
+  });
+}
+
+/** 从数值反推勾选状态 */
+function setIntents(value) {
+  const v = Number(value) || 0;
+  const unknown = v & ~KNOWN_MASK;
+
+  $$('#intentGroupChat input[type=checkbox], #intentGroupGuild input[type=checkbox]').forEach((cb) => {
+    const bit = Number(cb.dataset.bit);
+    cb.checked = Boolean(v & (1 << bit));
+  });
+
+  // 含未知位（比如官方新加的事件），自动切到高级模式，避免静默丢配置
+  const adv = unknown !== 0;
+  $('#intentsAdvanced').checked = adv;
+  $('#intentsManual').style.display = adv ? '' : 'none';
+  $('#intentsManual').value = v;
+  $('#intentsValue').textContent = v;
+  renderIntentSummary(v, adv);
+}
+
+/** 由勾选状态算出数值 */
+function updateIntentsValue() {
+  let v = 0;
+  $$('#intentGroupChat input[type=checkbox], #intentGroupGuild input[type=checkbox]').forEach((cb) => {
+    if (cb.checked) v += 1 << Number(cb.dataset.bit);
+  });
+  $('#cfgForm').intents.value = v;
+  $('#intentsValue').textContent = v;
+  renderIntentSummary(v, false);
+}
+
+function renderIntentSummary(v, advanced) {
+  const desc = $('#intentsDesc');
+  const warn = $('#intentsWarn');
+
+  if (!v) {
+    desc.textContent = '未订阅任何事件，机器人收不到任何消息';
+    warn.textContent = '没有订阅事件时，连接会成功但永远不会有消息进来。';
+    warn.style.display = '';
+    return;
+  }
+
+  const picked = INTENTS.filter((it) => v & (1 << it.bit)).map((it) => it.name);
+  const unknown = advanced ? v & ~KNOWN_MASK : 0;
+
+  desc.textContent = picked.length ? picked.join(' + ') : '自定义组合';
+
+  const needsApply = INTENTS.filter((it) => (v & (1 << it.bit)) && it.needsApply).map((it) => it.name);
+  const msgs = [];
+  if (needsApply.length) {
+    msgs.push(`「${needsApply.join('、')}」需要先在开放平台申请权限，否则连接会被拒（关闭码 4014）。`);
+  }
+  if (unknown) {
+    msgs.push(`另有未识别的位 ${unknown}，可能是官方新增事件，已按原样保留。`);
+  }
+  warn.textContent = msgs.join(' ');
+  warn.style.display = msgs.length ? '' : 'none';
+}
+
+function bindIntentsUI() {
+  renderIntents();
+
+  $$('[data-preset]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const map = {
+        chat: [25],
+        guild: [0, 30, 1],
+        all: INTENTS.map((it) => it.bit),
+        none: [],
+      };
+      const bits = map[btn.dataset.preset] ?? [];
+      $('#intentsAdvanced').checked = false;
+      $('#intentsManual').style.display = 'none';
+      $$('#intentGroupChat input[type=checkbox], #intentGroupGuild input[type=checkbox]').forEach((cb) => {
+        cb.checked = bits.includes(Number(cb.dataset.bit));
+      });
+      updateIntentsValue();
+    });
+  });
+
+  $('#intentsAdvanced').addEventListener('change', (e) => {
+    const on = e.target.checked;
+    $('#intentsManual').style.display = on ? '' : 'none';
+    if (on) {
+      // 进入高级模式时，用当前勾选结果作为起点
+      let v = 0;
+      $$('#intentGroupChat input[type=checkbox], #intentGroupGuild input[type=checkbox]').forEach((cb) => {
+        if (cb.checked) v += 1 << Number(cb.dataset.bit);
+      });
+      $('#intentsManual').value = v;
+      $('#intentsValue').textContent = v;
+    } else {
+      // 退出高级模式：按数值回填勾选
+      setIntents(Number($('#intentsManual').value) || 0);
+    }
+  });
+
+  $('#intentsManual').addEventListener('input', (e) => {
+    const v = Number(e.target.value) || 0;
+    $('#intentsValue').textContent = v;
+    renderIntentSummary(v, true);
+  });
+}
+
 async function loadConfig() {
   try {
     fillForm(await api('/api/config'));
@@ -202,12 +386,6 @@ async function loadConfig() {
     $('#cfgMsg').textContent = '读取配置失败: ' + e.message;
   }
 }
-
-$('#intentsPreset').addEventListener('change', (e) => {
-  const custom = e.target.value === 'custom';
-  $('#intentsCustomWrap').style.display = custom ? '' : 'none';
-  if (!custom) $('#cfgForm').intents.value = e.target.value;
-});
 
 $('#cfgForm').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -510,6 +688,7 @@ function connectStream() {
   await initLogs();
   connectStream();
   setInterval(pollStatus, 5000);
+  bindIntentsUI();
   loadConfig();
   loadGroups();
 })();
