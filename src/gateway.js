@@ -52,6 +52,9 @@ export class Gateway {
     this.attempt = 0;
     this.stopped = false;
     this.ready = false;
+    this.heartbeatInterval = 45000;
+    this.lastAckAt = 0;
+    this.connecting = false;
 
     this.readyResolve = null;
     this.readyPromise = new Promise((r) => {
@@ -65,13 +68,41 @@ export class Gateway {
     return this.readyPromise;
   }
 
-  /** 供 WebUI 使用：断开后立刻重连 */
+  /**
+   * 供 WebUI 使用：断开后立刻重连。
+   * 注意 stop() 会把 stopped 置 true，这里必须重新置 false，否则 #connect 会直接返回。
+   */
   async restart() {
-    this.stop();
+    const old = this.ws;
+    this.stop(); // stopped=true，此时旧连接的 close 事件会被忽略
+
+    // 等旧连接真正关闭再继续，否则 close 回调会再安排一次重连，建出两条连接
+    if (old) {
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 800);
+        try {
+          old.addEventListener(
+            'close',
+            () => {
+              clearTimeout(timer);
+              resolve();
+            },
+            { once: true },
+          );
+        } catch {
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+    } else {
+      await new Promise((r) => setTimeout(r, 300));
+    }
+
+    this.stopped = false;
     this.sessionId = '';
     this.lastSeq = null;
+    this.lastAckAt = 0;
     this.attempt = 0;
-    await new Promise((r) => setTimeout(r, 300));
     await this.#connect();
   }
 
@@ -93,6 +124,16 @@ export class Gateway {
 
   async #connect() {
     if (this.stopped) return;
+    // 防止重连定时器和手动重连撞在一起，建出两条连接
+    if (this.connecting) {
+      log.debug('已有连接在进行中，跳过本次');
+      return;
+    }
+    if (this.ws && (this.ws.readyState === 0 || this.ws.readyState === 1)) {
+      log.debug('已有活跃连接，跳过本次');
+      return;
+    }
+    this.connecting = true;
     let url;
     try {
       const gw = await this.api.getGateway();
@@ -101,6 +142,7 @@ export class Gateway {
       runtime.gatewayUrl = url;
       log.info(`网关地址: ${url}`);
     } catch (e) {
+      this.connecting = false;
       log.error('获取网关地址失败:', e.message);
       return this.#scheduleReconnect();
     }
@@ -108,7 +150,10 @@ export class Gateway {
     const ws = new WebSocket(url);
     this.ws = ws;
 
-    ws.addEventListener('open', () => log.debug('WebSocket 已连接'));
+    ws.addEventListener('open', () => {
+      this.connecting = false;
+      log.debug('WebSocket 已连接');
+    });
 
     ws.addEventListener('message', (ev) => {
       let payload;
@@ -131,9 +176,16 @@ export class Gateway {
     ws.addEventListener('close', (ev) => {
       this.#clearTimers();
       this.ready = false;
+      this.connecting = false;
+      if (this.ws === ws) this.ws = null;
       runtime.connected = false;
       if (this.stopped) return;
       runtime.reconnectCount += 1;
+      if (ev.code === 4902) {
+        // resume 被拒（会话已被别的连接用掉），清掉本地会话，下次走全新鉴权
+        this.sessionId = '';
+        this.lastSeq = null;
+      }
       const hint = CLOSE_HINTS[ev.code];
       log.warn(`WebSocket 关闭 code=${ev.code} reason=${ev.reason || '-'}`);
       if (hint) log.error(`原因: ${hint}`);
@@ -162,6 +214,7 @@ export class Gateway {
         break;
       }
       case OP.HEARTBEAT_ACK:
+        this.lastAckAt = Date.now();
         break;
       case OP.RECONNECT: {
         log.warn('服务端要求重连');
@@ -228,7 +281,19 @@ export class Gateway {
 
   #startHeartbeat(interval) {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.heartbeatInterval = interval;
+    this.lastAckAt = Date.now();
+
     this.heartbeatTimer = setInterval(() => {
+      // 连续两个多周期没有 ACK，说明连接已经假死，主动断开触发重连
+      if (this.lastAckAt && Date.now() - this.lastAckAt > interval * 2.5) {
+        log.warn('心跳长时间无响应，主动断开重连');
+        this.lastAckAt = 0;
+        try {
+          this.ws?.close(4001, 'heartbeat timeout');
+        } catch {}
+        return;
+      }
       this.#send({ op: OP.HEARTBEAT, d: this.lastSeq });
       runtime.lastHeartbeatAt = Date.now();
     }, interval);

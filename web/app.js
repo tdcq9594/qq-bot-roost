@@ -129,7 +129,7 @@ function renderStatus(s) {
   } else {
     body.innerHTML = s.chats.map((c) => `
       <tr>
-        <td class="mono" title="${c.id}">${shortId(c.id)}</td>
+        <td class="mono" title="${escapeHtml(c.id)}">${escapeHtml(shortId(c.id))}</td>
         <td>${c.kind === 'group' ? '群聊' : c.kind === 'c2c' ? '私聊' : c.kind}</td>
         <td class="num">${c.count}</td>
         <td>${fmtAgo(c.last)}</td>
@@ -474,11 +474,11 @@ async function loadPlugins() {
       return;
     }
     wrap.innerHTML = list.map((p) => `
-      <div class="plugin" data-id="${p.id}">
+      <div class="plugin" data-id="${escapeHtml(p.id)}">
         <div class="info">
-          <div class="name">${p.name || p.id} <span class="hint">v${p.version || '0.0.0'}</span></div>
-          <div class="meta">${p.id}${p.description ? ' · ' + p.description : ''}</div>
-          ${p.error ? `<div class="err">加载失败: ${p.error}</div>` : ''}
+          <div class="name">${escapeHtml(p.name || p.id)} <span class="hint">v${escapeHtml(p.version || '0.0.0')}</span></div>
+          <div class="meta">${escapeHtml(p.id)}${p.description ? ' · ' + escapeHtml(p.description) : ''}</div>
+          ${p.error ? `<div class="err">加载失败: ${escapeHtml(p.error)}</div>` : ''}
           ${p.menuMissing ? '<div class="err">未提供指令菜单，用户看不到它能做什么</div>' : ''}
         </div>
         <span class="badge ${p.loaded ? 'on' : p.enabled ? '' : 'off'}">
@@ -585,11 +585,11 @@ function renderGroups(list) {
   }
   body.innerHTML = list
     .map((g) => `
-      <tr data-id="${g.groupOpenid}">
-        <td class="mono" title="${g.groupOpenid}">${shortId(g.groupOpenid)}</td>
-        <td class="mono" title="${g.inviterOpenid || ''}">${g.inviterOpenid ? shortId(g.inviterOpenid) : '-'}</td>
-        <td class="mono" title="${g.ownerOpenid || ''}">${g.ownerOpenid ? shortId(g.ownerOpenid) : '-'}</td>
-        <td><input class="inline-input admin-input" value="${g.adminOpenid || ''}" placeholder="未设置"></td>
+      <tr data-id="${escapeHtml(g.groupOpenid)}">
+        <td class="mono" title="${escapeHtml(g.groupOpenid)}">${escapeHtml(shortId(g.groupOpenid))}</td>
+        <td class="mono" title="${escapeHtml(g.inviterOpenid || '')}">${g.inviterOpenid ? escapeHtml(shortId(g.inviterOpenid)) : '-'}</td>
+        <td class="mono" title="${escapeHtml(g.ownerOpenid || '')}">${g.ownerOpenid ? escapeHtml(shortId(g.ownerOpenid)) : '-'}</td>
+        <td><input class="inline-input admin-input" value="${escapeHtml(g.adminOpenid || '')}" placeholder="未设置"></td>
         <td><span class="badge ${g.enabled ? 'on' : 'off'}">${g.enabled ? '在用' : '已移出'}</span></td>
         <td>${g.lastActiveAt ? fmtAgo(g.lastActiveAt) : '-'}</td>
         <td class="num">
@@ -678,10 +678,10 @@ async function loadRoles() {
       .map(
         (r) => `
         <tr>
-          <td class="mono">${r.scope}</td>
-          <td class="mono" title="${r.openid}">${shortId(r.openid)}</td>
+          <td class="mono">${escapeHtml(r.scope)}</td>
+          <td class="mono" title="${escapeHtml(r.openid)}">${escapeHtml(shortId(r.openid))}</td>
           <td>${levelText(r.level)} <span class="hint">${r.level}</span></td>
-          <td class="num"><button class="btn small danger" data-scope="${r.scope}" data-openid="${r.openid}">移除</button></td>
+          <td class="num"><button class="btn small danger" data-scope="${escapeHtml(r.scope)}" data-openid="${escapeHtml(r.openid)}">移除</button></td>
         </tr>`,
       )
       .join('');

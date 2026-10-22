@@ -98,6 +98,9 @@ export function parseScope(input, msg) {
 /** 旧版本用的是 100/80/60/40，读取时转成新的 0/1/2/3 */
 const LEGACY_MAP = { 100: 0, 80: 1, 60: 2, 40: 3 };
 
+/** 数据格式版本。迁移过一次就写进文件，避免重复迁移误伤插件等级 */
+const DATA_VERSION = 2;
+
 export class RoleStore {
   constructor() {
     this.data = null; // { "<scope>": { "<openid>": level } }
@@ -127,20 +130,26 @@ export class RoleStore {
       this.data = {};
     }
 
-    // 兼容旧数据：把 100/80/60/40 迁移成 0/1/2/3
-    let migrated = false;
-    for (const members of Object.values(this.data)) {
-      for (const [oid, lv] of Object.entries(members)) {
-        if (lv >= 40 && LEGACY_MAP[lv] !== undefined) {
-          members[oid] = LEGACY_MAP[lv];
-          migrated = true;
+    // 一次性迁移：把旧的 100/80/60/40 转成 0/1/2/3
+    // 关键：只迁移 feature: 之外的作用域——插件号段是后来才有的，
+    // 40/60/80 在插件区是合法等级，不能当成旧数据转掉。
+    if (this.data.__version !== DATA_VERSION) {
+      let migrated = 0;
+      for (const [scope, members] of Object.entries(this.data)) {
+        if (scope.startsWith('__')) continue;
+        if (scope.startsWith('feature:')) continue;
+        if (!members || typeof members !== 'object') continue;
+        for (const [oid, lv] of Object.entries(members)) {
+          if (LEGACY_MAP[lv] !== undefined) {
+            members[oid] = LEGACY_MAP[lv];
+            migrated += 1;
+          }
         }
       }
-    }
-    if (migrated) {
-      log.info('已把旧版权限等级迁移为「0 最高」格式');
+      this.data.__version = DATA_VERSION;
       this.cache.clear();
       this.#scheduleSave();
+      if (migrated) log.info(`已迁移 ${migrated} 条旧版权限等级为「0 最高」格式`);
     }
     return this.data;
   }
@@ -164,7 +173,13 @@ export class RoleStore {
   }
 
   async all() {
-    return await this.#load();
+    const d = await this.#load();
+    const out = {};
+    for (const [k, v] of Object.entries(d)) {
+      if (k.startsWith('__')) continue;
+      out[k] = v;
+    }
+    return out;
   }
 
   /** 某作用域下的全部成员 { openid: level } */
@@ -227,7 +242,8 @@ export class RoleStore {
     const d = await this.#load();
     const out = [];
     for (const [scope, members] of Object.entries(d)) {
-      if (members[openid] !== undefined) out.push({ scope, level: members[openid] });
+      if (scope.startsWith('__')) continue;
+      if (members?.[openid] !== undefined) out.push({ scope, level: members[openid] });
     }
     // 数字小的权限高，升序排前面
     return out.sort((a, b) => a.level - b.level);
@@ -237,6 +253,7 @@ export class RoleStore {
   async listScopes() {
     const d = await this.#load();
     return Object.entries(d)
+      .filter(([scope]) => !scope.startsWith('__'))
       .map(([scope, members]) => ({ scope, count: Object.keys(members).length }))
       .filter((x) => x.count > 0)
       .sort((a, b) => a.scope.localeCompare(b.scope));

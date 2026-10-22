@@ -104,7 +104,10 @@ export async function saveConfig(cfg) {
     autoOwnerOnInvite: cfg.autoOwnerOnInvite,
     messageLog: cfg.messageLog,
   };
-  await fs.writeFile(CONFIG_PATH, JSON.stringify(out, null, 2) + '\n', 'utf8');
+  // 先写临时文件再改名，避免写一半断电把配置写坏
+  const tmp = `${CONFIG_PATH}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(out, null, 2) + '\n', 'utf8');
+  await fs.rename(tmp, CONFIG_PATH);
 }
 
 /** 首次运行时引导输入 AppID / AppSecret */

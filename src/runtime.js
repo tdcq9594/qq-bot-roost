@@ -1,3 +1,43 @@
+const SENSITIVE_KEY = /^(auth_token|token|access_token|secret|client_secret|cookie|password)$/i;
+
+/**
+ * 事件报文脱敏。
+ * 群消息的 message_scene.ext 里带 auth_token，属于敏感凭证，
+ * 不能进日志、更不能通过 /api/status 暴露出去。
+ */
+function redact(value, depth = 0) {
+  if (depth > 6) return '…';
+  if (Array.isArray(value)) return value.slice(0, 20).map((v) => redact(v, depth + 1));
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (SENSITIVE_KEY.test(k)) {
+        out[k] = '***';
+      } else if (k === 'ext') {
+        out[k] = ['(已隐藏)'];
+      } else {
+        out[k] = redact(v, depth + 1);
+      }
+    }
+    return out;
+  }
+  if (typeof value === 'string') {
+    return value
+      .replace(/auth_token=[^&"\s]*/g, 'auth_token=***')
+      .replace(/msg_idx=[^&"\s]*/g, 'msg_idx=***')
+      .slice(0, 400);
+  }
+  return value;
+}
+
+export function sanitizePayload(d) {
+  try {
+    return JSON.stringify(redact(d));
+  } catch {
+    return '<无法序列化>';
+  }
+}
+
 /**
  * 全局运行时状态，供 WebUI 读取。
  * 所有字段都是普通值，不做持久化，进程重启即归零。

@@ -25,6 +25,8 @@ export class QQApi {
     try {
       res = await fetch(`${this.baseUrl}${path}`, {
         method,
+        // 没有超时的话，网络卡住会让请求一直挂着，命令永远不返回
+        signal: AbortSignal.timeout(15000),
         headers: {
           Authorization: `QQBot ${token}`,
           'Content-Type': 'application/json',
@@ -34,7 +36,8 @@ export class QQApi {
       });
     } catch (e) {
       runtime.bump('errors');
-      throw new Error(`网络错误 ${method} ${path}: ${e.message}`);
+      const reason = e?.name === 'TimeoutError' ? '请求超时（15s）' : e.message;
+      throw new Error(`网络错误 ${method} ${path}: ${reason}`);
     }
 
     if (res.status === 401 && !retried) {

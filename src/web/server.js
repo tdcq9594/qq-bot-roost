@@ -112,6 +112,15 @@ export function startWebServer({ cfg, plugins, groups, roles, getGateway, tokens
       if (pathname.startsWith('/api/')) {
         if (!authorized(req, url)) return json(res, 401, { error: '访问密钥无效' });
 
+        // CSRF 防护：写操作必须带 application/json。
+        // 跨站的简单表单请求设不了这个 Content-Type，会被浏览器拦在预检阶段。
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          const ct = String(req.headers['content-type'] || '');
+          if (!ct.includes('application/json')) {
+            return json(res, 415, { error: '写操作需要 Content-Type: application/json' });
+          }
+        }
+
         // 状态
         if (pathname === '/api/status' && req.method === 'GET') {
           return json(res, 200, statusPayload());
@@ -137,7 +146,13 @@ export function startWebServer({ cfg, plugins, groups, roles, getGateway, tokens
             cfg.appSecret = body.appSecret.trim();
           }
           if (body.baseUrl) cfg.baseUrl = body.baseUrl.trim();
-          if (body.intents !== undefined) cfg.intents = Number(body.intents) || cfg.intents;
+          if (body.intents !== undefined) {
+            const n = Number(body.intents);
+            if (!Number.isInteger(n) || n < 0 || n > 0x7fffffff) {
+              return json(res, 400, { error: 'intents 必须是 0 ~ 2147483647 的整数' });
+            }
+            cfg.intents = n;
+          }
           if (body.commandPrefix) cfg.commandPrefix = body.commandPrefix;
           if (Array.isArray(body.owners)) cfg.owners = body.owners.map((s) => String(s).trim()).filter(Boolean);
           if (body.logLevel) {
@@ -317,8 +332,10 @@ export function startWebServer({ cfg, plugins, groups, roles, getGateway, tokens
 
       // ---------------- 静态文件 ----------------
       let filePath = pathname === '/' ? '/index.html' : pathname;
-      const abs = path.join(WEB_ROOT, filePath);
-      if (!abs.startsWith(WEB_ROOT)) {
+      const abs = path.resolve(WEB_ROOT, '.' + filePath);
+      const rel = path.relative(WEB_ROOT, abs);
+      // rel 以 .. 开头或为绝对路径，说明跑出了 web 目录
+      if (rel.startsWith('..') || path.isAbsolute(rel)) {
         res.writeHead(403);
         return res.end('forbidden');
       }
@@ -326,7 +343,12 @@ export function startWebServer({ cfg, plugins, groups, roles, getGateway, tokens
       try {
         content = await fs.readFile(abs);
       } catch {
-        // 前端路由回退
+        // 只有「不像静态资源」的路径才回退到 index.html（前端路由），
+        // 带扩展名的直接 404，免得把缺失的 js/css 也伪装成 200
+        if (path.extname(abs)) {
+          res.writeHead(404);
+          return res.end('not found');
+        }
         try {
           content = await fs.readFile(path.join(WEB_ROOT, 'index.html'));
           filePath = '/index.html';

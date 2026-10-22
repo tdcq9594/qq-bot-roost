@@ -99,7 +99,18 @@ export class PluginManager {
     if (!this.allocations.has(id)) {
       try {
         const dirs = await fs.readdir(this.dir, { withFileTypes: true });
-        this.allocations = allocateLevels(dirs.filter((e) => e.isDirectory()).map((e) => e.name));
+        const next = allocateLevels(dirs.filter((e) => e.isDirectory()).map((e) => e.name));
+        // 新增插件可能让其它插件的号段整体后移，已配好的权限会对不上
+        for (const [pid, alloc] of next) {
+          const prev = this.allocations.get(pid);
+          if (prev && prev.base !== alloc.base) {
+            log.warn(
+              `插件 ${pid} 的等级号段从 ${prev.base}-${prev.end} 变为 ${alloc.base}-${alloc.end}，` +
+                `已配置的该插件权限可能需要重新设置。建议重启一次让号段稳定。`,
+            );
+          }
+        }
+        this.allocations = next;
       } catch {}
     }
 

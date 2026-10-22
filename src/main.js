@@ -1,14 +1,14 @@
 import path from 'node:path';
 import process from 'node:process';
 import { loadConfig, ensureCredentials, saveConfig, ROOT, CONFIG_PATH } from './config.js';
-import { createLogger, setLevel } from './logger.js';
+import { createLogger, setLevel, getLevel } from './logger.js';
 import { TokenManager } from './token.js';
 import { QQApi } from './api.js';
 import { Gateway } from './gateway.js';
 import { buildMessage, isMessageEvent } from './message.js';
 import { Registry } from './plugin/context.js';
 import { PluginManager } from './plugin/loader.js';
-import { runtime } from './runtime.js';
+import { runtime, sanitizePayload } from './runtime.js';
 import { GroupStore } from './groups.js';
 import { RoleStore, LEVEL, NO_PERM, levelName, parseLevel, parseScope, scopeOf } from './roles.js';
 import { startWebServer } from './web/server.js';
@@ -106,6 +106,13 @@ function createGuards(cfg) {
         }
         rec.count += 1;
         rate.set(msg.chatId, rec);
+
+        // 会话可能很多，定期清掉过期的窗口，避免 Map 无限增长
+        if (rate.size > 500) {
+          for (const [k, v] of rate) {
+            if (now - v.start > 60_000) rate.delete(k);
+          }
+        }
         if (rec.count > limit) {
           runtime.bump('limited');
           if (rec.count === limit + 1) {
@@ -545,17 +552,30 @@ function createDispatcher({ registry, api, cfg, plugins, guards, groups, roles }
     runtime.messageEvent = eventName;
     runtime.bumpEvent(eventName);
     // 只留最近一条，截断防止把大对象塞进状态里
-    try {
-      const raw = JSON.stringify(d);
-      runtime.lastRaw = { name: eventName, at: Date.now(), payload: raw.slice(0, 1500) };
-    } catch {
-      runtime.lastRaw = { name: eventName, at: Date.now(), payload: '<无法序列化>' };
+    // 只有 debug 级别才保留完整（已脱敏）报文；平时只留摘要，省一次深拷贝
+    if (getLevel() === 'debug') {
+      runtime.lastRaw = {
+        name: eventName,
+        at: Date.now(),
+        payload: sanitizePayload(d).slice(0, 1500),
+      };
+    } else {
+      runtime.lastRaw = {
+        name: eventName,
+        at: Date.now(),
+        payload: JSON.stringify({
+          content: String(d?.content ?? '').slice(0, 200),
+          group_openid: d?.group_openid ?? '',
+          user: d?.author?.member_openid ?? d?.author?.user_openid ?? '',
+          id: d?.id ?? '',
+        }).slice(0, 600),
+      };
     }
 
     if (!isMessageEvent(eventName)) {
       // 未知事件不再静默丢弃，留个线索
       if (!KNOWN_SYSTEM_EVENTS.has(eventName)) {
-        log.debug(`收到未处理的事件 ${eventName}: ${JSON.stringify(d).slice(0, 300)}`);
+        log.debug(`收到未处理的事件 ${eventName}: ${sanitizePayload(d).slice(0, 300)}`);
       }
       // 入群 / 退群：维护群档案，并在必要时自动认主
       if (eventName === 'GROUP_ADD_ROBOT') {
@@ -747,6 +767,7 @@ async function runMock(cfg, registry, plugins, groups, roles) {
       await feed(line);
     }
     await groups.flush();
+    await roles.flush().catch(() => {});
     return;
   }
 
@@ -764,6 +785,7 @@ async function runMock(cfg, registry, plugins, groups, roles) {
   }
   rl.close();
   await groups.flush();
+  await roles.flush().catch(() => {});
 }
 
 /* ------------------------------------------------------------------ */
@@ -872,6 +894,7 @@ async function main() {
     gateway.stop();
     web?.close();
     await groups.flush().catch(() => {});
+    await roles.flush().catch(() => {});
     process.exit(0);
   };
   process.on('SIGINT', shutdown);

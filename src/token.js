@@ -41,11 +41,18 @@ export class TokenManager {
 
   async #fetch() {
     const url = `${this.baseUrl}/app/getAppAccessToken`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ appId: this.appId, clientSecret: this.appSecret }),
-    });
+    let res;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        signal: AbortSignal.timeout(15000),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ appId: this.appId, clientSecret: this.appSecret }),
+      });
+    } catch (e) {
+      const reason = e?.name === 'TimeoutError' ? '请求超时（15s）' : e.message;
+      throw new Error(`获取访问凭证失败: ${reason}`);
+    }
     const text = await res.text();
     let data;
     try {
