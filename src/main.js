@@ -169,11 +169,13 @@ function registerCoreCommands(registry, { cfg, plugins, tokens, roles }) {
     lines.push(bot);
 
     const myLv = await roles.effective(scopeOf(msg), msg.userId, { owners: cfg.owners });
-    const coreCmds = [...registry.commands.values()].filter((c) => c.pluginId === '__core');
+    const coreMenu = registry.menus.get('__core');
     lines.push('\n【内核】');
-    for (const c of coreCmds) {
-      if (c.admin && myLv > LEVEL.admin) continue;
-      lines.push(`  ${P}${c.name}${c.desc ? '  ' + c.desc : ''}`);
+    for (const sec of coreMenu?.sections ?? []) {
+      for (const it of sec.items) {
+        if (it.admin && myLv > LEVEL.admin) continue;
+        lines.push(`  ${P}${it.text}${it.desc ? '  ' + it.desc : ''}`);
+      }
     }
 
     const menus = [...registry.menus.values()].filter((m) => m.id !== '__core');
@@ -285,6 +287,16 @@ function registerCoreCommands(registry, { cfg, plugins, tokens, roles }) {
     await msg.reply(lines.join('\n'));
   });
 
+  // 把 /admin 的子命令也写进菜单，保证「所有指令都能在菜单里查到」
+  registry.addMenuSection('__core', { name: '内核' }, '权限子命令', [
+    { cmd: 'admin me', desc: '查看自己在各作用域的权限', admin: true },
+    { cmd: 'admin list [作用域]', desc: '列出某作用域的管理员', admin: true },
+    { cmd: 'admin set <openid> <等级> [作用域]', desc: '设置权限，只能授予数字更大的等级', admin: true },
+    { cmd: 'admin del <openid> [作用域]', desc: '移除权限', admin: true },
+    { cmd: 'admin scopes', desc: '列出所有已配置的作用域', admin: true },
+    { cmd: 'admin levels', desc: '查看等级空间与插件号段分配', admin: true },
+  ]);
+
   /* ---------------- 权限管理 ---------------- */
 
   const levelOf = (uid, scope = 'global') =>
@@ -330,6 +342,30 @@ function registerCoreCommands(registry, { cfg, plugins, tokens, roles }) {
         } else {
           lines.push('未在任何作用域获得权限');
         }
+      }
+      return msg.reply(lines.join('\n'));
+    }
+
+    // 等级空间与插件号段
+    if (sub === 'levels') {
+      if (myLevel > LEVEL.manager) return msg.reply('需要协管及以上权限');
+      const rows = [...(plugins.allocations ?? new Map()).entries()].sort(
+        (a, b) => a[1].base - b[1].base,
+      );
+      const lines = [
+        '等级空间（数字越小权限越高）',
+        '  0 主人 / 1 管理员 / 2 协管 / 3 助手',
+        '  4-9 内核预留',
+        '  10+ 插件区，每个插件 10 个号位',
+      ];
+      if (rows.length) {
+        lines.push('\n插件号段：');
+        for (const [id, a] of rows) {
+          const loaded = plugins.loaded.has(id) ? '运行中' : '未加载';
+          lines.push(`  ${id.padEnd(12)} ${a.base}-${a.end}  ${loaded}`);
+        }
+      } else {
+        lines.push('\n还没有插件');
       }
       return msg.reply(lines.join('\n'));
     }
@@ -418,7 +454,9 @@ function registerCoreCommands(registry, { cfg, plugins, tokens, roles }) {
       const menu = registry.menus.get(p.id);
       const cnt = menu ? menu.sections.reduce((n, s) => n + s.items.length, 0) : 0;
       const menuText = cnt ? `${cnt} 条菜单` : '未提供菜单';
-      lines.push(`${p.loaded ? '●' : '○'} ${p.id}${ver} [${flag}] · ${menuText}`);
+      const alloc = plugins.allocations?.get(p.id);
+      const lvText = alloc ? ` · 等级 ${alloc.base}-${alloc.end}` : '';
+      lines.push(`${p.loaded ? '●' : '○'} ${p.id}${ver} [${flag}] · ${menuText}${lvText}`);
       if (p.description) lines.push(`    ${p.description}`);
       if (p.error) lines.push(`    错误: ${p.error}`);
     }

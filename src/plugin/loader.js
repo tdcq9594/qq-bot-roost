@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { createLogger } from '../logger.js';
 import { createContext } from './context.js';
 import { DATA_DIR } from '../config.js';
+import { allocateLevels } from '../levels.js';
 
 const log = createLogger('plugins');
 const STATE_FILE = path.join(DATA_DIR, 'plugins.json');
@@ -31,6 +32,8 @@ export class PluginManager {
     this.loaded = new Map(); // id -> { meta, ctx, dir }
     this.state = {}; // id -> enabled
     this.errors = new Map(); // id -> 错误信息
+    // 插件等级号段分配：id -> { base, end, index }
+    this.allocations = new Map();
   }
 
   async #readState() {
@@ -57,9 +60,17 @@ export class PluginManager {
       return;
     }
 
-    for (const ent of entries) {
-      if (!ent.isDirectory()) continue;
-      const id = ent.name;
+    // 先把所有插件目录收集起来，统一分配等级号段（按 id 排序，重启后不变）
+    const ids = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+    this.allocations = allocateLevels(ids);
+    if (ids.length) {
+      const table = [...this.allocations.entries()]
+        .map(([id, a]) => `${id}:${a.base}-${a.end}`)
+        .join('  ');
+      log.info(`等级号段分配 ${table}`);
+    }
+
+    for (const id of ids) {
       if (this.state[id] === false) {
         log.info(`跳过已禁用插件: ${id}`);
         continue;
@@ -85,6 +96,13 @@ export class PluginManager {
       return false;
     }
 
+    if (!this.allocations.has(id)) {
+      try {
+        const dirs = await fs.readdir(this.dir, { withFileTypes: true });
+        this.allocations = allocateLevels(dirs.filter((e) => e.isDirectory()).map((e) => e.name));
+      } catch {}
+    }
+
     try {
       // 加时间戳绕过 ESM 缓存，实现热重载
       const url = `${pathToFileURL(entryFile).href}?t=${Date.now()}`;
@@ -103,6 +121,7 @@ export class PluginManager {
         cfg: this.cfg,
         groups: this.groups,
         roles: this.roles,
+        levels: this.allocations.get(id) ?? null,
         isOwner: this.isOwner,
       });
 

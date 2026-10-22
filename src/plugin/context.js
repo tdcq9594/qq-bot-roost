@@ -63,6 +63,8 @@ export class Registry {
         text,
         desc: (typeof it === 'object' && it.desc) || '',
         isCommand: Boolean(typeof it === 'object' && it.cmd) || false,
+        admin: Boolean(typeof it === 'object' && it.admin),
+        globalAdmin: Boolean(typeof it === 'object' && it.globalAdmin),
       });
     }
     return sec;
@@ -87,7 +89,7 @@ export class Registry {
       pluginId,
       { name: meta.plugin },
       '指令',
-      [{ cmd: meta.pattern ?? key, desc: meta.desc ?? '' }],
+      [{ cmd: meta.pattern ?? key, desc: meta.desc ?? '', admin: meta.admin, globalAdmin: meta.globalAdmin }],
     );
   }
 
@@ -164,7 +166,7 @@ class PluginStorage {
 /**
  * 插件上下文：插件能用的全部能力都在这里，不暴露内部实现。
  */
-export function createContext({ meta, registry, api, cfg, groups, roles, isOwner }) {
+export function createContext({ meta, registry, api, cfg, groups, roles, levels, isOwner }) {
   const id = meta.id;
   const logger = createLogger(`plugin:${id}`);
   const disposers = [];
@@ -181,6 +183,47 @@ export function createContext({ meta, registry, api, cfg, groups, roles, isOwner
     logger,
     storage: new PluginStorage(id),
     prefix: cfg.commandPrefix || '/',
+
+    /* ---------------- 权限等级 ---------------- */
+
+    /** 内核保留等级（只读，插件不能改语义） */
+    CORE_LEVELS: LEVEL,
+
+    /** 本插件分到的号段起点，例如 10 / 20 / 30 */
+    levelBase: levels?.base ?? 10,
+
+    /** 本插件可用号段 { base, end } */
+    levelRange: levels ? { base: levels.base, end: levels.end } : { base: 10, end: 19 },
+
+    /**
+     * 取本插件号段内的等级值。
+     *   ctx.level(0) → 号段最高权限（数字最小）
+     *   ctx.level(3) → 号段内第 4 档
+     */
+    level(offset = 0) {
+      const base = levels?.base ?? 10;
+      const end = levels?.end ?? 19;
+      return Math.min(base + Math.max(0, offset), end);
+    },
+
+    /**
+     * 一次性定义本插件的等级，并自动写进菜单，方便用户知道怎么授权。
+     *   const L = ctx.defineLevels({ 管理员: 0, 成员: 2 });
+     *   → { 管理员: 10, 成员: 12 }
+     */
+    defineLevels(map) {
+      const out = {};
+      for (const [name, offset] of Object.entries(map ?? {})) {
+        out[name] = this.level(offset);
+      }
+      registry.addMenuSection(
+        id,
+        meta,
+        '权限等级',
+        Object.entries(out).map(([name, lv]) => ({ text: `${lv}`, desc: name })),
+      );
+      return out;
+    },
 
     /**
      * 注册命令。命令名取第一个词，后面的是用法提示，仅用于帮助展示与必填校验。
@@ -249,15 +292,27 @@ export function createContext({ meta, registry, api, cfg, groups, roles, isOwner
     },
 
     /**
-     * 当前消息发送者的权限等级（数字）。
-     * 0 主人 / 1 管理员 / 2 协管 / 3 助手 / 99 普通成员（数字越小权限越高）
+     * 当前消息发送者的权限等级（数字，越小越高）。
+     *
+     * 取三者的最优（数字最小）：
+     *   全局 global、当前会话（group:/channel:）、本插件 feature:<id>
+     * 这样「群主」和「只被授予本插件权限的人」都能通过本插件的检查，
+     * 而无关的人拿到的还是 NO_PERM。
      */
-    async levelOf(msg) {
+    async levelOf(msg, scope) {
       if (!roles) return isOwner(msg?.userId) ? LEVEL.owner : NO_PERM;
-      return roles.effective(scopeOf(msg), msg?.userId, { owners: cfg.owners });
+      if (scope) return roles.effective(scope, msg?.userId, { owners: cfg.owners });
+      const chat = await roles.effective(scopeOf(msg), msg?.userId, { owners: cfg.owners });
+      const feature = await roles.effective(`feature:${id}`, msg?.userId, { owners: cfg.owners });
+      return Math.min(chat, feature);
     },
 
-    /** 当前消息发送者是否达到某等级，默认要求管理员（数字越小越高） */
+    /**
+     * 当前消息发送者是否达到某等级，默认要求管理员（数字越小越高）。
+     *   ctx.can(msg)                 → 需要 1 级管理员
+     *   ctx.can(msg, 'manager')      → 需要 2 级协管
+     *   ctx.can(msg, L.管理员)        → 需要本插件的某个等级
+     */
     async can(msg, need = 'admin') {
       const want = typeof need === 'number' ? need : LEVEL[need] ?? LEVEL.admin;
       return (await this.levelOf(msg)) <= want;

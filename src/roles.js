@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { DATA_DIR } from './config.js';
 import { createLogger } from './logger.js';
+import { NO_PERM as LEVELS_NO_PERM, describeLevel, PLUGIN_START } from './levels.js';
 
 const log = createLogger('roles');
 const FILE = path.join(DATA_DIR, 'roles.json');
@@ -23,8 +24,9 @@ const FILE = path.join(DATA_DIR, 'roles.json');
  *     1    管理员
  *     2    协管
  *     3    助手
- *     4+   自定义层级，数字越大权限越低
- *     99   无权限（普通成员）
+ *     4 - 9    内核预留
+ *     10 - 998 插件区（主程序按插件 id 动态分配号段）
+ *     9999     无权限（普通成员）
  *
  * 有效等级 = min(全局等级, 当前作用域等级)   ← 越小越高，所以取更小的那个
  * 例：某人是全局 1，在任何一个群里都是 1；
@@ -38,7 +40,10 @@ export const LEVEL = {
 };
 
 /** 无任何权限时的等级值 */
-export const NO_PERM = 99;
+export const NO_PERM = LEVELS_NO_PERM;
+
+/** 允许通过命令授予的最大等级号（插件区上限） */
+export const MAX_ASSIGNABLE = 998;
 
 /** 名字 → 等级 */
 const LEVEL_ALIAS = {
@@ -57,17 +62,13 @@ export function parseLevel(input) {
   const s = String(input).trim().toLowerCase();
   if (s in LEVEL_ALIAS) return LEVEL_ALIAS[s];
   const n = Number(s);
-  if (!Number.isInteger(n) || n < 0 || n >= NO_PERM) return null;
+  if (!Number.isInteger(n) || n < 0 || n > MAX_ASSIGNABLE) return null;
   return n;
 }
 
 export function levelName(n) {
-  if (n === 0) return '主人';
-  if (n === 1) return '管理员';
-  if (n === 2) return '协管';
-  if (n === 3) return '助手';
-  if (n === NO_PERM || n === undefined || n === null) return '普通成员';
-  return `${n} 级管理`;
+  if (n === undefined || n === null) return '普通成员';
+  return describeLevel(n);
 }
 
 /** 等级是否达到要求（数字越小越高） */
