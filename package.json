@@ -1,0 +1,15 @@
+{
+  "name": "qq-bot-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "QQ 官方机器人内核：填 AppID/AppSecret 即连，插件式扩展",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/main.js",
+    "mock": "node src/main.js --mock",
+    "check": "node src/main.js --check"
+  }
+}

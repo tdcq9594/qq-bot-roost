@@ -1,0 +1,7 @@
+# 运行时配置与数据，不入库
+config.json
+data/
+node_modules/
+*.log
+.DS_Store
+Thumbs.db

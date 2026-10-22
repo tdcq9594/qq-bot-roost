@@ -1,0 +1,9 @@
+{
+  "appId": "",
+  "appSecret": "",
+  "baseUrl": "https://api.bot.qq.com",
+  "intents": 33554432,
+  "owners": [],
+  "commandPrefix": "/",
+  "logLevel": "info"
+}
