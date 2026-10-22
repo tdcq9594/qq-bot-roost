@@ -25,6 +25,45 @@ async function api(path, opts = {}) {
   return data;
 }
 
+/* ---------------- 主题 ---------------- */
+
+const THEME_KEY = 'qqbot_theme';
+
+function updateThemeBtn(t) {
+  const btn = $('#btnTheme');
+  if (btn) btn.title = t === 'dark' ? '切换到日间模式' : '切换到夜间模式';
+}
+
+function setTheme(t, { persist = true } = {}) {
+  document.documentElement.dataset.theme = t;
+  if (persist) {
+    try { localStorage.setItem(THEME_KEY, t); } catch {}
+  }
+  updateThemeBtn(t);
+}
+
+function initTheme() {
+  const btn = $('#btnTheme');
+  const saved = (() => { try { return localStorage.getItem(THEME_KEY); } catch { return null; } })();
+  const sysDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+
+  // 没手动选过就跟随系统，且不写入 localStorage，保持「跟随系统」状态
+  setTheme(saved || (sysDark ? 'dark' : 'light'), { persist: Boolean(saved) });
+
+  btn?.addEventListener('click', () => {
+    const cur = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    setTheme(cur);
+  });
+
+  // 用户没手动选过时，系统主题变了跟着变
+  const mq = window.matchMedia('(prefers-color-scheme: dark)');
+  mq.addEventListener?.('change', (e) => {
+    let hasSaved = null;
+    try { hasSaved = localStorage.getItem(THEME_KEY); } catch {}
+    if (!hasSaved) setTheme(e.matches ? 'dark' : 'light', { persist: false });
+  });
+}
+
 /* ---------------- 工具 ---------------- */
 
 function fmtDuration(ms) {
@@ -798,6 +837,7 @@ function connectStream() {
   await pollStatus();
   await initLogs();
   connectStream();
+  initTheme();
   setInterval(pollStatus, 5000);
   bindIntentsUI();
   loadConfig();
