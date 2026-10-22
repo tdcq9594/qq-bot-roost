@@ -143,6 +143,20 @@
           <label>每分钟每会话上限<input name="perChatPerMinute" type="number" min="1"></label>
           <label>去重窗口（秒）<input name="dedupWindowSec" type="number" min="0"></label>
         </div>
+        <div class="divider"></div>
+        <div class="intent-group-title">消息日志</div>
+        <label class="switch">
+          <input type="checkbox" name="messageLogEnabled">
+          把收到的每一条消息写进日志（便于排查"为什么没反应"）
+        </label>
+        <div class="mute-row">
+          <span class="hint">屏蔽以下来源，不记录也不显示：</span>
+          <label class="switch small"><input type="checkbox" name="muteGroup"> 群聊</label>
+          <label class="switch small"><input type="checkbox" name="muteC2c"> 私聊</label>
+          <label class="switch small"><input type="checkbox" name="muteGuild"> 频道</label>
+          <label class="switch small"><input type="checkbox" name="muteDm"> 频道私信</label>
+        </div>
+
         <label class="full">白名单群 openid（每行一个）
           <textarea name="whitelistGroups" rows="2"></textarea>
         </label>
@@ -231,6 +245,7 @@
             <tr>
               <th>群 openid</th>
               <th>邀请者</th>
+              <th>群主（识别）</th>
               <th>本群管理者</th>
               <th>状态</th>
               <th>最后活跃</th>
@@ -238,7 +253,7 @@
             </tr>
           </thead>
           <tbody id="groupBody">
-            <tr><td colspan="6" class="empty">还没有群。把机器人拉进群后这里会自动出现。</td></tr>
+            <tr><td colspan="7" class="empty">还没有群。把机器人拉进群后这里会自动出现。</td></tr>
           </tbody>
         </table>
       </div>

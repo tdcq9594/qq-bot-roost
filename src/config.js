@@ -43,6 +43,12 @@ const DEFAULTS = {
 
   // 机器人入群时，自动把「邀请人」设为主人（owners 为空时才生效）
   autoOwnerOnInvite: true,
+
+  // 收到的消息是否写进日志；muteKinds 里的来源类型不记录
+  messageLog: {
+    enabled: true,
+    muteKinds: [], // group / c2c / guild / dm
+  },
 };
 
 function deepMerge(base, extra) {
@@ -96,6 +102,7 @@ export async function saveConfig(cfg) {
     rateLimit: cfg.rateLimit,
     dedupWindowSec: cfg.dedupWindowSec,
     autoOwnerOnInvite: cfg.autoOwnerOnInvite,
+    messageLog: cfg.messageLog,
   };
   await fs.writeFile(CONFIG_PATH, JSON.stringify(out, null, 2) + '\n', 'utf8');
 }

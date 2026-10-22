@@ -198,6 +198,14 @@ function fillForm(c) {
   f.perChatPerMinute.value = c.rateLimit?.perChatPerMinute ?? 30;
   f.dedupWindowSec.value = c.dedupWindowSec ?? 120;
 
+  const ml = c.messageLog ?? {};
+  f.messageLogEnabled.checked = ml.enabled !== false;
+  const mute = ml.muteKinds ?? [];
+  f.muteGroup.checked = mute.includes('group');
+  f.muteC2c.checked = mute.includes('c2c');
+  f.muteGuild.checked = mute.includes('guild');
+  f.muteDm.checked = mute.includes('dm');
+
   f.webuiHost.value = c.webui?.host || '127.0.0.1';
   f.webuiPort.value = c.webui?.port ?? 8080;
   f.webuiAccessKey.value = c.webui?.accessKey || '';
@@ -422,6 +430,15 @@ $('#cfgForm').addEventListener('submit', async (e) => {
       perChatPerMinute: Number(f.perChatPerMinute.value) || 30,
     },
     dedupWindowSec: Number(f.dedupWindowSec.value) || 0,
+    messageLog: {
+      enabled: f.messageLogEnabled.checked,
+      muteKinds: [
+        f.muteGroup.checked ? 'group' : null,
+        f.muteC2c.checked ? 'c2c' : null,
+        f.muteGuild.checked ? 'guild' : null,
+        f.muteDm.checked ? 'dm' : null,
+      ].filter(Boolean),
+    },
     webui: {
       host: f.webuiHost.value.trim() || '127.0.0.1',
       port: Number(f.webuiPort.value) || 8080,
@@ -555,14 +572,14 @@ async function loadGroups() {
   try {
     renderGroups(await api('/api/groups'));
   } catch (e) {
-    body.innerHTML = `<tr><td colspan="6" class="empty">加载失败: ${e.message}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="7" class="empty">加载失败: ${e.message}</td></tr>`;
   }
 }
 
 function renderGroups(list) {
   const body = $('#groupBody');
   if (!list.length) {
-    body.innerHTML = '<tr><td colspan="6" class="empty">还没有群。把机器人拉进群后这里会自动出现。</td></tr>';
+    body.innerHTML = '<tr><td colspan="7" class="empty">还没有群。把机器人拉进群后这里会自动出现。</td></tr>';
     return;
   }
   body.innerHTML = list
@@ -570,6 +587,7 @@ function renderGroups(list) {
       <tr data-id="${g.groupOpenid}">
         <td class="mono" title="${g.groupOpenid}">${shortId(g.groupOpenid)}</td>
         <td class="mono" title="${g.inviterOpenid || ''}">${g.inviterOpenid ? shortId(g.inviterOpenid) : '-'}</td>
+        <td class="mono" title="${g.ownerOpenid || ''}">${g.ownerOpenid ? shortId(g.ownerOpenid) : '-'}</td>
         <td><input class="inline-input admin-input" value="${g.adminOpenid || ''}" placeholder="未设置"></td>
         <td><span class="badge ${g.enabled ? 'on' : 'off'}">${g.enabled ? '在用' : '已移出'}</span></td>
         <td>${g.lastActiveAt ? fmtAgo(g.lastActiveAt) : '-'}</td>

@@ -163,6 +163,14 @@ export function startWebServer({ cfg, plugins, groups, getGateway, tokens, api, 
           if (body.autoOwnerOnInvite !== undefined) {
             cfg.autoOwnerOnInvite = Boolean(body.autoOwnerOnInvite);
           }
+          if (body.messageLog && typeof body.messageLog === 'object') {
+            cfg.messageLog = {
+              enabled: body.messageLog.enabled !== false,
+              muteKinds: Array.isArray(body.messageLog.muteKinds)
+                ? body.messageLog.muteKinds.filter((k) => ['group', 'c2c', 'guild', 'dm'].includes(k))
+                : [],
+            };
+          }
           if (body.webui && typeof body.webui === 'object') {
             cfg.webui = { ...cfg.webui, ...body.webui };
           }

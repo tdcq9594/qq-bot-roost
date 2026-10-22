@@ -335,6 +335,20 @@ function registerCoreCommands(registry, { cfg, plugins, tokens }) {
 /* 事件分发                                                            */
 /* ------------------------------------------------------------------ */
 
+/** 把收到的消息写进日志，可按来源类型屏蔽 */
+function logIncoming(msg, cfg) {
+  const ml = cfg.messageLog ?? {};
+  if (ml.enabled === false) return;
+  if ((ml.muteKinds ?? []).includes(msg.kind)) return;
+
+  const content = msg.content.length > 120 ? msg.content.slice(0, 120) + '…' : msg.content;
+  const who = msg.userName
+    ? `${msg.userName}(${msg.userId.slice(0, 8)})`
+    : msg.userId.slice(0, 8) || '-';
+  const where = msg.groupId ? msg.groupId.slice(0, 10) : '-';
+  log.info(`收到 ${msg.kind} 会话:${where} 来自:${who} 内容:${content || '(空)'}`);
+}
+
 function createDispatcher({ registry, api, cfg, plugins, guards, groups }) {
   const isOwner = (uid) => cfg.owners.includes(uid);
 
@@ -386,6 +400,13 @@ function createDispatcher({ registry, api, cfg, plugins, guards, groups }) {
 
     // 先登记群，再做拦截：被限流/白名单拦掉的消息也说明这个群存在
     if (msg.kind === 'group' && msg.groupId) await groups.touch(msg.groupId);
+
+    // 报文里带 member_role=owner 的就是群主，比「谁邀请机器人」更准
+    if (msg.kind === 'group' && msg.raw?.author?.member_role === 'owner') {
+      await groups.setOwner(msg.groupId, msg.userId);
+    }
+
+    logIncoming(msg, cfg);
 
     if (!guards.check(msg)) return;
 

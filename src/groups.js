@@ -76,6 +76,7 @@ export class GroupStore {
     const cur = d[groupOpenid] ?? {
       groupOpenid,
       inviterOpenid: '',
+      ownerOpenid: '', // 官方报文里 member_role=owner 的人，最准
       adminOpenid: '',
       enabled: true,
       addedAt: Date.now(),
@@ -122,6 +123,15 @@ export class GroupStore {
     return this.upsert(groupOpenid, { adminOpenid: openid || '' });
   }
 
+  /** 从消息报文里发现群主（author.member_role === 'owner'） */
+  async setOwner(groupOpenid, openid) {
+    if (!groupOpenid || !openid) return null;
+    const cur = await this.get(groupOpenid);
+    if (cur?.ownerOpenid === openid) return cur;
+    log.info(`发现群主 ${openid}（群 ${groupOpenid}）`);
+    return this.upsert(groupOpenid, { ownerOpenid: openid });
+  }
+
   async setEnabled(groupOpenid, enabled) {
     return this.upsert(groupOpenid, { enabled: Boolean(enabled) });
   }
@@ -132,10 +142,11 @@ export class GroupStore {
     this.#scheduleSave();
   }
 
-  /** 该用户是否是这个群的管理者 */
+  /** 该用户是否是这个群的管理者（手动设置的管理者，或识别到的群主） */
   async isAdmin(groupOpenid, userId) {
     if (!groupOpenid || !userId) return false;
     const g = await this.get(groupOpenid);
-    return Boolean(g?.adminOpenid && g.adminOpenid === userId);
+    if (!g) return false;
+    return g.adminOpenid === userId || g.ownerOpenid === userId;
   }
 }

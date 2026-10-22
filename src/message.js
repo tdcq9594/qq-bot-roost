@@ -18,14 +18,31 @@ export function isMessageEvent(name) {
   return name in MESSAGE_EVENTS;
 }
 
-/** 去掉频道消息里的 @机器人 前缀，如 "<@!123456> /help" */
+/**
+ * @ 的格式：<@2409AB55F21D2ACFED13223632472280>
+ * ID 可能是十进制，也可能是十六进制大写串，所以不能只匹配 \d+。
+ */
+const MENTION_RE = /<@!?[0-9A-Za-z]+>/g;
+const MENTION_TEST = /<@!?[0-9A-Za-z]+>/;
+
+/** 去掉正文里的 @xxx，保留其余内容 */
 function stripMention(content) {
-  return String(content ?? '').replace(/^\s*<@!?\d+>\s*/, '').trim();
+  return String(content ?? '')
+    .replace(MENTION_RE, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-/** 正文里是否 @ 了机器人（新版群消息事件可能是全量消息，需要自己判断） */
-function hasMention(raw) {
-  return /<@!?\d+>/.test(String(raw ?? ''));
+/**
+ * 正文里是否 @ 了机器人。
+ * 优先用官方给的 mentions 数组（带 is_you 标记，最准），
+ * 没有该字段时退回正则匹配。
+ */
+function detectMention(d) {
+  if (Array.isArray(d?.mentions) && d.mentions.length) {
+    return d.mentions.some((m) => m && (m.is_you || m.bot));
+  }
+  return MENTION_TEST.test(String(d?.content ?? ''));
 }
 
 /**
@@ -36,6 +53,7 @@ export function buildMessage(eventName, d, { api, cfg }) {
 
   let groupId = '';
   let userId = '';
+  const userName = d.author?.username ?? '';
   if (kind === 'group') {
     groupId = d.group_openid ?? '';
     userId = d.author?.member_openid ?? d.author?.id ?? '';
@@ -52,7 +70,7 @@ export function buildMessage(eventName, d, { api, cfg }) {
   const content = stripMention(d.content);
   const prefix = cfg.commandPrefix || '/';
   const isCommand = content.startsWith(prefix);
-  const mentioned = hasMention(d.content);
+  const mentioned = detectMention(d);
 
   const msg = {
     id: d.id ?? '',
@@ -60,6 +78,7 @@ export function buildMessage(eventName, d, { api, cfg }) {
     event: eventName,
     groupId,
     userId,
+    userName,
     chatId: groupId || userId,
     content,
     raw: d,
