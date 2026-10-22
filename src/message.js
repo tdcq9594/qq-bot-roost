@@ -85,6 +85,17 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
     content,
     raw: d,
     mentioned,
+    /**
+     * 本条消息 @ 了谁（不含机器人自己）。
+     * 官方在 d.mentions 里给的是 [{ id / member_openid / user_openid, is_you, bot }]，
+     * 各事件字段名不统一，这里统一成 [{ id, isBot }]，做 PvP、点名类玩法直接用。
+     */
+    mentions: (Array.isArray(d?.mentions) ? d.mentions : [])
+      .map((m) => ({
+        id: m?.id ?? m?.member_openid ?? m?.user_openid ?? '',
+        isBot: Boolean(m?.is_you || m?.bot),
+      }))
+      .filter((m) => m.id && !m.isBot),
     sticky,
     addressed,
     isCommand,
@@ -122,10 +133,57 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
     });
   };
 
-  /** 被动回复（带 msg_id，5 分钟内有效，msg_seq 自动递增） */
+  /* ---------------- 回复合并 ---------------- */
+
+  // 一次消息处理中可能有多个插件都要回复（命令 + 监听器 + 被动触发），
+  // 逐条发出去会刷屏。所以先攒起来，处理完统一发一条。
+  const replyBuf = [];
+  const MAX_CHUNK = 1500; // 单条上限，超了按行切成多条
+
+  /**
+   * 被动回复（带 msg_id，5 分钟内有效）。
+   * **不会立刻发出**，而是攒到本次处理结束，由 flushReplies() 合并成一条。
+   * 想立刻发用 msg.replyNow()。
+   */
   msg.reply = (text, opts = {}) => {
     if (text === undefined || text === null || text === '') return Promise.resolve(null);
+    replyBuf.push({ text: String(text), opts });
+    msg.replied = true; // 立刻标记，内核据此判断「这条消息有人管」
+    return Promise.resolve(null);
+  };
+
+  /** 绕过合并，立刻发一条 */
+  msg.replyNow = (text, opts = {}) => {
+    if (text === undefined || text === null || text === '') return Promise.resolve(null);
     return send({ content: String(text), ...opts }, true);
+  };
+
+  /**
+   * 把攒下的回复合并成一条发出去。由内核在本次处理结束时调用。
+   * 同一段文本内的 opts 只取第一条的（合并后就是一条消息，没法各带各的）。
+   */
+  msg.flushReplies = async () => {
+    if (!replyBuf.length) return null;
+    const items = replyBuf.splice(0, replyBuf.length);
+    const opts = items[0].opts ?? {};
+    const merged = items.map((x) => x.text).join('\n');
+
+    // 超长按行切，避免一条消息塞不下被平台拒
+    const chunks = [];
+    let cur = '';
+    for (const line of merged.split('\n')) {
+      if (cur && (cur.length + 1 + line.length) > MAX_CHUNK) {
+        chunks.push(cur);
+        cur = line;
+      } else {
+        cur = cur ? `${cur}\n${line}` : line;
+      }
+    }
+    if (cur) chunks.push(cur);
+
+    let last = null;
+    for (const c of chunks) last = await send({ content: c, ...opts }, true);
+    return last;
   };
 
   /** 主动推送（不带 msg_id，有频次限制） */
@@ -134,16 +192,19 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
     return send({ content: String(text), ...opts }, false);
   };
 
-  /** Markdown 消息（可带按钮 keyboard） */
-  msg.replyMarkdown = (markdown, keyboard) =>
-    send({ markdown, keyboard }, true).catch((e) => {
+  /** Markdown 消息（可带按钮 keyboard）。Markdown 是独立消息类型，先把攒的文本发掉 */
+  msg.replyMarkdown = async (markdown, keyboard) => {
+    await msg.flushReplies();
+    return send({ markdown, keyboard }, true).catch((e) => {
       log.error('发送 Markdown 失败:', e.message);
       return null;
     });
+  };
 
-  /** 发富媒体：上传后以 msg_type=7 发送 */
+  /** 发富媒体：上传后以 msg_type=7 发送。图片是独立消息，先把攒的文本发掉 */
   const replyMedia = async (fileType, source, { local = false } = {}) => {
     if (!source) return null;
+    await msg.flushReplies();
     try {
       const scene = kind === 'group' ? 'group' : 'c2c';
       const target = kind === 'group' ? groupId : userId;

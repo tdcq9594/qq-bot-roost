@@ -260,90 +260,95 @@ export class BotRuntime {
 
     /* ---- 消息事件 ---- */
     const msg = buildMessage(eventName, d, { api: this.api, cfg, outbound, session });
-    globalRuntime.bump('recv');
-    globalRuntime.touchChat(msg.chatId, msg.kind);
-    if (msg.kind === 'group' && msg.groupId) await groups.touch(msg.groupId);
+    try {
+      globalRuntime.bump('recv');
+      globalRuntime.touchChat(msg.chatId, msg.kind);
+      if (msg.kind === 'group' && msg.groupId) await groups.touch(msg.groupId);
 
-    if (msg.kind === 'group' && msg.raw?.author?.member_role === 'owner') {
-      await groups.setOwner(msg.groupId, msg.userId);
-      const gScope = `group:${msg.groupId}`;
-      if ((await roles.levelIn(gScope, msg.userId)) >= NO_PERM) {
-        await roles.set(gScope, msg.userId, LEVEL.admin);
-        this.log.info(`群主 ${msg.userId} 自动获得 ${gScope} 的管理员权限`);
-      }
-    }
-
-    this.logIncoming(msg);
-
-    if (msg.mentioned || msg.isCommand) session.markAddressed(msg.chatId);
-
-    const commandEntry = msg.isCommand ? registry.commands.get(msg.command) ?? null : null;
-    const passed = await pipeline.run({ msg, cfg, commandEntry });
-    if (!passed) return;
-
-    if (msg.isCommand && commandEntry) {
-      const scope = scopeOf(msg);
-      if (commandEntry.admin || commandEntry.globalAdmin) {
-        const lv = await roles.effective(scope, msg.userId, { owners: cfg.owners });
-        if (commandEntry.admin && lv > LEVEL.admin) {
-          return msg
-            .reply(
-              `需要管理员权限才能用这个命令（你当前是${levelName(lv)}）。\n` +
-                `发 ${cfg.commandPrefix || '/'}admin me 查看自己的权限。`,
-            )
-            .catch(() => {});
+      if (msg.kind === 'group' && msg.raw?.author?.member_role === 'owner') {
+        await groups.setOwner(msg.groupId, msg.userId);
+        const gScope = `group:${msg.groupId}`;
+        if ((await roles.levelIn(gScope, msg.userId)) >= NO_PERM) {
+          await roles.set(gScope, msg.userId, LEVEL.admin);
+          this.log.info(`群主 ${msg.userId} 自动获得 ${gScope} 的管理员权限`);
         }
-        if (commandEntry.globalAdmin) {
-          const gl = cfg.owners.includes(msg.userId)
-            ? LEVEL.owner
-            : await roles.levelIn('global', msg.userId);
-          if (gl > LEVEL.admin) {
-            return msg.reply('这个命令影响全局，需要「全局管理员」权限。').catch(() => {});
+      }
+
+      this.logIncoming(msg);
+
+      if (msg.mentioned || msg.isCommand) session.markAddressed(msg.chatId);
+
+      const commandEntry = msg.isCommand ? registry.commands.get(msg.command) ?? null : null;
+      const passed = await pipeline.run({ msg, cfg, commandEntry });
+      if (!passed) return;
+
+      if (msg.isCommand && commandEntry) {
+        const scope = scopeOf(msg);
+        if (commandEntry.admin || commandEntry.globalAdmin) {
+          const lv = await roles.effective(scope, msg.userId, { owners: cfg.owners });
+          if (commandEntry.admin && lv > LEVEL.admin) {
+            return msg
+              .reply(
+                `需要管理员权限才能用这个命令（你当前是${levelName(lv)}）。\n` +
+                  `发 ${cfg.commandPrefix || '/'}admin me 查看自己的权限。`,
+              )
+              .catch(() => {});
+          }
+          if (commandEntry.globalAdmin) {
+            const gl = cfg.owners.includes(msg.userId)
+              ? LEVEL.owner
+              : await roles.levelIn('global', msg.userId);
+            if (gl > LEVEL.admin) {
+              return msg.reply('这个命令影响全局，需要「全局管理员」权限。').catch(() => {});
+            }
+          }
+        }
+        const required = (commandEntry.pattern?.match(/<[^>]+>/g) ?? []).length;
+        if (msg.args.length < required) {
+          return msg.reply(`参数不够\n用法: ${commandEntry.usage}`).catch(() => {});
+        }
+        globalRuntime.bump('commands');
+        try {
+          await commandEntry.handler(msg, { args: msg.args, raw: msg.content, bot: this });
+        } catch (e) {
+          globalRuntime.bump('errors');
+          if (e?.code === 'offline' || e?.code === 'expired' || e?.code === 'quota') {
+            this.log.warn(`命令 ${commandEntry.name} 回复失败: ${e.message}`);
+            return;
+          }
+          this.log.error(
+            `命令 ${commandEntry.name}（插件 ${commandEntry.pluginId}）执行出错:`,
+            e.stack || e.message,
+          );
+          await msg.reply(`执行出错: ${e.message}`).catch(() => {});
+        }
+        return;
+      }
+
+      if (session.deliver(msg)) return;
+
+      if (msg.isCommand) {
+        const P = cfg.commandPrefix || '/';
+        return msg.reply(`没有这个命令：${P}${msg.command}\n发 ${P}help 查看全部命令`).catch(() => {});
+      }
+
+      let handled = false;
+      for (const evt of ['message', eventName]) {
+        for (const l of registry.listeners.get(evt) ?? []) {
+          try {
+            const ret = await l.handler(msg);
+            if (ret === true || msg.replied) handled = true;
+          } catch (e) {
+            globalRuntime.bump('errors');
+            this.log.error(`监听器 ${l.pluginId} 处理 ${evt} 出错:`, e.stack || e.message);
           }
         }
       }
-      const required = (commandEntry.pattern?.match(/<[^>]+>/g) ?? []).length;
-      if (msg.args.length < required) {
-        return msg.reply(`参数不够\n用法: ${commandEntry.usage}`).catch(() => {});
-      }
-      globalRuntime.bump('commands');
-      try {
-        await commandEntry.handler(msg, { args: msg.args, raw: msg.content, bot: this });
-      } catch (e) {
-        globalRuntime.bump('errors');
-        if (e?.code === 'offline' || e?.code === 'expired' || e?.code === 'quota') {
-          this.log.warn(`命令 ${commandEntry.name} 回复失败: ${e.message}`);
-          return;
-        }
-        this.log.error(
-          `命令 ${commandEntry.name}（插件 ${commandEntry.pluginId}）执行出错:`,
-          e.stack || e.message,
-        );
-        await msg.reply(`执行出错: ${e.message}`).catch(() => {});
-      }
-      return;
+      if (!handled) globalRuntime.bump('ignored');
+    } finally {
+      // 本次处理里所有插件攒下的回复，合并成一条发出去
+      await msg.flushReplies?.();
     }
-
-    if (session.deliver(msg)) return;
-
-    if (msg.isCommand) {
-      const P = cfg.commandPrefix || '/';
-      return msg.reply(`没有这个命令：${P}${msg.command}\n发 ${P}help 查看全部命令`).catch(() => {});
-    }
-
-    let handled = false;
-    for (const evt of ['message', eventName]) {
-      for (const l of registry.listeners.get(evt) ?? []) {
-        try {
-          const ret = await l.handler(msg);
-          if (ret === true || msg.replied) handled = true;
-        } catch (e) {
-          globalRuntime.bump('errors');
-          this.log.error(`监听器 ${l.pluginId} 处理 ${evt} 出错:`, e.stack || e.message);
-        }
-      }
-    }
-    if (!handled) globalRuntime.bump('ignored');
   }
 
   logIncoming(msg) {

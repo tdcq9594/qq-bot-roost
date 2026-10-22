@@ -92,6 +92,12 @@ export function botPaths(id) {
     pluginLog: (pluginId) => path.join(logs, 'plugins', `${pluginId}.log`),
     pluginConfig: (pluginId) => path.join(DIRS.botsConfig, id, 'plugins', `${pluginId}.json`),
     pluginData: (pluginId) => path.join(base, 'plugins', `${pluginId}.json`),
+    /**
+     * 外部插件专属的数据目录（不是文件）。
+     * 内建插件用 ctx.storage 存单个 JSON；外部插件语言各异，
+     * 给它一个目录，想用 JSON / SQLite / 自己的格式都行。
+     */
+    pluginDataDirFor: (pluginId) => path.join(base, 'plugins', pluginId),
   };
 }
 

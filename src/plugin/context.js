@@ -99,13 +99,15 @@ export class Registry {
 }
 
 /** 每个插件一个简单的 JSON 键值存储，游戏存档之类可以直接用 */
-class PluginStorage {
+export class PluginStorage {
   /** @param {string} file 该插件在该机器人下的存档文件 */
   constructor(file) {
     this.file = file;
     this.data = null;
     this.dirty = false;
     this.timer = null;
+    /** key -> 该 key 的更新队列尾，保证 update() 串行 */
+    this.locks = new Map();
   }
 
   async #load() {
@@ -121,6 +123,45 @@ class PluginStorage {
   async get(key, fallback = undefined) {
     const d = await this.#load();
     return key in d ? d[key] : fallback;
+  }
+
+  /**
+   * 原子更新：对同一个 key 的「读-改-写」串行执行，避免并发覆盖。
+   *
+   * 为什么需要：直接 get → 改 → set 在并发下会丢更新。
+   * 比如玩家连发 /签到 和 /喂食，两条命令都读到同一份旧数据，
+   * 后写入的会把前一条的结果盖掉。用 update 就不会。
+   *
+   *   await ctx.storage.update('user:123', (p) => {
+   *     p.points += 10;        // 直接改传入的对象，或返回新对象
+   *     return p;              // 返回 undefined 表示不写入
+   *   });
+   *
+   * @param {string} key
+   * @param {(cur:any)=>any} fn 拿到当前值，返回新值；返回 undefined 则不写入
+   * @param {any} [fallback] key 不存在时传给 fn 的初始值
+   */
+  async update(key, fn, fallback = undefined) {
+    const prev = this.locks.get(key) ?? Promise.resolve();
+    const task = prev.then(async () => {
+      const d = await this.#load();
+      const cur = key in d ? d[key] : fallback;
+      const val = await fn(cur);
+      // undefined / null 都表示「这次不写入」，保持原值
+      if (val !== undefined && val !== null) {
+        d[key] = val;
+        this.#scheduleSave();
+      }
+      return d[key];
+    });
+    // 排队用的一条链：前一个失败也不能卡住后面的，所以吞掉错误
+    const tail = task.catch(() => {});
+    this.locks.set(key, tail);
+    // 队列跑完就清掉，避免 key 多了内存堆积
+    tail.then(() => {
+      if (this.locks.get(key) === tail) this.locks.delete(key);
+    });
+    return task;
   }
 
   async set(key, value) {
@@ -325,6 +366,8 @@ export function createContext({ meta, paths, registry, api, cfg, config, configS
     async prompt(msg, text, opts = {}) {
       if (!session) throw new Error('当前环境不支持多轮对话');
       if (text) await msg.reply(text);
+      // 提示语是攒着的，必须立刻发出去，否则用户看不到问题、只能等到超时
+      await msg.flushReplies?.();
 
       const timeoutMs =
         opts.timeoutMs ?? Math.max(1000, (cfg.session?.promptTimeoutSec ?? 120) * 1000);

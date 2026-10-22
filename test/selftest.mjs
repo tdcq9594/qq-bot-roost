@@ -399,6 +399,121 @@ const RUN = Date.now().toString(36);
   check('退出后能注销自己的登记', !after[A] && !after[B] && !after[C_]);
 }
 
+/* ---------- 17. storage 原子更新（并发不丢数据） ---------- */
+{
+  const { PluginStorage } = await import('../src/plugin/context.js');
+  const os = await import('node:os');
+  const file = path.join(os.tmpdir(), `roost-test-${Date.now()}.json`);
+  const st = new PluginStorage(file);
+
+  // 10 个并发 update，每个 +1。没有串行化的话最终值会小于 10
+  await Promise.all(
+    Array.from({ length: 10 }, () =>
+      st.update('user:1', (p) => {
+        const cur = p ?? { n: 0 };
+        cur.n += 1;
+        return cur;
+      }),
+    ),
+  );
+  const after = await st.get('user:1');
+  check('并发 update 不丢更新', after?.n === 10, `实际 n=${after?.n}`);
+
+  // 返回 null 表示不写入
+  const keep = await st.update('user:1', () => null);
+  check('update 返回 null 时不写入', keep?.n === 10, `实际 n=${keep?.n}`);
+
+  // key 不存在时能拿到 fallback 之外的初始值
+  const born = await st.update('user:2', (p) => {
+    const cur = p ?? { n: 100 };
+    cur.n += 1;
+    return cur;
+  });
+  check('新 key 能正常创建', born?.n === 101, `实际 n=${born?.n}`);
+
+  // 并发改不同 key 互不干扰
+  await Promise.all([
+    st.update('a', (p) => ({ v: (p?.v ?? 0) + 1 })),
+    st.update('b', (p) => ({ v: (p?.v ?? 0) + 1 })),
+  ]);
+  check('不同 key 并行更新互不影响', (await st.get('a'))?.v === 1 && (await st.get('b'))?.v === 1);
+
+  await st.flush();
+  const onDisk = JSON.parse(await fs.readFile(file, 'utf8'));
+  check('flush 后数据真的落盘了', onDisk['user:1']?.n === 10);
+  await fs.unlink(file).catch(() => {});
+}
+
+/* ---------- 18. 多插件回复合并成一条 ---------- */
+{
+  const { buildMessage } = await import('../src/message.js');
+
+  const sent = [];
+  const fakeApi = {
+    sendGroup: async (target, body) => {
+      sent.push({ target, body });
+      return { id: 'x' };
+    },
+    sendC2C: async (target, body) => {
+      sent.push({ target, body });
+      return { id: 'x' };
+    },
+  };
+
+  const msg = buildMessage(
+    'GROUP_AT_MESSAGE_CREATE',
+    {
+      id: 'm1',
+      content: '测试',
+      group_openid: 'g1',
+      author: { member_openid: 'u1' },
+      timestamp: '1700000000000',
+    },
+    { api: fakeApi, cfg: { commandPrefix: '/' } },
+  );
+
+  // 模拟三个插件都要回复同一条消息
+  msg.reply('插件A 的结果');
+  msg.reply('插件B 的结果');
+  msg.reply('插件C 的结果');
+
+  check('回复先攒着不立即发', sent.length === 0, `实际发了 ${sent.length} 条`);
+  check('攒着的时候 replied 已置位', msg.replied === true);
+
+  await msg.flushReplies();
+
+  check('合并后只发一条', sent.length === 1, `实际发了 ${sent.length} 条`);
+  check(
+    '合并内容是三段拼起来的',
+    sent[0]?.body?.content === '插件A 的结果\n插件B 的结果\n插件C 的结果',
+    JSON.stringify(sent[0]?.body?.content),
+  );
+
+  // 再 flush 一次不应该重复发
+  await msg.flushReplies();
+  check('重复 flush 不会重复发送', sent.length === 1, `实际发了 ${sent.length} 条`);
+
+  // 超长要切分，避免一条塞不下
+  const big = buildMessage(
+    'GROUP_AT_MESSAGE_CREATE',
+    {
+      id: 'm2',
+      content: 'x',
+      group_openid: 'g2',
+      author: { member_openid: 'u2' },
+      timestamp: '1700000000001',
+    },
+    { api: fakeApi, cfg: { commandPrefix: '/' } },
+  );
+  for (let i = 0; i < 5; i++) big.reply('长'.repeat(500));
+  await big.flushReplies();
+  check('超长内容会拆成多条', sent.length >= 3, `总条数 ${sent.length}`);
+  check(
+    '拆分后没有丢内容',
+    sent.slice(1).reduce((n, s) => n + (s.body.content || '').length, 0) >= 2500,
+  );
+}
+
 /* ---------- 汇总 ---------- */
 // 清掉测试写进额度账本的条目，别污染真实数据。
 // 多机器人后账本在 data/bots/<id>/quota.json，所以两边都要扫。

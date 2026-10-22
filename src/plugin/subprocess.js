@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createLogger } from '../logger.js';
 import { PROTOCOL_VERSION, DEFAULTS, serializeMessage, parseLine } from './protocol.js';
@@ -16,11 +17,13 @@ import { scopeOf, LEVEL, NO_PERM } from '../roles.js';
  *   - 进程崩溃时结束所有挂起请求，并按次数上限自动重启
  */
 export class SubprocessPlugin {
-  constructor({ dir, manifest, pythonPath = null, botId = '-', allocation, cfg, roles, isOwner }) {
+  constructor({ dir, manifest, pythonPath = null, botId = '-', dataDir = null, allocation, cfg, roles, isOwner }) {
     this.dir = dir;
     this.manifest = manifest;
     this.id = manifest.id;
     this.botId = botId;
+    // 该插件专属的数据目录，插件想怎么存都行（JSON / SQLite / 自定义格式）
+    this.dataDir = dataDir ?? null;
     // 依赖安装器解析出的解释器（可能是插件目录里的 .venv），没有就用系统默认
     this.pythonPath = pythonPath;
     this.allocation = allocation ?? { base: 10, end: 19 };
@@ -103,6 +106,15 @@ export class SubprocessPlugin {
     }, DEFAULTS.readyTimeout);
     readyTimer.unref?.();
 
+    // 先把数据目录建好再 init，插件收到就能直接写
+    if (this.dataDir) {
+      try {
+        await fs.mkdir(this.dataDir, { recursive: true });
+      } catch (e) {
+        this.log.warn(`创建数据目录失败: ${e.message}`);
+      }
+    }
+
     this.#send({
       t: 'init',
       protocol: PROTOCOL_VERSION,
@@ -111,6 +123,8 @@ export class SubprocessPlugin {
       levels: this.allocation,
       coreLevels: LEVEL,
       prefix: this.cfg.commandPrefix || '/',
+      // 外部插件没有 storage 协议，给它一个专属目录自己存
+      dataDir: this.dataDir,
     });
 
     try {

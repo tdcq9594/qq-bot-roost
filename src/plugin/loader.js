@@ -272,6 +272,8 @@ export class PluginManager {
       dir,
       manifest: { ...raw, id: meta.id, config },
       botId: this.paths.id,
+      // 外部插件没有 storage 协议，给它一个专属目录自己存
+      dataDir: this.paths.pluginDataDirFor(meta.id),
       // 有 venv 就用 venv 里的解释器，没有就用探测到的系统解释器
       pythonPath: deps.python ?? null,
       allocation: this.allocations.get(id) ?? null,
