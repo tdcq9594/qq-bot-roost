@@ -348,6 +348,49 @@ export async function startWebServer({
         if (pathname === '/api/plugins' && req.method === 'GET') {
           return json(res, 200, plugins.list());
         }
+        /* ---------------- 插件设置面板 ---------------- */
+
+        // 拿某个插件的配置 schema、当前值、存档
+        const pm = pathname.match(/^\/api\/plugins\/([^/]+)\/panel$/);
+        if (pm && req.method === 'GET') {
+          const p = await plugins.panelOf(decodeURIComponent(pm[1]));
+          if (!p) return json(res, 404, { error: '插件没加载' });
+          return json(res, 200, p);
+        }
+
+        // 改插件配置
+        const pc = pathname.match(/^\/api\/plugins\/([^/]+)\/config$/);
+        if (pc && req.method === 'PUT') {
+          const body = await readBody(req);
+          try {
+            const next = await plugins.setConfig(decodeURIComponent(pc[1]), body ?? {});
+            return json(res, 200, { ok: true, config: next });
+          } catch (e) {
+            return json(res, 400, { error: e.message });
+          }
+        }
+
+        // 改 / 删一条插件存档
+        const pd = pathname.match(/^\/api\/plugins\/([^/]+)\/data$/);
+        if (pd && req.method === 'POST') {
+          const id = decodeURIComponent(pd[1]);
+          const body = await readBody(req);
+          const key = String(body.key ?? '').trim();
+          if (!key) return json(res, 400, { error: '缺少 key' });
+          try {
+            if (body.remove) {
+              await plugins.deleteData(id, key);
+              return json(res, 200, { ok: true, removed: key });
+            }
+            // value 允许是任意 JSON；字符串原样存
+            const value = typeof body.value === 'string' ? body.value : body.value;
+            await plugins.setData(id, key, value);
+            return json(res, 200, { ok: true, key });
+          } catch (e) {
+            return json(res, 400, { error: e.message });
+          }
+        }
+
         const m = pathname.match(/^\/api\/plugins\/([^/]+)\/(enable|disable|reload)$/);
         if (m && req.method === 'POST') {
           const [, id, action] = m;

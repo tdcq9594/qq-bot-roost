@@ -758,3 +758,49 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 /* 插件页工具条：说明文字 + 按钮一行放下 */
 .plugin-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .plugin-tools .hint { margin-right: 4px; }
+
+/* ============================================================
+   插件设置面板
+   ============================================================ */
+.modal.wide { width: min(760px, 94vw); max-height: 82vh; display: flex; flex-direction: column; }
+.pp-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+.pp-tab {
+  border: 0; background: none; cursor: pointer; font-family: inherit;
+  padding: 7px 14px; font-size: 13px; color: var(--muted);
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.pp-tab.active { color: var(--primary); border-bottom-color: var(--primary); font-weight: 600; }
+.pp-body { overflow: auto; flex: 1; min-height: 120px; }
+.pp-body[hidden] { display: none; }
+
+.pp-field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 14px; }
+.pp-field > span { font-size: 12.5px; font-weight: 500; color: var(--text-2); }
+.pp-field > i { font-size: 11.5px; color: var(--muted); font-style: normal; }
+.pp-field input[type="text"], .pp-field input[type="number"],
+.pp-field select, .pp-field textarea {
+  width: 100%; font-size: 13px; padding: 7px 10px;
+  border: 1px solid var(--border); border-radius: 7px;
+  background: var(--panel-2); color: var(--text); outline: none;
+  font-family: inherit;
+}
+.pp-field textarea { font-family: var(--mono); font-size: 12px; resize: vertical; }
+.pp-field input:focus, .pp-field select:focus, .pp-field textarea:focus { border-color: var(--primary); }
+.pp-switch { display: flex; align-items: center; gap: 7px; font-size: 13px; cursor: pointer; }
+
+.pp-hint { font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+.pp-data-row {
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 9px 11px; margin-bottom: 9px; background: var(--panel-2);
+}
+.pp-data-key {
+  font-family: var(--mono); font-size: 11.5px; color: var(--text-2);
+  margin-bottom: 6px; word-break: break-all;
+}
+.pp-data-row textarea {
+  width: 100%; font-family: var(--mono); font-size: 11.5px;
+  padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--panel); color: var(--text); outline: none; resize: vertical;
+}
+.pp-data-acts { display: flex; gap: 6px; margin-top: 6px; justify-content: flex-end; }
+.btn.danger { color: var(--err); border-color: var(--err-border); }
+.btn.danger:hover { background: var(--err-soft); }

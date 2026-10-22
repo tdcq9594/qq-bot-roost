@@ -510,6 +510,23 @@
   </div>
 </div>
 
+<!-- 插件设置：配置 + 玩家数据 -->
+<div class="modal-mask" id="pluginPanelMask" hidden>
+  <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="ppTitle">
+    <h3 class="modal-title" id="ppTitle">插件设置</h3>
+    <div class="pp-tabs">
+      <button type="button" class="pp-tab active" data-pp="config">配置</button>
+      <button type="button" class="pp-tab" data-pp="data">玩家数据</button>
+    </div>
+    <div id="ppConfig" class="pp-body"></div>
+    <div id="ppData" class="pp-body" hidden></div>
+    <div class="modal-actions">
+      <button class="btn" id="ppClose">关闭</button>
+      <button class="btn primary" id="ppSave">保存配置</button>
+    </div>
+  </div>
+</div>
+
 <script src="/app.js"></script>
 </body>
 </html>

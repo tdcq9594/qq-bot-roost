@@ -6,7 +6,7 @@ import { createContext } from './context.js';
 import { SubprocessPlugin } from './subprocess.js';
 import { rel } from '../paths.js';
 import { allocateLevels } from '../levels.js';
-import { PluginConfig } from './config.js';
+import { PluginConfig, schemaOf } from './config.js';
 import { ensurePluginDeps } from './deps.js';
 
 const log = createLogger('plugins');
@@ -280,7 +280,7 @@ export class PluginManager {
       );
     }
 
-    this.loaded.set(meta.id, { meta, ctx, dir, kind: 'internal', menuMissing });
+    this.loaded.set(meta.id, { meta, ctx, dir, kind: 'internal', menuMissing, configStore });
     this.#cacheMeta(meta.id, meta, 'internal', 'node');
     this.errors.delete(meta.id);
     log.info(`已加载内建插件 ${meta.id} (${meta.name ?? ''})`);
@@ -392,7 +392,7 @@ export class PluginManager {
       log.warn(`外部插件 ${meta.id} 的 ready 里没有 commands / menus，用户看不到它能做什么`);
     }
 
-    this.loaded.set(meta.id, { meta, host, dir, kind: 'external', menuMissing });
+    this.loaded.set(meta.id, { meta, host, dir, kind: 'external', menuMissing, configStore });
     this.#cacheMeta(meta.id, meta, 'external', raw.runtime || 'python');
     this.errors.delete(meta.id);
     log.info(
@@ -509,8 +509,69 @@ export class PluginManager {
     }
   }
 
+  /* ---------------- 面板：配置与数据 ---------------- */
+
+  /**
+   * 面板「插件设置」要的全部东西：配置 schema、当前值、插件存档。
+   * @param {string} id
+   */
+  async panelOf(id) {
+    const item = this.loaded.get(id);
+    if (!item) return null;
+
+    const store = item.configStore;
+    const config = store ? await store.load() : {};
+    const schema = store ? schemaOf(store.rawDefaults ?? {}) : {};
+    const storage = item.ctx?.storage ?? null;
+    const data = storage ? await storage.all() : {};
+
+    return {
+      id,
+      name: item.meta?.name ?? id,
+      kind: item.kind,
+      config,
+      schema,
+      data,
+      // 存档键里哪些像玩家数据，给面板分组用
+      dataKeys: Object.keys(data),
+    };
+  }
+
+  /** 改插件配置（面板用）。改完插件立刻能读到新值 */
+  async setConfig(id, patch) {
+    const item = this.loaded.get(id);
+    if (!item?.configStore) throw new Error('插件没加载，改不了配置');
+    const next = await item.configStore.set(patch);
+    // ctx.config 和 configStore.data 是同一个对象时不用动，保险起见重新指一次
+    if (item.ctx && next) item.ctx.config = next;
+    return next ?? (await item.configStore.load());
+  }
+
+  /** 改一条插件存档（面板用） */
+  async setData(id, key, value) {
+    const st = this.loaded.get(id)?.ctx?.storage;
+    if (!st) throw new Error('插件没加载，改不了数据');
+    if (!key) throw new Error('缺少数据键');
+    await st.set(key, value);
+    await st.flush();
+    return { key, value };
+  }
+
+  /** 删一条插件存档（面板用） */
+  async deleteData(id, key) {
+    const st = this.loaded.get(id)?.ctx?.storage;
+    if (!st) throw new Error('插件没加载，改不了数据');
+    if (!key) throw new Error('缺少数据键');
+    await st.delete(key);
+    await st.flush();
+    return { key };
+  }
+
   list() {
-    const ids = new Set([...this.loaded.keys(), ...Object.keys(this.state), ...this.meta.keys()]);
+    // 只列「已加载」和「磁盘上确实存在」的。
+    // 不能把 state 里的历史键也算进来——插件删了之后状态文件里还留着它的开关记录，
+    // 否则面板会一直显示一个装不存在的插件，还标成「内建 · v0.0.0」。
+    const ids = new Set([...this.loaded.keys(), ...this.meta.keys()]);
     return [...ids].map((id) => {
       const item = this.loaded.get(id);
       const cached = this.meta.get(id) ?? null;

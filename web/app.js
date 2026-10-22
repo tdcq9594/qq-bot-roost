@@ -831,11 +831,17 @@ async function loadPlugins() {
           ${p.enabled ? '禁用' : '启用'}
         </button>
         <button class="btn small" data-act="reload">重载</button>
+        <button class="btn small" data-act="panel">设置</button>
       </div>`).join('');
 
     wrap.querySelectorAll('button[data-act]').forEach((btn) => {
       btn.addEventListener('click', async () => {
         const id = btn.closest('.plugin').dataset.id;
+        // 「设置」不是启停操作，走独立弹窗
+        if (btn.dataset.act === 'panel') {
+          openPluginPanel(id);
+          return;
+        }
         btn.disabled = true;
         try {
           await api(`/api/plugins/${encodeURIComponent(id)}/${btn.dataset.act}`, { method: 'POST' });
@@ -1020,6 +1026,184 @@ $('#btnLoadMarket')?.addEventListener('click', () => {
   const box = $('#marketBox');
   if (box.hidden) loadMarket();
   else box.hidden = true;
+});
+
+/* ---------------- 插件设置面板 ---------------- */
+
+let PP = null; // 当前打开面板的插件数据
+
+async function openPluginPanel(id) {
+  try {
+    PP = await api(`/api/plugins/${encodeURIComponent(id)}/panel`);
+  } catch (e) {
+    await confirmDialog({ title: '打不开', message: e.message, okText: '知道了' });
+    return;
+  }
+  $('#ppTitle').textContent = `${PP.name} · 设置`;
+  renderPPConfig();
+  renderPPData();
+  switchPPTab('config');
+  $('#pluginPanelMask').hidden = false;
+}
+
+function switchPPTab(name) {
+  $$('.pp-tab').forEach((b) => b.classList.toggle('active', b.dataset.pp === name));
+  $('#ppConfig').hidden = name !== 'config';
+  $('#ppData').hidden = name !== 'data';
+  $('#ppSave').hidden = name !== 'config';
+}
+
+function renderPPConfig() {
+  const keys = Object.keys(PP.schema || {});
+  const box = $('#ppConfig');
+  if (!keys.length) {
+    box.innerHTML =
+      '<div class="empty">这个插件没有声明可配置项。<br>' +
+      '在插件的 config 里写默认值，就会自动出现在这里。</div>';
+    return;
+  }
+
+  box.innerHTML = keys
+    .map((k) => {
+      const s = PP.schema[k];
+      const v = PP.config?.[k] ?? s.default;
+      const id = escapeHtml(k);
+      let input;
+      if (s.type === 'boolean') {
+        input = `<label class="pp-switch"><input type="checkbox" data-cfg="${id}" ${v ? 'checked' : ''}> ${v ? '开' : '关'}</label>`;
+      } else if (s.type === 'number') {
+        input = `<input type="number" data-cfg="${id}" value="${Number(v) || 0}">`;
+      } else if (s.type === 'select') {
+        input = `<select data-cfg="${id}">${(s.options || [])
+          .map((o) => `<option ${o === v ? 'selected' : ''}>${escapeHtml(o)}</option>`)
+          .join('')}</select>`;
+      } else if (s.type === 'json') {
+        input = `<textarea data-cfg="${id}" rows="4">${escapeHtml(JSON.stringify(v ?? null, null, 2))}</textarea>`;
+      } else {
+        input = `<input type="text" data-cfg="${id}" value="${escapeHtml(v ?? '')}">`;
+      }
+      return `<label class="pp-field"><span>${id}</span>${input}${s.desc ? `<i>${escapeHtml(s.desc)}</i>` : ''}</label>`;
+    })
+    .join('');
+}
+
+function renderPPData() {
+  const keys = PP.dataKeys || [];
+  const box = $('#ppData');
+  if (!keys.length) {
+    box.innerHTML = '<div class="empty">这个插件还没有存任何数据。</div>';
+    return;
+  }
+
+  box.innerHTML =
+    `<div class="pp-hint">共 ${keys.length} 条。改完点保存立即生效，插件不用重载。</div>` +
+    keys
+      .map(
+        (k) => `
+      <div class="pp-data-row">
+        <div class="pp-data-key">${escapeHtml(k)}</div>
+        <textarea rows="3" data-val="${escapeHtml(k)}">${escapeHtml(JSON.stringify(PP.data[k], null, 2))}</textarea>
+        <div class="pp-data-acts">
+          <button class="btn small" data-save="${escapeHtml(k)}">保存</button>
+          <button class="btn small danger" data-del="${escapeHtml(k)}">删除</button>
+        </div>
+      </div>`,
+      )
+      .join('');
+
+  $$('[data-save]').forEach((b) => b.addEventListener('click', () => savePPData(b.dataset.save, b)));
+  $$('[data-del]').forEach((b) => b.addEventListener('click', () => deletePPData(b.dataset.del, b)));
+}
+
+async function savePPConfig() {
+  const patch = {};
+  let bad = null;
+
+  $$('[data-cfg]').forEach((el) => {
+    const k = el.dataset.cfg;
+    const type = PP.schema[k]?.type;
+    if (type === 'boolean') patch[k] = el.checked;
+    else if (type === 'number') patch[k] = Number(el.value);
+    else if (type === 'json') {
+      try {
+        patch[k] = JSON.parse(el.value || 'null');
+      } catch {
+        bad = k;
+      }
+    } else patch[k] = el.value;
+  });
+
+  if (bad) {
+    await confirmDialog({ title: '格式不对', message: `「${bad}」不是合法 JSON`, okText: '知道了' });
+    return;
+  }
+
+  try {
+    const r = await api(`/api/plugins/${encodeURIComponent(PP.id)}/config`, {
+      method: 'PUT',
+      body: JSON.stringify(patch),
+    });
+    PP.config = r.config;
+    await confirmDialog({ title: '已保存', message: '配置已生效，插件立刻能读到新值。', okText: '知道了' });
+  } catch (e) {
+    await confirmDialog({ title: '保存失败', message: e.message, okText: '知道了' });
+  }
+}
+
+async function savePPData(key, btn) {
+  const ta = document.querySelector(`[data-val="${CSS.escape(key)}"]`);
+  if (!ta) return;
+  let value;
+  try {
+    value = JSON.parse(ta.value);
+  } catch {
+    await confirmDialog({ title: '格式不对', message: `「${key}」的内容不是合法 JSON`, okText: '知道了' });
+    return;
+  }
+  btn.disabled = true;
+  try {
+    await api(`/api/plugins/${encodeURIComponent(PP.id)}/data`, {
+      method: 'POST',
+      body: JSON.stringify({ key, value }),
+    });
+    PP.data[key] = value;
+  } catch (e) {
+    await confirmDialog({ title: '保存失败', message: e.message, okText: '知道了' });
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function deletePPData(key, btn) {
+  const ok = await confirmDialog({
+    title: `删除 ${key}`,
+    message: '这条存档会被直接删掉，不可恢复。',
+    okText: '删除',
+    danger: true,
+  });
+  if (!ok) return;
+  btn.disabled = true;
+  try {
+    await api(`/api/plugins/${encodeURIComponent(PP.id)}/data`, {
+      method: 'POST',
+      body: JSON.stringify({ key, remove: true }),
+    });
+    delete PP.data[key];
+    PP.dataKeys = Object.keys(PP.data);
+    renderPPData();
+  } catch (e) {
+    await confirmDialog({ title: '删除失败', message: e.message, okText: '知道了' });
+    btn.disabled = false;
+  }
+}
+
+$$('.pp-tab').forEach((b) => b.addEventListener('click', () => switchPPTab(b.dataset.pp)));
+$('#ppClose')?.addEventListener('click', () => {
+  $('#pluginPanelMask').hidden = true;
+});
+$('#ppSave')?.addEventListener('click', savePPConfig);
+$('#pluginPanelMask')?.addEventListener('click', (e) => {
+  if (e.target === $('#pluginPanelMask')) $('#pluginPanelMask').hidden = true;
 });
 
 /* ---------------- 主人与群组 ---------------- */

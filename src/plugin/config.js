@@ -17,8 +17,7 @@ function isPlainObject(v) {
   return v && typeof v === 'object' && !Array.isArray(v);
 }
 
-export function deepMerge(base, extra) {
-  const out = { ...base };
+export function deepMerge(base, extra) {  const out = { ...base };
   for (const [k, v] of Object.entries(extra ?? {})) {
     if (isPlainObject(v) && isPlainObject(base[k])) out[k] = deepMerge(base[k], v);
     else if (v !== undefined) out[k] = v;
@@ -36,6 +35,70 @@ function fillDefaults(target, defaults) {
   return out;
 }
 
+/* ------------------------------------------------------------------ */
+/* 配置 schema                                                         */
+/* ------------------------------------------------------------------ */
+
+/** 是不是「带类型的字段描述」，而不是一个普通值 */
+function isDescriptor(v) {
+  return (
+    isPlainObject(v) &&
+    ('default' in v || 'type' in v) &&
+    // 有 type 时必须是认识的类型，避免把普通对象误判
+    (!('type' in v) || ['number', 'text', 'boolean', 'json', 'select'].includes(v.type))
+  );
+}
+
+/** 从值的类型推断控件 */
+function inferType(v) {
+  if (typeof v === 'number') return 'number';
+  if (typeof v === 'boolean') return 'boolean';
+  if (typeof v === 'string') return 'text';
+  return 'json';
+}
+
+/**
+ * 插件可以两种写法声明配置：
+ *
+ *   // 简写：只有默认值，面板按类型自动渲染
+ *   config: { 买蛋价: 80, 开启PvP: true }
+ *
+ *   // 完整：带说明和校验
+ *   config: {
+ *     买蛋价: { type: 'number', default: 80, desc: '买一颗蛋要多少节操' },
+ *     难度:   { type: 'select', default: '普通', options: ['简单','普通','困难'] },
+ *   }
+ *
+ * 下面两个函数把两种写法统一掉。
+ */
+
+/** 取纯默认值（喂给 PluginConfig） */
+export function resolveDefaults(defaults) {
+  const out = {};
+  for (const [k, v] of Object.entries(defaults ?? {})) {
+    out[k] = isDescriptor(v) ? (v.default ?? null) : v;
+  }
+  return out;
+}
+
+/** 生成给面板用的 schema */
+export function schemaOf(defaults) {
+  const out = {};
+  for (const [k, v] of Object.entries(defaults ?? {})) {
+    if (isDescriptor(v)) {
+      out[k] = {
+        type: v.type ?? inferType(v.default),
+        default: v.default ?? null,
+        desc: v.desc ?? '',
+        ...(Array.isArray(v.options) ? { options: v.options } : {}),
+      };
+    } else {
+      out[k] = { type: inferType(v), default: v, desc: '' };
+    }
+  }
+  return out;
+}
+
 export class PluginConfig {
   /**
    * @param {object} p
@@ -46,7 +109,9 @@ export class PluginConfig {
    */
   constructor({ id, defaults = {}, log = null, file = null }) {
     this.id = id;
-    this.defaults = defaults ?? {};
+    // 插件可能用完整写法声明（带 type/desc），这里统一取纯默认值
+    this.rawDefaults = defaults ?? {};
+    this.defaults = resolveDefaults(defaults);
     // 路径必须由 loader 按机器人传进来，这里不再自己拼
     if (!file) throw new Error(`插件 ${id} 的配置文件路径未指定`);
     this.file = file;
