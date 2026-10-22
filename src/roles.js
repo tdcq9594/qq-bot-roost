@@ -22,7 +22,7 @@ const FILE = path.join(DATA_DIR, 'roles.json');
  *   等级 level —— 「能管谁」，**数字越小权限越高**
  *     0    主人（只来自 config.json 的 owners，不可通过命令授予）
  *     1    管理员
- *     2    协管
+ *     2    群管
  *     3    助手
  *     4 - 9    内核预留
  *     10 - 998 插件区（主程序按插件 id 动态分配号段）
@@ -53,7 +53,8 @@ const LEVEL_ALIAS = {
   helper: 3,
   主人: 0,
   管理员: 1,
-  协管: 2,
+  群管: 2,
+  协管: 2, // 旧叫法，兼容
   助手: 3,
 };
 
@@ -102,6 +103,20 @@ export class RoleStore {
     this.data = null; // { "<scope>": { "<openid>": level } }
     this.dirty = false;
     this.timer = null;
+    // 有效等级缓存：`${scope}\u0000${openid}` -> level
+    // 权限很少变，但每条消息都要查好几次，缓存后基本零成本
+    this.cache = new Map();
+    this.stats = { hits: 0, misses: 0 };
+  }
+
+  /** 缓存命中情况，用于 /stats 观测 */
+  cacheStats() {
+    const total = this.stats.hits + this.stats.misses;
+    return {
+      ...this.stats,
+      size: this.cache.size,
+      hitRate: total ? Math.round((this.stats.hits / total) * 100) : 0,
+    };
   }
 
   async #load() {
@@ -124,6 +139,7 @@ export class RoleStore {
     }
     if (migrated) {
       log.info('已把旧版权限等级迁移为「0 最高」格式');
+      this.cache.clear();
       this.#scheduleSave();
     }
     return this.data;
@@ -166,11 +182,23 @@ export class RoleStore {
   /** 有效等级 = min(全局, 当前作用域)，越小权限越高 */
   async effective(scope, openid, { owners = [] } = {}) {
     if (!openid) return NO_PERM;
+    // 主人优先，不查缓存（owners 可能在运行中变化）
     if (owners.includes(openid)) return LEVEL.owner;
+
+    const key = `${scope}\u0000${openid}`;
+    const cached = this.cache.get(key);
+    if (cached !== undefined) {
+      this.stats.hits += 1;
+      return cached;
+    }
+    this.stats.misses += 1;
+
     const d = await this.#load();
     const g = d.global?.[openid] ?? NO_PERM;
     const s = scope === 'global' ? NO_PERM : d[scope]?.[openid] ?? NO_PERM;
-    return Math.min(g, s);
+    const v = Math.min(g, s);
+    this.cache.set(key, v);
+    return v;
   }
 
   async set(scope, openid, level) {
@@ -178,6 +206,7 @@ export class RoleStore {
     const d = await this.#load();
     if (!d[scope]) d[scope] = {};
     d[scope][openid] = level;
+    this.cache.clear(); // 写操作很少，直接全清最省心
     this.#scheduleSave();
     log.info(`设置权限 ${scope} ${openid} = ${levelName(level)}(${level})`);
     return true;
@@ -188,6 +217,7 @@ export class RoleStore {
     if (!d[scope]?.[openid]) return false;
     delete d[scope][openid];
     if (!Object.keys(d[scope]).length) delete d[scope];
+    this.cache.clear();
     this.#scheduleSave();
     return true;
   }

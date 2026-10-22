@@ -652,7 +652,7 @@ $('#groupInput')?.addEventListener('keydown', (e) => {
 
 /* ---------------- 权限 ---------------- */
 
-const LEVEL_TEXT = { 0: '主人', 1: '管理员', 2: '协管', 3: '助手' };
+const LEVEL_TEXT = { 0: '主人', 1: '管理员', 2: '群管', 3: '助手' };
 const levelText = (n) => LEVEL_TEXT[n] ?? (n >= 99 ? '普通成员' : `${n} 级管理`);
 
 async function loadRoles() {

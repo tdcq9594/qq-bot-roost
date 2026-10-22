@@ -302,15 +302,24 @@ export function createContext({ meta, registry, api, cfg, groups, roles, levels,
     async levelOf(msg, scope) {
       if (!roles) return isOwner(msg?.userId) ? LEVEL.owner : NO_PERM;
       if (scope) return roles.effective(scope, msg?.userId, { owners: cfg.owners });
-      const chat = await roles.effective(scopeOf(msg), msg?.userId, { owners: cfg.owners });
-      const feature = await roles.effective(`feature:${id}`, msg?.userId, { owners: cfg.owners });
-      return Math.min(chat, feature);
+
+      // 同一条消息里插件可能反复问权限，算一次就缓存到消息对象上
+      const cacheKey = `__lvl_${id}`;
+      if (msg && msg[cacheKey] !== undefined) return msg[cacheKey];
+
+      const [chat, feature] = await Promise.all([
+        roles.effective(scopeOf(msg), msg?.userId, { owners: cfg.owners }),
+        roles.effective(`feature:${id}`, msg?.userId, { owners: cfg.owners }),
+      ]);
+      const v = Math.min(chat, feature);
+      if (msg) msg[cacheKey] = v;
+      return v;
     },
 
     /**
      * 当前消息发送者是否达到某等级，默认要求管理员（数字越小越高）。
      *   ctx.can(msg)                 → 需要 1 级管理员
-     *   ctx.can(msg, 'manager')      → 需要 2 级协管
+     *   ctx.can(msg, 'manager')      → 需要 2 级群管
      *   ctx.can(msg, L.管理员)        → 需要本插件的某个等级
      */
     async can(msg, need = 'admin') {

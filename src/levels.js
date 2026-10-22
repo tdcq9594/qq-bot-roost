@@ -4,7 +4,7 @@
  * 等级是数字，越小权限越高。整个空间分区管理，避免内核和插件、插件和插件之间撞号。
  *
  *   0 - 3    内核独占，语义固定，插件只能读不能改
- *              0 主人 / 1 管理员 / 2 协管 / 3 助手
+ *              0 主人 / 1 管理员 / 2 群管 / 3 助手
  *   4 - 9    内核预留（以后加「超管」「审计」之类不用重排）
  *   10 - 999 插件区，主程序在启动时按插件 id 排序，每个插件分 10 个号位
  *              第 1 个插件 10-19，第 2 个 20-29，以此类推
@@ -58,7 +58,7 @@ export function zoneOf(level) {
 export function describeLevel(level) {
   if (level === 0) return '主人';
   if (level === 1) return '管理员';
-  if (level === 2) return '协管';
+  if (level === 2) return '群管';
   if (level === 3) return '助手';
   if (level === NO_PERM) return '普通成员';
   if (level >= 4 && level <= 9) return `内核预留 ${level}`;

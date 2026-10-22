@@ -276,6 +276,9 @@ function registerCoreCommands(registry, { cfg, plugins, tokens, roles }) {
       }
     }
 
+    const cs = roles.cacheStats();
+    lines.push(`\n权限缓存\n  命中 ${cs.hits} / 未命中 ${cs.misses} · 命中率 ${cs.hitRate}% · 条目 ${cs.size}`);
+
     const events = [...runtime.eventCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
     if (events.length) {
       lines.push('\n事件');
@@ -293,6 +296,7 @@ function registerCoreCommands(registry, { cfg, plugins, tokens, roles }) {
     { cmd: 'admin list [作用域]', desc: '列出某作用域的管理员', admin: true },
     { cmd: 'admin set <openid> <等级> [作用域]', desc: '设置权限，只能授予数字更大的等级', admin: true },
     { cmd: 'admin del <openid> [作用域]', desc: '移除权限', admin: true },
+    { cmd: 'admin whois <openid>', desc: '查某人在各作用域的权限（含各插件）', admin: true },
     { cmd: 'admin scopes', desc: '列出所有已配置的作用域', admin: true },
     { cmd: 'admin levels', desc: '查看等级空间与插件号段分配', admin: true },
   ]);
@@ -320,7 +324,7 @@ function registerCoreCommands(registry, { cfg, plugins, tokens, roles }) {
         lines.push('\n本作用域还没有配置管理员');
       }
       lines.push(
-        `\n等级（数字越小权限越高）: 0 主人 / 1 管理员 / 2 协管 / 3 助手 / 4+ 自定义`,
+        `\n等级（数字越小权限越高）: 0 主人 / 1 管理员 / 2 群管 / 3 助手 / 4+ 自定义`,
         `作用域: here(默认) / global / group:<id> / channel:<id> / feature:<插件>`,
         `设置: ${P}admin set <openid> <等级> [作用域]`,
       );
@@ -348,13 +352,13 @@ function registerCoreCommands(registry, { cfg, plugins, tokens, roles }) {
 
     // 等级空间与插件号段
     if (sub === 'levels') {
-      if (myLevel > LEVEL.manager) return msg.reply('需要协管及以上权限');
+      if (myLevel > LEVEL.manager) return msg.reply('需要群管及以上权限');
       const rows = [...(plugins.allocations ?? new Map()).entries()].sort(
         (a, b) => a[1].base - b[1].base,
       );
       const lines = [
         '等级空间（数字越小权限越高）',
-        '  0 主人 / 1 管理员 / 2 协管 / 3 助手',
+        '  0 主人 / 1 管理员 / 2 群管 / 3 助手',
         '  4-9 内核预留',
         '  10+ 插件区，每个插件 10 个号位',
       ];
@@ -366,6 +370,26 @@ function registerCoreCommands(registry, { cfg, plugins, tokens, roles }) {
         }
       } else {
         lines.push('\n还没有插件');
+      }
+      return msg.reply(lines.join('\n'));
+    }
+
+    // 查某人在所有作用域的权限
+    if (sub === 'whois') {
+      const target = rest[0];
+      if (!target) return msg.reply(`用法: ${P}admin whois <openid>`);
+      if (myLevel > LEVEL.admin) return msg.reply('需要管理员权限');
+
+      const rows = await roles.scopesOf(target);
+      const lines = [`openid: ${target}`];
+      if (cfg.owners.includes(target)) lines.push('身份: 主人');
+      const g = await roles.levelIn('global', target);
+      lines.push(`全局: ${g >= NO_PERM ? '无' : levelName(g)}`);
+      if (rows.length) {
+        lines.push('\n各作用域：');
+        for (const r of rows) lines.push(`  ${r.scope}  ${levelName(r.level)}（${r.level}）`);
+      } else {
+        lines.push('\n未在任何作用域获得权限');
       }
       return msg.reply(lines.join('\n'));
     }
@@ -384,7 +408,7 @@ function registerCoreCommands(registry, { cfg, plugins, tokens, roles }) {
       const target = rest[0] ? parseScope(rest[0], msg) : scope;
       if (!target) return msg.reply(`作用域写法不对: ${rest[0]}`);
       if ((await levelOf(msg.userId, target)) > LEVEL.manager) {
-        return msg.reply('需要该作用域的协管及以上权限');
+        return msg.reply('需要该作用域的群管及以上权限');
       }
       const members = await roles.scopeMembers(target);
       const list = Object.entries(members).sort((a, b) => a[1] - b[1]);
@@ -400,7 +424,7 @@ function registerCoreCommands(registry, { cfg, plugins, tokens, roles }) {
       const lv = parseLevel(lvText);
       if (!openid || lv === null) {
         return msg.reply(
-          `用法: ${P}admin set <openid> <等级> [作用域]\n等级: 1 管理员 / 2 协管 / 3 助手 / 4 及以上自定义`,
+          `用法: ${P}admin set <openid> <等级> [作用域]\n等级: 1 管理员 / 2 群管 / 3 助手 / 4 及以上自定义`,
         );
       }
       const target = scopeText ? parseScope(scopeText, msg) : scope;
@@ -409,7 +433,7 @@ function registerCoreCommands(registry, { cfg, plugins, tokens, roles }) {
 
       const actor = await levelOf(msg.userId, target);
       if (actor > LEVEL.manager) {
-        return msg.reply(`需要协管及以上权限才能设置（当前 ${levelName(actor)}）`);
+        return msg.reply(`需要群管及以上权限才能设置（当前 ${levelName(actor)}）`);
       }
       // 核心规则：数字越小权限越高，所以只能授予「数字更大」的等级
       if (lv <= actor) {
@@ -589,24 +613,24 @@ function createDispatcher({ registry, api, cfg, plugins, guards, groups, roles }
     if (msg.isCommand) {
       const entry = registry.commands.get(msg.command);
       if (entry) {
-        // 权限：按等级判定，不再只看「主人 / 本群管理员」
+        // 鉴权：本会话等级只算一次，命令判定和插件共用
         const scope = scopeOf(msg);
-        let allowed = true;
-        if (entry.admin) {
+        if (entry.admin || entry.globalAdmin) {
           const lv = await roles.effective(scope, msg.userId, { owners: cfg.owners });
-          allowed = lv <= LEVEL.admin;
-          if (!allowed) {
+          if (entry.admin && lv > LEVEL.admin) {
             return msg.reply(
-              `需要管理员权限才能用这个命令（你当前是${levelName(lv)}）。\n发 ${cfg.commandPrefix || '/'}admin me 查看自己的权限。`,
+              `需要管理员权限才能用这个命令（你当前是${levelName(lv)}）。\n` +
+                `发 ${cfg.commandPrefix || '/'}admin me 查看自己的权限。`,
             );
           }
-        }
-        if (entry.globalAdmin) {
-          const gl = cfg.owners.includes(msg.userId)
-            ? LEVEL.owner
-            : await roles.levelIn('global', msg.userId);
-          if (gl > LEVEL.admin) {
-            return msg.reply('这个命令影响全局，需要「全局管理员」权限。');
+          if (entry.globalAdmin) {
+            // 全局命令要求「全局」等级，不能拿某个群的等级来顶
+            const gl = cfg.owners.includes(msg.userId)
+              ? LEVEL.owner
+              : await roles.levelIn('global', msg.userId);
+            if (gl > LEVEL.admin) {
+              return msg.reply('这个命令影响全局，需要「全局管理员」权限。');
+            }
           }
         }
         const required = (entry.pattern?.match(/<[^>]+>/g) ?? []).length;
