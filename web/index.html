@@ -92,7 +92,7 @@
   <section id="tab-config" class="panel">
     <form id="cfgForm">
       <div class="box">
-        <div class="box-hd"><h3>连接凭证</h3><span class="hint">保存后若 AppID 变化会自动重连</span></div>
+        <div class="box-hd"><h3>连接凭证</h3><span class="hint">保存后若 AppID 或 intents 变化会自动重连</span></div>
         <div class="grid2">
           <label>AppID<input name="appId" placeholder="机器人 AppID"></label>
           <label>AppSecret<input name="appSecret" type="password" placeholder="留空则不修改"></label>
@@ -225,11 +225,12 @@
       </div>
       <label class="switch">
         <input type="checkbox" id="autoOwner">
-        机器人被拉进群时，自动把邀请人设为主人（仅在主人列表为空时生效）
+        机器人被拉进群时，自动把邀请人设为主人（仅在主人列表为空时生效；设为本群管理员是自动的，不受此开关影响）
       </label>
       <div class="hint" style="margin-top:8px">
-        官方接口查不到「群主」，能拿到的只有「谁把机器人拉进群」。
-        这个人通常是群主或管理员，所以用它作为该群管理者的默认值。
+        官方没有「查群主」接口。能确认的只有两条：谁把机器人拉进群、
+        以及消息报文里 member_role 为 owner 的人（即群主本人，但他要发过言才能识别）。
+        两者都会自动成为该群管理员，可在这里手动覆盖。
       </div>
     </div>
 
@@ -259,7 +260,8 @@
         </table>
       </div>
       <div class="hint" style="margin-top:8px">
-        本群管理者可以使用管理命令（启用/禁用/重载插件），但只限本群。
+        本群管理员（1 级）能用本群范围内的管理命令（如 /admin）；
+        但启用/禁用/重载插件影响全局，需要「全局管理员」。
       </div>
 
       <div class="divider"></div>
@@ -286,7 +288,7 @@
     <div class="box">
       <div class="box-hd">
         <h3>权限等级</h3>
-        <span class="hint">作用域决定「在哪管」，等级决定「能管谁」；只能授予低于自己的等级</span>
+        <span class="hint">作用域决定「在哪管」，等级决定「能管谁」；数字越小权限越高，只能授予数字更大的等级</span>
       </div>
       <div class="perm-legend">
         <span class="hint" style="margin-right:6px">数字越小权限越高：</span>
@@ -294,8 +296,9 @@
         <span><b>1</b> 管理员</span>
         <span><b>2</b> 群管</span>
         <span><b>3</b> 助手</span>
-        <span><b>4+</b> 自定义层级</span>
-        <span><b>99</b> 无权限</span>
+        <span><b>4-9</b> 内核预留</span>
+        <span><b>10+</b> 插件区</span>
+        <span><b>9999</b> 无权限</span>
       </div>
       <div class="perm-legend" style="margin-top:6px">
         <span><b>global</b> 全局</span>
@@ -312,9 +315,9 @@
         <input id="roleScope" list="scopeList" placeholder="作用域，如 group:xxx / global">
         <datalist id="scopeList"></datalist>
         <input id="roleOpenid" placeholder="openid">
-        <input id="roleLevel" type="number" min="1" max="98" value="2"
+        <input id="roleLevel" type="number" min="1" max="998" value="2"
                style="width:120px" title="数字越小权限越高">
-        <span class="hint">等级（1 管理员 / 2 群管 / 3 助手 / 4+ 自定义）</span>
+        <span class="hint">等级（1 管理员 / 2 群管 / 3 助手 / 10+ 插件区，最大 998）</span>
         <button class="btn primary" id="btnAddRole">保存</button>
       </div>
       <div class="hint" style="margin-top:8px">
