@@ -82,7 +82,12 @@ function renderStatus(s) {
   $('#c-recv').textContent = s.counters.recv;
   $('#c-sent').textContent = s.counters.sent;
   $('#c-cmd').textContent = s.counters.commands;
-  $('#c-err').textContent = `${s.counters.errors} / ${s.counters.dedup + s.counters.limited + s.counters.rejected}`;
+  const blocked =
+    (s.counters.dedup ?? 0) +
+    (s.counters.limited ?? 0) +
+    (s.counters.rejected ?? 0) +
+    (s.counters.ignored ?? 0);
+  $('#c-err').textContent = `${s.counters.errors} / ${blocked}`;
 
   $('#i-botid').textContent = s.botId || '-';
   $('#i-gw').textContent = s.gatewayUrl || '-';
