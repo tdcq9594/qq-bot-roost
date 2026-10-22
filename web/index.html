@@ -21,6 +21,7 @@
     <button class="tab" data-tab="config">配置</button>
     <button class="tab" data-tab="plugins">插件</button>
     <button class="tab" data-tab="groups">群组</button>
+    <button class="tab" data-tab="roles">权限</button>
     <button class="tab" data-tab="logs">日志</button>
   </nav>
   <div class="status-pill" id="connPill">
@@ -276,6 +277,60 @@
       <div class="form-inline" style="margin-top:12px">
         <input id="groupInput" placeholder="已知群 openid 时可直接登记">
         <button class="btn" id="btnAddGroup">手动登记</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 权限 -->
+  <section id="tab-roles" class="panel">
+    <div class="box">
+      <div class="box-hd">
+        <h3>权限等级</h3>
+        <span class="hint">作用域决定「在哪管」，等级决定「能管谁」；只能授予低于自己的等级</span>
+      </div>
+      <div class="perm-legend">
+        <span><b>100</b> 主人（config.json）</span>
+        <span><b>80</b> 管理员</span>
+        <span><b>60</b> 协管</span>
+        <span><b>40</b> 助手</span>
+      </div>
+      <div class="perm-legend" style="margin-top:6px">
+        <span><b>global</b> 全局</span>
+        <span><b>group:xxx</b> 某个群</span>
+        <span><b>channel:xxx</b> 频道</span>
+        <span><b>user:xxx</b> 私聊</span>
+        <span><b>feature:插件</b> 功能</span>
+      </div>
+    </div>
+
+    <div class="box">
+      <div class="box-hd"><h3>添加 / 修改</h3></div>
+      <div class="form-inline">
+        <input id="roleScope" list="scopeList" placeholder="作用域，如 group:xxx / global">
+        <datalist id="scopeList"></datalist>
+        <input id="roleOpenid" placeholder="openid">
+        <select id="roleLevel">
+          <option value="80">管理员 80</option>
+          <option value="60">协管 60</option>
+          <option value="40">助手 40</option>
+        </select>
+        <button class="btn primary" id="btnAddRole">保存</button>
+      </div>
+      <div class="hint" style="margin-top:8px">
+        面板操作视为本机管理员行为，不受等级限制；聊天里请用 /admin set。
+      </div>
+    </div>
+
+    <div class="box">
+      <div class="box-hd">
+        <h3>已授权列表</h3>
+        <button class="btn small" id="btnReloadRoles">刷新</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>作用域</th><th>openid</th><th>等级</th><th class="num">操作</th></tr></thead>
+          <tbody id="roleBody"><tr><td colspan="4" class="empty">还没有配置权限</td></tr></tbody>
+        </table>
       </div>
     </div>
   </section>

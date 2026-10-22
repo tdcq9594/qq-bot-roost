@@ -10,6 +10,7 @@ import { Registry } from './plugin/context.js';
 import { PluginManager } from './plugin/loader.js';
 import { runtime } from './runtime.js';
 import { GroupStore } from './groups.js';
+import { RoleStore, LEVEL, levelName, parseLevel, parseScope, scopeOf } from './roles.js';
 import { startWebServer } from './web/server.js';
 
 const log = createLogger('core');
@@ -123,7 +124,7 @@ function createGuards(cfg) {
 /* 核心命令：不依赖任何插件，保证机器人一启动就能用                      */
 /* ------------------------------------------------------------------ */
 
-function registerCoreCommands(registry, { cfg, plugins, tokens }) {
+function registerCoreCommands(registry, { cfg, plugins, tokens, roles }) {
   const P = cfg.commandPrefix || '/';
   const isOwner = (uid) => cfg.owners.includes(uid);
 
@@ -167,10 +168,11 @@ function registerCoreCommands(registry, { cfg, plugins, tokens }) {
     const bot = runtime.botName ? `${runtime.botName} · 全局菜单` : '全局菜单';
     lines.push(bot);
 
+    const myLv = await roles.effective(scopeOf(msg), msg.userId, { owners: cfg.owners });
     const coreCmds = [...registry.commands.values()].filter((c) => c.pluginId === '__core');
     lines.push('\n【内核】');
     for (const c of coreCmds) {
-      if (c.admin && !isOwner(msg.userId)) continue;
+      if (c.admin && myLv < LEVEL.admin) continue;
       lines.push(`  ${P}${c.name}${c.desc ? '  ' + c.desc : ''}`);
     }
 
@@ -207,11 +209,13 @@ function registerCoreCommands(registry, { cfg, plugins, tokens }) {
   });
 
   core('whoami', { desc: '查看自己的 openid（配置主人用）' }, async (msg) => {
+    const lv = await roles.effective(scopeOf(msg), msg.userId, { owners: cfg.owners });
     const lines = [
       `来源: ${msg.kind}`,
       `你的 openid: ${msg.userId}`,
       msg.groupId ? `群 openid: ${msg.groupId}` : '',
       `是否主人: ${isOwner(msg.userId) ? '是' : '否'}`,
+      `当前权限: ${levelName(lv)}`,
     ].filter(Boolean);
     await msg.reply(lines.join('\n'));
   });
@@ -281,6 +285,126 @@ function registerCoreCommands(registry, { cfg, plugins, tokens }) {
     await msg.reply(lines.join('\n'));
   });
 
+  /* ---------------- 权限管理 ---------------- */
+
+  const levelOf = (uid, scope = 'global') =>
+    roles.effective(scope, uid, { owners: cfg.owners });
+  const brief = (id) => (id.length > 14 ? id.slice(0, 8) + '…' + id.slice(-4) : id);
+
+  core('admin', { desc: '权限管理：list / set / del / me / scopes' }, async (msg) => {
+    const [sub, ...rest] = msg.args;
+    const scope = scopeOf(msg);
+    const myLevel = await levelOf(msg.userId, scope);
+
+    // 不带参数：看当前作用域的权限情况
+    if (!sub) {
+      const members = await roles.scopeMembers(scope);
+      const lines = [`作用域: ${scope}`, `你的等级: ${levelName(myLevel)}`];
+      const list = Object.entries(members).sort((a, b) => b[1] - a[1]);
+      if (list.length) {
+        lines.push('\n本作用域管理员：');
+        for (const [oid, lv] of list) lines.push(`  ${brief(oid)}  ${levelName(lv)}`);
+      } else {
+        lines.push('\n本作用域还没有配置管理员');
+      }
+      lines.push(
+        `\n等级: admin(管理员) > manager(协管) > helper(助手)`,
+        `作用域: here(默认) / global / group:<id> / channel:<id> / feature:<插件>`,
+        `设置: ${P}admin set <openid> <等级> [作用域]`,
+      );
+      return msg.reply(lines.join('\n'));
+    }
+
+    // 我是谁
+    if (sub === 'me') {
+      const owner = cfg.owners.includes(msg.userId);
+      const rows = await roles.scopesOf(msg.userId);
+      const lines = [`openid: ${msg.userId}`];
+      if (owner) lines.push('身份: 主人（最高权限）');
+      else {
+        const g = await roles.levelIn('global', msg.userId);
+        lines.push(`全局: ${g ? levelName(g) : '无'}`);
+        if (rows.length) {
+          lines.push('\n各作用域：');
+          for (const r of rows) lines.push(`  ${r.scope}  ${levelName(r.level)}`);
+        } else {
+          lines.push('未在任何作用域获得权限');
+        }
+      }
+      return msg.reply(lines.join('\n'));
+    }
+
+    // 列出所有作用域
+    if (sub === 'scopes') {
+      const all = await roles.listScopes();
+      if (!all.length) return msg.reply('还没有配置任何权限');
+      return msg.reply(
+        ['已配置的作用域：', ...all.map((x) => `  ${x.scope}  ${x.count} 人`)].join('\n'),
+      );
+    }
+
+    // 列某作用域成员
+    if (sub === 'list') {
+      const target = rest[0] ? parseScope(rest[0], msg) : scope;
+      if (!target) return msg.reply(`作用域写法不对: ${rest[0]}`);
+      if ((await levelOf(msg.userId, target)) < LEVEL.manager) {
+        return msg.reply('需要该作用域的协管及以上权限');
+      }
+      const members = await roles.scopeMembers(target);
+      const list = Object.entries(members).sort((a, b) => b[1] - a[1]);
+      if (!list.length) return msg.reply(`${target} 下没有配置管理员`);
+      return msg.reply(
+        [`${target}：`, ...list.map(([oid, lv]) => `  ${brief(oid)}  ${levelName(lv)}`)].join('\n'),
+      );
+    }
+
+    // 设置
+    if (sub === 'set') {
+      const [openid, lvText, scopeText] = rest;
+      const lv = parseLevel(lvText);
+      if (!openid || lv === null) {
+        return msg.reply(`用法: ${P}admin set <openid> <admin|manager|helper> [作用域]`);
+      }
+      const target = scopeText ? parseScope(scopeText, msg) : scope;
+      if (!target) return msg.reply(`作用域写法不对: ${scopeText}`);
+      if (lv === LEVEL.owner) return msg.reply('主人只能在 config.json 的 owners 里设置');
+
+      const actor = await levelOf(msg.userId, target);
+      if (actor < LEVEL.manager) {
+        return msg.reply(`需要协管及以上权限才能设置（当前 ${levelName(actor)}）`);
+      }
+      // 核心规则：只能授予严格低于自己的等级
+      if (lv >= actor) {
+        return msg.reply(`不能授予不低于自己的等级（你是 ${levelName(actor)}）`);
+      }
+      const cur = await roles.levelIn(target, openid);
+      if (cur >= actor) {
+        return msg.reply(`对方当前是 ${levelName(cur)}，不低于你，无法修改`);
+      }
+
+      await roles.set(target, openid, lv);
+      return msg.reply(`已设置 ${brief(openid)} 在 ${target} 为 ${levelName(lv)}`);
+    }
+
+    // 移除
+    if (sub === 'del' || sub === 'remove') {
+      const [openid, scopeText] = rest;
+      if (!openid) return msg.reply(`用法: ${P}admin del <openid> [作用域]`);
+      const target = scopeText ? parseScope(scopeText, msg) : scope;
+      if (!target) return msg.reply(`作用域写法不对: ${scopeText}`);
+
+      const cur = await roles.levelIn(target, openid);
+      if (!cur) return msg.reply('该用户在这个作用域没有权限');
+      const actor = await levelOf(msg.userId, target);
+      if (actor <= cur) return msg.reply('不能移除同级或更高级别的管理员');
+
+      await roles.remove(target, openid);
+      return msg.reply(`已移除 ${brief(openid)} 在 ${target} 的权限`);
+    }
+
+    await msg.reply(`未知子命令: ${sub}\n可用: list / set / del / me / scopes`);
+  });
+
   core('plugins', { desc: '列出插件与状态' }, async (msg) => {
     const list = plugins.list();
     if (!list.length) return msg.reply('还没有安装任何插件。把插件文件夹放进 plugins/ 即可。');
@@ -303,21 +427,21 @@ function registerCoreCommands(registry, { cfg, plugins, tokens }) {
     await msg.reply(lines.join('\n'));
   });
 
-  core('enable', { desc: '启用插件', admin: true }, async (msg) => {
+  core('enable', { desc: '启用插件（需全局管理员）', admin: true, globalAdmin: true }, async (msg) => {
     const id = msg.args[0];
     if (!id) return msg.reply(`用法: ${P}enable <插件id>`);
     const ok = await plugins.setEnabled(id, true);
     await msg.reply(ok ? `已启用 ${id}` : `启用失败，查看日志或 ${P}plugins 看错误`);
   });
 
-  core('disable', { desc: '禁用插件', admin: true }, async (msg) => {
+  core('disable', { desc: '禁用插件（需全局管理员）', admin: true, globalAdmin: true }, async (msg) => {
     const id = msg.args[0];
     if (!id) return msg.reply(`用法: ${P}disable <插件id>`);
     await plugins.setEnabled(id, false);
     await msg.reply(`已禁用 ${id}`);
   });
 
-  core('reload', { desc: '重载插件（不传 id 则全部重载）', admin: true }, async (msg) => {
+  core('reload', { desc: '重载插件（需全局管理员）', admin: true, globalAdmin: true }, async (msg) => {
     const id = msg.args[0];
     if (id) {
       const ok = await plugins.reload(id);
@@ -349,7 +473,7 @@ function logIncoming(msg, cfg) {
   log.info(`收到 ${msg.kind} 会话:${where} 来自:${who} 内容:${content || '(空)'}`);
 }
 
-function createDispatcher({ registry, api, cfg, plugins, guards, groups }) {
+function createDispatcher({ registry, api, cfg, plugins, guards, groups, roles }) {
   const isOwner = (uid) => cfg.owners.includes(uid);
 
   return async function dispatch(eventName, d) {
@@ -374,6 +498,13 @@ function createDispatcher({ registry, api, cfg, plugins, guards, groups }) {
         const gid = d?.group_openid;
         const inviter = d?.op_member_openid || '';
         await groups.onAdded(gid, inviter);
+        // 邀请人默认成为该群管理员（本群作用域），不影响其它群
+        if (inviter && gid) {
+          const gScope = `group:${gid}`;
+          if (!(await roles.levelIn(gScope, inviter))) {
+            await roles.set(gScope, inviter, LEVEL.admin);
+          }
+        }
         if (cfg.autoOwnerOnInvite && !cfg.owners.length && inviter) {
           cfg.owners.push(inviter);
           await saveConfig(cfg);
@@ -404,6 +535,11 @@ function createDispatcher({ registry, api, cfg, plugins, guards, groups }) {
     // 报文里带 member_role=owner 的就是群主，比「谁邀请机器人」更准
     if (msg.kind === 'group' && msg.raw?.author?.member_role === 'owner') {
       await groups.setOwner(msg.groupId, msg.userId);
+      const gScope = `group:${msg.groupId}`;
+      if (!(await roles.levelIn(gScope, msg.userId))) {
+        await roles.set(gScope, msg.userId, LEVEL.admin);
+        log.info(`群主 ${msg.userId} 自动获得 ${gScope} 的管理员权限`);
+      }
     }
 
     logIncoming(msg, cfg);
@@ -413,10 +549,25 @@ function createDispatcher({ registry, api, cfg, plugins, guards, groups }) {
     if (msg.isCommand) {
       const entry = registry.commands.get(msg.command);
       if (entry) {
-        const groupAdmin =
-          msg.kind === 'group' ? await groups.isAdmin(msg.groupId, msg.userId) : false;
-        if (entry.admin && !isOwner(msg.userId) && !groupAdmin) {
-          return msg.reply('这个命令只有机器人主人或本群管理员能用。发 /whoami 查看自己的 openid。');
+        // 权限：按等级判定，不再只看「主人 / 本群管理员」
+        const scope = scopeOf(msg);
+        let allowed = true;
+        if (entry.admin) {
+          const lv = await roles.effective(scope, msg.userId, { owners: cfg.owners });
+          allowed = lv >= LEVEL.admin;
+          if (!allowed) {
+            return msg.reply(
+              `需要管理员权限才能用这个命令（你当前是${levelName(lv)}）。\n发 ${cfg.commandPrefix || '/'}admin me 查看自己的权限。`,
+            );
+          }
+        }
+        if (entry.globalAdmin) {
+          const gl = cfg.owners.includes(msg.userId)
+            ? LEVEL.owner
+            : await roles.levelIn('global', msg.userId);
+          if (gl < LEVEL.admin) {
+            return msg.reply('这个命令影响全局，需要「全局管理员」权限。');
+          }
         }
         const required = (entry.pattern?.match(/<[^>]+>/g) ?? []).length;
         if (msg.args.length < required) {
@@ -477,13 +628,14 @@ function createMockApi() {
   };
 }
 
-async function runMock(cfg, registry, plugins, groups) {
+async function runMock(cfg, registry, plugins, groups, roles) {
   console.log('\n=== Mock 模式 ===');
   console.log('不连接 QQ，用本地假消息验证插件逻辑。输入内容回车发送，Ctrl+C 退出。\n');
 
   const guards = createGuards(cfg);
-  const dispatch = createDispatcher({ registry, api: createMockApi(), cfg, plugins, guards, groups });
-  const currentUser = () => cfg.owners[0] ?? 'mock-user-openid';
+  const dispatch = createDispatcher({ registry, api: createMockApi(), cfg, plugins, guards, groups, roles });
+  let asUser = null; // !as 可以切换发送者，方便测多级权限
+  const currentUser = () => asUser ?? cfg.owners[0] ?? 'mock-user-openid';
   const fakeGroup = 'mock-group-openid';
   let seq = 0;
 
@@ -500,6 +652,12 @@ async function runMock(cfg, registry, plugins, groups) {
         op_member_openid: inviter,
         timestamp: String(Date.now()),
       });
+    }
+    if (t.startsWith('!as')) {
+      const [, id] = t.split(/\s+/);
+      asUser = id || null;
+      console.log(`[模拟] 发送者切换为 ${currentUser()}`);
+      return;
     }
     if (t.startsWith('!delbot')) {
       const [, gid = fakeGroup] = t.split(/\s+/);
@@ -555,6 +713,7 @@ async function main() {
 
   const registry = new Registry();
   const groups = new GroupStore();
+  const roles = new RoleStore();
   let tokens = null;
   let api = null;
 
@@ -587,10 +746,11 @@ async function main() {
     api,
     cfg,
     groups,
+    roles,
     isOwner: (uid) => cfg.owners.includes(uid),
   });
 
-  registerCoreCommands(registry, { cfg, plugins, tokens });
+  registerCoreCommands(registry, { cfg, plugins, tokens, roles });
   await plugins.scan();
 
   let gateway = null;
@@ -600,6 +760,7 @@ async function main() {
     cfg,
     plugins,
     groups,
+    roles,
     getGateway: () => gateway,
     tokens,
     api,
@@ -618,7 +779,7 @@ async function main() {
       });
       return new Promise(() => {});
     }
-    await runMock(cfg, registry, plugins, groups);
+    await runMock(cfg, registry, plugins, groups, roles);
     web?.close();
     return;
   }
@@ -628,7 +789,7 @@ async function main() {
   }
 
   const guards = createGuards(cfg);
-  const dispatch = createDispatcher({ registry, api, cfg, plugins, guards, groups });
+  const dispatch = createDispatcher({ registry, api, cfg, plugins, guards, groups, roles });
 
   gateway = new Gateway({
     api,

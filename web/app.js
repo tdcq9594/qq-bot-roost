@@ -64,6 +64,7 @@ function activateTab(name) {
   if (name === 'plugins') loadPlugins();
   if (name === 'config') loadConfig();
   if (name === 'groups') loadGroups();
+  if (name === 'roles') loadRoles();
 }
 
 $$('.tab').forEach((btn) => {
@@ -647,6 +648,80 @@ async function addGroupManually() {
 $('#btnAddGroup')?.addEventListener('click', addGroupManually);
 $('#groupInput')?.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); addGroupManually(); }
+});
+
+/* ---------------- 权限 ---------------- */
+
+const LEVEL_TEXT = { 100: '主人', 80: '管理员', 60: '协管', 40: '助手' };
+
+async function loadRoles() {
+  const body = $('#roleBody');
+  if (!body) return;
+  try {
+    const data = await api('/api/roles');
+    const rows = data.rows ?? [];
+
+    // 作用域候选：global + 已知群
+    const scopes = new Set(['global']);
+    for (const r of rows) scopes.add(r.scope);
+    try {
+      for (const g of await api('/api/groups')) scopes.add(`group:${g.groupOpenid}`);
+    } catch {}
+    $('#scopeList').innerHTML = [...scopes].map((x) => `<option value="${x}">`).join('');
+
+    if (!rows.length) {
+      body.innerHTML = '<tr><td colspan="4" class="empty">还没有配置权限</td></tr>';
+      return;
+    }
+    body.innerHTML = rows
+      .map(
+        (r) => `
+        <tr>
+          <td class="mono">${r.scope}</td>
+          <td class="mono" title="${r.openid}">${shortId(r.openid)}</td>
+          <td>${LEVEL_TEXT[r.level] ?? r.level} <span class="hint">${r.level}</span></td>
+          <td class="num"><button class="btn small danger" data-scope="${r.scope}" data-openid="${r.openid}">移除</button></td>
+        </tr>`,
+      )
+      .join('');
+
+    body.querySelectorAll('button[data-scope]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        try {
+          await api('/api/roles/remove', {
+            method: 'POST',
+            body: JSON.stringify({ scope: btn.dataset.scope, openid: btn.dataset.openid }),
+          });
+          await loadRoles();
+        } catch (e) {
+          alert('移除失败: ' + e.message);
+          btn.disabled = false;
+        }
+      });
+    });
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="4" class="empty">加载失败: ${e.message}</td></tr>`;
+  }
+}
+
+$('#btnReloadRoles')?.addEventListener('click', loadRoles);
+
+$('#btnAddRole')?.addEventListener('click', async () => {
+  const scope = $('#roleScope').value.trim();
+  const openid = $('#roleOpenid').value.trim();
+  const level = Number($('#roleLevel').value);
+  if (!scope || !openid) return alert('作用域和 openid 都要填');
+  try {
+    await api('/api/roles/set', {
+      method: 'POST',
+      body: JSON.stringify({ scope, openid, level }),
+    });
+    $('#roleOpenid').value = '';
+    await loadRoles();
+  } catch (e) {
+    alert('保存失败: ' + e.message);
+  }
 });
 
 /* ---------------- 日志 ---------------- */

@@ -51,7 +51,7 @@ async function readBody(req, limit = 1024 * 256) {
  * 默认只监听 127.0.0.1，不对外暴露。
  * 设置 webui.accessKey 后，所有 /api/* 请求需要带 X-Access-Key 头或 ?key=。
  */
-export function startWebServer({ cfg, plugins, groups, getGateway, tokens, api, saveConfig, onConfigApplied }) {
+export function startWebServer({ cfg, plugins, groups, roles, getGateway, tokens, api, saveConfig, onConfigApplied }) {
   const wc = cfg.webui ?? {};
   if (wc.enabled === false) {
     log.info('可视化面板已禁用（config.json → webui.enabled = false）');
@@ -218,6 +218,34 @@ export function startWebServer({ cfg, plugins, groups, getGateway, tokens, api, 
           if (body.note !== undefined) patch.note = String(body.note);
           const g = await groups.upsert(id, patch);
           return json(res, 200, g);
+        }
+
+        // 权限
+        if (pathname === '/api/roles' && req.method === 'GET') {
+          const all = await roles.all();
+          const rows = [];
+          for (const [scope, members] of Object.entries(all)) {
+            for (const [openid, level] of Object.entries(members)) {
+              rows.push({ scope, openid, level });
+            }
+          }
+          rows.sort((a, b) => b.level - a.level || a.scope.localeCompare(b.scope));
+          return json(res, 200, { owners: cfg.owners, rows });
+        }
+        if (pathname === '/api/roles/set' && req.method === 'POST') {
+          const body = await readBody(req);
+          const scope = String(body.scope || '').trim();
+          const openid = String(body.openid || '').trim();
+          const level = Number(body.level);
+          if (!scope || !openid || !level) return json(res, 400, { error: '缺少参数' });
+          if (level === 100) return json(res, 400, { error: '主人只能在 config.json 设置' });
+          await roles.set(scope, openid, level);
+          return json(res, 200, { ok: true });
+        }
+        if (pathname === '/api/roles/remove' && req.method === 'POST') {
+          const body = await readBody(req);
+          await roles.remove(String(body.scope || ''), String(body.openid || ''));
+          return json(res, 200, { ok: true });
         }
 
         // 日志

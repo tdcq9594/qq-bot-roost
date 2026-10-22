@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createLogger } from '../logger.js';
 import { DATA_DIR } from '../config.js';
+import { scopeOf, LEVEL, levelName } from '../roles.js';
 
 /**
  * 全局注册表：所有插件注册的命令和事件监听都放这里。
@@ -163,7 +164,7 @@ class PluginStorage {
 /**
  * 插件上下文：插件能用的全部能力都在这里，不暴露内部实现。
  */
-export function createContext({ meta, registry, api, cfg, groups, isOwner }) {
+export function createContext({ meta, registry, api, cfg, groups, roles, isOwner }) {
   const id = meta.id;
   const logger = createLogger(`plugin:${id}`);
   const disposers = [];
@@ -246,6 +247,29 @@ export function createContext({ meta, registry, api, cfg, groups, isOwner }) {
     isOwner(userId) {
       return isOwner(userId);
     },
+
+    /**
+     * 当前消息发送者的权限等级（数字）。
+     * 100 主人 / 80 管理员 / 60 协管 / 40 助手 / 0 普通成员
+     */
+    async levelOf(msg) {
+      if (!roles) return isOwner(msg?.userId) ? LEVEL.owner : 0;
+      return roles.effective(scopeOf(msg), msg?.userId, { owners: cfg.owners });
+    },
+
+    /** 当前消息发送者是否达到某等级，默认要求管理员 */
+    async can(msg, need = 'admin') {
+      const want = typeof need === 'number' ? need : LEVEL[need] ?? LEVEL.admin;
+      return (await this.levelOf(msg)) >= want;
+    },
+
+    /** 当前作用域（group:xxx / channel:xxx / user:xxx / global） */
+    scopeOf(msg) {
+      return scopeOf(msg);
+    },
+
+    /** 等级数字转名字 */
+    levelName,
 
     /** 某人是否是指定群的管理者（默认是邀请机器人入群的人） */
     async isGroupAdmin(groupOpenid, userId) {

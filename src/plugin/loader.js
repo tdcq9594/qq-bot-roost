@@ -20,13 +20,14 @@ const STATE_FILE = path.join(DATA_DIR, 'plugins.json');
  * 启用状态存在 data/plugins.json，删掉文件夹即等于卸载。
  */
 export class PluginManager {
-  constructor({ pluginsDir, registry, api, cfg, groups, isOwner }) {
+  constructor({ pluginsDir, registry, api, cfg, groups, roles, isOwner }) {
     this.dir = pluginsDir;
     this.registry = registry;
     this.api = api;
     this.cfg = cfg;
     this.isOwner = isOwner;
     this.groups = groups;
+    this.roles = roles;
     this.loaded = new Map(); // id -> { meta, ctx, dir }
     this.state = {}; // id -> enabled
     this.errors = new Map(); // id -> 错误信息
@@ -101,6 +102,7 @@ export class PluginManager {
         api: this.api,
         cfg: this.cfg,
         groups: this.groups,
+        roles: this.roles,
         isOwner: this.isOwner,
       });
 
