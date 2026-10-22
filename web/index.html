@@ -65,6 +65,7 @@
           <dt>intents</dt><dd id="i-intents">-</dd>
           <dt>命令前缀</dt><dd id="i-prefix">-</dd>
           <dt>重连次数</dt><dd id="i-reconn">0</dd>
+          <dt>事件统计</dt><dd id="i-events">-</dd>
           <dt>Node</dt><dd id="i-node">-</dd>
         </dl>
         <div class="btn-row">
@@ -219,6 +220,23 @@
       </div>
       <div class="hint" style="margin-top:8px">
         本群管理者可以使用管理命令（启用/禁用/重载插件），但只限本群。
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="hint" style="margin-bottom:8px">
+        <b>看不到你的群？</b>官方没有「查询机器人所在群列表」的接口，
+        群只能靠事件被动发现。请按顺序排查：
+      </div>
+      <ol class="tips">
+        <li>在群里 <b>@机器人</b> 发一句话（不 @ 不会推送消息）</li>
+        <li>确认这个群在开放平台「沙箱配置」里（开发中的机器人只收沙箱群消息）</li>
+        <li>确认机器人是在它<b>运行期间</b>被拉进群的——离线时入群的事件会丢</li>
+        <li>看上面「事件统计」：全是 0 说明平台一条都没推过来</li>
+      </ol>
+      <div class="form-inline" style="margin-top:12px">
+        <input id="groupInput" placeholder="已知群 openid 时可直接登记">
+        <button class="btn" id="btnAddGroup">手动登记</button>
       </div>
     </div>
   </section>

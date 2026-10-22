@@ -90,6 +90,14 @@ function renderStatus(s) {
   $('#i-intents').textContent = s.intents;
   $('#i-prefix').textContent = s.prefix;
   $('#i-reconn').textContent = s.reconnectCount;
+  const evEl = $('#i-events');
+  if (evEl) {
+    if (!s.events || !s.events.length) {
+      evEl.innerHTML = '<span style="color:var(--warn)">一条都没收到</span>';
+    } else {
+      evEl.textContent = s.events.map((e) => `${e.name}×${e.count}`).join('  ');
+    }
+  }
   $('#i-node').textContent = `${s.node} (${s.platform})`;
 
   const body = $('#chatBody');
@@ -400,6 +408,27 @@ function renderGroups(list) {
 }
 
 $('#btnReloadGroups')?.addEventListener('click', loadGroups);
+
+async function addGroupManually() {
+  const input = $('#groupInput');
+  const id = input.value.trim();
+  if (!id) return;
+  try {
+    await api(`/api/groups/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ enabled: true, note: '手动登记' }),
+    });
+    input.value = '';
+    await loadGroups();
+  } catch (e) {
+    alert('登记失败: ' + e.message);
+  }
+}
+
+$('#btnAddGroup')?.addEventListener('click', addGroupManually);
+$('#groupInput')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); addGroupManually(); }
+});
 
 /* ---------------- 日志 ---------------- */
 

@@ -27,6 +27,14 @@ export const runtime = {
   /** 每个群/用户的消息计数，最多保留 200 个键 */
   perChat: new Map(),
 
+  /** 各类事件收到多少次。全为 0 说明平台压根没推事件过来 */
+  eventCounts: new Map(),
+
+  bumpEvent(name) {
+    if (!name) return;
+    this.eventCounts.set(name, (this.eventCounts.get(name) ?? 0) + 1);
+  },
+
   bump(key, n = 1) {
     this.counters[key] = (this.counters[key] ?? 0) + n;
   },
@@ -69,6 +77,9 @@ export const runtime = {
       reconnectCount: this.reconnectCount,
       counters: { ...this.counters },
       chats: [...this.perChat.values()].sort((a, b) => b.count - a.count).slice(0, 20),
+      events: [...this.eventCounts.entries()]
+        .map(([name, count]) => ({ name, count }))
+        .sort((a, b) => b.count - a.count),
       tokenExpiresIn,
       plugins: plugins.map((p) => ({
         id: p.id,

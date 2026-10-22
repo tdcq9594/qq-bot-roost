@@ -225,6 +225,7 @@ function createDispatcher({ registry, api, cfg, plugins, guards, groups }) {
   return async function dispatch(eventName, d) {
     runtime.lastEventAt = Date.now();
     runtime.messageEvent = eventName;
+    runtime.bumpEvent(eventName);
 
     if (!isMessageEvent(eventName)) {
       // 入群 / 退群：维护群档案，并在必要时自动认主
@@ -256,8 +257,9 @@ function createDispatcher({ registry, api, cfg, plugins, guards, groups }) {
     runtime.bump('recv');
     runtime.touchChat(msg.chatId, msg.kind);
 
-    if (!guards.check(msg)) return;
+    // 先登记群，再做拦截：被限流/白名单拦掉的消息也说明这个群存在
     if (msg.kind === 'group' && msg.groupId) await groups.touch(msg.groupId);
+    if (!guards.check(msg)) return;
 
     if (msg.isCommand) {
       const entry = registry.commands.get(msg.command);
