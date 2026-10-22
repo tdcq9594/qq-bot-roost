@@ -93,21 +93,37 @@ function registerCoreCommands(rt) {
     registry.addCommand('__core', name, { plugin: '内核', ...meta }, handler);
 
   /** 把某插件的菜单渲染成文本 */
-  function renderMenu(m) {
-    const lines = [`${m.title}${m.version ? ' v' + m.version : ''}`];
-    if (m.desc) lines.push(m.desc);
-    let total = 0;
+  /**
+   * 把注册表里的菜单转成 renderMenuMd 需要的分组结构。
+   * 命令项做成可点击标签，非命令项（被动触发的关键词）只显示文字。
+   */
+  function menuGroupsOf(m, { withCommands = true } = {}) {
+    const groups = [];
     for (const sec of m.sections) {
       if (!sec.items.length) continue;
-      lines.push(`\n【${sec.title}】`);
-      for (const it of sec.items) {
-        total += 1;
-        const label = it.isCommand ? `${P}${it.text}` : it.text;
-        lines.push(`  ${label}${it.desc ? '  ' + it.desc : ''}`);
-      }
+      groups.push({ title: sec.title, items: sec.items.map((it) => menuItemOf(it, withCommands)) });
     }
-    if (!total) lines.push('\n（该插件没有提供任何指令）');
-    return lines.join('\n');
+    return groups;
+  }
+
+  /**
+   * 单个菜单项 → 可点击项。
+   * 带参数的命令只把「命令名」做成可点击（点一下插入 /admin，参数自己补），
+   * 完整用法放说明里——否则点出来是一串 <openid> 占位符，没法直接用。
+   */
+  function menuItemOf(it, withCommands = true) {
+    if (!it.isCommand) {
+      return { text: it.text, desc: it.desc || '', cmd: null };
+    }
+    const pattern = String(it.text).trim();
+    const name = pattern.split(/\s+/)[0];
+    const hasArgs = pattern !== name;
+    return {
+      text: `${P}${name}`,
+      // 用法包在反引号里，里面有什么符号都不会被 markdown 吃掉
+      desc: hasArgs ? `用法 \`${P}${pattern}\`${it.desc ? ' · ' + it.desc : ''}` : it.desc || '',
+      cmd: withCommands ? `${P}${name}` : null,
+    };
   }
 
   /** 全局菜单 */
@@ -121,37 +137,47 @@ function registerCoreCommands(rt) {
         const ids = [...registry.menus.keys()].filter((k) => k !== '__core');
         return msg.reply(`没有「${arg}」这个插件。\n可用: ${ids.join('、') || '无'}`);
       }
-      return msg.reply(renderMenu(m));
+      return msg.replyMenu(`${m.title}${m.version ? ' v' + m.version : ''}`, menuGroupsOf(m));
     }
 
     // /help → 全局
-    const lines = [];
-    const bot = runtime.botName ? `${runtime.botName} · 全局菜单` : '全局菜单';
-    lines.push(bot);
-
     const myLv = await roles.effective(scopeOf(msg), msg.userId, { owners: cfg.owners });
     const coreMenu = registry.menus.get('__core');
-    lines.push('\n【内核】');
+    const groups = [];
+
+    // 内核指令：按权限过滤掉用不了的
+    const coreItems = [];
     for (const sec of coreMenu?.sections ?? []) {
       for (const it of sec.items) {
         if (it.admin && myLv > LEVEL.admin) continue;
-        lines.push(`  ${P}${it.text}${it.desc ? '  ' + it.desc : ''}`);
+        coreItems.push(menuItemOf(it));
       }
+    }
+    if (coreItems.length) groups.push({ title: '内核', items: coreItems });
+
+    // 插件列表：点一下直接把 /help <id> 填进输入框
+    const menus = [...registry.menus.values()].filter((m) => m.id !== '__core');
+    if (!menus.length) {
+      groups.push({
+        title: '插件',
+        items: [{ text: '还没有安装插件，把文件夹放进 plugins/ 即可', desc: '', cmd: null }],
+      });
+    } else {
+      groups.push({
+        title: `插件（${menus.length} 个）`,
+        items: menus.map((m) => {
+          const cnt = m.sections.reduce((n, s) => n + s.items.length, 0);
+          return {
+            text: m.id,
+            desc: `${m.title}${cnt ? ` · ${cnt} 条` : ' · 未提供菜单'}`,
+            cmd: `${P}help ${m.id}`,
+          };
+        }),
+      });
     }
 
-    const menus = [...registry.menus.values()].filter((m) => m.id !== '__core');
-    lines.push(`\n【插件】${menus.length} 个`);
-    if (!menus.length) {
-      lines.push('  还没有安装插件，把文件夹放进 plugins/ 即可');
-    } else {
-      for (const m of menus) {
-        const cnt = m.sections.reduce((n, s) => n + s.items.length, 0);
-        const flag = cnt ? `${cnt} 条` : '未提供菜单';
-        lines.push(`  ${m.id}  ${m.title} · ${flag}`);
-      }
-      lines.push(`\n发 ${P}help <插件id> 看该插件的下级菜单`);
-    }
-    await msg.reply(lines.join('\n'));
+    const bot = runtime.botName || '全局菜单';
+    await msg.replyMenu(bot, groups);
   });
 
   /** /menu 是 /help 的别名 */
@@ -159,12 +185,20 @@ function registerCoreCommands(rt) {
     const arg = (args[0] || '').toLowerCase();
     if (arg) {
       const m = registry.menus.get(arg);
-      return msg.reply(m ? renderMenu(m) : `没有「${arg}」这个插件`);
+      if (!m) return msg.reply(`没有「${arg}」这个插件`);
+      return msg.replyMenu(`${m.title}${m.version ? ' v' + m.version : ''}`, menuGroupsOf(m));
     }
     const menus = [...registry.menus.values()].filter((m) => m.id !== '__core');
-    await msg.reply(
-      ['插件菜单：', ...menus.map((m) => `  ${P}help ${m.id}  ${m.title}`)].join('\n'),
-    );
+    await msg.replyMenu('插件菜单', [
+      {
+        title: `共 ${menus.length} 个`,
+        items: menus.map((m) => ({
+          text: m.id,
+          desc: m.title,
+          cmd: `${P}help ${m.id}`,
+        })),
+      },
+    ]);
   });
 
   core('ping', { desc: '测试机器人是否在线' }, async (msg) => {
@@ -519,7 +553,11 @@ function registerCoreCommands(rt) {
 function createMockApi(botName) {
   const echo = (scene) => async (target, body) => {
     runtime.bump('sent');
-    console.log(`\n→ [${botName}] [${scene} ${target}] ${body?.content ?? JSON.stringify(body)}`);
+    // markdown 消息单独打印正文，否则一堆 JSON 没法看
+    const text = body?.markdown
+      ? `[markdown]\n${body.markdown.content}`
+      : body?.content ?? JSON.stringify(body);
+    console.log(`\n→ [${botName}] [${scene} ${target}] ${text}`);
     return { id: 'mock', timestamp: Date.now() };
   };
   return {

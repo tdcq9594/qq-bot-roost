@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createLogger } from '../logger.js';
 import { scopeOf, LEVEL, NO_PERM, levelName } from '../roles.js';
+import { md, renderMenuMd } from '../markdown.js';
 
 /**
  * 全局注册表：所有插件注册的命令和事件监听都放这里。
@@ -225,6 +226,14 @@ export function createContext({ meta, paths, registry, api, cfg, config, configS
     api,
     logger,
     storage: new PluginStorage(paths.pluginData(id)),
+    /**
+     * Markdown 与消息内交互标签的构造工具。
+     *   ctx.md.cmdInput('/签到', '签到')  → 点了把 /签到 插进输入框（群聊可用）
+     *   ctx.md.cmdEnter('/签到')         → 点了直接发（群聊不支持）
+     *   ctx.md.esc(用户输入)              → 转义，防止破坏排版
+     * 配合 msg.replyMarkdown({content}) 或 msg.replyMenu(title, groups) 使用。
+     */
+    md,
     prefix: cfg.commandPrefix || '/',
 
     /**

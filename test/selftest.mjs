@@ -514,6 +514,38 @@ const RUN = Date.now().toString(36);
   );
 }
 
+/* ---------- 19. Markdown 与消息内交互标签 ---------- */
+{
+  const { md, renderMenuMd, escMd } = await import('../src/markdown.js');
+
+  // text 必须 urlencode，否则带空格/中文的指令会解析错
+  const tag = md.cmdInput('/admin set 123 1', '设置权限');
+  check('cmdInput 会 urlencode text', tag.includes('text="%2Fadmin%20set%20123%201"'), tag);
+  check('cmdInput 会 urlencode show', tag.includes('show="%E8%AE%BE%E7%BD%AE%E6%9D%83%E9%99%90"'));
+  check('cmdInput 用对标签名', tag.startsWith('<qqbot-cmd-input') && tag.endsWith('/>'));
+
+  // 群聊只有 cmd-input；单聊/频道才有 cmd-enter（点了直接发）
+  const groups = [{ title: '测试', items: [{ text: '/签到', desc: '每日一次' }] }];
+  const forGroup = renderMenuMd('标题', groups, { kind: 'group' });
+  const forC2C = renderMenuMd('标题', groups, { kind: 'c2c' });
+  check('群聊菜单用 cmd-input', forGroup.includes('<qqbot-cmd-input'));
+  check('群聊菜单不用 cmd-enter', !forGroup.includes('cmd-enter'));
+  check('单聊菜单用 cmd-enter', forC2C.includes('<qqbot-cmd-enter'));
+
+  // 标题会渲染成 markdown 标题
+  check('渲染出标题和分组', forGroup.includes('# 标题') && forGroup.includes('## 测试'));
+
+  // cmd: null 的项不做成可点击（被动触发的玩法）
+  const passive = renderMenuMd('t', [{ title: 'g', items: [{ text: '我的鲲', cmd: null }] }], {
+    kind: 'group',
+  });
+  check('非命令项不生成点击标签', !passive.includes('cmd-input') && passive.includes('我的鲲'));
+
+  // 转义只处理会破坏行内排版的字符，不碰 < > [ ]
+  check('escMd 转义星号', escMd('a*b') === 'a\\*b');
+  check('escMd 不动尖括号', escMd('/admin set <openid>') === '/admin set <openid>');
+}
+
 /* ---------- 汇总 ---------- */
 // 清掉测试写进额度账本的条目，别污染真实数据。
 // 多机器人后账本在 data/bots/<id>/quota.json，所以两边都要扫。

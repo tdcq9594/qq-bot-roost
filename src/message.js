@@ -1,6 +1,7 @@
 import { createLogger } from './logger.js';
 import { FILE_TYPE } from './api.js';
 import { messageKindOf, EVENTS } from './events.js';
+import { renderMenuMd } from './markdown.js';
 
 const log = createLogger('message');
 
@@ -199,6 +200,22 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
       log.error('发送 Markdown 失败:', e.message);
       return null;
     });
+  };
+
+  /**
+   * 发一条带**可点击指令**的菜单（markdown 消息）。
+   *
+   * 群聊用 `<qqbot-cmd-input>`（点了把指令插进输入框，用户自己按发送），
+   * 单聊 / 频道用 `<qqbot-cmd-enter>`（点了直接发）。
+   * 这两种标签只能在 markdown 消息里生效，普通文本里会显示成原始标签。
+   *
+   * @param {string} title 大标题
+   * @param {Array<{title:string, items:Array<{text:string, desc?:string, cmd?:string}>}>} groups
+   * @param {object} [opts] { keyboard } 需要真按钮时传
+   */
+  msg.replyMenu = async (title, groups, opts = {}) => {
+    const content = renderMenuMd(title, groups, { kind });
+    return msg.replyMarkdown({ content }, opts.keyboard);
   };
 
   /** 发富媒体：上传后以 msg_type=7 发送。图片是独立消息，先把攒的文本发掉 */
