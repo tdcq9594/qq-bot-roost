@@ -1,0 +1,16 @@
+# dsh-roost 的组合包层。
+#
+# 这一行把插件插进 profile 的插件表。id 是这个行在配置里的唯一标识，
+# name 是包名（Node 模块解析用，必须和 package.json 的 name 一致）。
+#
+# config 里的值都会被 schema 的默认值兜住，用户可以在自己 profile 的
+# cordis.patch.yml 里整行覆盖（是整行替换，不是深合并）。
+- insert:
+    - id: dsh-roost
+      name: dsh-roost
+      config:
+        # 栖 Roost 面板地址。插件通过它调 REST API。
+        # 面板端口默认 15207，如果被占用会自动换，具体看 roost 启动日志。
+        baseUrl: http://127.0.0.1:15207
+        # 面板设了 webui.accessKey 才需要填，留空表示不校验
+        accessKey: ''

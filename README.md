@@ -514,3 +514,26 @@ mock 模式下：直接输入文本 = 模拟一条群 @ 消息；`!as <openid>` 
 自愿捐赠可以接受，但**不能**把任何付费行为设成使用前提。
 
 你可以自由使用、修改、分发、商用，保留版权声明即可。
+
+---
+
+## 集成：DeepSeek Harness
+
+仓库里带了一个 DSH 插件（`integrations/dsh-roost/`），装进
+[DeepSeek Harness](https://deepseek-harness.github.io/) 之后可以直接对 AI 说：
+
+> 机器人现在在线吗？收了多少消息？
+> 看看最近的报错日志
+> 把 dice 插件禁用了
+
+插件通过面板 REST API 跟 Roost 对话，**不把 Roost 塞进 DSH 进程**——
+Roost 是常驻服务，DSH 一关机器人不能跟着掉线。
+
+```bash
+dsh plugin --profile desktop add /path/to/qq-bot-roost/integrations/dsh-roost
+```
+
+六个工具：`roost_status` `roost_plugins` `roost_logs`（只读）、
+`roost_plugin_toggle` `roost_send` `roost_reconnect`（写操作）。
+
+详见 [integrations/dsh-roost/README.md](integrations/dsh-roost/README.md)。

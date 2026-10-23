@@ -1,0 +1,39 @@
+{
+  "name": "dsh-roost",
+  "version": "0.1.0",
+  "description": "在 DeepSeek Harness 里管理 栖 Roost QQ 机器人：查状态、看日志、启停插件、发消息",
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "qq-bot",
+    "roost",
+    "qq-bot-roost"
+  ],
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": ">=0.2.0-0 <0.3.0"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.2.1-0 <0.3.0"
+  },
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tdcq9594/qq-bot-roost.git",
+    "directory": "integrations/dsh-roost"
+  },
+  "private": false
+}
