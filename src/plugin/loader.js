@@ -569,9 +569,14 @@ export class PluginManager {
       log.warn(`插件 ${id} 的 dashboard() 出错: ${e.message}`);
     }
 
-    if (!raw) raw = item.ctx?.getDashboard?.() ?? item.host?.dashboard ?? null;
+    // 回退要看「洗完之后有没有内容」，不能看 raw 是否 truthy：
+    // 插件写了 dashboard: {} 或 dashboard() 返回 null 时，raw 仍是真值，
+    // 但 normalize 出来是 null，此时该继续用 ctx.setDashboard 推的那份。
+    let data = normalizeDashboard(raw);
+    if (!data) {
+      data = normalizeDashboard(item.ctx?.getDashboard?.() ?? item.host?.dashboard ?? null);
+    }
 
-    const data = normalizeDashboard(raw);
     this.dashCache.set(id, { at: Date.now(), data });
     return data;
   }

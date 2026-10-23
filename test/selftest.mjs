@@ -620,6 +620,25 @@ async function testDashboard() {
   check('dashboard: 读到 ctx.setDashboard 的数据', pushed?.metrics[0].label === '推的');
 
   check('dashboard: 未加载的插件返回 null', (await pm.dashboardOf('nope')) === null);
+
+  // 声明式给了但内容为空时，必须继续回退到 ctx.setDashboard 推的那份。
+  // 曾经的 bug：用 `if (!raw)` 判断，而 `dashboard: {}` 是 truthy，
+  // 于是插件推的数据被活活吞掉。
+  pm.loaded.set('w', { meta: { dashboard: {} }, ctx: { getDashboard: () => ({ metrics: [{ label: '推的', value: 1 }] }) } });
+  check('dashboard: 声明式为空时回退到 setDashboard', (await pm.dashboardOf('w'))?.metrics[0].label === '推的');
+
+  pm.loaded.set('x', {
+    meta: { dashboard: () => null },
+    ctx: { getDashboard: () => ({ metrics: [{ label: '推的2', value: 2 }] }) },
+  });
+  check('dashboard: 函数返回 null 时回退', (await pm.dashboardOf('x'))?.metrics[0].label === '推的2');
+
+  // 声明式有效时不该被覆盖
+  pm.loaded.set('y', {
+    meta: { dashboard: { metrics: [{ label: '声明的', value: 3 }] } },
+    ctx: { getDashboard: () => ({ metrics: [{ label: '推的3', value: 4 }] }) },
+  });
+  check('dashboard: 声明式有效时优先', (await pm.dashboardOf('y'))?.metrics[0].label === '声明的');
 }
 
 await testDashboard();
