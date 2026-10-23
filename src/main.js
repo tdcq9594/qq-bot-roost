@@ -612,6 +612,47 @@ function createMockApi(botName) {
       console.log(`\n→ [${botName}] [黑名单 ${op} ${g}] ${JSON.stringify(member_openids)}`);
       return { fail_openids: [] };
     },
+    // 入群申请与自动审批：公开接口，mock 直接返回空列表
+    getJoinRequests: async (g) => {
+      console.log(`\n→ [${botName}] [入群申请列表 ${g}]`);
+      return { request_list: [], cursor: '' };
+    },
+    handleJoinRequest: async (g, uid, body) => {
+      console.log(`\n→ [${botName}] [审批入群 ${g} ${uid}] ${body.op}`);
+      return {};
+    },
+    approveJoinRequest: async (g, uid, rid) => {
+      console.log(`\n→ [${botName}] [通过入群 ${g} ${uid}] ${rid || ''}`);
+      return {};
+    },
+    declineJoinRequest: async (g, uid, body = {}) => {
+      console.log(`\n→ [${botName}] [拒绝入群 ${g} ${uid}] ${body.rejectReason || ''}`);
+      return {};
+    },
+    listJoinStrategies: async () => {
+      console.log(`\n→ [${botName}] [审批策略列表]`);
+      return { strategy_list: [], cursor: '' };
+    },
+    createJoinStrategy: async (p) => {
+      console.log(`\n→ [${botName}] [创建审批策略] ${JSON.stringify(p)}`);
+      return { strategy_id: 'st_mock' };
+    },
+    updateJoinStrategy: async (id, p) => {
+      console.log(`\n→ [${botName}] [修改审批策略 ${id}] ${JSON.stringify(p)}`);
+      return {};
+    },
+    deleteJoinStrategy: async (id) => {
+      console.log(`\n→ [${botName}] [删除审批策略 ${id}]`);
+      return {};
+    },
+    executeJoinStrategy: async (id) => {
+      console.log(`\n→ [${botName}] [执行审批策略 ${id}]（官方异步，约 10 分钟完成）`);
+      return {};
+    },
+    updateStrategyWhitelist: async (id, { op, whitelist_users }) => {
+      console.log(`\n→ [${botName}] [白名单 ${op} ${id}] ${(whitelist_users || []).length} 个号码`);
+      return { fail_users: [] };
+    },
   };
 }
 

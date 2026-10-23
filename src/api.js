@@ -309,6 +309,141 @@ export class QQApi {
     });
   }
 
+  /* ---------------- 入群申请与自动审批 ---------------- */
+
+  /**
+   * 拉取入群申请列表（公开接口）。
+   * GET /v2/groups/{group_openid}/join_request_list
+   * 机器人需拥有群管理员身份。30 QPM。
+   * @param {string} groupOpenid
+   * @param {{cursor?:string, limit?:number}} [p] limit 默认 20，最大 50
+   */
+  getJoinRequests(groupOpenid, { cursor, limit } = {}) {
+    const q = new URLSearchParams();
+    if (cursor) q.set('cursor', cursor);
+    if (limit) q.set('limit', String(limit));
+    const suffix = q.toString() ? `?${q}` : '';
+    return this.#request('GET', `/v2/groups/${groupOpenid}/join_request_list${suffix}`);
+  }
+
+  /**
+   * 审批入群申请（公开接口）。
+   * POST /v2/groups/{group_openid}/approval_join_request/{member_openid}
+   * 机器人需拥有群管理员身份。60 QPM。
+   *
+   * @param {string} groupOpenid
+   * @param {string} memberOpenid 申请人
+   * @param {{op:'approve'|'decline', joinRequestId?:string, rejectReason?:string, addToBlacklist?:boolean}} body
+   */
+  handleJoinRequest(groupOpenid, memberOpenid, body = {}) {
+    const payload = { op: body.op };
+    if (body.joinRequestId) payload.join_request_id = body.joinRequestId;
+    if (body.rejectReason) payload.reject_reason = body.rejectReason;
+    if (body.addToBlacklist) payload.add_to_member_blacklist = true;
+    return this.#request(
+      'POST',
+      `/v2/groups/${groupOpenid}/approval_join_request/${memberOpenid}`,
+      payload,
+    );
+  }
+
+  /** 通过入群申请 */
+  approveJoinRequest(groupOpenid, memberOpenid, joinRequestId) {
+    return this.handleJoinRequest(groupOpenid, memberOpenid, { op: 'approve', joinRequestId });
+  }
+
+  /** 拒绝入群申请，可同时拉黑 */
+  declineJoinRequest(groupOpenid, memberOpenid, { joinRequestId, rejectReason, addToBlacklist } = {}) {
+    return this.handleJoinRequest(groupOpenid, memberOpenid, {
+      op: 'decline',
+      joinRequestId,
+      rejectReason,
+      addToBlacklist,
+    });
+  }
+
+  /**
+   * 查询入群自动审批策略列表（公开接口），按创建时间倒序。
+   * GET /v2/groups/join_approval_strategy
+   */
+  listJoinStrategies({ cursor, limit } = {}) {
+    const q = new URLSearchParams();
+    if (cursor) q.set('cursor', cursor);
+    if (limit) q.set('limit', String(limit));
+    const suffix = q.toString() ? `?${q}` : '';
+    return this.#request('GET', `/v2/groups/join_approval_strategy${suffix}`);
+  }
+
+  /**
+   * 创建入群自动审批策略（公开接口）。
+   * POST /v2/groups/join_approval_strategy
+   * group_openids 与 group_ids 二选一，最多 100 个；一个机器人最多 20 个策略。
+   * 注意：策略要**机器人是该群管理员**才会实际生效。
+   *
+   * @param {{groupOpenids?:string[], groupIds?:string[], isEnable?:string, expireAt?:string, remark?:string}} p
+   *   isEnable: 'on' | 'off'，默认 on；expireAt: RFC3339，不传默认一年
+   */
+  createJoinStrategy({ groupOpenids, groupIds, isEnable, expireAt, remark } = {}) {
+    const payload = {};
+    if (groupOpenids) payload.group_openids = groupOpenids;
+    if (groupIds) payload.group_ids = groupIds.map(String);
+    if (isEnable) payload.is_enable = isEnable;
+    if (expireAt) payload.expire_at = expireAt;
+    if (remark) payload.remark = remark;
+    return this.#request('POST', `/v2/groups/join_approval_strategy`, payload);
+  }
+
+  /**
+   * 修改入群自动审批策略（公开接口）。
+   * PATCH /v2/groups/join_approval_strategy/{strategy_id}
+   *
+   * @param {string} strategyId
+   * @param {{isEnable?:string, expireAt?:string, remark?:string,
+   *          groupAction?:{op:'add'|'del', groupOpenids?:string[], groupIds?:string[]}}} p
+   */
+  updateJoinStrategy(strategyId, { isEnable, expireAt, remark, groupAction } = {}) {
+    const payload = {};
+    if (isEnable) payload.is_enable = isEnable;
+    if (expireAt) payload.expire_at = expireAt;
+    if (remark) payload.remark = remark;
+    if (groupAction) {
+      payload.group_action = { op: groupAction.op };
+      if (groupAction.groupOpenids) payload.group_action.group_openids = groupAction.groupOpenids;
+      if (groupAction.groupIds) payload.group_action.group_ids = groupAction.groupIds.map(String);
+    }
+    return this.#request('PATCH', `/v2/groups/join_approval_strategy/${strategyId}`, payload);
+  }
+
+  /** 删除入群自动审批策略 */
+  deleteJoinStrategy(strategyId) {
+    return this.#request('DELETE', `/v2/groups/join_approval_strategy/${strategyId}`);
+  }
+
+  /**
+   * 执行策略：对关联的全部群做全量扫描，命中白名单的申请自动通过。
+   * **异步执行，约 10 分钟完成**，别当成同步接口等结果。
+   */
+  executeJoinStrategy(strategyId) {
+    return this.#request('POST', `/v2/groups/join_approval_strategy/${strategyId}/execute`, {});
+  }
+
+  /**
+   * 修改策略的白名单 QQ 号码（公开接口）。
+   * POST /v2/groups/join_approval_strategy/{strategy_id}/whitelist_users
+   * 单次最多 10000 个，总上限 10 万。
+   * 注意这里用的是 **QQ 号码**，不是 openid；用字符串传，避免 JS 数字精度问题。
+   *
+   * @param {string} strategyId
+   * @param {{op:'add'|'del', whitelistUsers:string[]}} p
+   */
+  updateStrategyWhitelist(strategyId, { op, whitelistUsers }) {
+    return this.#request(
+      'POST',
+      `/v2/groups/join_approval_strategy/${strategyId}/whitelist_users`,
+      { op, whitelist_users: whitelistUsers.map(String) },
+    );
+  }
+
   /* ---------------- 内部 ---------------- */
 
   #payload({ content, msgType = 0, msgId, markdown, keyboard, media, ark }) {

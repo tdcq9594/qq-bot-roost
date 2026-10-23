@@ -700,6 +700,28 @@ async function testGroupManage() {
   if (cfg) {
     check('群管: 配置默认 invited=false', cfg.groupManage?.invited === false);
   }
+
+  // 入群申请 / 自动审批是公开接口，不该被内邀闸门挡着
+  api.setGroupInvited(false);
+  const joinApis = [
+    ['getJoinRequests', () => api.getJoinRequests('g')],
+    ['approveJoinRequest', () => api.approveJoinRequest('g', 'u', 'rid')],
+    ['declineJoinRequest', () => api.declineJoinRequest('g', 'u', {})],
+    ['listJoinStrategies', () => api.listJoinStrategies()],
+    ['createJoinStrategy', () => api.createJoinStrategy({ groupOpenids: ['g'] })],
+    ['updateJoinStrategy', () => api.updateJoinStrategy('st_1', { isEnable: 'off' })],
+    ['deleteJoinStrategy', () => api.deleteJoinStrategy('st_1')],
+    ['executeJoinStrategy', () => api.executeJoinStrategy('st_1')],
+    ['updateStrategyWhitelist', () => api.updateStrategyWhitelist('st_1', { op: 'add', whitelistUsers: ['123'] })],
+  ];
+  for (const [name, fn] of joinApis) {
+    try {
+      await fn();
+      check(`群管: ${name} 公开可用`, false, '居然连上了');
+    } catch (e) {
+      check(`群管: ${name} 公开可用`, !/未开启/.test(e.message), e.message.slice(0, 40));
+    }
+  }
 }
 
 await testGroupManage();
