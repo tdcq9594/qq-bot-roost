@@ -13,27 +13,60 @@ export const DEFAULT_INDEX_URL =
 
 /**
  * 拉取插件市场的索引。
+ *
+ * 国内访问 raw.githubusercontent.com 经常抖，所以：
+ *   - 超时给到 20 秒（默认 15 秒偶尔不够）
+ *   - 失败重试一次，第二次还失败才报错
+ *   - **并发去重**：同一时刻多个调用只发一个请求
+ *
+ * 为什么需要去重：启动后的自动更新检查、用户点开市场、面板轮询可能同时触发，
+ * 三个请求并发打 GitHub 容易被限流，反而全部失败。
+ *
  * @param {string} [url]
  * @returns {Promise<{schema:number, repo:string, branch:string, updated:string, plugins:object[]}>}
  */
+const indexInFlight = new Map();
+
 export async function fetchIndex(url = DEFAULT_INDEX_URL) {
-  let res;
-  try {
-    res = await fetch(url, { signal: AbortSignal.timeout(15000) });
-  } catch (e) {
-    throw new Error(`连不上插件市场：${e.message}`);
-  }
-  if (!res.ok) throw new Error(`插件市场返回 HTTP ${res.status}`);
+  const key = String(url || DEFAULT_INDEX_URL);
+  const running = indexInFlight.get(key);
+  if (running) return running;
 
-  let data;
-  try {
-    data = await res.json();
-  } catch {
-    throw new Error('插件市场返回的不是合法 JSON');
-  }
-  if (!Array.isArray(data?.plugins)) throw new Error('插件市场索引格式不对（缺少 plugins 数组）');
+  const task = fetchIndexOnce(key).finally(() => indexInFlight.delete(key));
+  indexInFlight.set(key, task);
+  return task;
+}
 
-  return data;
+async function fetchIndexOnce(url) {
+  let lastErr = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 1500));
+
+    let res;
+    try {
+      res = await fetch(url, { signal: AbortSignal.timeout(20000) });
+    } catch (e) {
+      lastErr = new Error(`连不上插件市场：${e.message}`);
+      continue;
+    }
+    if (!res.ok) {
+      lastErr = new Error(`插件市场返回 HTTP ${res.status}`);
+      // 4xx 是地址错了，重试没意义
+      if (res.status >= 400 && res.status < 500) throw lastErr;
+      continue;
+    }
+
+    let data;
+    try {
+      data = await res.json();
+    } catch {
+      throw new Error('插件市场返回的不是合法 JSON');
+    }
+    if (!Array.isArray(data?.plugins)) throw new Error('插件市场索引格式不对（缺少 plugins 数组）');
+
+    return data;
+  }
+  throw lastErr ?? new Error('连不上插件市场');
 }
 
 /** 跑一条命令，收集输出。失败时把 stderr 带出来 */

@@ -31,6 +31,20 @@ const GLOBAL_DEFAULTS = {
     maxBytes: 5 * 1024 * 1024,
   },
 
+  /**
+   * Webhook 接收服务（全局一个端口，服务所有选了 webhook 模式的机器人）。
+   * 不开就不占端口；开了以后每个机器人靠 AppID 分流。
+   * 公网部署时记得把 path 暴露出去，并配好 HTTPS 反代。
+   */
+  webhook: {
+    enabled: false,
+    host: '0.0.0.0',
+    port: 15208,
+    path: '/webhook',
+    /** 对外可访问的完整地址，只用于面板显示和提示，不参与逻辑 */
+    publicUrl: '',
+  },
+
   plugins: {
     autoInstallDeps: true,
     /** Go 插件用的 go 可执行文件路径，留空则用 PATH 里的 go 或 GO_BIN 环境变量 */
@@ -62,6 +76,16 @@ const BOT_DEFAULTS = {
   rateLimit: {
     enabled: true,
     perChatPerMinute: 30,
+  },
+
+  /**
+   * 收事件的方式：
+   *   websocket —— 长连接，本地跑最省心（默认）
+   *   webhook   —— 平台 HTTP 回调，适合公网部署 / Serverless
+   * 两种模式下**发消息都走 HTTP API**，行为一致。
+   */
+  connection: {
+    mode: 'websocket',
   },
 
   dedupWindowSec: 120,
@@ -169,6 +193,35 @@ export async function loadGlobalConfig() {
     cfg.webui.accessKey = cfg.webui.token;
     delete cfg.webui.token;
   }
+
+  /**
+   * 环境变量覆盖（容器部署用）。
+   * Docker 里配置文件是挂载进来的，改完要重建容器；用环境变量可以直接调，
+   * 而且镜像能保持「无状态」——同一份镜像跑不同实例。
+   *
+   * 优先级：环境变量 > 配置文件 > 默认值。
+   * 只在环境变量**有值**时覆盖，不写就完全不影响。
+   */
+  const env = process.env;
+  if (env.ROOST_WEBUI_HOST) cfg.webui.host = env.ROOST_WEBUI_HOST;
+  if (env.ROOST_WEBUI_PORT) {
+    const p = Number(env.ROOST_WEBUI_PORT);
+    if (Number.isInteger(p) && p > 0 && p < 65536) cfg.webui.port = p;
+  }
+  if (env.ROOST_WEBUI_KEY) cfg.webui.accessKey = env.ROOST_WEBUI_KEY;
+  if (env.ROOST_LOG_LEVEL) cfg.logLevel = env.ROOST_LOG_LEVEL;
+
+  // Webhook：容器里想开回调，两个变量就够
+  if (env.ROOST_WEBHOOK_ENABLED) {
+    cfg.webhook.enabled = !/^(0|false|no|off)$/i.test(env.ROOST_WEBHOOK_ENABLED);
+  }
+  if (env.ROOST_WEBHOOK_PORT) {
+    const p = Number(env.ROOST_WEBHOOK_PORT);
+    if (Number.isInteger(p) && p > 0 && p < 65536) cfg.webhook.port = p;
+  }
+  if (env.ROOST_WEBHOOK_PATH) cfg.webhook.path = env.ROOST_WEBHOOK_PATH;
+  if (env.ROOST_WEBHOOK_PUBLIC_URL) cfg.webhook.publicUrl = env.ROOST_WEBHOOK_PUBLIC_URL;
+
   return cfg;
 }
 
@@ -225,6 +278,7 @@ export async function saveBotConfig(id, cfg) {
     whitelist: cfg.whitelist,
     rateLimit: cfg.rateLimit,
     dedupWindowSec: cfg.dedupWindowSec,
+    connection: cfg.connection ?? { mode: 'websocket' },
     messageLog: cfg.messageLog,
     outbound: cfg.outbound,
     session: cfg.session,

@@ -244,5 +244,63 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
   msg.replyVoice = (src, opts) => replyMedia(FILE_TYPE.VOICE, src, opts);
   msg.replyFile = (src, opts) => replyMedia(FILE_TYPE.FILE, src, opts);
 
+  /**
+   * 流式回复（**仅单聊**，官方没有群聊的流式接口）。
+   *
+   * 适合 AI 打字机效果：一边生成一边往下发，不用等整段生成完。
+   * 返回一个对象，用法：
+   *
+   *   const s = msg.replyStream();
+   *   await s.push('正在想');        // 第一片，index 自动递增
+   *   await s.push('正在想……');
+   *   await s.end('这是完整答案');    // 最后一片，input_state=10
+   *
+   * 内部自动维护 index 和 stream_msg_id，插件不用管。
+   * 走的是「replace」模式——每次传全量正文，服务端会算差量，
+   * 所以内容必须以上次已下发的前缀开头，不能中途改写前面的话。
+   */
+  msg.replyStream = (opts = {}) => {
+    if (kind !== 'c2c') {
+      // 群聊没有流式接口，退化成普通 markdown 回复，别让插件崩
+      return {
+        push: async (text) => msg.replyMarkdown({ content: String(text ?? '') }),
+        end: async (text) => msg.replyMarkdown({ content: String(text ?? '') }),
+      };
+    }
+
+    let index = 0;
+    let streamId = opts.streamMsgId || '';
+    const target = userId;
+
+    return {
+      /** 发一片。返回服务端生成的 stream_msg_id（第一片才有） */
+      async push(contentRaw) {
+        const r = await api.sendStreamMessage(target, {
+          contentRaw,
+          index: index++,
+          state: 1,
+          mode: 'replace',
+          streamMsgId: streamId || undefined,
+          msgId: msg.id,
+          isWakeup: opts.isWakeup,
+        });
+        if (r?.id && !streamId) streamId = r.id;
+        return r;
+      },
+      /** 结束流。contentRaw 传最终全量正文 */
+      async end(contentRaw) {
+        return api.sendStreamMessage(target, {
+          contentRaw,
+          index: index++,
+          state: 10,
+          mode: 'replace',
+          streamMsgId: streamId || undefined,
+          msgId: msg.id,
+          isWakeup: opts.isWakeup,
+        });
+      },
+    };
+  };
+
   return msg;
 }

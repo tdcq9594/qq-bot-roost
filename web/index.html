@@ -156,6 +156,12 @@
           <label>AppSecret<input name="appSecret" type="password" placeholder="留空则不修改"></label>
           <label>API 地址<input name="baseUrl"></label>
           <label>命令前缀<input name="commandPrefix" maxlength="3"></label>
+          <label>收事件方式
+            <select name="connectionMode">
+              <option value="websocket">WebSocket 长连接（本地推荐）</option>
+              <option value="webhook">Webhook 回调（公网 / Serverless）</option>
+            </select>
+          </label>
         </div>
         <div class="full intents-block">
           <div class="intents-head">

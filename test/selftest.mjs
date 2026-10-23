@@ -781,6 +781,68 @@ async function testGroupManage() {
 
 await testGroupManage();
 
+/* ---------- Webhook 签名与流式消息/全局菜单 ---------- */
+
+async function testWebhookAndStream() {
+  const { signCallback, seedFromSecret, verifyRequest } = await import('../src/sign.js');
+  const crypto = await import('node:crypto');
+
+  // seed 推导：短 secret 循环填充，长 secret 截断
+  const short = seedFromSecret('abc');
+  check('webhook: 短 secret 填充到 32 字节', short.length === 32 && short.toString('utf8') === 'abc'.repeat(11).slice(0, 32));
+  const long = seedFromSecret('x'.repeat(50));
+  check('webhook: 长 secret 截断到 32 字节', long.length === 32 && long.toString('utf8') === 'x'.repeat(32));
+
+  // 签名必须是合法 Ed25519，且能用对应公钥验过
+  const secret = 'test-secret-32-bytes-long-enough';
+  const sig = signCallback(secret, '1729555200', 'plain-token-abc');
+  check('webhook: 签名是 128 位 hex', /^[0-9a-f]{128}$/.test(sig), sig.slice(0, 20) + '...');
+  const priv = crypto.createPrivateKey({
+    key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), seedFromSecret(secret)]),
+    format: 'der',
+    type: 'pkcs8',
+  });
+  const pub = crypto.createPublicKey(priv);
+  check(
+    'webhook: 签名可通过公钥验证',
+    crypto.verify(null, Buffer.from('1729555200plain-token-abc'), pub, Buffer.from(sig, 'hex')),
+  );
+  check('webhook: 同输入签名稳定', signCallback(secret, '1729555200', 'plain-token-abc') === sig);
+  check('webhook: 不同输入签名不同', signCallback(secret, '1729555200', 'other') !== sig);
+
+  // op=13 验证请求
+  const signed = verifyRequest(secret, { op: 13, d: { plain_token: 'tok', event_ts: '1729555200' } });
+  check('webhook: op=13 返回 plain_token + signature', signed?.plain_token === 'tok' && signed?.signature === signCallback(secret, '1729555200', 'tok'));
+  check('webhook: 缺字段返回 null', verifyRequest(secret, { op: 13, d: {} }) === null);
+
+  // 流式消息与全局菜单：公开接口，不该被内邀闸门挡
+  const { QQApi } = await import('../src/api.js');
+  const api = new QQApi({ tokenManager: { get: async () => 'x', appId: '1' }, baseUrl: 'http://127.0.0.1:1' });
+  api.setGroupInvited(false);
+  for (const [name, fn] of [
+    ['sendStreamMessage', () => api.sendStreamMessage('u', { contentRaw: 'hi', index: 0 })],
+    ['getGlobalMenu', () => api.getGlobalMenu()],
+    ['setGlobalMenu', () => api.setGlobalMenu([{ name: '菜单', type: 'send_message', send_message: 'hi' }])],
+  ]) {
+    try {
+      await fn();
+      check(`新接口: ${name} 公开可用`, false, '居然连上了');
+    } catch (e) {
+      check(`新接口: ${name} 公开可用`, !/未开启/.test(e.message), e.message.slice(0, 40));
+    }
+  }
+
+  // 菜单数量上限要拦
+  try {
+    api.setGlobalMenu(new Array(11).fill({ name: 'x' }));
+    check('新接口: 菜单超过 10 项被拒', false, '居然没报错');
+  } catch (e) {
+    check('新接口: 菜单超过 10 项被拒', /最多 10 个/.test(e.message));
+  }
+}
+
+await testWebhookAndStream();
+
 /* ---------- 配置归属：全局设置不能落进机器人配置 ---------- */
 
 async function testConfigOwnership() {

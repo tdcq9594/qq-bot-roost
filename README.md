@@ -8,8 +8,9 @@
 
 <img src="https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white" alt="Node.js 22+">
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
-<img src="https://img.shields.io/badge/self--test-45%20passed-brightgreen" alt="自检 45 项">
+<img src="https://img.shields.io/badge/tests-230%20passed-brightgreen" alt="测试 230 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
+<img src="https://img.shields.io/badge/version-0.5.1-blueviolet" alt="版本 0.5.1">
 <img src="https://img.shields.io/badge/license-Non--Commercial-red" alt="禁止商用">
 
 [快速开始](#3-分钟跑起来) ｜ [写插件](docs/插件开发规范.md) ｜ [外部插件协议](docs/插件协议.md) ｜ [配置参考](docs/配置参考.md) ｜ [常见问题](docs/常见问题.md) ｜ [贡献](CONTRIBUTING.md)
@@ -58,17 +59,19 @@
 
 **官方接口这一层**
 
-- 出站调度器统一处理 5 分钟窗口、每秒 5 条限速、主动消息每日额度、断线拒发、审核中识别
-- 被动回复自动维护 `msg_seq`（同一 msg_id 递增，官方硬要求）
-- 免@粘性：@ 过一次后 N 分钟内该会话免@也算对话
-- 多轮对话：`ctx.prompt()` 问一句等回答，文字游戏的基础
-- 中间件管道：去重、白名单、限流、命令冷却都可插拔
+- **限制全兜底**：出站调度器统一处理 5 分钟窗口、每秒 5 条限速、主动消息每日额度、断线拒发、审核中识别——插件只管调 `msg.reply()`
+- **`msg_seq` 自动维护**：同一 `msg_id` 被动回复必须递增，这是官方硬要求，漏一次就发不出去
+- **免@粘性**：@ 过一次后 N 分钟内该会话免@ 也算在跟机器人说话
+- **多轮对话**：`ctx.prompt()` 问一句等回答，文字游戏的地基
+- **流式回复**：`msg.replyStream()` 做 AI 打字机效果，自动维护分片序号；群聊自动降级成普通消息
+- **中间件管道**：去重、白名单、限流、命令冷却都可插拔
 
 **连接与容错**
 
-- 访问凭证自动获取、提前 120 秒刷新、401 自动重试
-- WebSocket 心跳、指数退避重连、`Resume` 补发断线期间的事件
-- 关闭码翻译成人话（`4014` → 提示去开通群聊能力）
+- **两种收事件方式**：WebSocket 长连接（本地默认）或 **Webhook 回调**（公网 / Serverless / 容器）
+- **凭证自动刷新**：提前 120 秒续期，401 自动重试，不用管 token
+- **断线补事件**：心跳 + 指数退避重连，有 session 走 `Resume` 把掉线期间的事件补回来
+- **关闭码翻译成人话**：`4014` → 提示你去开通群聊能力
 - **实例互斥**：同一个 AppID 重复启动会被拒绝并给出 PID，避免两进程互踢（4902）
 
 **事件**
@@ -78,13 +81,15 @@
 - 框架不认识的未知事件**也照样转发**，只是日志提示补登记
 - 面板「事件」页显示每个事件的订阅状态、接收次数、最后收到时间
 
-**插件**
+**插件系统**
 
 - **插件不在本仓库**：全部放在 [qq-bot-roost-plugins](https://github.com/tdcq9594/qq-bot-roost-plugins)，
-  面板「插件 → 市场」一键安装；也可以自己往 `plugins/` 扔文件夹，点「刷新」即可加载
-- 同一会话串行、跨会话并行，插件不用自己加锁
-- 独立配置、独立日志、独立存档，卸载自动清理定时器和中间件
-- 第三方依赖自动装进插件目录的隔离环境，不污染系统
+  面板「插件 → 市场」一键安装，**有新版会自动提示、一键更新**
+- **任意语言**：内建插件跑在主进程（JS），外部插件跑在独立子进程（Python / Go / 任何语言），崩溃只影响自己
+- **同会话串行、跨会话并行**：插件不用自己加锁
+- **独立配置、独立日志、独立存档**，卸载自动清理定时器和中间件
+- **依赖自动隔离**：第三方包装进插件目录的 `.venv`，不污染系统
+- **面板可改数据**：插件在「设置」页自动获得配置表单和存档编辑，**不需要写前端代码**
 
 **权限**
 
@@ -92,12 +97,19 @@
 - 一个人在不同群、不同插件里可以有完全不同的权限，互不干扰
 - 只能授予数字更大的等级，不能给自己或同级提权
 
+**群管能力**
+
+- **禁言**：单个 / 批量，自动预检机器人是不是群管理员（查 `bot_state`，带缓存）
+- **踢人 / 群成员 / 群黑名单**：官方内邀接口，默认关闭，面板一键开启
+- **入群申请审批 + 自动审批策略**：拉取申请、通过 / 拒绝 / 拉黑，白名单自动放行
+
 **可视化面板**
 
-- 6 个页签：概览 / 配置 / 插件 / 群组 / 权限 / 日志
+- 7 个页签：概览 / 配置 / 插件 / 事件 / 群组 / 权限 / 日志
 - 实时日志流（SSE），按级别和来源着色
-- 日间 / 夜间主题，跟随系统或手动切换
-- 启动自动开浏览器，端口被占用自动顺延，右上角一键关闭
+- 一个面板管多个机器人，顶栏随时切换
+- 插件卡片直接显示它自己上报的运行数据（已回复条数、在线人数…）
+- 日间 / 夜间主题，启动自动开浏览器，端口被占用自动顺延
 
 ---
 
@@ -141,6 +153,63 @@ INFO  [webui] 可视化面板: http://127.0.0.1:15207/
 > 认领码每次启动随机生成，只打印在控制台和面板日志里。
 
 也可以直接在面板「群组」页增删主人。
+
+---
+
+## Docker 部署
+
+想在服务器 / NAS 上跑，用容器更省事：
+
+```bash
+git clone https://github.com/tdcq9594/qq-bot-roost.git
+cd qq-bot-roost
+cp config/bot.example.json config/bot.json    # 首次，然后填 AppID / AppSecret
+docker compose up -d
+```
+
+面板在 `http://你的服务器:15207`。
+
+四个目录必须挂出来（`docker-compose.yml` 里已配好），否则容器重建后全丢：
+
+| 宿主机目录 | 容器内 | 存什么 |
+|---|---|---|
+| `./config` | `/app/config` | 配置（含 AppSecret，注意文件权限） |
+| `./data` | `/app/data` | 权限、群档案、插件存档 |
+| `./logs` | `/app/logs` | 日志 |
+| `./plugins` | `/app/plugins` | 插件代码 |
+
+常用环境变量（优先级高于配置文件）：
+
+| 变量 | 作用 |
+|---|---|
+| `ROOST_WEBUI_HOST` / `ROOST_WEBUI_PORT` | 面板监听地址，容器里默认 `0.0.0.0:15207` |
+| `ROOST_WEBUI_KEY` | 面板访问密钥，**对外暴露时务必设置** |
+| `QQ_BOT_APPID` / `QQ_BOT_SECRET` | 机器人凭证，不想写进配置文件就用这个 |
+| `ROOST_WEBHOOK_ENABLED` / `ROOST_WEBHOOK_PORT` | 开 Webhook 模式 |
+| `ROOST_LOG_LEVEL` | 日志级别 |
+
+镜像里**没有 Python / Go**。要跑对应语言的外部插件，把 `Dockerfile` 里那行 `apk add` 的注释打开。
+
+---
+
+## 收事件：WebSocket 还是 Webhook
+
+官方两种都支持，框架都实现了：
+
+| | WebSocket | Webhook |
+|---|---|---|
+| 默认 | ✅ 开箱即用 | 需配置 |
+| 需要公网入口 | 不用，只要出站 | **要**，且必须 HTTPS |
+| 断线重连 | 框架自动 | 平台超时重推 |
+| 空闲占用 | 一条长连接 | 不占 |
+| 容器 / Serverless | 不太合适 | **合适** |
+
+本地跑、NAT 后面 → 用默认的 WebSocket。
+有域名、跑在服务器上、想按需唤醒 → 改 `connection.mode` 为 `webhook`，
+并打开全局 `webhook.enabled`，到开放平台填回调地址。
+
+回调地址的 `op=13` 验证请求框架会自动用 AppSecret 做 Ed25519 签名回应，
+不用自己算。细节见 [配置参考](docs/配置参考.md#收事件方式-connection)。
 
 ---
 
@@ -300,13 +369,17 @@ bot/
 │   ├── session.js              多轮对话 + 免@粘性
 │   ├── instance.js             实例互斥，防止同一 AppID 双开
 │   ├── gateway.js              WebSocket 网关
+│   ├── webhook.js              Webhook 接收服务（多机器人共用一个端口）
+│   ├── sign.js                 Webhook 回调签名（Ed25519）
 │   ├── api.js                  HTTP API
 │   ├── message.js              事件 → 统一 Message
 │   ├── roles.js                权限存储
 │   ├── logger.js               日志：控制台 + 落盘 + 轮转
 │   ├── web/server.js           面板服务端（REST + SSE）
 │   └── plugin/                 插件加载、配置、依赖、子进程宿主
-├── test/selftest.mjs           框架自检（45 项）
+├── test/
+│   ├── selftest.mjs            框架自检（135 项）
+│   └── e2e.mjs                 端到端测试（95 项，起真实服务打接口）
 ├── web/                        面板前端（原生 JS/CSS，无构建）
 └── docs/
 ```
@@ -338,7 +411,9 @@ openid 完全不同。共享 `roles.json` 等于所有权限记录全部对不�
 ## 开发
 
 ```bash
-npm test              # 框架自检，31 项
+npm test              # 框架自检 135 项
+npm run test:e2e      # 端到端 95 项（起服务打全部接口）
+npm run test:all      # 两个都跑
 node src/main.js --mock          # 不连 QQ，命令行发假消息调插件
 node src/main.js --mock --serve  # 只开面板，调界面
 node src/main.js --check         # 只验证凭证和网关

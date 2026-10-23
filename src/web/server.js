@@ -270,14 +270,16 @@ export async function startWebServer({
     return out;
   };
 
-  // 启动后过一会儿查一次，别拖慢启动；之后每小时一次
+  // 启动后过一会儿查一次，别拖慢启动；之后每小时一次。
+  // 60 秒是有意的：启动瞬间面板、插件、市场可能都在拉数据，
+  // 再叠一个 GitHub 请求容易一起超时。fetchIndex 内部也有并发去重兜底。
   const updateTimer = setInterval(() => {
     for (const r of runtimes) checkUpdates(r).catch(() => {});
   }, 60 * 60 * 1000);
   updateTimer.unref?.();
   setTimeout(() => {
     for (const r of runtimes) checkUpdates(r).catch(() => {});
-  }, 30000).unref?.();
+  }, 60000).unref?.();
 
   /* ---------------- 机器人管理（不依赖当前选中项） ---------------- */
 

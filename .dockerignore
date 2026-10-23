@@ -1,0 +1,29 @@
+# 依赖与产物
+node_modules/
+*.log
+
+# 真实配置（含 AppSecret），只提交 .example.json
+config/bot.json
+config/bots/
+!config/bots.example.json
+
+# 运行时数据
+data/
+logs/
+
+# 插件代码：框架仓库不放插件，全部走插件市场
+plugins/
+
+# 本机路径记录
+node-path.txt
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# 临时文件
+tmp-*
+*.tmp

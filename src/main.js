@@ -18,6 +18,7 @@ import { BotRuntime } from './bot.js';
 import { runtime, sanitizePayload } from './runtime.js';
 import { LEVEL, NO_PERM, levelName, parseLevel, parseScope, scopeOf } from './roles.js';
 import { openBrowser } from './browser.js';
+import { WebhookServer } from './webhook.js';
 import { startWebServer } from './web/server.js';
 
 /* ------------------------------------------------------------------ */
@@ -672,6 +673,22 @@ function createMockApi(botName) {
       console.log(`\n→ [${botName}] [白名单 ${op} ${id}] ${(whitelist_users || []).length} 个号码`);
       return { fail_users: [] };
     },
+    // 流式消息与全局菜单：公开接口
+    sendStreamMessage: async (openid, p) => {
+      console.log(
+        `\n→ [${botName}] [流式消息 ${openid}] 第 ${p.index ?? 0} 片 state=${p.state ?? 1} ` +
+          `mode=${p.mode ?? 'append'}: ${String(p.contentRaw ?? '').slice(0, 40)}`,
+      );
+      return { id: `mock-stream-${p.index ?? 0}` };
+    },
+    getGlobalMenu: async () => {
+      console.log(`\n→ [${botName}] [查询全局菜单]`);
+      return { menu: { items: [] } };
+    },
+    setGlobalMenu: async (items) => {
+      console.log(`\n→ [${botName}] [设置全局菜单] ${(items || []).length} 项`);
+      return {};
+    },
   };
 }
 
@@ -803,6 +820,37 @@ async function main() {
     botCfgs = [await loadBotConfig(id)];
   }
 
+  // Webhook 接收服务：全局一个端口，按 AppID 分流给各个机器人。
+  // 只有机器人配了 connection.mode=webhook 才需要它，但开着也不占多少资源。
+  let webhookServer = null;
+  if (globalCfg.webhook?.enabled) {
+    webhookServer = new WebhookServer({
+      host: globalCfg.webhook.host,
+      port: globalCfg.webhook.port,
+      path: globalCfg.webhook.path,
+    });
+    try {
+      const port = await webhookServer.start();
+      if (globalCfg.webhook.publicUrl) {
+        log.info(`Webhook 对外地址（请到开放平台填写）: ${globalCfg.webhook.publicUrl}${webhookServer.path}`);
+      } else {
+        log.info(`Webhook 已监听 :${port}${webhookServer.path}，公网部署请配反向代理和 HTTPS`);
+      }
+    } catch (e) {
+      log.error(`Webhook 启动失败: ${e.message}（webhook 模式的机器人将无法收事件）`);
+      webhookServer = null;
+    }
+  } else {
+    // 有人配了 webhook 模式但没开服务，提前说清楚
+    const wantWebhook = botCfgs.filter((c) => c.enabled !== false && c.connection?.mode === 'webhook');
+    if (wantWebhook.length) {
+      log.warn(
+        `有 ${wantWebhook.length} 个机器人配了 webhook 模式，但全局配置 webhook.enabled=false，` +
+          `它们收不到事件。去 config/bot.json 打开`,
+      );
+    }
+  }
+
   // 建运行时
   const runtimes = [];
   for (const cfg of botCfgs) {
@@ -817,6 +865,7 @@ async function main() {
       cfg,
       globalCfg,
       mock: MOCK,
+      webhook: webhookServer,
       registerCore: (r) => registerCoreCommands(r),
       makeMockApi: (r) => createMockApi(r.name),
     });
@@ -839,6 +888,7 @@ async function main() {
     shutdown.called = true;
     log.info('正在退出...');
     web?.close();
+    await webhookServer?.stop().catch(() => {});
     for (const rt of runtimes) await rt.stop().catch(() => {});
     await flushLogs().catch(() => {});
     process.exit(0);

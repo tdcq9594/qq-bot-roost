@@ -32,13 +32,15 @@ export class BotRuntime {
    * @param {object} p.globalCfg 全局配置
    * @param {object} p.guards    前置拦截用的配置（从 cfg 派生）
    * @param {boolean} p.mock     是否 mock 模式
+   * @param {object} [p.webhook]  全局 WebhookServer，webhook 模式下注册到这里
    * @param {(runtime:BotRuntime)=>void} [p.registerCore] 注册内核命令的回调
    * @param {()=>object} [p.makeMockApi] mock 模式下造 API 的函数
    */
-  constructor({ cfg, globalCfg, mock = false, registerCore = null, makeMockApi = null }) {
+  constructor({ cfg, globalCfg, mock = false, webhook = null, registerCore = null, makeMockApi = null }) {
     this.cfg = cfg;
     this.globalCfg = globalCfg;
     this.mock = mock;
+    this.webhook = webhook;
     this.id = cfg.id;
     this.name = cfg.name || cfg.id;
     this.paths = botPaths(this.id);
@@ -182,6 +184,33 @@ export class BotRuntime {
       return this.state;
     }
 
+    // Webhook 模式：不连网关，把回调注册到全局 Webhook 服务即可。
+    // 发消息仍然走 HTTP API，所以后续所有发送逻辑不受影响。
+    if (cfg.connection?.mode === 'webhook') {
+      const wh = this.webhook;
+      if (!wh) {
+        this.state = 'error';
+        this.lastError = '配置选了 webhook 模式，但 Webhook 服务没启动（检查全局配置 webhook.enabled）';
+        this.log.error(this.lastError);
+        return this.state;
+      }
+      try {
+        wh.register(cfg.appId, {
+          secret: cfg.appSecret,
+          onEvent: (event, d, payload) => this.dispatch(event, d, payload),
+          onError: (e) => this.log.error(`Webhook 事件处理失败: ${e.message}`),
+        });
+        this.state = 'online';
+        if (!this.startedAt) this.startedAt = Date.now();
+        this.log.info(`已上线（Webhook 模式，回调 ${wh.path}）`);
+      } catch (e) {
+        this.state = 'error';
+        this.lastError = e.message;
+        this.log.error(`Webhook 注册失败: ${e.message}`);
+      }
+      return this.state;
+    }
+
     // 同一个 AppID 不能有两个实例连网关
     const claimed = await claimInstance({ appId: cfg.appId });
     if (!claimed.ok) {
@@ -221,6 +250,10 @@ export class BotRuntime {
       this.gateway?.stop();
     } catch {}
     this.gateway = null;
+    // webhook 模式没有长连接，注销回调才算真的下线
+    try {
+      this.webhook?.unregister(this.cfg.appId);
+    } catch {}
     if (!this.mock) await releaseInstance(this.cfg.appId).catch(() => {});
     this.state = 'offline';
     this.log.info('已下线（插件与存档保留）');
@@ -230,6 +263,9 @@ export class BotRuntime {
   async stop() {
     try {
       this.gateway?.stop();
+    } catch {}
+    try {
+      this.webhook?.unregister(this.cfg.appId);
     } catch {}
     this.session?.clear();
     await this.plugins?.shutdown().catch(() => {});

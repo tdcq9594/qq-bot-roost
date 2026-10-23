@@ -569,6 +569,7 @@ function fillForm(c) {
   f.appSecret.placeholder = c.appSecretSet ? '已设置，留空则不修改' : '请输入 AppSecret';
   f.baseUrl.value = c.baseUrl || '';
   f.commandPrefix.value = c.commandPrefix || '/';
+  f.connectionMode.value = c.connection?.mode || 'websocket';
 
   owners = [...(c.owners || [])];
   renderOwners();
@@ -804,6 +805,7 @@ $('#cfgForm').addEventListener('submit', async (e) => {
     appSecret: f.appSecret.value.trim(),
     baseUrl: f.baseUrl.value.trim(),
     commandPrefix: f.commandPrefix.value.trim() || '/',
+    connection: { mode: f.connectionMode.value === 'webhook' ? 'webhook' : 'websocket' },
     intents: Number(f.intents.value),
     logLevel: f.logLevel.value,
     whitelist: {

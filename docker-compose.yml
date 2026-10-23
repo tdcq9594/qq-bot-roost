@@ -1,0 +1,57 @@
+# 栖 Roost —— docker compose 部署
+#
+#   cp config/bot.example.json config/bot.json      # 首次
+#   docker compose up -d
+#
+# 面板：http://你的服务器:15207
+#
+# 三个目录必须挂出来，否则容器重建后配置、存档、插件全丢。
+
+services:
+  roost:
+    build: .
+    image: qq-bot-roost:latest
+    container_name: roost
+    restart: unless-stopped
+
+    ports:
+      - "15207:15207"     # 面板
+      # Webhook 模式才需要，不用就注释掉
+      # - "15208:15208"
+
+    volumes:
+      - ./config:/app/config    # 配置（含 AppSecret，注意权限）
+      - ./data:/app/data        # 运行时数据：权限、群档案、插件存档
+      - ./logs:/app/logs        # 日志
+      - ./plugins:/app/plugins  # 插件代码
+
+    environment:
+      # 面板监听地址，容器里必须是 0.0.0.0
+      ROOST_WEBUI_HOST: "0.0.0.0"
+      ROOST_WEBUI_PORT: "15207"
+      # 面板访问密钥。对外暴露时**务必设置**，否则谁都能改你的配置
+      # ROOST_WEBUI_KEY: "换成你自己的密钥"
+      ROOST_LOG_LEVEL: "info"
+
+      # 不想在配置文件里写 AppSecret 时，用这两个环境变量（优先级更高）
+      # QQ_BOT_APPID: "你的AppID"
+      # QQ_BOT_SECRET: "你的AppSecret"
+
+      # Webhook 模式（公网部署）
+      # ROOST_WEBHOOK_ENABLED: "true"
+      # ROOST_WEBHOOK_PORT: "15208"
+      # ROOST_WEBHOOK_PUBLIC_URL: "https://bot.example.com"
+
+    # 健康检查：面板 HTTP 起来就算健康
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:15207/api/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

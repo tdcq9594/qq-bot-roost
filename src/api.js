@@ -527,6 +527,68 @@ export class QQApi {
     );
   }
 
+  /* ---------------- 流式消息与全局菜单 ---------------- */
+
+  /**
+   * 流式发送单聊消息（官方接口）。
+   * POST /v2/users/{user_openid}/stream_messages
+   * 50 QPS。**只支持单聊**，群聊没有这个接口。
+   *
+   * 用法：第一条发 `input_state:1, index:0`，**服务端会返回 `stream_msg_id`**；
+   * 后续每一片都要带上它，`index` 递增；最后一片发 `input_state:10`。
+   * `input_mode` 选 append（增量追加）或 replace（全量替换，须以已下发前缀开头）。
+   *
+   * @param {string} openid
+   * @param {object} p
+   * @param {string} p.contentRaw 本片内容
+   * @param {number} [p.index]    分片序号，从 0 递增
+   * @param {number} [p.state]    1=生成中（默认），10=结束
+   * @param {'append'|'replace'} [p.mode]  默认 append
+   * @param {'text'|'markdown'} [p.contentType] 默认 markdown
+   * @param {string} [p.streamMsgId] 第一条留空，后续传上一片返回的 id
+   * @param {string} [p.msgId]   被动回复用，二选一
+   * @param {string} [p.eventId] 被动回复用，二选一
+   * @param {boolean} [p.isWakeup] true 时不校验 msg_id/event_id 有效期
+   * @returns {Promise<{id?:string}>} 含服务端生成的 stream_msg_id
+   */
+  sendStreamMessage(openid, p = {}) {
+    const payload = {
+      input_mode: p.mode ?? 'append',
+      input_state: p.state ?? 1,
+      index: p.index ?? 0,
+      content_type: p.contentType ?? 'markdown',
+      content_raw: String(p.contentRaw ?? ''),
+    };
+    if (p.streamMsgId) payload.stream_msg_id = p.streamMsgId;
+    if (p.msgId) payload.msg_id = p.msgId;
+    if (p.eventId) payload.event_id = p.eventId;
+    if (p.isWakeup) payload.is_wakeup = true;
+    return this.#request('POST', `/v2/users/${openid}/stream_messages`, payload);
+  }
+
+  /**
+   * 查询全局自定义菜单（官方接口）。
+   * GET /v2/menu，30 QPM。**只对 C2C 私聊场景生效**，且对所有用户一视同仁。
+   */
+  getGlobalMenu() {
+    return this.#request('GET', '/v2/menu');
+  }
+
+  /**
+   * 修改全局自定义菜单（官方接口）。
+   * PUT /v2/menu，5 QPM。**覆盖式**——传上去的就是完整菜单，不传等于清空。
+   *
+   * @param {Array<object>} items 最多 10 个菜单项
+   *   { name, type: 'switch'|'send_message'|'link'|'menu', ... }
+   *   send_message 带 send_message 文本；link 带 https 链接（必须 https）；
+   *   switch 带 switch 配置；menu 带 sub_menu_items（最多 5 个，不能再嵌套）
+   */
+  setGlobalMenu(items) {
+    if (!Array.isArray(items)) throw new Error('菜单项必须是数组');
+    if (items.length > 10) throw new Error('菜单项最多 10 个');
+    return this.#request('PUT', '/v2/menu', { menu: { items } });
+  }
+
   /* ---------------- 内部 ---------------- */
 
   #payload({ content, msgType = 0, msgId, markdown, keyboard, media, ark }) {
