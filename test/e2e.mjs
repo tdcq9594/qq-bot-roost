@@ -21,6 +21,17 @@ const ok = (name, pass, extra = '') => {
   console.log(`${pass ? 'PASS' : 'FAIL'}  ${name}${extra ? '  ' + extra : ''}`);
 };
 
+/**
+ * 跳过：用于依赖外网的用例。
+ * 网络不通时不算失败——否则本地没网就跑不了测试，
+ * 久而久之大家就不跑测试了。
+ */
+const skipped = [];
+const skip = (name, reason = '') => {
+  skipped.push({ name, reason });
+  console.log(`SKIP  ${name}${reason ? '  ' + reason : ''}`);
+};
+
 let server = null;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const { signCallback } = await import('../src/sign.js');
@@ -211,6 +222,23 @@ async function testDashboard() {
 
 async function testMarket() {
   const mk = await api('/api/market');
+
+  /**
+   * 市场依赖外网。开发机网络不稳时（代理、DNS、GitHub 限流），
+   * 这一组断言失败不代表代码有问题——标记为跳过，不让整个测试变红。
+   * 真要看市场功能，单独跑 npm run test:e2e 并保证网络通。
+   */
+  if (mk.status !== 200) {
+    const msg = String(mk.data?.error || '');
+    if (/fetch failed|timeout|连不上|ECONN|ENOTFOUND|HTTP 4\d\d|HTTP 5\d\d/i.test(msg)) {
+      skip('市场: 拉索引（网络不可用，跳过）', msg.slice(0, 60));
+      skip('市场: plugins 结构（跳过）');
+      skip('市场: updates 结构（跳过）');
+      skip('市场: localVersions（跳过）');
+      return;
+    }
+  }
+
   ok('市场: 可拉索引', mk.status === 200, mk.data?.error || '');
   ok('市场: 有 plugins 数组', Array.isArray(mk.data?.plugins));
   ok('市场: 有 updates 数组', Array.isArray(mk.data?.updates));
@@ -401,6 +429,10 @@ async function main() {
 
   const fail = results.filter((r) => !r.pass);
   console.log(`\n${results.length - fail.length}/${results.length} 通过`);
+  if (skipped.length) {
+    console.log(`${skipped.length} 项跳过（依赖外网，网络不可用）：`);
+    skipped.forEach((s) => console.log('  ~ ' + s.name));
+  }
   if (fail.length) {
     console.log('失败项:');
     fail.forEach((f) => console.log('  - ' + f.name));

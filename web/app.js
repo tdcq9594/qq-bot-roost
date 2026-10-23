@@ -329,6 +329,11 @@ function initTheme() {
 
 /* ---------------- 工具 ---------------- */
 
+/**
+ * 时长格式化。
+ * 用「时:分:秒」而不是「21分 33秒」——指标卡片很窄，
+ * 中文单位加空格会折行，冒号版紧凑且一眼能读。
+ */
 function fmtDuration(ms) {
   if (!ms || ms < 0) return '-';
   const s = Math.floor(ms / 1000);
@@ -336,10 +341,12 @@ function fmtDuration(ms) {
   const h = Math.floor((s % 86400) / 3600);
   const m = Math.floor((s % 3600) / 60);
   const sec = s % 60;
-  if (d) return `${d}天 ${h}小时`;
-  if (h) return `${h}小时 ${m}分`;
-  if (m) return `${m}分 ${sec}秒`;
-  return `${sec}秒`;
+  const p2 = (n) => String(n).padStart(2, '0');
+
+  if (d) return `${d}天 ${p2(h)}:${p2(m)}`;
+  if (h) return `${h}:${p2(m)}:${p2(sec)}`;
+  if (m) return `${m}:${p2(sec)}`;
+  return `${sec}s`;
 }
 
 function fmtAgo(ts) {
@@ -1193,6 +1200,11 @@ async function loadMarket() {
   }
 
   meta.textContent = `${d.repo} · 更新于 ${d.updated || '未知'}`;
+  // 网络不通时后端会退回本地缓存，得让用户知道这是旧数据
+  if (d.stale) {
+    meta.innerHTML =
+      `${escapeHtml(d.repo)} · <span class="stale-tip">离线缓存（${escapeHtml(d.staleAge || '未知')}）</span>`;
+  }
   if (!d.plugins.length) {
     list.innerHTML = '<div class="empty">市场里还没有插件</div>';
     return;

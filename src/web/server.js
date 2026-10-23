@@ -647,6 +647,9 @@ export async function startWebServer({
                 latest: u.latest,
               })),
               localVersions: localVers,
+              // 网络挂了用的是本地缓存，面板要提示用户「这是旧数据」
+              stale: idx.stale === true,
+              staleAge: idx.staleAge || '',
             });
           } catch (e) {
             return json(res, 502, { error: e.message });

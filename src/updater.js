@@ -15,10 +15,8 @@
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import zlib from 'node:zlib';
-import { Readable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
 import { createLogger } from './logger.js';
+import { fetchAndExtract } from './tarball.js';
 import { ROOT } from './config.js';
 
 const log = createLogger('update');
@@ -138,114 +136,22 @@ export async function checkUpdate() {
   };
 }
 
-/* ---------------- tar.gz 解包（零依赖，够用就行） ---------------- */
+/* ---------------- 下载与解包 ---------------- */
 
 /**
- * 极简 tar 解析。只处理 ustar / pax 的普通文件与目录，
- * 不处理硬链接、设备文件——GitHub 的 tarball 里没有这些。
- */
-function parseTar(buf) {
-  const entries = [];
-  let off = 0;
-  while (off + 512 <= buf.length) {
-    const header = buf.subarray(off, off + 512);
-    // 全零块 = 结束
-    if (header.every((b) => b === 0)) break;
-
-    const readStr = (start, len) => {
-      const slice = header.subarray(start, start + len);
-      const end = slice.indexOf(0);
-      return slice.subarray(0, end === -1 ? len : end).toString('utf8');
-    };
-
-    const name = readStr(0, 100);
-    const sizeStr = readStr(124, 12).trim();
-    const size = parseInt(sizeStr, 8) || 0;
-    const type = String.fromCharCode(header[156]) || '0';
-    // ustar 前缀，长路径会用它
-    const prefix = readStr(345, 155);
-    const fullName = prefix ? `${prefix}/${name}` : name;
-
-    off += 512;
-    const content = buf.subarray(off, off + size);
-    off += Math.ceil(size / 512) * 512;
-
-    if (type === '5') entries.push({ name: fullName, dir: true });
-    else if (type === '0' || type === '\0') entries.push({ name: fullName, dir: false, content });
-    // pax 头（type 'x'）只影响下一条的路径，GitHub 的包里长路径会用到，
-    // 但这里用 basename 归一化后不影响，跳过即可
-  }
-  return entries;
-}
-
-/**
- * 下载并解包到临时目录，返回包内根目录路径。
- * GitHub 的 tarball 顶层是 `<repo>-<sha>/`，要剥掉。
+ * 下载 tarball 并解包到临时目录。
+ * 解析逻辑统一放在 src/tarball.js，插件市场和框架更新共用一份，
+ * 免得两处 tar 解析以后跑偏。
  */
 async function downloadTo(tmpDir, tarballUrl) {
-  let res = null;
-  let lastErr = null;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    if (attempt > 0) await new Promise((r) => setTimeout(r, 2000));
-    try {
-      res = await fetch(tarballUrl, {
-        headers: { 'User-Agent': 'qq-bot-roost-updater' },
-        signal: AbortSignal.timeout(120000),
-      });
-      if (res.ok) break;
-      lastErr = new Error(`下载失败：HTTP ${res.status}`);
-      res = null;
-    } catch (e) {
-      lastErr = e;
-      res = null;
-    }
-  }
-  if (!res) throw new Error(`${lastErr?.message ?? '下载失败'}（网络不稳，可稍后重试）`);
-
-  const gz = Buffer.from(await res.arrayBuffer());
-  const tar = zlib.gunzipSync(gz);
-  const entries = parseTar(tar);
-
-  if (!entries.length) throw new Error('下载到的包是空的');
-
-  /**
-   * 剥掉顶层目录。
-   *
-   * **不能假设第一条就是顶层目录**：GitHub 的 tarball 第一条是
-   * `qq-bot-roost-0.5.1/`，但用 `tar czf` 自己打的包第一条往往是 `./`，
-   * 拿 `entries[0]` 去算前缀会得到 `.`，结果所有路径都剥不掉。
-   *
-   * 正确做法：先去掉 `./` 前缀，再看所有条目的**公共顶层段**。
-   * 只有唯一一个顶层段时才剥（说明整个包被包在一个目录里）；
-   * 多于一个说明包本身就是扁平的（src/ web/ 直接在最外层），不剥。
-   */
-  const cleaned = entries
-    .map((e) => ({ ...e, name: e.name.replace(/^\.\//, '') }))
-    .filter((e) => e.name);
-
-  const tops = new Set();
-  for (const e of cleaned) {
-    const seg = e.name.split('/')[0];
-    if (seg) tops.add(seg);
-  }
-  const wrapper = tops.size === 1 ? [...tops][0] : null;
-
-  for (const e of cleaned) {
-    const rel = wrapper && e.name.startsWith(wrapper + '/') ? e.name.slice(wrapper.length + 1) : e.name;
-    if (!rel) continue;
-    // 防路径穿越
-    const dest = path.resolve(path.join(tmpDir, rel));
-    if (!dest.startsWith(path.resolve(tmpDir) + path.sep)) continue;
-
-    if (e.dir) {
-      await fs.mkdir(dest, { recursive: true });
-    } else {
-      await fs.mkdir(path.dirname(dest), { recursive: true });
-      await fs.writeFile(dest, e.content);
-    }
-  }
+  await fetchAndExtract(tarballUrl, tmpDir, {
+    timeoutMs: 120000,
+    retries: 1,
+    onRetry: (m) => log.warn(m),
+  });
   return tmpDir;
 }
+
 
 /**
  * 只保留最近 N 份更新备份，老的删掉。

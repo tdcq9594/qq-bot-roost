@@ -2,10 +2,14 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { spawn } from 'node:child_process';
 import { createLogger } from '../logger.js';
+import { fetchAndExtract, branchTarballUrl } from '../tarball.js';
+import { DIRS } from '../paths.js';
 
 const log = createLogger('market');
+
+/** 同一个索引地址同时只允许一个请求在飞 */
+const indexInFlight = new Map();
 
 /** 官方插件仓库。改这里就能指向你自己的插件源 */
 export const DEFAULT_INDEX_URL =
@@ -14,27 +18,65 @@ export const DEFAULT_INDEX_URL =
 /**
  * 拉取插件市场的索引。
  *
- * 国内访问 raw.githubusercontent.com 经常抖，所以：
- *   - 超时给到 20 秒（默认 15 秒偶尔不够）
- *   - 失败重试一次，第二次还失败才报错
- *   - **并发去重**：同一时刻多个调用只发一个请求
+ * 国内访问 raw.githubusercontent.com 经常抖，所以做了三层兜底：
+ *   1. **并发去重**：同一时刻多个调用只发一个请求（启动时的自动检查 + 用户点市场
+ *      会同时触发，并发打 GitHub 容易一起超时）
+ *   2. **重试**：失败再试一次
+ *   3. **本地缓存**：成功后存一份到 data/，网络挂了就用缓存，
+ *      并在返回值里标 `stale: true` 让面板提示「离线数据」。
  *
- * 为什么需要去重：启动后的自动更新检查、用户点开市场、面板轮询可能同时触发，
- * 三个请求并发打 GitHub 容易被限流，反而全部失败。
- *
- * @param {string} [url]
- * @returns {Promise<{schema:number, repo:string, branch:string, updated:string, plugins:object[]}>}
+ * 有缓存这一层很关键——不然网络一抖，用户连"我装过哪些插件"都看不到。
  */
-const indexInFlight = new Map();
-
 export async function fetchIndex(url = DEFAULT_INDEX_URL) {
   const key = String(url || DEFAULT_INDEX_URL);
   const running = indexInFlight.get(key);
   if (running) return running;
 
-  const task = fetchIndexOnce(key).finally(() => indexInFlight.delete(key));
+  const task = fetchIndexOnce(key)
+    .then(async (data) => {
+      await writeIndexCache(key, data).catch(() => {});
+      return data;
+    })
+    .catch(async (e) => {
+      // 网络挂了：有缓存就用缓存，但要让调用方知道这是旧的
+      const cached = await readIndexCache(key).catch(() => null);
+      if (cached) {
+        log.warn(`拉取插件市场失败（${e.message}），改用本地缓存（${cached.age}）`);
+        return { ...cached.data, stale: true, staleAge: cached.age };
+      }
+      throw e;
+    })
+    .finally(() => indexInFlight.delete(key));
+
   indexInFlight.set(key, task);
   return task;
+}
+
+/* ---------------- 索引缓存 ---------------- */
+
+function cachePath() {
+  return path.join(DIRS.data, 'market-cache.json');
+}
+
+async function writeIndexCache(url, data) {
+  await fs.mkdir(DIRS.data, { recursive: true });
+  await fs.writeFile(
+    cachePath(),
+    JSON.stringify({ url, at: Date.now(), data }, null, 0),
+    'utf8',
+  );
+}
+
+async function readIndexCache(url) {
+  const raw = await fs.readFile(cachePath(), 'utf8');
+  const obj = JSON.parse(raw);
+  // 换了市场源，旧缓存不能用
+  if (obj.url !== url) return null;
+  if (!Array.isArray(obj.data?.plugins)) return null;
+
+  const mins = Math.round((Date.now() - obj.at) / 60000);
+  const age = mins < 60 ? `${mins} 分钟前` : `${Math.round(mins / 60)} 小时前`;
+  return { data: obj.data, age };
 }
 
 async function fetchIndexOnce(url) {
@@ -69,36 +111,15 @@ async function fetchIndexOnce(url) {
   throw lastErr ?? new Error('连不上插件市场');
 }
 
-/** 跑一条命令，收集输出。失败时把 stderr 带出来 */
-function run(cmd, args, { cwd, timeoutMs = 120000 } = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { cwd, windowsHide: true });
-    let out = '';
-    let err = '';
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error(`${cmd} 超时`));
-    }, timeoutMs);
-
-    child.stdout.on('data', (d) => (out += d));
-    child.stderr.on('data', (d) => (err += d));
-    child.on('error', (e) => {
-      clearTimeout(timer);
-      reject(new Error(`无法执行 ${cmd}：${e.message}`));
-    });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      if (code === 0) resolve(out);
-      else reject(new Error(`${cmd} 退出码 ${code}\n${err.slice(-400)}`));
-    });
-  });
-}
 
 /**
  * 安装一个插件。
  *
- * 做法是 `git clone --depth 1` 到临时目录，再把插件目录整个复制进 plugins/。
- * 不用 zip/tar 是因为本项目零依赖，而 git 一定在（项目本身就是 clone 下来的）。
+ * 下载仓库的 tarball 到临时目录，再把插件目录整个复制进 plugins/。
+ *
+ * **不用 git**：之前用 `git clone`，理由是「项目本身是 clone 下来的，git 一定在」。
+ * 这个假设是错的——很多人下载 zip 解压用，机器上没装 git，
+ * 于是安装插件直接报 `spawn git ENOENT`。改成 tarball 直链后不需要任何外部命令。
  *
  * @param {object} p
  * @param {object} p.entry    index.json 里的一条
@@ -118,12 +139,11 @@ export async function installPlugin({ entry, pluginsDir, repo, branch = 'main', 
 
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'roost-plugin-'));
   try {
-    log.info(`开始安装插件 ${id}（来自 ${repo}）`);
-    await run(
-      'git',
-      ['clone', '--depth', '1', '--branch', branch, `https://github.com/${repo}.git`, tmp],
-      { timeoutMs: 120000 },
-    );
+    log.info(`开始下载插件 ${id}（来自 ${repo}）`);
+    await fetchAndExtract(branchTarballUrl(repo, branch), tmp, {
+      timeoutMs: 120000,
+      onRetry: (m) => log.warn(m),
+    });
 
     const src = path.join(tmp, entry.path);
     // 防路径穿越：解析后必须仍在 clone 目录内
@@ -236,14 +256,14 @@ export async function syncRepo({ repo, branch = 'main', indexUrl } = {}) {
 
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'roost-repo-'));
   try {
-    await run(
-      'git',
-      ['clone', '--depth', '1', '--branch', branch, `https://github.com/${repo}.git`, tmp],
-      { timeoutMs: 180000 },
-    );
+    log.info(`正在下载插件仓库 ${repo}@${branch}…`);
+    await fetchAndExtract(branchTarballUrl(repo, branch), tmp, {
+      timeoutMs: 180000,
+      onRetry: (m) => log.warn(m),
+    });
   } catch (e) {
     await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
-    throw e;
+    throw new Error(`下载插件仓库失败：${e.message}`);
   }
   return { tmp, index };
 }
