@@ -79,9 +79,12 @@
     </svg>
   </button>
 
-  <div class="status-pill" id="connPill">
-    <span class="dot" id="connDot"></span><span id="connText">连接中</span>
-  </div>
+  <button class="status-pill" id="connPill" title="点击上线 / 下线">
+    <span class="dot" id="connDot"></span>
+    <span id="connText">连接中</span>
+    <span class="pill-sep"></span>
+    <span id="connAction">上线</span>
+  </button>
 </header>
 
 <main>
@@ -517,9 +520,11 @@
     <div class="pp-tabs">
       <button type="button" class="pp-tab active" data-pp="config">配置</button>
       <button type="button" class="pp-tab" data-pp="data">玩家数据</button>
+      <button type="button" class="pp-tab" data-pp="dash">运行数据</button>
     </div>
     <div id="ppConfig" class="pp-body"></div>
     <div id="ppData" class="pp-body" hidden></div>
+    <div id="ppDash" class="pp-body" hidden></div>
     <div class="modal-actions">
       <button class="btn" id="ppClose">关闭</button>
       <button class="btn primary" id="ppSave">保存配置</button>

@@ -546,6 +546,84 @@ const RUN = Date.now().toString(36);
   check('escMd 不动尖括号', escMd('/admin set <openid>') === '/admin set <openid>');
 }
 
+/* ---------- 插件运行数据（dashboard） ---------- */
+
+async function testDashboard() {
+  const { normalizeDashboard } = await import('../src/plugin/dashboard.js');
+
+  // 无效输入一律返回 null，面板显示「插件未提供运行数据」
+  check('dashboard: null 返回 null', normalizeDashboard(null) === null);
+  check('dashboard: 空对象返回 null', normalizeDashboard({}) === null);
+  check('dashboard: metrics 为空且无 note 返回 null', normalizeDashboard({ metrics: [] }) === null);
+
+  const d = normalizeDashboard({
+    metrics: [
+      { label: '已回复', value: 1234, unit: '条' },
+      { label: '平均耗时', value: 320, unit: 'ms', hint: '最近 100 次' },
+    ],
+    note: '模型：x',
+  });
+  check('dashboard: 指标数量', d.metrics.length === 2);
+  check('dashboard: 数字转字符串', d.metrics[0].value === '1234');
+  check('dashboard: 保留单位', d.metrics[0].unit === '条');
+  check('dashboard: 保留说明', d.metrics[1].hint === '最近 100 次');
+  check('dashboard: 保留 note', d.note === '模型：x');
+
+  // 0 是合法值，不能被 || 兜成空
+  const zero = normalizeDashboard({ metrics: [{ label: '已回复', value: 0 }] });
+  check('dashboard: 0 不被吞掉', zero.metrics[0].value === '0');
+
+  // 脏数据不能把面板搞崩
+  const dirty = normalizeDashboard({
+    metrics: [null, 42, { value: 1 }, { label: '好', value: { a: 1 } }],
+  });
+  check('dashboard: 丢弃无 label 的项', dirty.metrics.length === 1);
+  check('dashboard: 对象值转 JSON', dirty.metrics[0].value === '{"a":1}');
+
+  // 数量与长度都有上限
+  const many = normalizeDashboard({
+    metrics: Array.from({ length: 40 }, (_, i) => ({ label: 'k' + i, value: i })),
+  });
+  check('dashboard: 指标上限 12', many.metrics.length === 12);
+
+  const long = normalizeDashboard({ metrics: [{ label: 'x'.repeat(80), value: 'y'.repeat(80) }] });
+  check('dashboard: label 截断', long.metrics[0].label.length === 24);
+  check('dashboard: value 截断', long.metrics[0].value.length === 40);
+
+  // 声明式 dashboard 支持函数，也支持直接给对象
+  const { PluginManager } = await import('../src/plugin/loader.js');
+  const pm = Object.create(PluginManager.prototype);
+  pm.loaded = new Map();
+  pm.dashCache = new Map();
+  pm.loaded.set('t', { meta: { dashboard: () => ({ metrics: [{ label: 'a', value: 1 }] }) }, ctx: {} });
+  const got = await pm.dashboardOf('t');
+  check('dashboard: 函数形式被调用', got?.metrics[0].label === 'a');
+
+  // 1 秒内重复拉取走缓存，不会把插件函数打爆
+  let calls = 0;
+  pm.loaded.set('u', {
+    meta: {
+      dashboard: () => {
+        calls += 1;
+        return { metrics: [{ label: 'n', value: calls }] };
+      },
+    },
+    ctx: {},
+  });
+  await pm.dashboardOf('u');
+  await pm.dashboardOf('u');
+  check('dashboard: 1 秒内复用缓存', calls === 1);
+
+  // ctx.setDashboard 推的数据也能读到
+  pm.loaded.set('v', { meta: {}, ctx: { getDashboard: () => ({ metrics: [{ label: '推的', value: 9 }] }) } });
+  const pushed = await pm.dashboardOf('v');
+  check('dashboard: 读到 ctx.setDashboard 的数据', pushed?.metrics[0].label === '推的');
+
+  check('dashboard: 未加载的插件返回 null', (await pm.dashboardOf('nope')) === null);
+}
+
+await testDashboard();
+
 /* ---------- 汇总 ---------- */
 // 清掉测试写进额度账本的条目，别污染真实数据。
 // 多机器人后账本在 data/bots/<id>/quota.json，所以两边都要扫。

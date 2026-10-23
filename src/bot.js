@@ -150,48 +150,77 @@ export class BotRuntime {
   /* ---------------- 启动 / 停止 ---------------- */
 
   async start() {
+    this.startedAt = Date.now();
+    return this.goOnline();
+  }
+
+  /**
+   * 上线：连网关。已经在线就什么都不做。
+   * 面板的「上线」按钮走这里，和 start() 的区别只是不重置 startedAt。
+   */
+  async goOnline() {
+    if (this.state === 'online' || this.state === 'starting') return this.state;
     const { cfg } = this;
     this.state = 'starting';
-    this.startedAt = Date.now();
-
-    if (!this.mock) {
-      if (!cfg.appId || !cfg.appSecret) {
-        this.state = 'error';
-        this.lastError = '缺少 AppID / AppSecret';
-        this.log.error(this.lastError);
-        return;
-      }
-
-      // 同一个 AppID 不能有两个实例连网关
-      const claimed = await claimInstance({ appId: cfg.appId });
-      if (!claimed.ok) {
-        this.state = 'error';
-        this.lastError = `AppID ${cfg.appId} 已有实例在运行（PID ${claimed.conflict.pid}）`;
-        this.log.error(this.lastError);
-        return;
-      }
-
-      this.gateway = new Gateway({
-        api: this.api,
-        tokens: this.tokens,
-        intents: cfg.intents,
-        onDispatch: (event, d, p) => this.dispatch(event, d, p),
-      });
-
-      try {
-        await this.gateway.start();
-        this.state = 'online';
-      } catch (e) {
-        this.state = 'error';
-        this.lastError = e.message;
-        this.log.error(`连接失败: ${e.message}`);
-      }
-      return;
-    }
+    this.lastError = '';
 
     // mock 模式：不连网关，直接算在线
-    this.state = 'online';
-    this.log.info('mock 模式已就绪');
+    if (this.mock) {
+      this.state = 'online';
+      this.log.info('mock 模式已就绪');
+      return this.state;
+    }
+
+    if (!cfg.appId || !cfg.appSecret) {
+      this.state = 'error';
+      this.lastError = '缺少 AppID / AppSecret';
+      this.log.error(this.lastError);
+      return this.state;
+    }
+
+    // 同一个 AppID 不能有两个实例连网关
+    const claimed = await claimInstance({ appId: cfg.appId });
+    if (!claimed.ok) {
+      this.state = 'error';
+      this.lastError = `AppID ${cfg.appId} 已有实例在运行（PID ${claimed.conflict.pid}）`;
+      this.log.error(this.lastError);
+      return this.state;
+    }
+
+    this.gateway = new Gateway({
+      api: this.api,
+      tokens: this.tokens,
+      intents: cfg.intents,
+      onDispatch: (event, d, p) => this.dispatch(event, d, p),
+    });
+
+    try {
+      await this.gateway.start();
+      this.state = 'online';
+      if (!this.startedAt) this.startedAt = Date.now();
+      this.log.info('已上线');
+    } catch (e) {
+      this.state = 'error';
+      this.lastError = e.message;
+      this.log.error(`连接失败: ${e.message}`);
+    }
+    return this.state;
+  }
+
+  /**
+   * 下线：断开网关，但**不卸载插件、不清存档**。
+   * 和 stop() 的区别是这里可以随时再 goOnline() 回来。
+   */
+  async goOffline() {
+    if (this.state === 'offline') return this.state;
+    try {
+      this.gateway?.stop();
+    } catch {}
+    this.gateway = null;
+    if (!this.mock) await releaseInstance(this.cfg.appId).catch(() => {});
+    this.state = 'offline';
+    this.log.info('已下线（插件与存档保留）');
+    return this.state;
   }
 
   async stop() {

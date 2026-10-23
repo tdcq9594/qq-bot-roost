@@ -12,6 +12,9 @@ const ACCESS_KEY = localStorage.getItem('qqbot_key') || '';
 // 当前正在看的机器人。所有 /api 请求都会带上 ?bot=<id>
 let CURRENT_BOT = localStorage.getItem('qqbot_bot') || '';
 
+// 上下线请求进行中：按钮置灰，避免连点重复连网关
+let CONN_BUSY = false;
+
 async function api(path, opts = {}) {
   let url = path;
   if (CURRENT_BOT && !/[?&]bot=/.test(url)) {
@@ -115,7 +118,6 @@ function renderBotMenu(keyword = '') {
             <b>${escapeHtml(b.name)}</b>
             <i>${b.id} · ${stateText} · ${b.plugins} 个插件</i>
           </span>
-          ${active ? '<span class="bot-check">✓</span>' : ''}
           <button class="bot-del" data-del="${b.id}" title="删除">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
               <path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/>
@@ -386,13 +388,29 @@ window.addEventListener('hashchange', () => {
 
 function renderStatus(s) {
   const pill = $('#connPill');
-  pill.classList.toggle('online', s.connected);
-  pill.classList.toggle('offline', !s.connected);
-  $('#connText').textContent = s.connected ? '在线' : '离线';
-  $('#connDot').style.background = '';
-  $('#botName').textContent = s.connected ? s.botName || '已连接' : '未连接';
+  // 以机器人实例状态为准：mock 模式下没有网关连接，但机器人是「在线」的
+  const state = s.state || (s.connected ? 'online' : 'offline');
+  const online = state === 'online';
+  const starting = state === 'starting';
 
-  $('#c-conn').textContent = s.connected ? '在线' : '离线';
+  pill.classList.toggle('online', online);
+  pill.classList.toggle('offline', !online && !starting);
+  pill.classList.toggle('busy', starting);
+  pill.disabled = starting || CONN_BUSY;
+
+  $('#connText').textContent = starting
+    ? '连接中'
+    : online
+      ? '在线'
+      : state === 'error'
+        ? '连接失败'
+        : '离线';
+  $('#connAction').textContent = CONN_BUSY ? (online ? '下线中…' : '上线中…') : online ? '下线' : '上线';
+  pill.title = online ? '点击下线（只断开连接，插件与存档保留）' : '点击上线';
+  $('#connDot').style.background = '';
+  $('#botName').textContent = online ? s.botName || '已连接' : '未连接';
+
+  $('#c-conn').textContent = online ? '在线' : state === 'error' ? '连接失败' : '离线';
   $('#c-uptime').textContent = fmtDuration(s.uptimeMs);
   $('#c-cred').textContent = s.credentialExpiresIn
     ? `${Math.floor(s.credentialExpiresIn / 60)} 分`
@@ -446,6 +464,35 @@ async function pollStatus() {
     $('#connPill').className = 'status-pill offline';
   }
 }
+
+/* 上下线按钮：只断/连网关，不卸载插件、不清存档 */
+$('#connPill').addEventListener('click', async () => {
+  if (CONN_BUSY) return;
+  const botId = CURRENT_BOT || BOTS[0]?.id;
+  if (!botId) return;
+
+  const online = $('#connPill').classList.contains('online');
+  const action = online ? 'offline' : 'online';
+
+  CONN_BUSY = true;
+  $('#connAction').textContent = online ? '下线中…' : '上线中…';
+  $('#connPill').disabled = true;
+
+  try {
+    const r = await api(`/api/bots/${encodeURIComponent(botId)}/${action}`, {
+      method: 'POST',
+      body: '{}',
+    });
+    if (r?.state === 'error') throw new Error(r.error || '连接失败');
+  } catch (e) {
+    alert(`${online ? '下线' : '上线'}失败：${e.message}`);
+  } finally {
+    CONN_BUSY = false;
+    $('#connPill').disabled = false;
+    await pollStatus();
+    await loadBots();
+  }
+});
 
 $('#btnReconnect').addEventListener('click', async (e) => {
   e.target.disabled = true;
@@ -787,10 +834,15 @@ $('#cfgForm').addEventListener('submit', async (e) => {
   btn.disabled = true;
   $('#cfgMsg').textContent = '保存中…';
   try {
-    await api('/api/config', { method: 'PUT', body: JSON.stringify(payload) });
-    $('#cfgMsg').textContent = '已保存' + (payload.appId ? '' : '（AppID 为空）');
+    const r = await api('/api/config', { method: 'PUT', body: JSON.stringify(payload) });
+    // 后端在填完 AppID / AppSecret 后会把占位名换成官方昵称，这里同步显示
+    const renamed = r?.name && r.name !== botById(CURRENT_BOT)?.name;
+    $('#cfgMsg').textContent =
+      (renamed ? `已保存，机器人昵称同步为「${r.name}」` : '已保存') +
+      (payload.appId ? '' : '（AppID 为空）');
     f.appSecret.value = '';
-    setTimeout(() => ($('#cfgMsg').textContent = ''), 3000);
+    setTimeout(() => ($('#cfgMsg').textContent = ''), 4000);
+    await loadBots();
     pollStatus();
   } catch (err) {
     $('#cfgMsg').textContent = '保存失败: ' + err.message;
@@ -804,12 +856,29 @@ $('#cfgForm').addEventListener('submit', async (e) => {
 async function loadPlugins() {
   const wrap = $('#pluginList');
   try {
-    const list = await api('/api/plugins');
+    // 运行数据单独一个接口，拿不到不影响列表显示
+    const [list, dash] = await Promise.all([
+      api('/api/plugins'),
+      api('/api/plugins/dashboard').catch(() => ({})),
+    ]);
     if (!list.length) {
       wrap.innerHTML = '<div class="empty">还没有插件，把文件夹放进 plugins/ 即可</div>';
       return;
     }
-    wrap.innerHTML = list.map((p) => `
+    wrap.innerHTML = list.map((p) => {
+      // 插件自己上报的指标，卡片上最多露 3 个，详情在「设置 → 运行数据」
+      const d = dash[p.id];
+      const chips = (d?.metrics ?? [])
+        .slice(0, 3)
+        .map(
+          (m) =>
+            `<span class="dash-chip">${escapeHtml(m.label)} <b>${escapeHtml(m.value)}${
+              m.unit ? escapeHtml(m.unit) : ''
+            }</b></span>`,
+        )
+        .join('');
+
+      return `
       <div class="plugin" data-id="${escapeHtml(p.id)}">
         <div class="info">
           <div class="name">${escapeHtml(p.name || p.id)} <span class="hint">v${escapeHtml(p.version || '0.0.0')}</span></div>
@@ -821,6 +890,7 @@ async function loadPlugins() {
             ${p.pid ? `<span class="hint">pid ${p.pid}</span>` : ''}
             ${p.description ? '<br>' + escapeHtml(p.description) : ''}
           </div>
+          ${chips ? `<div class="plugin-metrics">${chips}</div>` : ''}
           ${p.error ? `<div class="err">加载失败: ${escapeHtml(p.error)}</div>` : ''}
           ${p.menuMissing ? '<div class="err">未提供指令菜单，用户看不到它能做什么</div>' : ''}
         </div>
@@ -832,7 +902,8 @@ async function loadPlugins() {
         </button>
         <button class="btn small" data-act="reload">重载</button>
         <button class="btn small" data-act="panel">设置</button>
-      </div>`).join('');
+      </div>`;
+    }).join('');
 
     wrap.querySelectorAll('button[data-act]').forEach((btn) => {
       btn.addEventListener('click', async () => {
@@ -1042,6 +1113,7 @@ async function openPluginPanel(id) {
   $('#ppTitle').textContent = `${PP.name} · 设置`;
   renderPPConfig();
   renderPPData();
+  renderPPDash();
   switchPPTab('config');
   $('#pluginPanelMask').hidden = false;
 }
@@ -1050,7 +1122,43 @@ function switchPPTab(name) {
   $$('.pp-tab').forEach((b) => b.classList.toggle('active', b.dataset.pp === name));
   $('#ppConfig').hidden = name !== 'config';
   $('#ppData').hidden = name !== 'data';
+  $('#ppDash').hidden = name !== 'dash';
   $('#ppSave').hidden = name !== 'config';
+}
+
+/**
+ * 「运行数据」标签：插件自己决定显示什么。
+ * 数据来自插件导出的 dashboard() 或 ctx.setDashboard()，框架只负责排版。
+ */
+function renderPPDash() {
+  const box = $('#ppDash');
+  const d = PP.dashboard;
+  if (!d || (!d.metrics?.length && !d.note)) {
+    box.innerHTML =
+      '<div class="empty">这个插件没有提供运行数据。<br>' +
+      '插件可以导出 <code>dashboard()</code> 或用 <code>ctx.setDashboard()</code> 上报。</div>';
+    return;
+  }
+
+  const cards = (d.metrics ?? [])
+    .map(
+      (m) => `
+      <div class="dash-card">
+        <div class="dash-k">${escapeHtml(m.label)}</div>
+        <div class="dash-v">${escapeHtml(m.value)}${
+          m.unit ? `<span class="dash-unit">${escapeHtml(m.unit)}</span>` : ''
+        }</div>
+        ${m.hint ? `<div class="dash-hint">${escapeHtml(m.hint)}</div>` : ''}
+      </div>`,
+    )
+    .join('');
+
+  box.innerHTML =
+    (cards ? `<div class="dash-grid">${cards}</div>` : '') +
+    (d.note ? `<pre class="dash-note">${escapeHtml(d.note)}</pre>` : '') +
+    `<div class="pp-hint" style="margin-top:10px">插件上报于 ${new Date(
+      d.updatedAt || Date.now(),
+    ).toLocaleTimeString()}</div>`;
 }
 
 function renderPPConfig() {

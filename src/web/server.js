@@ -140,6 +140,8 @@ export async function startWebServer({
       cfg: rt?.cfg ?? {},
       botId: rt?.id ?? null,
       botName: rt?.name ?? null,
+      // 上下线按钮要看机器人自己的状态：idle / starting / online / offline / error / stopped
+      state: rt?.state ?? 'offline',
     });
 
   // 日志实时推送：日志是全局的，所有连接都收到同一份
@@ -173,6 +175,37 @@ export async function startWebServer({
       url.searchParams.get('key') ||
       url.searchParams.get('token');
     return given === accessKey;
+  };
+
+  /**
+   * 把机器人显示名同步成官方昵称。
+   *
+   * 全新安装时配置里的名字是「默认机器人」这种占位符，填完 AppID / AppSecret
+   * 之后没人会记得回来改它，面板上就一直显示占位名。所以保存凭证时顺手调一次
+   * /users/@me 拿真实昵称。
+   *
+   * 只在占位名（空 / 等于 id / 「默认机器人」）时替换——用户自己起过的名字不动。
+   * 拉取失败不影响配置保存，只记一条 warn。
+   */
+  const PLACEHOLDER_NAME = /^(默认机器人|未命名|新机器人)$/;
+  const syncBotName = async (r) => {
+    if (!r || r.mock || !r.cfg.appId || !r.cfg.appSecret) return null;
+    const cur = String(r.name ?? '').trim();
+    if (cur && cur !== r.id && !PLACEHOLDER_NAME.test(cur)) return null;
+
+    try {
+      const me = await r.api.getMe();
+      const nick = String(me?.username ?? me?.nickname ?? '').trim();
+      if (!nick || nick === r.name) return null;
+      r.name = nick;
+      r.cfg.name = nick;
+      await saveBotConfig(r.id, r.cfg);
+      log.info(`机器人昵称已同步为「${nick}」`);
+      return nick;
+    } catch (e) {
+      log.warn(`拉取机器人昵称失败（不影响使用）：${e.message}`);
+      return null;
+    }
   };
 
   const server = http.createServer(async (req, res) => {
@@ -226,7 +259,9 @@ export async function startWebServer({
               appId: String(body.appId ?? '').trim(),
               appSecret: String(body.appSecret ?? '').trim(),
             });
-            return json(res, 200, { ok: true, id, state: created?.state ?? 'unknown' });
+            // 没填显示名时用官方昵称补上
+            const name = await syncBotName(created);
+            return json(res, 200, { ok: true, id, name: name ?? created?.name ?? id, state: created?.state ?? 'unknown' });
           } catch (e) {
             return json(res, 400, { error: e.message });
           }
@@ -266,6 +301,27 @@ export async function startWebServer({
           }
         }
 
+        /* ---------------- 上下线 ---------------- */
+
+        // 面板的上下线按钮。只动网关连接，不卸载插件、不清存档
+        const bo = pathname.match(/^\/api\/bots\/([^/]+)\/(online|offline)$/);
+        if (bo && req.method === 'POST') {
+          const target = runtimes.find((r) => r.id === decodeURIComponent(bo[1]));
+          if (!target) return json(res, 404, { error: '没有这个机器人' });
+          try {
+            const state =
+              bo[2] === 'online' ? await target.goOnline() : await target.goOffline();
+            return json(res, 200, {
+              ok: state === 'online' || state === 'offline',
+              state,
+              online: target.online,
+              error: target.lastError || '',
+            });
+          } catch (e) {
+            return json(res, 400, { error: e.message });
+          }
+        }
+
         // 状态
         if (pathname === '/api/status' && req.method === 'GET') {
           return json(res, 200, statusPayload(rt));
@@ -284,6 +340,7 @@ export async function startWebServer({
         if (pathname === '/api/config' && req.method === 'PUT') {
           const body = await readBody(req);
           const before = JSON.stringify({ appId: cfg.appId, intents: cfg.intents });
+          const oldSecret = cfg.appSecret;
 
           if (typeof body.appId === 'string') cfg.appId = body.appId.trim();
           // 密钥留空或仍是掩码时保持原值
@@ -337,16 +394,37 @@ export async function startWebServer({
           log.info('配置已通过面板更新');
 
           const after = JSON.stringify({ appId: cfg.appId, intents: cfg.intents });
+          // 凭证变了要让 token 管理器跟着换，否则还在用旧 AppID 的 access_token
+          if (cfg.appSecret !== oldSecret) {
+            if (tokens) {
+              tokens.appSecret = cfg.appSecret;
+              tokens.token = '';
+              tokens.expiresAt = 0;
+            }
+          }
           if (before !== after) {
+            if (tokens && tokens.appId !== cfg.appId) {
+              tokens.appId = cfg.appId;
+              tokens.token = '';
+              tokens.expiresAt = 0;
+            }
             log.info('连接参数变化，正在重连网关...');
             rt.gateway?.restart?.().catch(() => {});
           }
-          return json(res, 200, { ok: true });
+
+          // 填完 AppID / AppSecret 顺手把「默认机器人」换成官方昵称
+          const name = await syncBotName(rt);
+          return json(res, 200, { ok: true, name: name ?? rt.name });
         }
 
         // 插件
         if (pathname === '/api/plugins' && req.method === 'GET') {
           return json(res, 200, plugins.list());
+        }
+
+        // 插件自定义运行数据：一次拿全部，面板轮询这个接口
+        if (pathname === '/api/plugins/dashboard' && req.method === 'GET') {
+          return json(res, 200, await plugins.dashboards());
         }
         /* ---------------- 插件设置面板 ---------------- */
 
@@ -526,8 +604,13 @@ export async function startWebServer({
 
         // 网关操作
         if (pathname === '/api/gateway/reconnect' && req.method === 'POST') {
+          // 已经下线时没有「重连」可言，直接当上线处理，免得点了没反应
+          if (!rt.online) {
+            const state = await rt.goOnline();
+            return json(res, 200, { ok: state === 'online', state, error: rt.lastError || '' });
+          }
           await getGateway?.()?.restart();
-          return json(res, 200, { ok: true });
+          return json(res, 200, { ok: true, state: rt.state });
         }
         if (
           (pathname === '/api/credential/refresh' || pathname === '/api/token/refresh') &&

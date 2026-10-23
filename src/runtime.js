@@ -111,9 +111,11 @@ export const runtime = {
     return Date.now() - this.startedAt;
   },
 
-  snapshot({ credentialExpiresIn = 0, plugins = [], cfg = {}, botId = null, botName = null } = {}) {
+  snapshot({ credentialExpiresIn = 0, plugins = [], cfg = {}, botId = null, botName = null, state = null } = {}) {
     return {
       connected: this.connected,
+      // 机器人实例自己的状态（online / offline / starting …），面板的上下线按钮用
+      state,
       // 多机器人下 botId/botName 由调用方按当前选中的机器人传入
       botName: botName ?? this.botName,
       botId: botId ?? this.botId,

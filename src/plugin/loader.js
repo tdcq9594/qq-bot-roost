@@ -7,6 +7,7 @@ import { SubprocessPlugin } from './subprocess.js';
 import { rel } from '../paths.js';
 import { allocateLevels } from '../levels.js';
 import { PluginConfig, schemaOf } from './config.js';
+import { normalizeDashboard } from './dashboard.js';
 import { ensurePluginDeps } from './deps.js';
 
 const log = createLogger('plugins');
@@ -47,6 +48,9 @@ export class PluginManager {
      * 所以这里单独留一份，不随 unload 清除。
      */
     this.meta = new Map();
+    // 面板「运行数据」的短缓存：id -> { at, data }
+    // 面板会轮询，插件函数不能每次都真跑一遍
+    this.dashCache = new Map();
   }
 
   async #readState() {
@@ -432,6 +436,7 @@ export class PluginManager {
     // 关掉它的日志文件句柄，免得句柄泄漏
     detachLogFile(`plugin:${this.paths.id}/${id}`);
     this.loaded.delete(id);
+    this.dashCache.delete(id);
     log.info(`已卸载插件 ${id}`);
     return true;
   }
@@ -534,7 +539,51 @@ export class PluginManager {
       data,
       // 存档键里哪些像玩家数据，给面板分组用
       dataKeys: Object.keys(data),
+      // 插件自定义的运行指标（可能为 null）
+      dashboard: await this.dashboardOf(id),
     };
+  }
+
+  /**
+   * 面板「运行数据」：插件想在面板上显示什么就显示什么。
+   *
+   * 三种来源，按优先级：
+   *   1. 插件导出里声明 dashboard（对象或函数，函数每次现算）
+   *   2. 插件运行中用 ctx.setDashboard() 推的最后一份
+   *   3. 外部插件发 {"t":"dashboard"} 协议消息推的
+   *
+   * 1 秒内重复拉取直接返回上次结果——面板在轮询，不能让插件函数被打爆。
+   */
+  async dashboardOf(id) {
+    const item = this.loaded.get(id);
+    if (!item) return null;
+
+    const hit = this.dashCache.get(id);
+    if (hit && Date.now() - hit.at < 1000) return hit.data;
+
+    let raw = null;
+    try {
+      const d = item.meta?.dashboard;
+      raw = typeof d === 'function' ? await d(item.ctx) : d ?? null;
+    } catch (e) {
+      log.warn(`插件 ${id} 的 dashboard() 出错: ${e.message}`);
+    }
+
+    if (!raw) raw = item.ctx?.getDashboard?.() ?? item.host?.dashboard ?? null;
+
+    const data = normalizeDashboard(raw);
+    this.dashCache.set(id, { at: Date.now(), data });
+    return data;
+  }
+
+  /** 一次拿全部已加载插件的运行数据，面板一次请求就够 */
+  async dashboards() {
+    const out = {};
+    for (const id of this.loaded.keys()) {
+      const d = await this.dashboardOf(id);
+      if (d) out[id] = d;
+    }
+    return out;
   }
 
   /** 改插件配置（面板用）。改完插件立刻能读到新值 */

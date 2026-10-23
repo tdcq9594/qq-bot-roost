@@ -3,6 +3,7 @@ import path from 'node:path';
 import { createLogger } from '../logger.js';
 import { scopeOf, LEVEL, NO_PERM, levelName } from '../roles.js';
 import { md, renderMenuMd } from '../markdown.js';
+import { normalizeDashboard } from './dashboard.js';
 
 /**
  * 全局注册表：所有插件注册的命令和事件监听都放这里。
@@ -226,6 +227,9 @@ export function createContext({ meta, paths, registry, api, cfg, config, configS
   // 先占位，保证即使插件没注册任何命令，菜单里也有它的条目
   registry.ensureMenu(id, meta);
 
+  // 面板「运行数据」：插件用 ctx.setDashboard() 推的最后一份
+  let dashboardCache = null;
+
   const ctx = {
     id,
     name: meta.name ?? id,
@@ -244,6 +248,27 @@ export function createContext({ meta, paths, registry, api, cfg, config, configS
      */
     md,
     prefix: cfg.commandPrefix || '/',
+
+    /**
+     * 往面板的「运行数据」推一份指标，面板每几秒拉一次就会更新。
+     *   ctx.setDashboard({
+     *     metrics: [
+     *       { label: '已回复', value: counters.reply, unit: '条' },
+     *       { label: '平均耗时', value: 320, unit: 'ms' },
+     *     ],
+     *     note: '模型：xxx',
+     *   });
+     * 想每次现算，也可以在插件导出里写 dashboard() 函数，二选一。
+     */
+    setDashboard(data) {
+      dashboardCache = normalizeDashboard(data);
+      return dashboardCache;
+    },
+
+    /** 框架内部用：取插件推的最后一份运行数据 */
+    getDashboard() {
+      return dashboardCache;
+    },
 
     /**
      * 改自己的配置并立刻落盘（只改传入的键，其余保留）。

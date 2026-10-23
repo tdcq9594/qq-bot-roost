@@ -41,6 +41,8 @@ export class SubprocessPlugin {
     this.menus = [];
     this.levels = [];
     this.listen = []; // 想接收哪些非命令消息，如 ['message']
+    // 插件主动上报的面板运行数据（{"t":"dashboard","data":{...}}）
+    this.dashboard = null;
     this.state = 'stopped'; // stopped | starting | running | crashed
     this.lastError = '';
     this.restarts = [];
@@ -253,6 +255,11 @@ export class SubprocessPlugin {
       case 'log': {
         const lv = ['debug', 'info', 'warn', 'error'].includes(o.level) ? o.level : 'info';
         this.log[lv](String(o.msg ?? ''));
+        break;
+      }
+      case 'dashboard': {
+        // 插件上报面板运行数据，随时可以发，后到的覆盖先到的
+        this.dashboard = o.data ?? null;
         break;
       }
       case 'error': {
