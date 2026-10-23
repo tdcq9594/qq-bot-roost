@@ -136,8 +136,13 @@ export class QQApi {
   /* ---------------- 撤回 ---------------- */
 
   /**
-   * 撤回群消息。只能撤回机器人自己发的。
+   * 撤回群消息。
    * DELETE /v2/groups/{group_openid}/messages/{message_id}
+   *
+   * 官方约束（这里不做预检，失败了由调用方看错误码）：
+   *   - 发送超过 2 分钟的消息不可撤回（40064004）
+   *   - 机器人是群管理员时可撤自己的和普通成员的；是普通成员时只能撤自己的（40062003）
+   *   - 群成员的消息 ID 取群消息事件的 d.id；自己发的取发送接口响应
    */
   retractGroupMessage(groupOpenid, messageId) {
     return this.#request('DELETE', `/v2/groups/${groupOpenid}/messages/${messageId}`);
