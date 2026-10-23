@@ -199,6 +199,30 @@ async function testPlugins() {
   const rl = await api('/api/plugins/echo/reload', { method: 'POST', body: '{}' });
   ok('插件: 可重载', rl.status === 200, rl.data?.error || '');
 
+  /**
+   * 卸载接口的**安全边界**。
+   * 这里只测拒绝路径——真删会破坏测试环境里的示例插件。
+   */
+  const rmNo = await api('/api/plugins/nosuch-plugin/remove', { method: 'POST', body: '{}' });
+  ok('插件: 卸载不存在的插件返回 404', rmNo.status === 404, rmNo.data?.error || '');
+
+  const rmBad = await api('/api/plugins/KUN/remove', { method: 'POST', body: '{}' });
+  ok('插件: 卸载时非法 id 被拒', rmBad.status === 400, rmBad.data?.error || '');
+
+  const rmTrav = await api('/api/plugins/..%2f..%2fsrc/remove', { method: 'POST', body: '{}' });
+  ok('插件: 卸载时路径穿越被拒', rmTrav.status === 400 || rmTrav.status === 404, `HTTP ${rmTrav.status}`);
+
+  // 拒绝之后示例插件必须完好
+  const afterRm = await api('/api/plugins');
+  ok(
+    '插件: 被拒的卸载没动到任何插件',
+    ['dice', 'echo', 'hello-py', 'kun'].every((i) => afterRm.data.some((p) => p.id === i)),
+  );
+
+  // dashboard 接口：插件指标靠它，插件页要轮询
+  const dash = await api('/api/plugins/dashboard');
+  ok('插件: dashboard 可读', dash.status === 200 && typeof dash.data === 'object');
+
   // 设置面板
   const pp = await api('/api/plugins/echo/panel');
   ok('插件: panel 可读', pp.status === 200);

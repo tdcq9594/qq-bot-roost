@@ -410,7 +410,13 @@ function activateTab(name) {
   if (!btn) return;
   $$('.tab').forEach((b) => b.classList.toggle('active', b === btn));
   $$('.panel').forEach((p) => p.classList.toggle('active', p.id === `tab-${name}`));
-  if (name === 'plugins') loadPlugins();
+  // 插件指标只在插件页轮询，切走就停——别在后台白耗请求
+  if (name === 'plugins') {
+    loadPlugins();
+    startPluginDashPolling();
+  } else {
+    stopPluginDashPolling();
+  }
   if (name === 'events') loadEvents();
   if (name === 'config') loadConfig();
   if (name === 'groups') loadGroups();
@@ -1044,6 +1050,71 @@ $('#cfgForm').addEventListener('submit', async (e) => {
 
 /* ---------------- 插件 ---------------- */
 
+/** 把插件上报的指标渲染成小 chip，最多 3 个 */
+function renderDashChips(metrics) {
+  return (metrics ?? [])
+    .slice(0, 3)
+    .map(
+      (m) =>
+        `<span class="dash-chip">${escapeHtml(m.label)} <b>${escapeHtml(String(m.value))}${
+          m.unit ? escapeHtml(m.unit) : ''
+        }</b></span>`,
+    )
+    .join('');
+}
+
+let pluginDashTimer = null;
+
+/**
+ * 只刷新指标，**不重建卡片**。
+ *
+ * 整块重绘会让滚动位置丢失、正在点的按钮消失，用户会以为界面在抽风。
+ * 所以这里只改 .plugin-metrics 的 innerHTML。
+ */
+async function refreshPluginDashboards() {
+  const wrap = $('#pluginList');
+  if (!wrap || !wrap.querySelector('.plugin')) return;
+
+  let dash;
+  try {
+    dash = await api('/api/plugins/dashboard');
+  } catch {
+    return; // 网络抖一下不打断轮询，下一轮继续
+  }
+
+  for (const [id, d] of Object.entries(dash || {})) {
+    const card = wrap.querySelector(`.plugin[data-id="${CSS.escape(id)}"]`);
+    if (!card) continue;
+
+    const html = renderDashChips(d?.metrics);
+    let box = card.querySelector('.plugin-metrics');
+
+    if (box) {
+      box.innerHTML = html;
+      if (!html) box.remove(); // 指标清空了，容器也别留着占位
+    } else if (html) {
+      // 首次没指标、后来才有了：补一个容器
+      const info = card.querySelector('.info');
+      if (info) {
+        box = document.createElement('div');
+        box.className = 'plugin-metrics';
+        box.innerHTML = html;
+        info.appendChild(box);
+      }
+    }
+  }
+}
+
+function startPluginDashPolling() {
+  stopPluginDashPolling();
+  pluginDashTimer = setInterval(refreshPluginDashboards, 5000);
+}
+
+function stopPluginDashPolling() {
+  if (pluginDashTimer) clearInterval(pluginDashTimer);
+  pluginDashTimer = null;
+}
+
 async function loadPlugins() {
   const wrap = $('#pluginList');
   try {
@@ -1063,20 +1134,12 @@ async function loadPlugins() {
     wrap.innerHTML = list.map((p) => {
       // 插件自己上报的指标，卡片上最多露 3 个，详情在「设置 → 运行数据」
       const d = dash[p.id];
-      const chips = (d?.metrics ?? [])
-        .slice(0, 3)
-        .map(
-          (m) =>
-            `<span class="dash-chip">${escapeHtml(m.label)} <b>${escapeHtml(m.value)}${
-              m.unit ? escapeHtml(m.unit) : ''
-            }</b></span>`,
-        )
-        .join('');
+      const chips = renderDashChips(d?.metrics);
 
       const u = updMap[p.id];
 
       return `
-      <div class="plugin" data-id="${escapeHtml(p.id)}">
+      <div class="plugin" data-id="${escapeHtml(p.id)}" data-name="${escapeHtml(p.name || p.id)}">
         <div class="info">
           <div class="name">${escapeHtml(p.name || p.id)} <span class="hint">v${escapeHtml(p.version || '0.0.0')}</span>
             ${u ? `<span class="upd-tag">可更新 ${escapeHtml(u.latest)}</span>` : ''}
@@ -1102,6 +1165,7 @@ async function loadPlugins() {
         </button>
         <button class="btn small" data-act="reload">重载</button>
         <button class="btn small" data-act="panel">设置</button>
+        <button class="btn small danger" data-act="remove" title="删除插件代码，数据保留">卸载</button>
       </div>`;
     }).join('');
 
@@ -1119,12 +1183,32 @@ async function loadPlugins() {
 
     wrap.querySelectorAll('button[data-act]').forEach((btn) => {
       btn.addEventListener('click', async () => {
-        const id = btn.closest('.plugin').dataset.id;
+        const card = btn.closest('.plugin');
+        const id = card.dataset.id;
         // 「设置」不是启停操作，走独立弹窗
         if (btn.dataset.act === 'panel') {
           openPluginPanel(id);
           return;
         }
+
+        /**
+         * 卸载是不可逆的（代码目录直接删），必须先问清楚。
+         * 数据目录不删——用户重装后还想接着用存档。
+         */
+        if (btn.dataset.act === 'remove') {
+          const name = card.dataset.name || id;
+          const ok = await confirmDialog({
+            title: `卸载插件「${name}」`,
+            message:
+              `会删除 <code>plugins/${escapeHtml(id)}</code> 整个目录，插件代码就没了。\n\n` +
+              '它的<b>数据会保留</b>（群档案、插件存档都在 data/ 里），重装之后还能接着用。\n\n' +
+              '确定卸载？',
+            okText: '卸载',
+            danger: true,
+          });
+          if (!ok) return;
+        }
+
         btn.disabled = true;
         try {
           await api(`/api/plugins/${encodeURIComponent(id)}/${btn.dataset.act}`, { method: 'POST' });

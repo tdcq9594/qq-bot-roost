@@ -465,6 +465,24 @@ export class PluginManager {
     return this.load(id);
   }
 
+  /**
+   * 忘掉一个插件留下的所有痕迹。
+   *
+   * 卸载时用。只删目录不够——state 里还留着它的开关记录（可能是 false），
+   * 重装之后会被这条旧记录挡住不加载，用户会以为装坏了。
+   */
+  async forget(id) {
+    let dirty = false;
+    if (this.state && id in this.state) {
+      delete this.state[id];
+      dirty = true;
+    }
+    this.errors.delete(id);
+    this.meta.delete(id);
+    this.diskIds.delete(id);
+    if (dirty) await this.#writeState().catch(() => {});
+  }
+
   async setEnabled(id, enabled) {
     this.state[id] = enabled;
     await this.#writeState();

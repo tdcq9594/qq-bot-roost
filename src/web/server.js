@@ -153,17 +153,16 @@ export async function startWebServer({
   };
 
   /**
-   * 面板开关 → 同时改「配置过滤器」和「运行时开关」。
+   * 只改「配置里的启用名单」，**不碰运行时**。
    *
-   * 这两层原来各管各的：面板只写 state，配置里的 include/exclude 不动，
-   * 结果就是「面板显示已启用，实际根本没加载」——用户点来点去都莫名其妙。
+   * 和 setPluginEnabled 的区别很重要：
+   * 装完插件时只想把它加进名单，然后让 rescan 去加载——
+   * 如果这里顺手 load 了，rescan 会发现「已加载」而跳过，added 就是空的，
+   * 前端就会误报「插件已安装，但没能自动加载」。
    *
-   * 三种模式的改法：
-   *   all     启用不用改；禁用 → 转成 exclude 并把它加进名单
-   *   include 启用 → 加进名单；禁用 → 移出名单
-   *   exclude 启用 → 移出名单；禁用 → 加进名单
+   * @returns {Promise<boolean>} 是否真的改了配置
    */
-  const setPluginEnabled = async (rt, id, enabled) => {
+  const ensurePluginInList = async (rt, id, enabled = true) => {
     const spec = rt?.cfg?.plugins ?? { mode: 'all', list: [] };
     let mode = spec.mode ?? 'all';
     let list = new Set(spec.list ?? []);
@@ -190,17 +189,24 @@ export async function startWebServer({
       changed = true;
     }
 
-    if (changed) {
-      rt.cfg.plugins = { ...spec, mode, list: [...list] };
-      // filter 是内存里的，不同步的话这次操作不生效
-      rt.plugins.filter = pluginFilterOf(rt.cfg.plugins);
-      try {
-        await saveBotConfig(rt.id, rt.cfg);
-      } catch (e) {
-        log.warn(`保存插件启用配置失败：${e.message}`);
-      }
-    }
+    if (!changed) return false;
 
+    rt.cfg.plugins = { ...spec, mode, list: [...list] };
+    // filter 是内存里的，不同步的话这次改动不生效
+    rt.plugins.filter = pluginFilterOf(rt.cfg.plugins);
+    try {
+      await saveBotConfig(rt.id, rt.cfg);
+    } catch (e) {
+      log.warn(`保存插件启用配置失败：${e.message}`);
+    }
+    return true;
+  };
+
+  /**
+   * 面板开关 → 改配置 + 真的加载/卸载。
+   */
+  const setPluginEnabled = async (rt, id, enabled) => {
+    await ensurePluginInList(rt, id, enabled);
     return rt.plugins.setEnabled(id, enabled);
   };
 
@@ -656,9 +662,42 @@ export async function startWebServer({
           }
         }
 
-        const m = pathname.match(/^\/api\/plugins\/([^/]+)\/(enable|disable|reload)$/);
+        const m = pathname.match(/^\/api\/plugins\/([^/]+)\/(enable|disable|reload|remove)$/);
         if (m && req.method === 'POST') {
-          const [, id, action] = m;
+          const [, rawId, action] = m;
+          const id = decodeURIComponent(rawId);
+
+          /* ---------------- 卸载插件 ---------------- */
+          if (action === 'remove') {
+            // id 只允许字母数字下划线横线，和安装时的校验保持一致
+            if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(id)) {
+              return json(res, 400, { error: `插件 id 不合法：${id}` });
+            }
+            const base = path.resolve(DIRS.plugins);
+            const dir = path.resolve(base, id);
+            // 防路径穿越：必须严格是 plugins/ 下的一级子目录
+            if (dir !== path.join(base, id) || !dir.startsWith(base + path.sep)) {
+              return json(res, 400, { error: '路径越界，已拒绝' });
+            }
+            const st = await fs.stat(dir).catch(() => null);
+            if (!st?.isDirectory()) return json(res, 404, { error: `插件 ${id} 没装` });
+
+            try {
+              // 先卸运行时再删文件，顺序反了会出现进程还在读已删除的代码
+              if (plugins.loaded.has(id)) await plugins.unload(id).catch(() => {});
+              await ensurePluginInList(rt, id, false).catch(() => {});
+              await fs.rm(dir, { recursive: true, force: true });
+              // 清掉 state 里的残留，否则重装会被旧的 false 挡住
+              await plugins.forget(id).catch(() => {});
+              const scanned = await plugins.rescan();
+              log.info(`已卸载插件 ${id}（数据目录保留，重装可继续用）`);
+              return json(res, 200, { ok: true, id, ...scanned });
+            } catch (e) {
+              log.error(`卸载插件 ${id} 失败：${e.message}`);
+              return json(res, 500, { error: e.message });
+            }
+          }
+
           let ok = false;
           if (action === 'enable') ok = await setPluginEnabled(rt, id, true);
           else if (action === 'disable') ok = await setPluginEnabled(rt, id, false);
@@ -730,12 +769,13 @@ export async function startWebServer({
             });
 
             /**
-             * 装完必须确保它在启用名单里。
+             * 装完先确保它在启用名单里，**然后交给 rescan 去加载**。
              *
-             * include 模式下 filter 只认名单内的，新装的插件不在名单里就永远不加载。
-             * 这一步要在 rescan **之前**做，否则 rescan 还是把它过滤掉。
+             * 这里只能调 ensurePluginInList（只改配置），不能调 setPluginEnabled
+             * ——后者会顺手 load，导致 rescan 看到「已加载」就跳过，added 变成空，
+             * 前端就会误报「插件已安装，但没能自动加载」。
              */
-            await setPluginEnabled(rt, r.id, true);
+            await ensurePluginInList(rt, r.id, true);
 
             // 装完立刻扫一遍，用户不用重启
             const scanned = await plugins.rescan();
