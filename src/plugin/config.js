@@ -3,7 +3,7 @@ import path from 'node:path';
 import { rel } from '../paths.js';
 
 /**
- * 插件配置：默认值写在插件代码里，用户改的存 config/plugins/<id>.json。
+ * 插件配置：默认值写在插件代码里，用户改的存 config/bots/<机器人id>/plugins/<id>.json。
  *
  * 规则（和主流框架一致）：
  *   - 文件不存在 → 用默认值生成一份，让用户知道有哪些项可以改

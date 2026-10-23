@@ -331,6 +331,11 @@ export async function startWebServer({
         if (pathname === '/api/config' && req.method === 'GET') {
           return json(res, 200, {
             ...cfg,
+            // webui 和 logLevel 是**全局**设置（config/bot.json），所有机器人共用，
+            // 不在这台机器人的 cfg 里。不返回的话面板永远显示默认值，
+            // 用户改完也看不出当前是什么。
+            webui: globalCfg.webui ?? {},
+            logLevel: globalCfg.logLevel ?? 'info',
             appSecret: cfg.appSecret ? '********' : '',
             appSecretSet: Boolean(cfg.appSecret),
           });
@@ -387,7 +392,11 @@ export async function startWebServer({
             };
           }
           if (body.webui && typeof body.webui === 'object') {
-            cfg.webui = { ...cfg.webui, ...body.webui };
+            // webui 是全局设置，不能写进机器人 cfg：
+            // 写进去 saveBotConfig 也不保存它（白名单式保存），
+            // 结果是面板提示「已保存」但什么都没变。
+            globalCfg.webui = { ...globalCfg.webui, ...body.webui };
+            await saveGlobalConfig?.(globalCfg).catch(() => {});
           }
           // 群管内邀开关：同步给 api 层，否则要等重启才生效
           if (body.groupManage && typeof body.groupManage === 'object') {

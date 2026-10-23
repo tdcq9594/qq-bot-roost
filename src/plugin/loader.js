@@ -20,7 +20,7 @@ const log = createLogger('plugins');
  *   2. 外部插件 —— 目录下有 plugin.json，启动为独立子进程，可用任意语言
  *
  * 外部插件通过 stdin/stdout 的 NDJSON 通信，协议见 src/plugin/protocol.js。
- * 启用状态存在 data/plugins.json，删掉文件夹即等于卸载。
+ * 启用状态存在 data/bots/<机器人id>/plugins.json，删掉文件夹即等于卸载。
  */
 export class PluginManager {
   constructor({ pluginsDir, paths, registry, api, cfg, goBin, groups, roles, outbound, session, pipeline, isOwner }) {

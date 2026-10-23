@@ -726,6 +726,52 @@ async function testGroupManage() {
 
 await testGroupManage();
 
+/* ---------- 配置归属：全局设置不能落进机器人配置 ---------- */
+
+async function testConfigOwnership() {
+  const { saveBotConfig, loadBotConfig, BOT_DEFAULTS } = await import('../src/config.js');
+  const fsP = await import('node:fs/promises');
+  const path = await import('node:path');
+
+  const tmpId = '__selftest_cfg';
+  const file = path.join(process.cwd(), 'config', 'bots', `${tmpId}.json`);
+
+  // 故意把 webui / logLevel 塞进 cfg，模拟从面板传进来的脏数据
+  const dirty = {
+    ...BOT_DEFAULTS,
+    id: tmpId,
+    name: 'selftest',
+    appId: '1',
+    appSecret: '2',
+    webui: { host: 'evil.example', port: 1, accessKey: 'x' },
+    logLevel: 'debug',
+  };
+  await saveBotConfig(tmpId, dirty);
+
+  let raw = {};
+  try {
+    raw = JSON.parse(await fsP.readFile(file, 'utf8'));
+  } catch {}
+
+  // saveBotConfig 是白名单式保存，这两个全局设置不该出现在机器人配置里
+  check('配置: webui 不落进机器人配置', raw.webui === undefined);
+  check('配置: logLevel 不落进机器人配置', raw.logLevel === undefined);
+  // 该在的必须在
+  check('配置: groupManage 会保存', raw.groupManage?.invited === false);
+  check('配置: 基本字段会保存', raw.appId === '1' && raw.name === 'selftest');
+
+  // 读回来的 cfg 也不该带上全局设置
+  const back = await loadBotConfig(tmpId).catch(() => null);
+  if (back) {
+    check('配置: 读回的 cfg 不含 webui', back.webui === undefined);
+    check('配置: 读回的 cfg 有 groupManage 默认值', back.groupManage?.invited === false);
+  }
+
+  await fsP.unlink(file).catch(() => {});
+}
+
+await testConfigOwnership();
+
 /* ---------- 汇总 ---------- */
 // 清掉测试写进额度账本的条目，别污染真实数据。
 // 多机器人后账本在 data/bots/<id>/quota.json，所以两边都要扫。

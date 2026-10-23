@@ -234,7 +234,7 @@ export function createContext({ meta, paths, registry, api, cfg, config, configS
     id,
     name: meta.name ?? id,
     version: meta.version ?? '0.0.0',
-    // 已与默认值合并的用户配置，来自 config/plugins/<id>.json
+    // 已与默认值合并的用户配置，来自 config/bots/<机器人id>/plugins/<id>.json
     config: config ?? meta.config ?? {},
     api,
     logger,

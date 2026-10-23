@@ -65,7 +65,7 @@ QQ 机器人内核
 
 配置:
   config/bot.json               本体配置（AppID / AppSecret / intents / owners / webui）
-  config/plugins/<插件id>.json   插件配置，首次加载自动生成
+  config/bots/<机器人id>/plugins/<插件id>.json   插件配置，首次加载自动生成
   logs/bot.log                  本体日志（含所有插件输出）
   logs/plugins/<插件id>.log      单个插件的日志
   data/                         运行时数据（存档、权限、额度），不要手改
