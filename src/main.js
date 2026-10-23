@@ -859,7 +859,10 @@ async function main() {
       continue;
     }
     if (!MOCK && (!cfg.appId || !cfg.appSecret)) {
-      await ensureBotCredentials(cfg.id);
+      // 注意要**把返回值写回 cfg**：ensureBotCredentials 返回的是重新读出来的配置，
+      // 不写回的话下面 new BotRuntime 拿到的还是空凭证，
+      // 用户明明输了 AppID 却报「缺少 AppID / AppSecret」。
+      Object.assign(cfg, await ensureBotCredentials(cfg.id));
     }
     const rt = new BotRuntime({
       cfg,

@@ -16,6 +16,11 @@ import {
   detectUpdates,
   compareVersion,
 } from '../plugin/market.js';
+import {
+  checkUpdate as checkFrameworkUpdate,
+  applyUpdate as applyFrameworkUpdate,
+  currentVersion,
+} from '../updater.js';
 
 const log = createLogger('webui');
 const WEB_ROOT = path.join(ROOT, 'web');
@@ -505,6 +510,38 @@ export async function startWebServer({
         if (pathname === '/api/plugins/updates' && req.method === 'GET') {
           const force = url.searchParams.get('force') === '1';
           return json(res, 200, await checkUpdates(rt, { force }));
+        }
+
+        /* ---------------- 框架自身更新 ---------------- */
+
+        // 查最新版本（不装）
+        if (pathname === '/api/update/check' && req.method === 'GET') {
+          try {
+            return json(res, 200, await checkFrameworkUpdate());
+          } catch (e) {
+            return json(res, 200, { ok: false, error: e.message });
+          }
+        }
+
+        // 执行更新。会覆盖代码目录，前端必须先确认过
+        if (pathname === '/api/update/apply' && req.method === 'POST') {
+          try {
+            const info = await checkFrameworkUpdate();
+            if (!info.ok) return json(res, 400, { error: info.error || '检查更新失败' });
+            if (!info.hasUpdate) return json(res, 400, { error: `已经是最新版本 ${info.current}` });
+
+            const r = await applyFrameworkUpdate(info);
+            if (!r.ok) return json(res, 500, { error: r.error, from: r.from });
+            return json(res, 200, {
+              ok: true,
+              from: r.from,
+              to: r.to,
+              backup: r.backup,
+              message: '更新完成，重启程序后生效',
+            });
+          } catch (e) {
+            return json(res, 400, { error: e.message });
+          }
         }
         /* ---------------- 插件设置面板 ---------------- */
 

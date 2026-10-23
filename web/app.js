@@ -501,6 +501,72 @@ $('#btnReconnect').addEventListener('click', async (e) => {
   finally { setTimeout(() => { e.target.disabled = false; pollStatus(); }, 1200); }
 });
 
+/* ---------------- 框架版本与更新 ---------------- */
+
+let pendingUpdate = null;
+
+async function checkFrameworkUpdate() {
+  const btn = $('#btnCheckUpdate');
+  const msg = $('#updMsg');
+  btn.disabled = true;
+  msg.textContent = '正在检查…';
+  try {
+    const d = await api('/api/update/check');
+    $('#updCurrent').textContent = d.current || '-';
+    if (!d.ok) {
+      msg.textContent = '检查失败：' + (d.error || '未知错误');
+      return;
+    }
+    if (!d.hasUpdate) {
+      msg.textContent = `已是最新版本 v${d.current}`;
+      $('#btnApplyUpdate').hidden = true;
+      pendingUpdate = null;
+      return;
+    }
+    pendingUpdate = d;
+    msg.innerHTML =
+      `发现新版本 <b>v${escapeHtml(d.latest)}</b>` +
+      (d.publishedAt ? `（${escapeHtml(d.publishedAt.slice(0, 10))}）` : '') +
+      '<br>更新只替换代码目录，配置 / 存档 / 日志 / 插件都不会动。';
+    $('#btnApplyUpdate').hidden = false;
+  } catch (e) {
+    msg.textContent = '检查失败：' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$('#btnCheckUpdate').addEventListener('click', checkFrameworkUpdate);
+
+$('#btnApplyUpdate').addEventListener('click', async (e) => {
+  if (!pendingUpdate) return;
+  const ok = await confirmDialog({
+    title: `更新到 v${pendingUpdate.latest}`,
+    message:
+      `当前版本 <b>v${pendingUpdate.current}</b>，将更新到 <b>v${pendingUpdate.latest}</b>。<br><br>` +
+      '只替换 <code>src/ web/ test/ docs/</code> 等代码目录，' +
+      '<b>配置、存档、日志、插件都不会动</b>，更新前还会自动备份到 <code>data/backups/</code>。<br><br>' +
+      '更新完成后需要<b>手动重启程序</b>才会生效。',
+    okText: '确认更新',
+  });
+  if (!ok) return;
+
+  e.target.disabled = true;
+  const msg = $('#updMsg');
+  msg.textContent = '正在下载并替换…（可能需要几十秒）';
+  try {
+    const r = await api('/api/update/apply', { method: 'POST', body: '{}' });
+    msg.innerHTML =
+      `<b>已更新 v${escapeHtml(r.from)} → v${escapeHtml(r.to)}</b>，` +
+      `备份在 <code>${escapeHtml(r.backup || '')}</code>。<br>` +
+      '<b>请关闭程序后重新启动，新版本才会生效。</b>';
+    $('#btnApplyUpdate').hidden = true;
+  } catch (err) {
+    msg.textContent = '更新失败：' + err.message + '（代码已自动还原）';
+    e.target.disabled = false;
+  }
+});
+
 /* ---------------- 关闭程序 ---------------- */
 
 $('#btnShutdown')?.addEventListener('click', async () => {
@@ -713,6 +779,42 @@ function updateIntentsValue() {
   $('#cfgForm').intents.value = v;
   $('#intentsValue').textContent = v;
   renderIntentSummary(v, false);
+  // 勾选即生效：不用再点保存
+  autoSaveIntents();
+}
+
+/**
+ * 订阅事件自动保存。
+ *
+ * 防抖 900ms——连着勾 5 个只提交一次。
+ * 每次提交都会让后端**重连网关**（intents 是连接参数），
+ * 不做防抖的话勾几个就重连几次，机器人会反复掉线。
+ */
+let intentsSaveTimer = null;
+function autoSaveIntents() {
+  const tip = $('#cfgMsgTop');
+  if (intentsSaveTimer) clearTimeout(intentsSaveTimer);
+  if (tip) tip.textContent = '事件订阅待应用…';
+
+  intentsSaveTimer = setTimeout(async () => {
+    intentsSaveTimer = null;
+    const v = Number($('#cfgForm').intents.value) || 0;
+    if (tip) tip.textContent = '正在应用（会重连）…';
+    try {
+      await api('/api/config', {
+        method: 'PUT',
+        body: JSON.stringify({ intents: v }),
+      });
+      if (tip) {
+        tip.textContent = `已生效（intents=${v}），网关正在重连`;
+        setTimeout(() => {
+          if (tip.textContent.startsWith('已生效')) tip.textContent = '';
+        }, 4000);
+      }
+    } catch (e) {
+      if (tip) tip.textContent = '应用失败: ' + e.message;
+    }
+  }, 900);
 }
 
 function renderIntentSummary(v, advanced) {
@@ -785,6 +887,9 @@ function bindIntentsUI() {
     const v = Number(e.target.value) || 0;
     $('#intentsValue').textContent = v;
     renderIntentSummary(v, true);
+    // 高级模式手填数值同样立即生效
+    $('#cfgForm').intents.value = v;
+    autoSaveIntents();
   });
 }
 

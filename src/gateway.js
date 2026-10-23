@@ -55,6 +55,8 @@ export class Gateway {
     this.heartbeatInterval = 45000;
     this.lastAckAt = 0;
     this.connecting = false;
+    /** 已经为哪条 ws 安排过重连，防止 error + close 双触发建出两条连接 */
+    this.retryScheduledFor = null;
 
     this.readyResolve = null;
     this.readyPromise = new Promise((r) => {
@@ -150,7 +152,19 @@ export class Gateway {
     const ws = new WebSocket(url);
     this.ws = ws;
 
+    /**
+     * 连接超时兜底：握手阶段卡住（网络半开、DNS 慢）时 open / error / close
+     * 可能都不来，不设超时就会永远停在「上线中」。
+     */
+    const connectTimer = setTimeout(() => {
+      if (this.ws === ws && ws.readyState !== 1) {
+        log.warn('WebSocket 连接超时（20 秒未建立）');
+        this.#failAndRetry(ws, 'connect timeout');
+      }
+    }, 20000);
+
     ws.addEventListener('open', () => {
+      clearTimeout(connectTimer);
       this.connecting = false;
       log.debug('WebSocket 已连接');
     });
@@ -171,9 +185,17 @@ export class Gateway {
         ? [err.code, err.message || err.errno || err.name].filter(Boolean).join(' ')
         : ev?.message || '未知错误';
       log.warn(`WebSocket 错误: ${detail}`);
+      clearTimeout(connectTimer);
+      /**
+       * 关键：握手失败时**只发 error、不发 close**（Node 内置 WebSocket 的行为）。
+       * 不在这里兜底，`connecting` 会永远停在 true，
+       * 后续每次重连都被 `#connect` 开头的 guard 挡掉，表现就是「一直上线中」。
+       */
+      this.#failAndRetry(ws, detail);
     });
 
     ws.addEventListener('close', (ev) => {
+      clearTimeout(connectTimer);
       this.#clearTimers();
       this.ready = false;
       this.connecting = false;
@@ -191,6 +213,30 @@ export class Gateway {
       if (hint) log.error(`原因: ${hint}`);
       this.#scheduleReconnect();
     });
+  }
+
+  /**
+   * 连接失败后的统一收尾：复位 connecting、丢弃这条 ws、安排重连。
+   *
+   * 幂等——error 和 close 可能先后都来，靠 `retryScheduledFor` 保证只安排一次，
+   * 否则会出现两条连接互相踢（4902）。
+   */
+  #failAndRetry(ws, why = '') {
+    if (this.stopped) return;
+    if (this.ws !== ws) return;
+    if (this.retryScheduledFor === ws) return;
+    this.retryScheduledFor = ws;
+
+    this.connecting = false;
+    this.ready = false;
+    runtime.connected = false;
+    this.#clearTimers();
+    try {
+      ws.close();
+    } catch {}
+    if (this.ws === ws) this.ws = null;
+    if (why) log.debug(`连接失败收尾（${why}）`);
+    this.#scheduleReconnect();
   }
 
   async #handle(p) {
@@ -310,10 +356,16 @@ export class Gateway {
 
   #scheduleReconnect() {
     if (this.stopped) return;
+    // 已经有重连排队了就不再叠加，否则 error + close 会各排一个
+    if (this.reconnectTimer) {
+      log.debug('已有重连排队，跳过');
+      return;
+    }
     // 指数退避，上限 30s
     const delay = Math.min(1000 * 2 ** this.attempt++, 30000);
     log.info(`${(delay / 1000).toFixed(0)}s 后重连（第 ${this.attempt} 次）`);
     this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
       this.#connect().catch((e) => log.error('重连失败:', e.message));
     }, delay);
   }
