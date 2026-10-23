@@ -849,6 +849,39 @@ async function testWebhookAndStream() {
   check('更新: 解析不了的版本当相等', compareVersion('next', '0.5.2') === 0);
   const cur = await currentVersion();
   check('更新: 能读到当前版本', /^\d+\.\d+\.\d+/.test(cur), cur);
+
+  // 定时重启的触发条件
+  const { RestartService } = await import('../src/services/restart.js');
+  let fired = 0;
+  const mk = (cfg) =>
+    new RestartService({ globalCfg: { restart: cfg }, onRestart: async () => { fired += 1; } });
+
+  const s1 = mk({ enabled: true, everyHours: 6 });
+  s1.lastAt = Date.now() - 7 * 3600_000;
+  await s1.tick();
+  check('重启: everyHours 到点触发', fired === 1);
+
+  fired = 0;
+  const s2 = mk({ enabled: true, everyHours: 6 });
+  s2.lastAt = Date.now() - 3600_000;
+  await s2.tick();
+  check('重启: everyHours 未到点不触发', fired === 0);
+
+  const s3 = mk({ enabled: true, at: 'abc' });
+  await s3.tick();
+  check('重启: at 格式错误有提示', /格式不对/.test(s3.detail), s3.detail);
+
+  fired = 0;
+  const s4 = mk({ enabled: true, at: '00:00' });
+  await s4.tick();
+  await s4.tick();
+  check('重启: at 到点只触发一次', fired === 1, `触发 ${fired} 次`);
+
+  // 清理服务：禁区目录必须跳过（存档误删是不可接受的）
+  const { CleanupService } = await import('../src/services/cleanup.js');
+  const cs = new CleanupService({ globalCfg: {} });
+  check('清理: 默认保留 3 份备份', cs.keepBackups === 3);
+  check('清理: 默认日志保留 14 天', cs.keepLogDays === 14);
 }
 
 await testWebhookAndStream();

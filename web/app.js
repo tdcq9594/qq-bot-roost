@@ -503,6 +503,33 @@ $('#btnReconnect').addEventListener('click', async (e) => {
   finally { setTimeout(() => { e.target.disabled = false; pollStatus(); }, 1200); }
 });
 
+/* ---------------- 后台服务 ---------------- */
+
+async function loadServices() {
+  const wrap = $('#serviceList');
+  if (!wrap) return;
+  try {
+    const d = await api('/api/services');
+    const list = d.services || [];
+    if (!list.length) {
+      wrap.innerHTML = '<div class="empty">没有启用任何后台服务</div>';
+      return;
+    }
+    wrap.innerHTML = list
+      .map(
+        (s) => `
+      <div class="service-item">
+        <span class="service-dot ${s.state === 'running' ? 'ok' : s.state === 'error' ? 'bad' : ''}"></span>
+        <span class="service-name">${escapeHtml(s.label || s.name)}</span>
+        <span class="service-detail">${escapeHtml(s.detail || '')}</span>
+      </div>`,
+      )
+      .join('');
+  } catch (e) {
+    wrap.innerHTML = `<div class="empty">加载失败: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
 /* ---------------- 框架版本与更新 ---------------- */
 
 let pendingUpdate = null;
@@ -1889,6 +1916,9 @@ function connectStream() {
   bindIntentsUI();
   loadConfig();
   loadGroups();
+  // 后台服务状态：detail 会变（内存、下次重启时间），30 秒刷一次够了
+  loadServices();
+  setInterval(loadServices, 30000);
   const initial = location.hash.slice(1);
   if (initial) activateTab(initial);
   // 调试用：?openmenu 直接展开机器人下拉，方便截图和检查样式

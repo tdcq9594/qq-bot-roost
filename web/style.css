@@ -875,3 +875,20 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
   border-top: 1px solid var(--border);
 }
 .cred-actions .btn { min-width: 110px; }
+
+/* 后台服务列表 */
+.service-list { display: grid; gap: 6px; }
+.service-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 10px; border-radius: 7px;
+  background: var(--panel-2, rgba(127,127,127,.06));
+  font-size: 12.5px;
+}
+.service-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--muted); flex: 0 0 auto;
+}
+.service-dot.ok { background: #3fb950; }
+.service-dot.bad { background: #f85149; }
+.service-name { font-weight: 600; flex: 0 0 96px; }
+.service-detail { color: var(--muted); font-size: 12px; }

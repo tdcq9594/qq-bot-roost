@@ -119,6 +119,7 @@ export async function startWebServer({
   onBotAdd,
   onBotRemove,
   onShutdown,
+  services = null,
 }) {
   const wc = globalCfg.webui ?? {};
   // 启动时读一次版本号，status 里带给面板
@@ -514,6 +515,17 @@ export async function startWebServer({
         if (pathname === '/api/plugins/updates' && req.method === 'GET') {
           const force = url.searchParams.get('force') === '1';
           return json(res, 200, await checkUpdates(rt, { force }));
+        }
+
+        // 后台服务状态：健康巡检、清理、配置热加载、定时重启、检查更新
+        if (pathname === '/api/services' && req.method === 'GET') {
+          const list = services?.status?.() ?? [];
+          // 把健康采样和更新检查结果也带上，面板一处显示
+          const extra = {};
+          for (const s of services?.list ?? []) {
+            if (typeof s.snapshot === 'function') extra[s.name] = s.snapshot();
+          }
+          return json(res, 200, { services: list, extra });
         }
 
         /* ---------------- 框架自身更新 ---------------- */

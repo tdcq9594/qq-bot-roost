@@ -45,6 +45,49 @@ const GLOBAL_DEFAULTS = {
     publicUrl: '',
   },
 
+  /**
+   * 后台服务开关。都是增强，关掉不影响机器人跑。
+   */
+  services: {
+    /** 每分钟采样内存/积压/重连，超阈值告警 */
+    health: true,
+    /** 清临时目录、旧备份、过期日志 */
+    cleanup: true,
+    /** 手改 config/*.json 不用重启 */
+    configWatch: true,
+  },
+
+  cleanup: {
+    /** 更新备份保留几份 */
+    keepBackups: 3,
+    /** 日志保留天数 */
+    keepLogDays: 14,
+  },
+
+  /**
+   * 定时重启。长时间跑内存碎片、句柄泄漏是慢慢积累的，
+   * 每天重启一次比事后排查便宜。
+   *   "at": "04:00"      每天这个点
+   *   "everyHours": 12   每 N 小时
+   * 两个都填以 at 为准。
+   */
+  restart: {
+    enabled: false,
+    at: '',
+    everyHours: 0,
+  },
+
+  /**
+   * 框架自身更新。
+   * autoCheck 只检查不安装（默认），发现新版在面板提示。
+   * autoApply 会自动装——**默认关**，开了就要接受装到有 bug 版本的风险。
+   */
+  update: {
+    autoCheck: true,
+    autoApply: false,
+    intervalHours: 6,
+  },
+
   plugins: {
     autoInstallDeps: true,
     /** Go 插件用的 go 可执行文件路径，留空则用 PATH 里的 go 或 GO_BIN 环境变量 */

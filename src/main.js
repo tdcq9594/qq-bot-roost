@@ -20,6 +20,7 @@ import { LEVEL, NO_PERM, levelName, parseLevel, parseScope, scopeOf } from './ro
 import { openBrowser } from './browser.js';
 import { WebhookServer } from './webhook.js';
 import { startWebServer } from './web/server.js';
+import { Services } from './services/index.js';
 
 /* ------------------------------------------------------------------ */
 /* 开箱即用：先把运行环境检查清楚，别让人对着莫名其妙的报错猜              */
@@ -886,14 +887,62 @@ async function main() {
 
   let web = null;
 
-  const shutdown = async () => {
+  /* ---------------- 后台服务 ---------------- */
+
+  /**
+   * 健康巡检、文件清理、配置热加载、定时重启、检查更新。
+   * 都是增强，单个失败不影响主程序。
+   */
+  const services = new Services({
+    globalCfg,
+    getRuntimes: () => runtimes,
+    // 手改配置后同步到运行时（能热的字段）
+    onConfigReload: (nextGlobal, nextBot) => {
+      if (nextBot) {
+        const rt = runtimes.find((r) => r.id === nextBot.id);
+        if (rt) {
+          // 只同步能热改的字段。appId/appSecret 变了要重连，
+          // intents 变了也要重连，这些交给面板的保存逻辑处理。
+          const hot = ['commandPrefix', 'owners', 'whitelist', 'rateLimit', 'dedupWindowSec', 'groupManage', 'messageLog'];
+          for (const k of hot) {
+            if (nextBot[k] !== undefined) rt.cfg[k] = nextBot[k];
+          }
+          rt.log.info('配置已热加载');
+        }
+      }
+    },
+    // 定时重启：先优雅关闭，再拉起新进程
+    onRestart: async () => {
+      log.warn('定时重启：正在关闭当前进程…');
+      await shutdown({ restarting: true });
+    },
+  });
+
+  const shutdown = async ({ restarting = false } = {}) => {
     if (shutdown.called) return;
     shutdown.called = true;
     log.info('正在退出...');
+    await services.stop().catch(() => {});
     web?.close();
     await webhookServer?.stop().catch(() => {});
     for (const rt of runtimes) await rt.stop().catch(() => {});
     await flushLogs().catch(() => {});
+    if (restarting) {
+      // 拉起新进程后退出，裸机部署也能自愈
+      try {
+        const { spawn } = await import('node:child_process');
+        const child = spawn(process.execPath, process.argv.slice(1), {
+          cwd: process.cwd(),
+          detached: true,
+          stdio: 'inherit',
+          env: { ...process.env, ROOST_RESTARTED: '1' },
+        });
+        child.unref();
+        log.info(`已拉起新进程 pid=${child.pid}，当前进程退出`);
+      } catch (e) {
+        log.error(`拉起新进程失败：${e.message}，请手动重启`);
+      }
+    }
     process.exit(0);
   };
   shutdown.called = false;
@@ -909,6 +958,7 @@ async function main() {
     saveBotConfig,
     saveGlobalConfig,
     onShutdown: shutdown,
+    services,
 
     /** 面板「新建机器人」 */
     onBotAdd: async (id, patch) => {
@@ -988,6 +1038,8 @@ async function main() {
 
     if (SERVE) {
       log.info('mock + serve：只跑面板，Ctrl+C 退出');
+      // mock 下也把服务拉起来，方便测服务本身（清理、健康巡检等）
+      await services.start();
       process.on('SIGINT', shutdown);
       process.on('SIGTERM', shutdown);
       return new Promise(() => {});
@@ -1022,6 +1074,9 @@ async function main() {
   for (const rt of runtimes) {
     if (!rt.online) log.error(`[${rt.id}] 未连上：${rt.lastError || '未知原因'}`);
   }
+
+  // 后台服务放在最后启动，不干扰启动流程的日志
+  await services.start();
 
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
