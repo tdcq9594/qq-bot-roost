@@ -8,9 +8,9 @@
 
 <img src="https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white" alt="Node.js 22+">
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
-<img src="https://img.shields.io/badge/tests-230%20passed-brightgreen" alt="测试 230 项">
+<img src="https://img.shields.io/badge/tests-236%20passed-brightgreen" alt="测试 236 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
-<img src="https://img.shields.io/badge/version-0.5.1-blueviolet" alt="版本 0.5.1">
+<img src="https://img.shields.io/badge/version-0.5.3-blueviolet" alt="版本 0.5.3">
 <img src="https://img.shields.io/badge/license-Non--Commercial-red" alt="禁止商用">
 
 [快速开始](#3-分钟跑起来) ｜ [写插件](docs/插件开发规范.md) ｜ [外部插件协议](docs/插件协议.md) ｜ [配置参考](docs/配置参考.md) ｜ [常见问题](docs/常见问题.md) ｜ [贡献](CONTRIBUTING.md)
@@ -378,7 +378,7 @@ bot/
 │   ├── web/server.js           面板服务端（REST + SSE）
 │   └── plugin/                 插件加载、配置、依赖、子进程宿主
 ├── test/
-│   ├── selftest.mjs            框架自检（135 项）
+│   ├── selftest.mjs            框架自检（141 项）
 │   └── e2e.mjs                 端到端测试（95 项，起真实服务打接口）
 ├── web/                        面板前端（原生 JS/CSS，无构建）
 └── docs/
@@ -411,7 +411,7 @@ openid 完全不同。共享 `roles.json` 等于所有权限记录全部对不�
 ## 开发
 
 ```bash
-npm test              # 框架自检 135 项
+npm test              # 框架自检 141 项
 npm run test:e2e      # 端到端 95 项（起服务打全部接口）
 npm run test:all      # 两个都跑
 node src/main.js --mock          # 不连 QQ，命令行发假消息调插件
