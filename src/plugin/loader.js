@@ -40,6 +40,8 @@ export class PluginManager {
     this.pipeline = pipeline;
     this.isOwner = isOwner;
     this.loaded = new Map(); // id -> { meta, ctx?, host?, dir, kind, menuMissing }
+    /** 磁盘上实际存在的插件目录，含未启用的 */
+    this.diskIds = new Set();
     this.state = {}; // id -> enabled
     this.errors = new Map(); // id -> 错误信息
     this.allocations = new Map(); // id -> { base, end, index }
@@ -88,6 +90,8 @@ export class PluginManager {
     }
 
     const allIds = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+    // 记下磁盘上到底有哪些，list() 要据此显示「装了但未启用」的插件
+    this.diskIds = new Set(allIds);
     // 号段分配必须基于**全部**插件，否则不同机器人看到的等级号段会不一致
     this.allocations = allocateLevels(allIds);
 
@@ -132,6 +136,7 @@ export class PluginManager {
     }
 
     const allIds = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+    this.diskIds = new Set(allIds);
     // 号段要按全量重算，否则新插件拿不到号段
     this.allocations = allocateLevels(allIds);
 
@@ -161,7 +166,20 @@ export class PluginManager {
 
     if (added.length) log.info(`新加载插件: ${added.join('、')}`);
     if (removed.length) log.info(`插件目录已消失，已卸载: ${removed.join('、')}`);
-    return { added, removed };
+
+    /**
+     * 把加载失败的也带出去。
+     *
+     * 原来只返回 added/removed，前端看到空 added 只能提示「没有发现新插件」——
+     * 但真实情况可能是「发现了，加载失败」。两种完全不同的事，
+     * 却给用户同一句话，只能靠翻日志才知道怎么回事。
+     */
+    const errors = [];
+    for (const [id, msg] of this.errors) {
+      if (allIds.includes(id)) errors.push({ id, error: msg });
+    }
+
+    return { added, removed, errors };
   }
 
   async #detectKind(dir) {
@@ -454,7 +472,16 @@ export class PluginManager {
     return this.unload(id);
   }
 
+  /**
+   * 「启用」是**两层**共同决定的：
+   *   1. 机器人配置的过滤器（include / exclude / all）—— 决定这个机器人要不要这个插件
+   *   2. 面板上的开关（state）—— 决定装了的插件要不要跑
+   *
+   * 只看第 2 层会骗人：配置里被 include 名单排除的插件，
+   * 面板会显示「已启用」，实际根本没加载，用户点来点去都莫名其妙。
+   */
   isEnabled(id) {
+    if (this.filter && !this.filter(id)) return false;
     return this.state[id] !== false;
   }
 
@@ -657,7 +684,10 @@ export class PluginManager {
     // 只列「已加载」和「磁盘上确实存在」的。
     // 不能把 state 里的历史键也算进来——插件删了之后状态文件里还留着它的开关记录，
     // 否则面板会一直显示一个装不存在的插件，还标成「内建 · v0.0.0」。
-    const ids = new Set([...this.loaded.keys(), ...this.meta.keys()]);
+    //
+    // diskIds 是「装了但没启用」的那批（include 模式下常见），
+    // 也要列出来——否则用户在面板里根本看不到它，也就没法启用。
+    const ids = new Set([...this.loaded.keys(), ...this.meta.keys(), ...this.diskIds]);
     return [...ids].map((id) => {
       const item = this.loaded.get(id);
       const cached = this.meta.get(id) ?? null;

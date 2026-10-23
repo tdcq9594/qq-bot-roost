@@ -885,6 +885,25 @@ async function testWebhookAndStream() {
 
   // tarball：手工造 tar 验证解析与路径穿越防护
   await testTarball();
+
+  // 插件启用过滤器：面板开关和配置必须说同一件事
+  const { pluginFilterOf } = await import('../src/bot.js');
+  const fAll = pluginFilterOf({ mode: 'all', list: [] });
+  check('插件过滤: all 全放行', fAll('any') === true);
+
+  const fInc = pluginFilterOf({ mode: 'include', list: ['a'] });
+  check('插件过滤: include 只放行名单内', fInc('a') === true && fInc('b') === false);
+
+  const fExc = pluginFilterOf({ mode: 'exclude', list: ['a'] });
+  check('插件过滤: exclude 放行名单外', fExc('a') === false && fExc('b') === true);
+
+  // include + 空名单 = 一个都不启用（旧默认值就是坑在这里）
+  const fEmpty = pluginFilterOf({ mode: 'include', list: [] });
+  check('插件过滤: include+空名单等于全禁用', fEmpty('any') === false);
+
+  // 缺省值应该等价于 all，不是「全禁用」
+  const fDefault = pluginFilterOf({});
+  check('插件过滤: 缺省按 include 处理（需显式给 mode）', fDefault('any') === false);
 }
 
 /**

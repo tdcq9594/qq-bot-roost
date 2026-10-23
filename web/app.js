@@ -145,6 +145,35 @@ function renderBotMenu(keyword = '') {
   });
 }
 
+/**
+ * 把单个机器人的最新状态同步到列表和「已打开」的下拉菜单。
+ *
+ * 不整体重渲染菜单——那会让搜索框丢焦点、正在点的人被闪一下。
+ * 只改状态点和那一行文字。菜单没开就只更新数据，下次打开自然是新的。
+ */
+function syncBotListState(botId, { online, state }) {
+  if (!botId) return;
+  const b = BOTS.find((x) => x.id === botId);
+  if (b) {
+    b.online = online;
+    b.state = state;
+  }
+
+  const menu = $('#botMenu');
+  if (!menu || menu.hidden) return;
+  const el = menu.querySelector(`.bot-item[data-id="${CSS.escape(botId)}"]`);
+  if (!el) return;
+
+  const dot = el.querySelector('.bot-dot');
+  if (dot) dot.className = `bot-dot ${online ? 'on' : 'off'}`;
+
+  const sub = el.querySelector('i');
+  if (sub && b) {
+    const stateText = online ? '在线' : state === 'error' ? '连接失败' : '离线';
+    sub.textContent = `${b.id} · ${stateText} · ${b.plugins} 个插件`;
+  }
+}
+
 async function loadBots() {
   try {
     const d = await api('/api/bots');
@@ -160,10 +189,21 @@ async function loadBots() {
   }
 }
 
-function openBotMenu() {
+/**
+ * 打开机器人下拉。
+ *
+ * **每次打开都重新拉一次状态**：BOTS 是初始化时拉的快照，
+ * 那时候机器人可能还没上线（启动要 1~2 秒）。不重拉的话，
+ * 用户会看到「离线」，得手动点刷新才对——这就是之前那个 bug。
+ *
+ * 先用现有数据立刻渲染（菜单要马上出来，不能等网络），
+ * 拉到新数据后 loadBots 内部会再渲染一次。
+ */
+async function openBotMenu() {
   $('#botMenu').hidden = false;
   $('#botTrigger').setAttribute('aria-expanded', 'true');
   renderBotMenu($('#botSearch')?.value ?? '');
+  await loadBots();
   if (!$('#botSearch').hidden) $('#botSearch').focus();
 }
 
@@ -399,6 +439,9 @@ function renderStatus(s) {
   const state = s.state || (s.connected ? 'online' : 'offline');
   const online = state === 'online';
   const starting = state === 'starting';
+
+  // 把最新状态同步回机器人列表，下拉菜单里才不会显示旧状态
+  syncBotListState(s.botId, { online, state });
 
   pill.classList.toggle('online', online);
   pill.classList.toggle('offline', !online && !starting);
@@ -1171,6 +1214,10 @@ async function rescanPlugins() {
     const parts = [];
     if (r.added?.length) parts.push(`新加载：${r.added.join('、')}`);
     if (r.removed?.length) parts.push(`已卸载：${r.removed.join('、')}`);
+    // 加载失败要说出来，不然用户只会看到「没有新插件」，以为插件没放进去
+    if (r.errors?.length) {
+      parts.push('加载失败：' + r.errors.map((e) => `${e.id}（${e.error}）`).join('、'));
+    }
     const msg = parts.join('\n') || '没有发现新插件';
     await loadPlugins();
     await confirmDialog({ title: '刷新完成', message: msg, okText: '知道了' });
@@ -1357,7 +1404,11 @@ async function installFromMarket(id, btn) {
     await loadMarket();
     await confirmDialog({
       title: '安装完成',
-      message: r.added?.length ? `已加载：${r.added.join('、')}` : '插件已安装，但没能自动加载，看日志找原因',
+      message: r.added?.length
+        ? `已加载：${r.added.join('、')}`
+        : r.errors?.length
+          ? `插件已安装，但加载失败：\n${r.errors.map((e) => `${e.id}：${e.error}`).join('\n')}`
+          : '插件已安装，但没能自动加载，看日志找原因',
       okText: '知道了',
     });
   } catch (e) {

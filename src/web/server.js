@@ -21,6 +21,8 @@ import {
   applyUpdate as applyFrameworkUpdate,
   currentVersion,
 } from '../updater.js';
+// 面板改插件启停时要同步机器人配置里的过滤器，两边不能各说各的
+import { pluginFilterOf } from '../bot.js';
 
 const log = createLogger('webui');
 const WEB_ROOT = path.join(ROOT, 'web');
@@ -148,6 +150,58 @@ export async function startWebServer({
       if (hit) return hit;
     }
     return runtimes[0] ?? null;
+  };
+
+  /**
+   * 面板开关 → 同时改「配置过滤器」和「运行时开关」。
+   *
+   * 这两层原来各管各的：面板只写 state，配置里的 include/exclude 不动，
+   * 结果就是「面板显示已启用，实际根本没加载」——用户点来点去都莫名其妙。
+   *
+   * 三种模式的改法：
+   *   all     启用不用改；禁用 → 转成 exclude 并把它加进名单
+   *   include 启用 → 加进名单；禁用 → 移出名单
+   *   exclude 启用 → 移出名单；禁用 → 加进名单
+   */
+  const setPluginEnabled = async (rt, id, enabled) => {
+    const spec = rt?.cfg?.plugins ?? { mode: 'all', list: [] };
+    let mode = spec.mode ?? 'all';
+    let list = new Set(spec.list ?? []);
+    let changed = false;
+
+    if (enabled) {
+      if (mode === 'include' && !list.has(id)) {
+        list.add(id);
+        changed = true;
+      } else if (mode === 'exclude' && list.has(id)) {
+        list.delete(id);
+        changed = true;
+      }
+    } else if (mode === 'include' && list.has(id)) {
+      list.delete(id);
+      changed = true;
+    } else if (mode === 'exclude' && !list.has(id)) {
+      list.add(id);
+      changed = true;
+    } else if (mode === 'all') {
+      // all 模式下禁用单个插件，只能转成「排除名单」
+      mode = 'exclude';
+      list = new Set([id]);
+      changed = true;
+    }
+
+    if (changed) {
+      rt.cfg.plugins = { ...spec, mode, list: [...list] };
+      // filter 是内存里的，不同步的话这次操作不生效
+      rt.plugins.filter = pluginFilterOf(rt.cfg.plugins);
+      try {
+        await saveBotConfig(rt.id, rt.cfg);
+      } catch (e) {
+        log.warn(`保存插件启用配置失败：${e.message}`);
+      }
+    }
+
+    return rt.plugins.setEnabled(id, enabled);
   };
 
   const statusPayload = (rt) =>
@@ -606,8 +660,8 @@ export async function startWebServer({
         if (m && req.method === 'POST') {
           const [, id, action] = m;
           let ok = false;
-          if (action === 'enable') ok = await plugins.setEnabled(id, true);
-          else if (action === 'disable') ok = await plugins.setEnabled(id, false);
+          if (action === 'enable') ok = await setPluginEnabled(rt, id, true);
+          else if (action === 'disable') ok = await setPluginEnabled(rt, id, false);
           else ok = await plugins.reload(id);
           return json(res, ok ? 200 : 500, { ok, error: ok ? undefined : '操作失败，看日志' });
         }
@@ -674,6 +728,15 @@ export async function startWebServer({
               branch: idx.branch || 'main',
               exists: (pid) => plugins.loaded.has(pid),
             });
+
+            /**
+             * 装完必须确保它在启用名单里。
+             *
+             * include 模式下 filter 只认名单内的，新装的插件不在名单里就永远不加载。
+             * 这一步要在 rescan **之前**做，否则 rescan 还是把它过滤掉。
+             */
+            await setPluginEnabled(rt, r.id, true);
+
             // 装完立刻扫一遍，用户不用重启
             const scanned = await plugins.rescan();
             return json(res, 200, { ok: true, id: r.id, ...scanned });

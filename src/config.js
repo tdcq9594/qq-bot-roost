@@ -154,10 +154,18 @@ const BOT_DEFAULTS = {
    *   all     — 全部启用，新装插件自动生效
    *   include — 只启用 list 里的
    *   exclude — 除了 list 里的都启用
-   * 默认 include：新机器人默认不启用任何插件，避免误触发。
+   *
+   * 默认 all：**装了就用**。
+   *
+   * 早先的默认是 `include` + 空 list（想「避免误触发」），结果是灾难：
+   * 用户从市场装了插件 → 不在名单里 → 不加载 → 面板只列已加载的 →
+   * 用户看不到这个插件、也没法启用 → 永远「装了不生效」。
+   * 装插件本来就是为了用，默认启用才符合直觉。
+   *
+   * 需要精细控制（比如某个机器人不跑某几个插件）的，自己改成 include 或 exclude。
    */
   plugins: {
-    mode: 'include',
+    mode: 'all',
     list: [],
     /**
      * 启动时自动更新有新版的内邀/公开插件。默认 false：
@@ -304,6 +312,25 @@ export async function loadBotConfig(id) {
       .map((s) => s.trim())
       .filter(Boolean);
   }
+
+  /**
+   * 纠正旧默认值。
+   *
+   * 0.5.4 之前 BOT_DEFAULTS 是 `mode:'include' + list:[]`，字面意思「一个都不启用」。
+   * 结果是用户从市场装了插件也永远不加载，而面板只列已加载的插件，
+   * 用户既看不到它、也没法启用——死循环。
+   *
+   * 只在内存里纠正，**不改用户文件**。用户真想全禁用就自己把 mode 设成 exclude。
+   */
+  if (cfg.plugins?.mode === 'include' && !cfg.plugins.list?.length) {
+    cfg.plugins.mode = 'all';
+    // 这里不能用 logger：logger 依赖 config，会成环。控制台提示够用了。
+    console.warn(
+      `[提示] 机器人 ${id} 的插件模式是 include 但名单为空（等于全禁用），` +
+        `已按 all 处理。想恢复精细控制请编辑 config/bots/${id}.json`,
+    );
+  }
+
   return cfg;
 }
 
