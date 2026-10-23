@@ -36,11 +36,14 @@ dsh plugin --profile desktop add /path/to/qq-bot-roost/integrations/dsh-roost
 
 ### 方式二：从 GitHub
 
-```bash
-dsh plugin --profile desktop add github:tdcq9594/qq-bot-roost#path:/integrations/dsh-roost
-```
+**目前装不了。**
 
-> 如果上面的 `#path:` 语法你的 pnpm 版本不支持，用方式一或方式三。
+`dsh plugin add github:...` 会把整个仓库当成一个插件包，但插件的
+`package.json` 在 `integrations/dsh-roost/` 子目录里，而 pnpm 的 git
+依赖没有可靠的「指定子目录」语法。
+
+要支持这种方式，得把插件拆成独立仓库（`tdcq9594/dsh-roost`）。
+在那之前用方式一。
 
 ### 方式三：从 npm（发布后可用）
 

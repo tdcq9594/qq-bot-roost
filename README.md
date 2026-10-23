@@ -408,6 +408,7 @@ openid 完全不同。共享 `roles.json` 等于所有权限记录全部对不�
 | [常见问题](docs/常见问题.md) | 收不到消息、发不出去、面板打不开、数据在哪 |
 | [事件与接口清单](docs/事件与接口清单.md) | 官方 43 个事件、72 个接口的覆盖审计 |
 | [架构说明](docs/架构说明.md) | 进程模型、数据隔离、事件流、插件加载、面板多机器人实现 |
+| [DSH 接入指南](docs/DSH接入.md) | 装进 DeepSeek Harness，用 AI 管机器人：安装、配置、验证、排查 |
 | [同类项目调研](docs/GitHub同类项目调研.md) | 与 AstrBot / NoneBot2 / Koishi / ZeroBot 的对比 |
 
 ---
@@ -530,10 +531,10 @@ mock 模式下：直接输入文本 = 模拟一条群 @ 消息；`!as <openid>` 
 Roost 是常驻服务，DSH 一关机器人不能跟着掉线。
 
 ```bash
-dsh plugin --profile desktop add /path/to/qq-bot-roost/integrations/dsh-roost
+npx @deepseek-ai/dsh plugin --profile desktop add "/绝对路径/qq-bot-roost/integrations/dsh-roost"
 ```
 
 六个工具：`roost_status` `roost_plugins` `roost_logs`（只读）、
 `roost_plugin_toggle` `roost_send` `roost_reconnect`（写操作）。
 
-详见 [integrations/dsh-roost/README.md](integrations/dsh-roost/README.md)。
+完整步骤、配置、排查见 **[DSH 接入指南](docs/DSH接入.md)**。
