@@ -862,10 +862,14 @@ async function loadPlugins() {
   const wrap = $('#pluginList');
   try {
     // 运行数据单独一个接口，拿不到不影响列表显示
-    const [list, dash] = await Promise.all([
+    const [list, dash, upd] = await Promise.all([
       api('/api/plugins'),
       api('/api/plugins/dashboard').catch(() => ({})),
+      api('/api/plugins/updates').catch(() => ({ updates: [] })),
     ]);
+    const updMap = {};
+    for (const u of upd.updates || []) updMap[u.id] = u;
+
     if (!list.length) {
       wrap.innerHTML = '<div class="empty">还没有插件，把文件夹放进 plugins/ 即可</div>';
       return;
@@ -883,10 +887,14 @@ async function loadPlugins() {
         )
         .join('');
 
+      const u = updMap[p.id];
+
       return `
       <div class="plugin" data-id="${escapeHtml(p.id)}">
         <div class="info">
-          <div class="name">${escapeHtml(p.name || p.id)} <span class="hint">v${escapeHtml(p.version || '0.0.0')}</span></div>
+          <div class="name">${escapeHtml(p.name || p.id)} <span class="hint">v${escapeHtml(p.version || '0.0.0')}</span>
+            ${u ? `<span class="upd-tag">可更新 ${escapeHtml(u.latest)}</span>` : ''}
+          </div>
           <div class="meta">
             ${escapeHtml(p.id)}
             <span class="kind-tag ${p.kind === 'external' ? 'ext' : 'int'}">
@@ -902,6 +910,7 @@ async function loadPlugins() {
         <span class="badge ${p.loaded ? 'on' : p.enabled ? '' : 'off'}">
           ${p.loaded ? '运行中' : p.enabled ? '未加载' : '已禁用'}
         </span>
+        ${u ? `<button class="btn small primary" data-update-one="${escapeHtml(p.id)}">更新</button>` : ''}
         <button class="btn small" data-act="${p.enabled ? 'disable' : 'enable'}">
           ${p.enabled ? '禁用' : '启用'}
         </button>
@@ -909,6 +918,18 @@ async function loadPlugins() {
         <button class="btn small" data-act="panel">设置</button>
       </div>`;
     }).join('');
+
+    // 顶部提示：有几个可更新
+    const n = (upd.updates || []).length;
+    const tip = $('#pluginUpdateTip');
+    if (tip) {
+      tip.innerHTML = n
+        ? `<b>${n} 个插件有新版本</b>，去「插件市场」一键更新。` +
+          `<a href="javascript:void(0)" id="lnkUpdateAll">全部更新</a>`
+        : '';
+      const lnk = $('#lnkUpdateAll');
+      if (lnk) lnk.addEventListener('click', () => updateAllFromMarket());
+    }
 
     wrap.querySelectorAll('button[data-act]').forEach((btn) => {
       btn.addEventListener('click', async () => {
@@ -927,6 +948,11 @@ async function loadPlugins() {
           btn.disabled = false;
         }
       });
+    });
+
+    // 单个插件的「更新」按钮
+    wrap.querySelectorAll('[data-update-one]').forEach((btn) => {
+      btn.addEventListener('click', () => updateFromMarket(btn.dataset.updateOne, btn));
     });
   } catch (e) {
     wrap.innerHTML = `<div class="empty">加载失败: ${e.message}</div>`;
@@ -1036,13 +1062,19 @@ async function loadMarket() {
     return;
   }
 
+  const upd = {};
+  for (const u of d.updates || []) upd[u.id] = u;
+
   list.innerHTML = d.plugins
     .map(
-      (p) => `
+      (p) => {
+        const u = upd[p.id];
+        return `
       <div class="plugin">
         <div class="info">
           <div class="name">${escapeHtml(p.name || p.id)}
             <span class="hint">v${escapeHtml(p.version || '0.0.0')}</span>
+            ${u ? `<span class="upd-tag">可更新 ${escapeHtml(u.current)} → ${escapeHtml(u.latest)}</span>` : ''}
           </div>
           <div class="meta">
             ${escapeHtml(p.id)}
@@ -1050,22 +1082,113 @@ async function loadMarket() {
               ${p.runtime === 'node' ? '内建 · node' : '外部 · ' + escapeHtml(p.runtime || '')}
             </span>
             ${p.author ? `<span class="hint">by ${escapeHtml(p.author)}</span>` : ''}
+            ${p.credits ? `<span class="hint">${escapeHtml(p.credits)}</span>` : ''}
             ${p.description ? '<br>' + escapeHtml(p.description) : ''}
             ${(p.tags || []).length ? '<br><span class="hint">' + p.tags.map(escapeHtml).join(' / ') + '</span>' : ''}
+            ${u ? `<br><span class="hint">本地版本 v${escapeHtml(u.current)}</span>` : ''}
           </div>
         </div>
         ${
-          p.installed
-            ? '<span class="badge on">已安装</span>'
-            : `<button class="btn small primary" data-install="${escapeHtml(p.id)}">安装</button>`
+          u
+            ? `<button class="btn small primary" data-update="${escapeHtml(p.id)}">更新到 ${escapeHtml(u.latest)}</button>`
+            : p.installed
+              ? '<span class="badge on">已安装</span>'
+              : `<button class="btn small primary" data-install="${escapeHtml(p.id)}">安装</button>`
         }
-      </div>`,
+      </div>`;
+      },
     )
     .join('');
 
   $$('[data-install]').forEach((b) => {
     b.addEventListener('click', () => installFromMarket(b.dataset.install, b));
   });
+  $$('[data-update]').forEach((b) => {
+    b.addEventListener('click', () => updateFromMarket(b.dataset.update, b));
+  });
+}
+
+/** 一键更新全部有新版 的插件 */
+async function updateAllFromMarket() {
+  let count = 0;
+  let names = '';
+  try {
+    const d = await api('/api/plugins/updates?force=1');
+    count = (d.updates || []).length;
+    names = (d.updates || []).map((u) => `${u.name || u.id} ${u.current}→${u.latest}`).join('\n');
+  } catch {
+    /* 拿不到详情就用通用文案 */
+  }
+  if (!count) {
+    alert('没有可更新的插件');
+    return;
+  }
+
+  const ok = await confirmDialog({
+    title: `更新 ${count} 个插件`,
+    message:
+      `以下插件会被覆盖更新：\n\n${escapeHtml(names)}\n\n` +
+      '<b>插件目录会被整体覆盖</b>——手动改过的代码会丢失。' +
+      '玩家存档在 <code>data/</code> 下，不受影响。\n\n' +
+      '更新后会自动重载。',
+    okText: '全部更新',
+  });
+  if (!ok) return;
+
+  try {
+    const r = await api('/api/market/update-all', { method: 'POST', body: '{}' });
+    const lines = [`更新完成：成功 ${r.updated?.length ?? 0} 个`];
+    if (r.skipped?.length) lines.push(`跳过 ${r.skipped.length} 个（已是最新或未安装）`);
+    if (r.failed?.length) {
+      lines.push(`失败 ${r.failed.length} 个：`);
+      for (const f of r.failed) lines.push(`  · ${f.id}：${f.error}`);
+    }
+    alert(lines.join('\n'));
+    await loadPlugins();
+    if (!$('#marketBox').hidden) await loadMarket();
+  } catch (e) {
+    alert('更新失败: ' + e.message);
+  }
+}
+
+/** 更新插件。会覆盖本地目录，必须先跟用户说清楚 */
+async function updateFromMarket(id, btn) {
+  let info = null;
+  try {
+    const d = await api('/api/plugins/updates?force=1');
+    info = (d.updates || []).find((u) => u.id === id) || null;
+  } catch {
+    /* 拿不到详情就用通用文案 */
+  }
+
+  const ok = await confirmDialog({
+    title: `更新插件「${info?.name || id}」`,
+    message:
+      `将把 <b>${escapeHtml(id)}</b> 从 ` +
+      `<b>v${escapeHtml(info?.current || '?')}</b> 更新到 <b>v${escapeHtml(info?.latest || '?')}</b>。<br><br>` +
+      '<b>插件目录会被整体覆盖</b>——如果你手动改过这个插件的代码，改动会丢失。' +
+      '玩家存档在 <code>data/</code> 下，不受影响。<br><br>' +
+      '更新后会自动重载插件。',
+    okText: '确认更新',
+  });
+  if (!ok) return;
+
+  btn.disabled = true;
+  btn.textContent = '更新中…';
+  try {
+    const r = await api('/api/market/update', {
+      method: 'POST',
+      body: JSON.stringify({ id }),
+    });
+    btn.textContent = '已更新';
+    await loadMarket();
+    await loadPlugins();
+    if (r.error) alert(r.error);
+  } catch (e) {
+    alert('更新失败: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = '重试';
+  }
 }
 
 async function installFromMarket(id, btn) {

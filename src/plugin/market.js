@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
 import { createLogger } from '../logger.js';
 
@@ -128,4 +129,206 @@ export function mergeWithInstalled(indexPlugins, installedIds) {
     ...p,
     installed: installedIds.has(p.id),
   }));
+}
+
+/* ------------------------------------------------------------------ */
+/* 版本比较与更新检测                                                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 比较两个语义化版本号。
+ * 只认 `主.次.修订[-预发行]`，其余部分忽略，不抛错——插件作者版本号写歪了
+ * 不该让整个市场挂掉。
+ *
+ * @returns {number} 1 表示 a 更新，-1 表示 b 更新，0 表示相等
+ */
+export function compareVersion(a, b) {
+  const parse = (v) => {
+    const m = String(v ?? '').match(/^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/);
+    if (!m) return null;
+    return {
+      nums: [Number(m[1]), Number(m[2]), Number(m[3])],
+      pre: m[4] ?? '',
+    };
+  };
+
+  const pa = parse(a);
+  const pb = parse(b);
+  // 有一边解析不了就当作相等，交给人工判断，不擅自提示更新
+  if (!pa || !pb) return 0;
+
+  for (let i = 0; i < 3; i++) {
+    if (pa.nums[i] !== pb.nums[i]) return pa.nums[i] > pb.nums[i] ? 1 : -1;
+  }
+  // 预发行版本低于正式版：1.0.0-beta < 1.0.0
+  if (pa.pre === pb.pre) return 0;
+  if (!pa.pre) return 1;
+  if (!pb.pre) return -1;
+  return pa.pre > pb.pre ? 1 : -1;
+}
+
+/**
+ * 对照市场索引，找出本地有新版可用的插件。
+ *
+ * @param {object[]} indexPlugins 市场索引
+ * @param {Object<string,string>} localVersions 本地已装插件的版本 { id: version }
+ * @returns {Array<{id:string, current:string, latest:string, entry:object}>}
+ */
+export function detectUpdates(indexPlugins, localVersions = {}) {
+  const out = [];
+  for (const entry of indexPlugins ?? []) {
+    const cur = localVersions[entry.id];
+    // 没装、或本地版本号缺失/不合法 → 不提示，让用户自己决定
+    if (!cur) continue;
+    if (compareVersion(cur, entry.version) < 0) {
+      out.push({ id: entry.id, current: cur, latest: entry.version, entry });
+    }
+  }
+  return out;
+}
+
+/**
+ * 同步插件仓库：拉一次索引 + clone 一次源码，拿到所有插件的本地副本。
+ *
+ * 为什么不是每个插件单独 clone：N 个插件要更新就是 N 次完整 clone，
+ * 每次几十秒。参考 BetterGI 的 ScriptRepoUpdater——先拉中央仓库，
+ * 再从里面逐个检出。调用方用完必须调 `cleanupRepo()`。
+ *
+ * @returns {Promise<{tmp:string, index:object}>}
+ */
+export async function syncRepo({ repo, branch = 'main', indexUrl } = {}) {
+  const index = await fetchIndex(indexUrl);
+  if (!repo) repo = index.repo;
+  if (!repo) throw new Error('索引里缺少 repo 字段，无法同步');
+
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'roost-repo-'));
+  try {
+    await run(
+      'git',
+      ['clone', '--depth', '1', '--branch', branch, `https://github.com/${repo}.git`, tmp],
+      { timeoutMs: 180000 },
+    );
+  } catch (e) {
+    await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
+    throw e;
+  }
+  return { tmp, index };
+}
+
+/** 删掉 syncRepo 拉下来的临时目录 */
+export async function cleanupRepo(tmp) {
+  if (tmp) await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
+}
+
+/** 校验仓库里的某个目录确实是插件，返回其绝对路径 */
+async function resolvePluginDir(tmp, entry) {
+  if (!entry?.path) throw new Error('索引里缺少 path 字段');
+  const resolved = path.resolve(path.join(tmp, entry.path));
+  // 防路径穿越：解析后必须仍在 clone 目录内
+  if (!resolved.startsWith(path.resolve(tmp) + path.sep)) {
+    throw new Error('索引里的 path 指向了仓库外部，已拒绝');
+  }
+  const stat = await fs.stat(resolved).catch(() => null);
+  if (!stat?.isDirectory()) throw new Error(`仓库里找不到目录 ${entry.path}`);
+  const files = await fs.readdir(resolved);
+  if (!files.includes('index.js') && !files.includes('plugin.json')) {
+    throw new Error('这个目录既没有 index.js 也没有 plugin.json，不是合法插件');
+  }
+  return resolved;
+}
+
+/**
+ * 从已同步的仓库里更新一批插件。
+ *
+ * 每个插件都是「先备份到临时目录 → 复制新的 → 失败则还原」，
+ * 单个插件失败不影响其他插件。备份放在调用方传入的 tmp 里，
+ * 不放在 plugins/ 旁边——否则会被 loader 扫成幽灵插件。
+ *
+ * @param {object} p
+ * @param {string} p.tmp        syncRepo 返回的临时目录
+ * @param {object} p.index      syncRepo 返回的索引
+ * @param {string} p.pluginsDir 目标插件目录
+ * @param {string[]} [p.ids]    只更新这些；不传则更新全部「有新版」的
+ * @param {Object<string,string>} [p.localVersions] 本地版本，用于判断谁有新版
+ * @returns {Promise<{updated:Array, skipped:Array, failed:Array}>}
+ */
+export async function updatePlugins({ tmp, index, pluginsDir, ids, localVersions = {} }) {
+  const want = ids?.length ? new Set(ids) : null;
+  const result = { updated: [], skipped: [], failed: [] };
+
+  for (const entry of index.plugins ?? []) {
+    if (want && !want.has(entry.id)) continue;
+
+    const dest = path.join(pluginsDir, entry.id);
+    const cur = localVersions[entry.id];
+
+    // 本地没装 → 不是更新，跳过（要走 install）
+    if (!cur) {
+      result.skipped.push({ id: entry.id, reason: '本地未安装' });
+      continue;
+    }
+    // 没有新版 → 跳过
+    if (compareVersion(cur, entry.version) >= 0) {
+      result.skipped.push({ id: entry.id, reason: `已是最新 ${cur}` });
+      continue;
+    }
+
+    const backup = path.join(tmp, `bak-${entry.id}`);
+    try {
+      const src = await resolvePluginDir(tmp, entry);
+      const hadOld = await fs.stat(dest).catch(() => null);
+      if (hadOld) await fs.rename(dest, backup);
+
+      try {
+        await fs.cp(src, dest, { recursive: true });
+      } catch (e) {
+        // 复制失败：把旧的放回去，别让用户丢插件
+        await fs.rm(dest, { recursive: true, force: true }).catch(() => {});
+        await fs.rename(backup, dest).catch(() => {});
+        throw new Error(`复制失败，已还原：${e.message}`);
+      }
+
+      result.updated.push({ id: entry.id, from: cur, to: entry.version });
+      log.info(`插件 ${entry.id} 已更新 ${cur} → ${entry.version}`);
+    } catch (e) {
+      result.failed.push({ id: entry.id, error: e.message });
+      log.warn(`插件 ${entry.id} 更新失败: ${e.message}`);
+    }
+  }
+
+  // 明确要更新但市场里没有的，也报告出来
+  if (want) {
+    const inIndex = new Set((index.plugins ?? []).map((p) => p.id));
+    for (const id of want) {
+      if (!inIndex.has(id)) result.failed.push({ id, error: '市场里没有这个插件' });
+    }
+  }
+
+  return result;
+}
+
+/** 读本地插件目录里声明的版本号，读不到返回空串 */
+export async function readPluginVersion(dir) {
+  // 内建插件：import 模块拿 default 导出（只 import 不执行 setup）
+  for (const f of ['index.js', 'index.mjs', 'main.js']) {
+    const p = path.join(dir, f);
+    if (await fs.access(p).then(() => true, () => false)) {
+      try {
+        const mod = await import(`${pathToFileURL(p).href}?v=${Date.now()}`);
+        const meta = mod.default ?? mod.plugin;
+        if (meta?.version) return String(meta.version);
+      } catch {
+        /* 读不出来就算了，用 plugin.json 兜底 */
+      }
+      break;
+    }
+  }
+  // 外部插件：读 plugin.json
+  try {
+    const raw = JSON.parse(await fs.readFile(path.join(dir, 'plugin.json'), 'utf8'));
+    if (raw?.version) return String(raw.version);
+  } catch {
+    /* 没有就不是外部插件 */
+  }
+  return '';
 }

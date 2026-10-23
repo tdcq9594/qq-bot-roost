@@ -19,6 +19,8 @@ export class QQApi {
     this.seqMap = new Map();
     // 群管内邀开关，由 BotRuntime 按配置同步；默认关
     this.groupInvited = false;
+    // 群角色查询缓存：groupOpenid -> { at, value }。bot_state 只有 30 QPM
+    this.roleCache = new Map();
   }
 
   async #request(method, path, body, { retried = false, headers } = {}) {
@@ -183,6 +185,8 @@ export class QQApi {
    */
   setGroupInvited(v) {
     this.groupInvited = Boolean(v);
+    // 角色缓存可能存着「查不到」的结果，开关切换后要重新试
+    this.roleCache.clear();
     return this.groupInvited;
   }
 
@@ -197,19 +201,40 @@ export class QQApi {
   }
 
   /**
+   * 群管操作前的身份预检。
+   *
+   * 禁言、踢人、入群审批都要求机器人是群管理员，服务端不满足就返回 40062003。
+   * 这里先查一次 bot_state（带 60 秒缓存），确认不是管理员就直接抛友好错误，
+   * 省得插件每次自己 try/catch 猜原因。
+   *
+   * 查不到角色时（内邀没开、网络失败）**不拦截**——照样发请求让服务端判。
+   * 想跳过预检传 `{ precheck: false }`。
+   */
+  async #precheckAdmin(groupOpenid, opts) {
+    if (opts?.precheck === false) return;
+    const st = await this.canManageGroup(groupOpenid);
+    // 只有「确认不是管理员」才拦；查不到就放行
+    if (st.role && !st.ok) {
+      throw new Error(`机器人在这个群没有管理权限：${st.reason}`);
+    }
+  }
+
+  /**
    * 设置群成员禁言（公开接口，无需内邀）。
    * POST /v2/groups/{group_openid}/restrict_chat_setting
    *
    * 官方约束：
-   *   - 机器人必须是群管理员，否则 40062003
+   *   - 机器人必须是群管理员，否则 40062003（默认会先用 canManageGroup 预检）
    *   - 最长 30 天；到期时间 RFC3339，如 2026-08-05T11:23:05+08:00
    *   - 单次最多 20 个成员
    *   - 只能操作普通成员，群主 / 管理员 / 机器人都不能动
    *
    * @param {string} groupOpenid
    * @param {Array<{op:'add'|'update'|'del', member_openid:string, mute_expire_at?:string}>} members
+   * @param {{precheck?:boolean}} [opts]
    */
-  muteMembers(groupOpenid, members) {
+  async muteMembers(groupOpenid, members, opts) {
+    await this.#precheckAdmin(groupOpenid, opts);
     return this.#request('POST', `/v2/groups/${groupOpenid}/restrict_chat_setting`, { members });
   }
 
@@ -217,10 +242,18 @@ export class QQApi {
    * 禁言单个成员到某个时间。muteExpireAt 传 null / 空串表示立即解除。
    * 内部仍走 muteMembers，只是把 op 和到期时间填好。
    */
-  muteMember(groupOpenid, memberOpenid, muteExpireAt) {
-    return this.muteMembers(groupOpenid, [
-      { op: muteExpireAt ? 'add' : 'del', member_openid: memberOpenid, mute_expire_at: muteExpireAt ?? '' },
-    ]);
+  muteMember(groupOpenid, memberOpenid, muteExpireAt, opts) {
+    return this.muteMembers(
+      groupOpenid,
+      [
+        {
+          op: muteExpireAt ? 'add' : 'del',
+          member_openid: memberOpenid,
+          mute_expire_at: muteExpireAt ?? '',
+        },
+      ],
+      opts,
+    );
   }
 
   /**
@@ -240,11 +273,62 @@ export class QQApi {
   }
 
   /**
-   * 获取机器人在群内的状态（公开接口）。
+   * 获取机器人在群内的状态（**内邀**接口）。
    * GET /v2/groups/{group_openid}/bot_state
+   *
+   * 返回里最有用的是 `member_role`：`member` 普通成员 / `owner` 群主 / `admin` 管理员。
+   * 禁言、踢人、入群审批都要求机器人是 admin 或 owner，所以调用群管接口前
+   * 可以用它预检，省得撞 `40062003`。
+   *
+   * 注意：这个接口官方标注「仅白名单机器人可用」（11253），
+   * 没申请内邀的机器人调不了，只能靠错误码反推。
    */
   getBotGroupState(groupOpenid) {
+    this.#needInvite();
     return this.#request('GET', `/v2/groups/${groupOpenid}/bot_state`);
+  }
+
+  /**
+   * 机器人在这个群里是不是管理员（群主或群管理员）。
+   *
+   * 内部走 `getBotGroupState`，带 60 秒缓存——那个接口只有 30 QPM，
+   * 每次群管操作都查一遍会烧额度。
+   *
+   * @returns {Promise<{ok:boolean, role:string|null, reason:string}>}
+   *   ok=true 表示可以群管；role 是 member/owner/admin；
+   *   查不到（内邀没开、网络失败）时 role=null，reason 说明为什么
+   */
+  async canManageGroup(groupOpenid, { maxAgeMs = 60000 } = {}) {
+    const key = String(groupOpenid || '');
+    if (!key) return { ok: false, role: null, reason: '缺少群 openid' };
+
+    const hit = this.roleCache.get(key);
+    if (hit && Date.now() - hit.at < maxAgeMs) return hit.value;
+
+    let value;
+    try {
+      const st = await this.getBotGroupState(key);
+      const role = String(st?.member_role ?? '');
+      if (role === 'owner' || role === 'admin') {
+        value = { ok: true, role, reason: role === 'owner' ? '机器人是群主' : '机器人是群管理员' };
+      } else if (role === 'member') {
+        value = { ok: false, role, reason: '机器人只是普通成员，没有群管权限' };
+      } else {
+        value = { ok: false, role: null, reason: `无法识别机器人角色（返回 ${role || '空'}）` };
+      }
+    } catch (e) {
+      // 最常见的是内邀没开（11253）——这时候没法预检，让调用方自己决定
+      value = { ok: false, role: null, reason: `查不到机器人角色：${e.message}` };
+    }
+
+    // 失败结果也缓存，避免每次调用都去撞一次 11253
+    this.roleCache.set(key, { at: Date.now(), value });
+    return value;
+  }
+
+  /** 清掉角色缓存（内邀开关切换后调用，避免还用着旧的失败结果） */
+  clearRoleCache() {
+    this.roleCache.clear();
   }
 
   /**
@@ -275,16 +359,13 @@ export class QQApi {
    * POST /v2/groups/{group_openid}/batch_remove_members
    * 单次最多 20 个；isRobotBlacklist=true 会同时拉黑。
    */
-  removeMembers(groupOpenid, memberOpenids, { addToBlacklist = false } = {}) {
+  async removeMembers(groupOpenid, memberOpenids, { addToBlacklist = false, precheck } = {}) {
     this.#needInvite();
-    return this.#request(
-      'POST',
-      `/v2/groups/${groupOpenid}/batch_remove_members`,
-      {
-        member_openids: memberOpenids,
-        is_robot_blacklist: Boolean(addToBlacklist),
-      },
-    );
+    await this.#precheckAdmin(groupOpenid, { precheck });
+    return this.#request('POST', `/v2/groups/${groupOpenid}/batch_remove_members`, {
+      member_openids: memberOpenids,
+      is_robot_blacklist: Boolean(addToBlacklist),
+    });
   }
 
   /**
@@ -335,7 +416,8 @@ export class QQApi {
    * @param {string} memberOpenid 申请人
    * @param {{op:'approve'|'decline', joinRequestId?:string, rejectReason?:string, addToBlacklist?:boolean}} body
    */
-  handleJoinRequest(groupOpenid, memberOpenid, body = {}) {
+  async handleJoinRequest(groupOpenid, memberOpenid, body = {}) {
+    await this.#precheckAdmin(groupOpenid, body);
     const payload = { op: body.op };
     if (body.joinRequestId) payload.join_request_id = body.joinRequestId;
     if (body.rejectReason) payload.reject_reason = body.rejectReason;
@@ -348,17 +430,18 @@ export class QQApi {
   }
 
   /** 通过入群申请 */
-  approveJoinRequest(groupOpenid, memberOpenid, joinRequestId) {
-    return this.handleJoinRequest(groupOpenid, memberOpenid, { op: 'approve', joinRequestId });
+  approveJoinRequest(groupOpenid, memberOpenid, joinRequestId, opts) {
+    return this.handleJoinRequest(groupOpenid, memberOpenid, { op: 'approve', joinRequestId, ...opts });
   }
 
   /** 拒绝入群申请，可同时拉黑 */
-  declineJoinRequest(groupOpenid, memberOpenid, { joinRequestId, rejectReason, addToBlacklist } = {}) {
+  declineJoinRequest(groupOpenid, memberOpenid, { joinRequestId, rejectReason, addToBlacklist, ...opts } = {}) {
     return this.handleJoinRequest(groupOpenid, memberOpenid, {
       op: 'decline',
       joinRequestId,
       rejectReason,
       addToBlacklist,
+      ...opts,
     });
   }
 

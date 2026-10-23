@@ -589,7 +589,26 @@ function createMockApi(botName) {
       return { mute_list: [] };
     },
     getGroupInfo: async (g) => ({ group_openid: g, name: 'mock群', owner_openid: 'mock' }),
-    getBotGroupState: async (g) => ({ group_openid: g, is_admin: true }),
+    // bot_state 是内邀接口，mock 同样走闸门；返回字段按官方文档来
+    getBotGroupState: async (g) => {
+      if (!mockGroupInvited) throw new Error('群管内邀功能未开启');
+      console.log(`\n→ [${botName}] [机器人群内状态 ${g}]`);
+      return {
+        member_openid: 'mock-bot',
+        joined_at: new Date().toISOString(),
+        allow_proactive_msg: true,
+        recv_msg_setting: 'all',
+        member_role: 'admin', // mock 下默认当成群管理员，方便验证群管流程
+      };
+    },
+    canManageGroup: async (g) => {
+      if (!mockGroupInvited) {
+        // 没开内邀就查不到角色：不拦截，让服务端去判
+        return { ok: false, role: null, reason: '群管内邀功能未开启，无法预检' };
+      }
+      return { ok: true, role: 'admin', reason: '机器人是群管理员' };
+    },
+    clearRoleCache: () => {},
     getGroupMembers: async (g) => {
       if (!mockGroupInvited) throw new Error('群管内邀功能未开启');
       return { members: [], next_index: 0 };

@@ -684,7 +684,6 @@ async function testGroupManage() {
     ['muteMembers', () => api.muteMembers('g', [])],
     ['getMuteStatus', () => api.getMuteStatus('g')],
     ['getGroupInfo', () => api.getGroupInfo('g')],
-    ['getBotGroupState', () => api.getBotGroupState('g')],
   ]) {
     try {
       await fn();
@@ -694,6 +693,10 @@ async function testGroupManage() {
     }
   }
 
+  // bot_state 是**内邀**接口（官方文档标注 11253 仅白名单机器人可用），
+  // 早期版本把它归类成公开是错的，这里锁住正确行为
+  await expectThrow('群管: getBotGroupState 默认拒绝', () => api.getBotGroupState('g'));
+
   // 配置默认值：invited 必须是 false
   const { loadBotConfig } = await import('../src/config.js');
   const cfg = await loadBotConfig('main').catch(() => null);
@@ -701,10 +704,62 @@ async function testGroupManage() {
     check('群管: 配置默认 invited=false', cfg.groupManage?.invited === false);
   }
 
+  // 群管预检：查不到角色时不拦截，确认不是管理员才拦
+  api.setGroupInvited(false);
+  // 没开内邀 → canManageGroup 返回 role=null → 不该拦住禁言请求
+  const st1 = await api.canManageGroup('g1');
+  check('群管: 内邀未开时查不到角色', st1.role === null && st1.ok === false);
+  try {
+    await api.muteMembers('g1', []);
+    check('群管: 查不到角色不拦截禁言', false, '居然没报错');
+  } catch (e) {
+    check('群管: 查不到角色不拦截禁言', !/没有管理权限/.test(e.message), e.message.slice(0, 40));
+  }
+
+  // 开了内邀 + 假造一个「只是普通成员」的响应 → 应该被友好地拦下来
+  api.setGroupInvited(true);
+  api.roleCache.clear();
+  const realState = api.getBotGroupState.bind(api);
+  api.getBotGroupState = async () => ({ member_role: 'member' });
+  const st2 = await api.canManageGroup('g2');
+  check('群管: 普通成员被识别为无权', st2.ok === false && st2.role === 'member');
+  try {
+    await api.muteMembers('g2', []);
+    check('群管: 普通成员禁言被预检拦下', false, '居然没报错');
+  } catch (e) {
+    check('群管: 普通成员禁言被预检拦下', /没有管理权限/.test(e.message), e.message.slice(0, 50));
+  }
+  // 踢人和入群审批同样要拦
+  for (const [name, fn] of [
+    ['removeMembers', () => api.removeMembers('g2', ['u'])],
+    ['approveJoinRequest', () => api.approveJoinRequest('g2', 'u', 'rid')],
+  ]) {
+    try {
+      await fn();
+      check(`群管: ${name} 普通成员被拦`, false, '居然没报错');
+    } catch (e) {
+      check(`群管: ${name} 普通成员被拦`, /没有管理权限/.test(e.message));
+    }
+  }
+  // precheck:false 可以跳过
+  try {
+    await api.muteMembers('g2', [], { precheck: false });
+    check('群管: precheck:false 跳过预检', false, '居然没报错');
+  } catch (e) {
+    check('群管: precheck:false 跳过预检', !/没有管理权限/.test(e.message), e.message.slice(0, 40));
+  }
+
+  // 群主/管理员要放行
+  api.getBotGroupState = async () => ({ member_role: 'owner' });
+  api.roleCache.clear();
+  const st3 = await api.canManageGroup('g3');
+  check('群管: 群主识别为有权', st3.ok === true && st3.role === 'owner');
+  api.getBotGroupState = realState;
+  api.roleCache.clear();
+
   // 入群申请 / 自动审批是公开接口，不该被内邀闸门挡着
   api.setGroupInvited(false);
   const joinApis = [
-    ['getJoinRequests', () => api.getJoinRequests('g')],
     ['approveJoinRequest', () => api.approveJoinRequest('g', 'u', 'rid')],
     ['declineJoinRequest', () => api.declineJoinRequest('g', 'u', {})],
     ['listJoinStrategies', () => api.listJoinStrategies()],
@@ -771,6 +826,56 @@ async function testConfigOwnership() {
 }
 
 await testConfigOwnership();
+
+/* ---------- 模块可导入性（防止改了导出忘了改引用） ---------- */
+
+async function testModulesLoad() {
+  const files = [
+    '../src/api.js',
+    '../src/bot.js',
+    '../src/browser.js',
+    '../src/config.js',
+    '../src/events.js',
+    '../src/gateway.js',
+    '../src/groups.js',
+    '../src/instance.js',
+    '../src/levels.js',
+    '../src/logger.js',
+    '../src/markdown.js',
+    '../src/message.js',
+    '../src/outbound.js',
+    '../src/paths.js',
+    '../src/pipeline.js',
+    '../src/roles.js',
+    '../src/runtime.js',
+    '../src/session.js',
+    '../src/token.js',
+    '../src/web/server.js',
+    '../src/plugin/config.js',
+    '../src/plugin/context.js',
+    '../src/plugin/dashboard.js',
+    '../src/plugin/deps.js',
+    '../src/plugin/loader.js',
+    '../src/plugin/market.js',
+    '../src/plugin/protocol.js',
+    '../src/plugin/subprocess.js',
+  ];
+  let bad = [];
+  for (const f of files) {
+    try {
+      await import(f);
+    } catch (e) {
+      bad.push(`${f.replace('../src/', '')}: ${e.message.split('\n')[0]}`);
+    }
+  }
+  check(
+    `模块: ${files.length} 个源文件全部可导入`,
+    bad.length === 0,
+    bad.join('; ').slice(0, 160),
+  );
+}
+
+await testModulesLoad();
 
 /* ---------- 汇总 ---------- */
 // 清掉测试写进额度账本的条目，别污染真实数据。

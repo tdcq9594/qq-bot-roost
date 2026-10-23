@@ -92,6 +92,14 @@ const BOT_DEFAULTS = {
   plugins: {
     mode: 'include',
     list: [],
+    /**
+     * 启动时自动更新有新版的内邀/公开插件。默认 false：
+     * 自动更新会覆盖 plugins/ 里的目录，用户自己改过的代码会丢，
+     * 这种事必须先问过。打开后每次启动检查一次，只更市场里标记过的插件。
+     */
+    autoUpdate: false,
+    /** 在这个版本之前不再弹更新提示（用户选「知道了」后写入） */
+    muteUpdateBelow: '',
   },
 
   /**

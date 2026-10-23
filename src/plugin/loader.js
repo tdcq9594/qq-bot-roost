@@ -8,6 +8,7 @@ import { rel } from '../paths.js';
 import { allocateLevels } from '../levels.js';
 import { PluginConfig, schemaOf } from './config.js';
 import { normalizeDashboard } from './dashboard.js';
+import { readPluginVersion } from './market.js';
 import { ensurePluginDeps } from './deps.js';
 
 const log = createLogger('plugins');
@@ -587,6 +588,37 @@ export class PluginManager {
     for (const id of this.loaded.keys()) {
       const d = await this.dashboardOf(id);
       if (d) out[id] = d;
+    }
+    return out;
+  }
+
+  /**
+   * 本地已装插件的版本号 { id: version }，给插件市场比对新版用。
+   *
+   * **以磁盘为准**，不是内存里的 meta：用户可能手动换过 plugins/ 下的文件
+   * （覆盖安装、从别处拷贝），这时内存里的 version 是旧的，按它判断会漏报。
+   * 只有磁盘读不到（文件损坏、语法错误）才回退到内存 meta。
+   */
+  async localVersions() {
+    const out = {};
+    let dirs = [];
+    try {
+      dirs = await fs.readdir(this.pluginsDir);
+    } catch {
+      dirs = [];
+    }
+
+    for (const name of dirs) {
+      const dir = path.join(this.pluginsDir, name);
+      const stat = await fs.stat(dir).catch(() => null);
+      if (!stat?.isDirectory()) continue;
+      const v = await readPluginVersion(dir);
+      if (v) out[name] = v;
+    }
+
+    // 磁盘读不到的，用内存里的 meta 兜底
+    for (const [id, item] of this.loaded) {
+      if (!out[id] && item.meta?.version) out[id] = String(item.meta.version);
     }
     return out;
   }

@@ -6,7 +6,16 @@ import { DIRS, botPaths, listBotIds, rel } from '../paths.js';
 import { createLogger, recentLogs, onLog, getLevel, setLevel } from '../logger.js';
 import { runtime } from '../runtime.js';
 import { EVENT_NAMES, INTENT_META, describeIntents, groupEvents } from '../events.js';
-import { fetchIndex, installPlugin, mergeWithInstalled } from '../plugin/market.js';
+import {
+  fetchIndex,
+  installPlugin,
+  syncRepo,
+  cleanupRepo,
+  updatePlugins,
+  mergeWithInstalled,
+  detectUpdates,
+  compareVersion,
+} from '../plugin/market.js';
 
 const log = createLogger('webui');
 const WEB_ROOT = path.join(ROOT, 'web');
@@ -221,7 +230,56 @@ export async function startWebServer({
         // 这样下面所有 handler 的写法都不用变
         const rt = pickRuntime(url);
 
-        /* ---------------- 机器人管理（不依赖当前选中项） ---------------- */
+  /* ---------------- 插件更新检查 ---------------- */
+
+  // 更新检查结果按机器人缓存。插件**代码**是全局共享的，但启用状态 per-bot，
+  // 所以每个机器人看到的「可更新」可能不同，缓存也跟着分。
+  const updateCache = new Map(); // botId -> { at, updates, error }
+  const UPDATE_CACHE_MS = 5 * 60 * 1000;
+
+  /**
+   * 对照插件市场，看这个机器人有哪些插件能更新。
+   * 只检查不安装——安装会覆盖本地目录，必须用户点。
+   */
+  const checkUpdates = async (r, { force = false } = {}) => {
+    if (!r) return { at: 0, updates: [], error: '没有可用的机器人' };
+    const hit = updateCache.get(r.id);
+    if (hit && !force && Date.now() - hit.at < UPDATE_CACHE_MS) return hit;
+
+    const out = { at: Date.now(), updates: [], error: '' };
+    try {
+      const idx = await fetchIndex(globalCfg.plugins?.marketUrl || undefined);
+      const localVers = await r.plugins.localVersions();
+      out.updates = detectUpdates(idx.plugins, localVers).map((u) => ({
+        id: u.id,
+        current: u.current,
+        latest: u.latest,
+        name: u.entry.name ?? u.id,
+      }));
+      if (out.updates.length) {
+        log.info(
+          `[${r.id}] 插件市场有 ${out.updates.length} 个更新：` +
+            out.updates.map((u) => `${u.id} ${u.current}→${u.latest}`).join('、'),
+        );
+      }
+    } catch (e) {
+      // 连不上市场是常事（离线、代理、限流），不该刷错误日志
+      out.error = e.message;
+    }
+    updateCache.set(r.id, out);
+    return out;
+  };
+
+  // 启动后过一会儿查一次，别拖慢启动；之后每小时一次
+  const updateTimer = setInterval(() => {
+    for (const r of runtimes) checkUpdates(r).catch(() => {});
+  }, 60 * 60 * 1000);
+  updateTimer.unref?.();
+  setTimeout(() => {
+    for (const r of runtimes) checkUpdates(r).catch(() => {});
+  }, 30000).unref?.();
+
+  /* ---------------- 机器人管理（不依赖当前选中项） ---------------- */
 
         if (pathname === '/api/bots' && req.method === 'GET') {
           const ids = await listBotIds();
@@ -440,6 +498,12 @@ export async function startWebServer({
         if (pathname === '/api/plugins/dashboard' && req.method === 'GET') {
           return json(res, 200, await plugins.dashboards());
         }
+
+        // 有哪些插件能更新。结果缓存 5 分钟，?force=1 强制重新查
+        if (pathname === '/api/plugins/updates' && req.method === 'GET') {
+          const force = url.searchParams.get('force') === '1';
+          return json(res, 200, await checkUpdates(rt, { force }));
+        }
         /* ---------------- 插件设置面板 ---------------- */
 
         // 拿某个插件的配置 schema、当前值、存档
@@ -514,11 +578,20 @@ export async function startWebServer({
                 if (d.isDirectory()) installedIds.add(d.name);
               }
             } catch {}
+            const localVers = await plugins.localVersions();
+            const updates = detectUpdates(idx.plugins, localVers);
             return json(res, 200, {
               repo: idx.repo,
               updated: idx.updated,
               source: url2 || 'default',
               plugins: mergeWithInstalled(idx.plugins, installedIds),
+              // 本地有新版可用的插件
+              updates: updates.map((u) => ({
+                id: u.id,
+                current: u.current,
+                latest: u.latest,
+              })),
+              localVersions: localVers,
             });
           } catch (e) {
             return json(res, 502, { error: e.message });
@@ -695,6 +768,79 @@ export async function startWebServer({
             received: EVENT_NAMES.filter((n) => (runtime.eventCounts.get(n) ?? 0) > 0).length,
             groups,
           });
+        }
+
+        // 更新一个已安装的插件。会覆盖本地目录，所以前端必须弹窗确认过
+        if (pathname === '/api/market/update' && req.method === 'POST') {
+          const body = await readBody(req);
+          const id = String(body.id ?? '').trim();
+          if (!id) return json(res, 400, { error: '缺少插件 id' });
+          let repo = null;
+          try {
+            const src = globalCfg.plugins?.marketUrl || undefined;
+            const idx = await fetchIndex(src);
+            const entry = idx.plugins.find((p) => p.id === id);
+            if (!entry) return json(res, 404, { error: `市场里没有 ${id}` });
+
+            const localVers = await plugins.localVersions();
+            const cur = localVers[id];
+            if (!cur) return json(res, 400, { error: `本地没装 ${id}，先用「安装」` });
+            if (compareVersion(cur, entry.version) >= 0) {
+              return json(res, 400, { error: `${id} 已经是 ${cur}，没有新版` });
+            }
+
+            // 拉一次仓库，只更新指定的这一个
+            repo = await syncRepo({ repo: idx.repo, branch: idx.branch || 'main', indexUrl: src });
+            const r = await updatePlugins({
+              tmp: repo.tmp,
+              index: repo.index,
+              pluginsDir: DIRS.plugins,
+              ids: [id],
+              localVersions: localVers,
+            });
+            if (r.failed.length) return json(res, 400, { error: r.failed[0].error });
+            if (!r.updated.length) return json(res, 400, { error: `${id} 没有可用的更新` });
+
+            // 更新完重载该插件。玩家存档在 data/ 下，不受影响
+            await plugins.reload(id).catch((e) => {
+              log.warn(`插件 ${id} 更新后重载失败: ${e.message}`);
+            });
+            const scanned = await plugins.rescan();
+            return json(res, 200, { ok: true, from: r.updated[0].from, to: r.updated[0].to, ...scanned });
+          } catch (e) {
+            return json(res, 400, { error: e.message });
+          } finally {
+            await cleanupRepo(repo?.tmp);
+          }
+        }
+
+        // 一键更新全部有新版 的插件。同样会覆盖本地目录
+        if (pathname === '/api/market/update-all' && req.method === 'POST') {
+          let repo = null;
+          try {
+            const src = globalCfg.plugins?.marketUrl || undefined;
+            repo = await syncRepo({ indexUrl: src });
+            const localVers = await plugins.localVersions();
+            const r = await updatePlugins({
+              tmp: repo.tmp,
+              index: repo.index,
+              pluginsDir: DIRS.plugins,
+              localVersions: localVers,
+            });
+
+            // 更新成功的逐个重载，失败的不碰
+            for (const u of r.updated) {
+              await plugins.reload(u.id).catch((e) => {
+                log.warn(`插件 ${u.id} 更新后重载失败: ${e.message}`);
+              });
+            }
+            const scanned = await plugins.rescan();
+            return json(res, 200, { ok: true, ...r, ...scanned });
+          } catch (e) {
+            return json(res, 400, { error: e.message });
+          } finally {
+            await cleanupRepo(repo?.tmp);
+          }
         }
 
         // 关闭程序（前端已做二次确认）
