@@ -17,6 +17,8 @@ export class QQApi {
     this.baseUrl = baseUrl;
     // msg_id -> 已用的 msg_seq。被动回复同一消息时必须递增，否则会失败
     this.seqMap = new Map();
+    // 群管内邀开关，由 BotRuntime 按配置同步；默认关
+    this.groupInvited = false;
   }
 
   async #request(method, path, body, { retried = false, headers } = {}) {
@@ -169,6 +171,141 @@ export class QQApi {
   putInteraction(interactionId, code = 0) {
     return this.#request('PUT', `/interactions/${interactionId}`, { code }, {
       headers: { 'X-Callback-AppID': this.tokens.appId },
+    });
+  }
+
+  /* ---------------- 群管理 ---------------- */
+
+  /**
+   * 内邀开关。群成员列表 / 踢人 / 群黑名单这几个接口官方只对白名单机器人开放，
+   * 没申请就调会返回 11253。默认关着，申请到了在面板打开。
+   * 由 BotRuntime 在配置变化时调用，插件不用管。
+   */
+  setGroupInvited(v) {
+    this.groupInvited = Boolean(v);
+    return this.groupInvited;
+  }
+
+  /** 内邀接口的统一闸门。没开门就抛错，别把请求发出去刷一屏 11253 */
+  #needInvite() {
+    if (!this.groupInvited) {
+      throw new Error(
+        '群管内邀功能未开启。群成员列表 / 踢人 / 群黑名单需要官方白名单，' +
+          '申请通过后到面板「配置 → 群管能力」打开',
+      );
+    }
+  }
+
+  /**
+   * 设置群成员禁言（公开接口，无需内邀）。
+   * POST /v2/groups/{group_openid}/restrict_chat_setting
+   *
+   * 官方约束：
+   *   - 机器人必须是群管理员，否则 40062003
+   *   - 最长 30 天；到期时间 RFC3339，如 2026-08-05T11:23:05+08:00
+   *   - 单次最多 20 个成员
+   *   - 只能操作普通成员，群主 / 管理员 / 机器人都不能动
+   *
+   * @param {string} groupOpenid
+   * @param {Array<{op:'add'|'update'|'del', member_openid:string, mute_expire_at?:string}>} members
+   */
+  muteMembers(groupOpenid, members) {
+    return this.#request('POST', `/v2/groups/${groupOpenid}/restrict_chat_setting`, { members });
+  }
+
+  /**
+   * 禁言单个成员到某个时间。muteExpireAt 传 null / 空串表示立即解除。
+   * 内部仍走 muteMembers，只是把 op 和到期时间填好。
+   */
+  muteMember(groupOpenid, memberOpenid, muteExpireAt) {
+    return this.muteMembers(groupOpenid, [
+      { op: muteExpireAt ? 'add' : 'del', member_openid: memberOpenid, mute_expire_at: muteExpireAt ?? '' },
+    ]);
+  }
+
+  /**
+   * 查询群禁言状态（公开接口）。
+   * GET /v2/groups/{group_openid}/restrict_chat_setting
+   */
+  getMuteStatus(groupOpenid) {
+    return this.#request('GET', `/v2/groups/${groupOpenid}/restrict_chat_setting`);
+  }
+
+  /**
+   * 获取群基本信息（公开接口）。
+   * GET /v2/groups/{group_openid}/info
+   */
+  getGroupInfo(groupOpenid) {
+    return this.#request('GET', `/v2/groups/${groupOpenid}/info`);
+  }
+
+  /**
+   * 获取机器人在群内的状态（公开接口）。
+   * GET /v2/groups/{group_openid}/bot_state
+   */
+  getBotGroupState(groupOpenid) {
+    return this.#request('GET', `/v2/groups/${groupOpenid}/bot_state`);
+  }
+
+  /**
+   * 获取群成员列表（内邀）。
+   * GET /v2/groups/{group_openid}/members
+   * 每次最多 30 条，用 next_index 翻页。
+   */
+  getGroupMembers(groupOpenid, { limit, startIndex } = {}) {
+    this.#needInvite();
+    const q = new URLSearchParams();
+    if (limit) q.set('limit', String(limit));
+    if (startIndex) q.set('start_index', String(startIndex));
+    const suffix = q.toString() ? `?${q}` : '';
+    return this.#request('GET', `/v2/groups/${groupOpenid}/members${suffix}`);
+  }
+
+  /**
+   * 获取单个群成员信息（内邀）。
+   * GET /v2/groups/{group_openid}/members/{member_openid}
+   */
+  getGroupMember(groupOpenid, memberOpenid) {
+    this.#needInvite();
+    return this.#request('GET', `/v2/groups/${groupOpenid}/members/${memberOpenid}`);
+  }
+
+  /**
+   * 批量移除群成员，即踢人（内邀）。
+   * POST /v2/groups/{group_openid}/batch_remove_members
+   * 单次最多 20 个；isRobotBlacklist=true 会同时拉黑。
+   */
+  removeMembers(groupOpenid, memberOpenids, { addToBlacklist = false } = {}) {
+    this.#needInvite();
+    return this.#request(
+      'POST',
+      `/v2/groups/${groupOpenid}/batch_remove_members`,
+      {
+        member_openids: memberOpenids,
+        is_robot_blacklist: Boolean(addToBlacklist),
+      },
+    );
+  }
+
+  /**
+   * 查询群黑名单（内邀）。
+   * GET /v2/groups/{group_openid}/member_blacklist
+   */
+  getGroupBlacklist(groupOpenid) {
+    this.#needInvite();
+    return this.#request('GET', `/v2/groups/${groupOpenid}/member_blacklist`);
+  }
+
+  /**
+   * 操作群黑名单（内邀）。
+   * POST /v2/groups/{group_openid}/member_blacklist
+   * op: add 加入 / del 移除。目标用户不在群里才能加入。
+   */
+  operateGroupBlacklist(groupOpenid, { op, memberOpenids }) {
+    this.#needInvite();
+    return this.#request('POST', `/v2/groups/${groupOpenid}/member_blacklist`, {
+      op,
+      member_openids: memberOpenids,
     });
   }
 

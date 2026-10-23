@@ -389,6 +389,11 @@ export async function startWebServer({
           if (body.webui && typeof body.webui === 'object') {
             cfg.webui = { ...cfg.webui, ...body.webui };
           }
+          // 群管内邀开关：同步给 api 层，否则要等重启才生效
+          if (body.groupManage && typeof body.groupManage === 'object') {
+            cfg.groupManage = { invited: Boolean(body.groupManage.invited) };
+            rt.api?.setGroupInvited?.(cfg.groupManage.invited);
+          }
 
           await saveBotConfig(rt.id, cfg);
           log.info('配置已通过面板更新');

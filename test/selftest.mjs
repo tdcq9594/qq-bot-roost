@@ -643,6 +643,67 @@ async function testDashboard() {
 
 await testDashboard();
 
+/* ---------- 群管接口与内邀闸门 ---------- */
+
+async function testGroupManage() {
+  const { QQApi } = await import('../src/api.js');
+  // 假 token 管理器：闸门在 #request 之前抛错，所以永远走不到网络
+  const api = new QQApi({ tokenManager: { get: async () => 'x', appId: '1' }, baseUrl: 'http://127.0.0.1:1' });
+
+  const expectThrow = async (name, fn) => {
+    try {
+      await fn();
+      check(name, false, '居然没抛错');
+    } catch (e) {
+      check(name, /未开启/.test(e.message), e.message.slice(0, 40));
+    }
+  };
+
+  // 默认不开：四个内邀接口全部拒绝，且不该发出请求
+  await expectThrow('群管: 默认拒绝 getGroupMembers', () => api.getGroupMembers('g'));
+  await expectThrow('群管: 默认拒绝 getGroupMember', () => api.getGroupMember('g', 'u'));
+  await expectThrow('群管: 默认拒绝 removeMembers', () => api.removeMembers('g', ['u']));
+  await expectThrow('群管: 默认拒绝 getGroupBlacklist', () => api.getGroupBlacklist('g'));
+  await expectThrow('群管: 默认拒绝 operateGroupBlacklist', () =>
+    api.operateGroupBlacklist('g', { op: 'add', memberOpenids: ['u'] }),
+  );
+
+  // 打开后闸门放行（会真的去连 127.0.0.1:1，失败说明已经过了闸门）
+  api.setGroupInvited(true);
+  check('群管: setGroupInvited 生效', api.groupInvited === true);
+  try {
+    await api.getGroupMembers('g');
+    check('群管: 开启后放行', false, '居然连上了');
+  } catch (e) {
+    check('群管: 开启后放行', !/未开启/.test(e.message), e.message.slice(0, 40));
+  }
+
+  // 公开接口不受开关影响：同样会去连，但错误里不该有「未开启」
+  api.setGroupInvited(false);
+  for (const [name, fn] of [
+    ['muteMembers', () => api.muteMembers('g', [])],
+    ['getMuteStatus', () => api.getMuteStatus('g')],
+    ['getGroupInfo', () => api.getGroupInfo('g')],
+    ['getBotGroupState', () => api.getBotGroupState('g')],
+  ]) {
+    try {
+      await fn();
+      check(`群管: ${name} 公开可用`, false, '居然连上了');
+    } catch (e) {
+      check(`群管: ${name} 公开可用`, !/未开启/.test(e.message), e.message.slice(0, 40));
+    }
+  }
+
+  // 配置默认值：invited 必须是 false
+  const { loadBotConfig } = await import('../src/config.js');
+  const cfg = await loadBotConfig('main').catch(() => null);
+  if (cfg) {
+    check('群管: 配置默认 invited=false', cfg.groupManage?.invited === false);
+  }
+}
+
+await testGroupManage();
+
 /* ---------- 汇总 ---------- */
 // 清掉测试写进额度账本的条目，别污染真实数据。
 // 多机器人后账本在 data/bots/<id>/quota.json，所以两边都要扫。

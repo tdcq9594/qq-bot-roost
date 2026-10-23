@@ -93,6 +93,18 @@ const BOT_DEFAULTS = {
     mode: 'include',
     list: [],
   },
+
+  /**
+   * 群管能力。官方群管理接口分两档：
+   *   公开  —— 禁言、撤回、群基本信息、机器人群内状态，随时可用
+   *   内邀  —— 群成员列表/信息、批量移除（踢人）、群黑名单，
+   *            普通机器人调用返回 11253，需先向平台运营申请白名单
+   * invited 默认 false：没申请的机器人不该去调，调了也是报错，
+   * 还会在日志里留一堆无意义的 11253。申请到了再回面板打开。
+   */
+  groupManage: {
+    invited: false,
+  },
 };
 
 function deepMerge(base, extra) {
@@ -209,6 +221,7 @@ export async function saveBotConfig(id, cfg) {
     outbound: cfg.outbound,
     session: cfg.session,
     plugins: cfg.plugins,
+    groupManage: cfg.groupManage ?? { invited: false },
   });
 }
 

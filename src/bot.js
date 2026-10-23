@@ -115,6 +115,10 @@ export class BotRuntime {
       quotaFile: this.paths.quota,
     });
 
+    // 群管内邀开关：api 层有自己的副本，配置变了由面板接口同步过来。
+    // mock 的 api 也实现了同名方法，一起同步，方便本地验证插件的群管逻辑
+    this.api.setGroupInvited?.(cfg.groupManage?.invited);
+
     this.session = new SessionManager({
       stickyMs: Math.max(0, (cfg.session?.stickySec ?? 180) * 1000),
       waitTimeoutMs: Math.max(1000, (cfg.session?.promptTimeoutSec ?? 120) * 1000),

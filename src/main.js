@@ -551,6 +551,7 @@ function registerCoreCommands(rt) {
 /* ------------------------------------------------------------------ */
 
 function createMockApi(botName) {
+  let mockGroupInvited = false;
   const echo = (scene) => async (target, body) => {
     runtime.bump('sent');
     // markdown 消息单独打印正文，否则一堆 JSON 没法看
@@ -570,6 +571,47 @@ function createMockApi(botName) {
     retractGroupMessage: async () => ({}),
     retractC2CMessage: async () => ({}),
     putInteraction: async () => ({}),
+    // 群管：mock 下也走同一套闸门，方便本地验证插件的群管逻辑
+    setGroupInvited(v) {
+      mockGroupInvited = Boolean(v);
+      return mockGroupInvited;
+    },
+    muteMembers: async (g, members) => {
+      console.log(`\n→ [${botName}] [禁言 ${g}] ${JSON.stringify(members)}`);
+      return {};
+    },
+    muteMember: async (g, uid, expireAt) => {
+      console.log(`\n→ [${botName}] [禁言 ${g} ${uid}] ${expireAt || '立即解除'}`);
+      return {};
+    },
+    getMuteStatus: async (g) => {
+      console.log(`\n→ [${botName}] [查询禁言 ${g}]`);
+      return { mute_list: [] };
+    },
+    getGroupInfo: async (g) => ({ group_openid: g, name: 'mock群', owner_openid: 'mock' }),
+    getBotGroupState: async (g) => ({ group_openid: g, is_admin: true }),
+    getGroupMembers: async (g) => {
+      if (!mockGroupInvited) throw new Error('群管内邀功能未开启');
+      return { members: [], next_index: 0 };
+    },
+    getGroupMember: async (g, uid) => {
+      if (!mockGroupInvited) throw new Error('群管内邀功能未开启');
+      return { member_openid: uid, join_timestamp: 0 };
+    },
+    removeMembers: async (g, ids) => {
+      if (!mockGroupInvited) throw new Error('群管内邀功能未开启');
+      console.log(`\n→ [${botName}] [踢人 ${g}] ${JSON.stringify(ids)}`);
+      return { fail_openids: [] };
+    },
+    getGroupBlacklist: async (g) => {
+      if (!mockGroupInvited) throw new Error('群管内邀功能未开启');
+      return { blacklist: [] };
+    },
+    operateGroupBlacklist: async (g, { op, member_openids }) => {
+      if (!mockGroupInvited) throw new Error('群管内邀功能未开启');
+      console.log(`\n→ [${botName}] [黑名单 ${op} ${g}] ${JSON.stringify(member_openids)}`);
+      return { fail_openids: [] };
+    },
   };
 }
 

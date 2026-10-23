@@ -594,6 +594,8 @@ function fillForm(c) {
   f.webuiPort.value = c.webui?.port ?? 15207;
   f.webuiAccessKey.value = c.webui?.accessKey || '';
   f.logLevel.value = c.logLevel || 'info';
+
+  f.groupInvited.checked = Boolean(c.groupManage?.invited);
 }
 
 /* ---------------- 事件订阅 intents ---------------- */
@@ -827,6 +829,9 @@ $('#cfgForm').addEventListener('submit', async (e) => {
       host: f.webuiHost.value.trim() || '127.0.0.1',
       port: Number(f.webuiPort.value) || 15207,
       accessKey: f.webuiAccessKey.value.trim(),
+    },
+    groupManage: {
+      invited: f.groupInvited.checked,
     },
   };
 
