@@ -184,7 +184,14 @@ export class Gateway {
       const detail = err
         ? [err.code, err.message || err.errno || err.name].filter(Boolean).join(' ')
         : ev?.message || '未知错误';
-      log.warn(`WebSocket 错误: ${detail}`);
+      /**
+       * 握手失败时 Node 的 WebSocket 会**连发两次 error**
+       * （"network error or non-101" 和 "closed before established"），
+       * 只记第一条，否则日志里每个失败都是双份。
+       */
+      if (this.retryScheduledFor !== ws) {
+        log.warn(`WebSocket 错误: ${detail}`);
+      }
       clearTimeout(connectTimer);
       /**
        * 关键：握手失败时**只发 error、不发 close**（Node 内置 WebSocket 的行为）。

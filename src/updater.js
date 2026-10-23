@@ -88,7 +88,7 @@ export async function checkUpdate() {
         method: 'GET',
         redirect: 'manual', // 要自己看 Location
         headers: { 'User-Agent': 'qq-bot-roost-updater' },
-        signal: AbortSignal.timeout(20000),
+        signal: AbortSignal.timeout(8000),
       });
       break;
     } catch (e) {
@@ -248,6 +248,36 @@ async function downloadTo(tmpDir, tarballUrl) {
 }
 
 /**
+ * 只保留最近 N 份更新备份，老的删掉。
+ * 每份约 1MB（整个代码目录），不清理会一直涨。
+ */
+async function pruneBackups(keep = 3) {
+  const dir = path.join(ROOT, 'data', 'backups');
+  let names;
+  try {
+    names = await fs.readdir(dir);
+  } catch {
+    return;
+  }
+
+  const items = [];
+  for (const name of names) {
+    const p = path.join(dir, name);
+    const st = await fs.stat(p).catch(() => null);
+    if (!st?.isDirectory()) continue;
+    items.push({ name, p, at: st.mtimeMs });
+  }
+  if (items.length <= keep) return;
+
+  // 按修改时间倒序，保留前 keep 个
+  items.sort((a, b) => b.at - a.at);
+  for (const it of items.slice(keep)) {
+    await fs.rm(it.p, { recursive: true, force: true }).catch(() => {});
+    log.info(`清理旧备份 ${it.name}`);
+  }
+}
+
+/**
  * 执行更新。
  *
  * @param {object} [info] checkUpdate() 的返回值；不传就现查
@@ -284,6 +314,9 @@ export async function applyUpdate(info) {
       if (has) await fs.cp(src, path.join(backupDir, name), { recursive: true });
     }
     log.info(`已备份到 ${path.relative(ROOT, backupDir)}`);
+
+    // 只留最近 3 份备份。每份约 1MB，不清理的话更新十几次就几十 MB
+    await pruneBackups(3).catch(() => {});
 
     // 替换
     for (const name of CODE_ENTRIES) {

@@ -121,6 +121,8 @@ export async function startWebServer({
   onShutdown,
 }) {
   const wc = globalCfg.webui ?? {};
+  // 启动时读一次版本号，status 里带给面板
+  const frameworkVersion = await currentVersion().catch(() => '0.0.0');
   if (wc.enabled === false) {
     log.info('可视化面板已禁用（config/bot.json → webui.enabled = false）');
     return null;
@@ -156,6 +158,8 @@ export async function startWebServer({
       botName: rt?.name ?? null,
       // 上下线按钮要看机器人自己的状态：idle / starting / online / offline / error / stopped
       state: rt?.state ?? 'offline',
+      // 面板「框架版本」直接显示，不用等用户点「检查更新」才有值
+      version: frameworkVersion,
     });
 
   // 日志实时推送：日志是全局的，所有连接都收到同一份

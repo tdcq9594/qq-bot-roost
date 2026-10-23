@@ -441,6 +441,8 @@ function renderStatus(s) {
     }
   }
   $('#i-node').textContent = `${s.node} (${s.platform})`;
+  // 框架版本：status 里直接带，不用等用户点「检查更新」
+  if (s.version) $('#updCurrent').textContent = s.version;
 
   const body = $('#chatBody');
   if (!s.chats?.length) {

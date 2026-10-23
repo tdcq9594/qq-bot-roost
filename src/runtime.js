@@ -111,7 +111,15 @@ export const runtime = {
     return Date.now() - this.startedAt;
   },
 
-  snapshot({ credentialExpiresIn = 0, plugins = [], cfg = {}, botId = null, botName = null, state = null } = {}) {
+  snapshot({
+    credentialExpiresIn = 0,
+    plugins = [],
+    cfg = {},
+    botId = null,
+    botName = null,
+    state = null,
+    version = '',
+  } = {}) {
     return {
       connected: this.connected,
       // 机器人实例自己的状态（online / offline / starting …），面板的上下线按钮用
@@ -148,6 +156,8 @@ export const runtime = {
       })),
       intents: cfg.intents ?? 0,
       prefix: cfg.commandPrefix ?? '/',
+      // 框架版本，面板「框架版本」直接显示
+      version,
       node: process.version,
       platform: process.platform,
       memoryMB: Math.round(process.memoryUsage().rss / 1048576),

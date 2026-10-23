@@ -839,6 +839,16 @@ async function testWebhookAndStream() {
   } catch (e) {
     check('新接口: 菜单超过 10 项被拒', /最多 10 个/.test(e.message));
   }
+
+  // 框架更新的版本比较
+  const { compareVersion, currentVersion } = await import('../src/updater.js');
+  check('更新: 0.5.1 < 0.5.2', compareVersion('0.5.1', '0.5.2') === -1);
+  check('更新: 0.6.0 > 0.5.9', compareVersion('0.6.0', '0.5.9') === 1);
+  check('更新: 同版本相等', compareVersion('0.5.1', '0.5.1') === 0);
+  check('更新: 带 v 前缀也能比', compareVersion('v0.5.1', '0.5.2') === -1);
+  check('更新: 解析不了的版本当相等', compareVersion('next', '0.5.2') === 0);
+  const cur = await currentVersion();
+  check('更新: 能读到当前版本', /^\d+\.\d+\.\d+/.test(cur), cur);
 }
 
 await testWebhookAndStream();

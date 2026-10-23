@@ -457,11 +457,20 @@ export async function ensureBotCredentials(botId) {
   const cfg = await loadBotConfig(botId);
   if (cfg.appId && cfg.appSecret) return cfg;
 
+  /**
+   * 没有交互终端时**不要抛错**。
+   *
+   * 面板本身就是配置入口——因为没凭证就把进程弄死，用户连配的地方都进不去。
+   * 这里只提示，交给 BotRuntime 报「缺少凭证」（state=error），
+   * 面板照常启动，用户在面板里填完就能连上。
+   */
   if (!stdin.isTTY) {
-    throw new Error(
-      `机器人 ${botId} 缺少 AppID / AppSecret。请在 ${rel(botPaths(botId).config)} 中填写，` +
-        `或打开可视化面板配置。`,
+    console.warn(
+      `\n[提示] 机器人 ${botId} 还没有 AppID / AppSecret。\n` +
+        `       打开面板填写，或编辑 ${rel(botPaths(botId).config)}。\n` +
+        `       面板地址见下面的日志。\n`,
     );
+    return cfg;
   }
 
   console.log(`\n机器人 ${botId} 还没有凭证，请输入 QQ 开放平台的信息（在 q.qq.com 管理端可查看）\n`);
@@ -473,7 +482,14 @@ export async function ensureBotCredentials(botId) {
     rl.close();
   }
 
-  if (!cfg.appId || !cfg.appSecret) throw new Error('AppID 或 AppSecret 为空，已退出。');
+  if (!cfg.appId || !cfg.appSecret) {
+    console.warn(
+      `\n[提示] AppID 或 AppSecret 为空，这次先不连。\n` +
+        `       面板已启动，可以在里面填写后再连接。\n`,
+    );
+    return cfg;
+  }
+
   await saveBotConfig(botId, cfg);
   console.log(`\n已保存到 ${rel(botPaths(botId).config)}\n`);
   return cfg;
