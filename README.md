@@ -8,9 +8,9 @@
 
 <img src="https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white" alt="Node.js 22+">
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
-<img src="https://img.shields.io/badge/tests-236%20passed-brightgreen" alt="测试 236 项">
+<img src="https://img.shields.io/badge/tests-249%20passed-brightgreen" alt="测试 249 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
-<img src="https://img.shields.io/badge/version-0.5.3-blueviolet" alt="版本 0.5.3">
+<img src="https://img.shields.io/badge/version-0.5.4-blueviolet" alt="版本 0.5.4">
 <img src="https://img.shields.io/badge/license-Non--Commercial-red" alt="禁止商用">
 
 [快速开始](#3-分钟跑起来) ｜ [写插件](docs/插件开发规范.md) ｜ [外部插件协议](docs/插件协议.md) ｜ [配置参考](docs/配置参考.md) ｜ [常见问题](docs/常见问题.md) ｜ [贡献](CONTRIBUTING.md)
@@ -19,7 +19,8 @@
 
 ![插件页](docs/images/plugins.png)
 
-用 Node.js 从零实现 QQ 开放平台 v2 协议，**不依赖任何第三方包**——装个 Node 22 就能跑，不需要 `npm install`。
+用 Node.js 从零实现 QQ 开放平台 v2 协议，**不依赖任何第三方包**——装个 Node 22 就能跑，
+不需要 `npm install`，**装插件和更新框架也不需要 git**（下载 GitHub 的 tar 包自己解，不调外部命令）。
 
 官方接口比第三方协议严格得多：被动回复只有 5 分钟、同一会话每秒最多 5 条、主动消息每会话每天 20 条。
 这些限制框架已经统一兜住，写插件时不用算时间、不用管额度，调 `msg.reply()` 就行。
@@ -371,14 +372,17 @@ bot/
 │   ├── gateway.js              WebSocket 网关
 │   ├── webhook.js              Webhook 接收服务（多机器人共用一个端口）
 │   ├── sign.js                 Webhook 回调签名（Ed25519）
+│   ├── tarball.js              tar.gz 下载解包（不依赖 git）
+│   ├── updater.js              框架自身检查更新与升级
 │   ├── api.js                  HTTP API
 │   ├── message.js              事件 → 统一 Message
 │   ├── roles.js                权限存储
 │   ├── logger.js               日志：控制台 + 落盘 + 轮转
+│   ├── services/               后台服务：健康巡检、清理、配置热加载、定时重启
 │   ├── web/server.js           面板服务端（REST + SSE）
 │   └── plugin/                 插件加载、配置、依赖、子进程宿主
 ├── test/
-│   ├── selftest.mjs            框架自检（141 项）
+│   ├── selftest.mjs            框架自检（154 项）
 │   └── e2e.mjs                 端到端测试（95 项，起真实服务打接口）
 ├── web/                        面板前端（原生 JS/CSS，无构建）
 └── docs/
@@ -411,7 +415,7 @@ openid 完全不同。共享 `roles.json` 等于所有权限记录全部对不�
 ## 开发
 
 ```bash
-npm test              # 框架自检 141 项
+npm test              # 框架自检 154 项
 npm run test:e2e      # 端到端 95 项（起服务打全部接口）
 npm run test:all      # 两个都跑
 node src/main.js --mock          # 不连 QQ，命令行发假消息调插件

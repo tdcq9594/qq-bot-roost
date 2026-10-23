@@ -882,6 +882,88 @@ async function testWebhookAndStream() {
   const cs = new CleanupService({ globalCfg: {} });
   check('清理: 默认保留 3 份备份', cs.keepBackups === 3);
   check('清理: 默认日志保留 14 天', cs.keepLogDays === 14);
+
+  // tarball：手工造 tar 验证解析与路径穿越防护
+  await testTarball();
+}
+
+/**
+ * 造一个最小 tar 条目。tar 头是 512 字节固定格式，
+ * 校验和字段要把自己当成 8 个空格算。
+ */
+function tarEntry(name, content, type = '0') {
+  const h = Buffer.alloc(512);
+  h.write(name, 0, 100, 'utf8');
+  h.write('0000644\0', 100); // mode
+  h.write('0000000\0', 108); // uid
+  h.write('0000000\0', 116); // gid
+  h.write(content.length.toString(8).padStart(11, '0') + '\0', 124); // size
+  h.write('00000000000\0', 136); // mtime
+  h.write('        ', 148); // checksum 占位 8 个空格
+  h.write(type, 156);
+  h.write('ustar\0', 257);
+  h.write('00', 263);
+
+  let sum = 0;
+  for (const b of h) sum += b;
+  h.write(sum.toString(8).padStart(6, '0') + '\0 ', 148);
+
+  const body = Buffer.alloc(Math.ceil(content.length / 512) * 512);
+  content.copy(body);
+  return Buffer.concat([h, body]);
+}
+
+async function testTarball() {
+  const { parseTar, extractEntries } = await import('../src/tarball.js');
+  const fs = await import('node:fs/promises');
+  const os = await import('node:os');
+  const path = await import('node:path');
+
+  const tar = Buffer.concat([
+    tarEntry('repo-main/', Buffer.alloc(0), '5'),
+    tarEntry('repo-main/src/main.js', Buffer.from('console.log(1)')),
+    tarEntry('repo-main/package.json', Buffer.from('{}')),
+  ]);
+  // 结尾两个全零块
+  const full = Buffer.concat([tar, Buffer.alloc(1024)]);
+
+  const entries = parseTar(full);
+  check('tarball: 解析出 3 个条目', entries.length === 3, `实际 ${entries.length}`);
+  check('tarball: 能识别目录', entries[0].dir === true);
+  check('tarball: 能读出文件内容', entries[1].content.toString() === 'console.log(1)');
+
+  // 剥顶层目录
+  const d1 = await fs.mkdtemp(path.join(os.tmpdir(), 'roost-tar-'));
+  await extractEntries(entries, d1);
+  const hasMain = await fs.access(path.join(d1, 'src', 'main.js')).then(() => true, () => false);
+  check('tarball: 剥掉顶层目录', hasMain);
+  await fs.rm(d1, { recursive: true, force: true });
+
+  // 带 ./ 前缀（tar czf 自打的包常见），也要能剥
+  const dotTar = Buffer.concat([
+    tarEntry('./', Buffer.alloc(0), '5'),
+    tarEntry('./repo-main/src/main.js', Buffer.from('x')),
+  ]);
+  const dotEntries = parseTar(Buffer.concat([dotTar, Buffer.alloc(1024)]));
+  const d2 = await fs.mkdtemp(path.join(os.tmpdir(), 'roost-tar-'));
+  await extractEntries(dotEntries, d2);
+  const ok2 = await fs.access(path.join(d2, 'src', 'main.js')).then(() => true, () => false);
+  check('tarball: ./ 前缀也能正确剥离', ok2);
+  await fs.rm(d2, { recursive: true, force: true });
+
+  // 路径穿越必须被拦住
+  const evil = parseTar(
+    Buffer.concat([tarEntry('repo-main/../../../evil.txt', Buffer.from('pwn')), Buffer.alloc(1024)]),
+  );
+  const d3 = await fs.mkdtemp(path.join(os.tmpdir(), 'roost-tar-'));
+  await extractEntries(evil, d3);
+  const escaped = await fs
+    .access(path.join(d3, '..', '..', '..', 'evil.txt'))
+    .then(() => true, () => false);
+  const inside = await fs.access(path.join(d3, 'evil.txt')).then(() => true, () => false);
+  check('tarball: 路径穿越被拦住', !escaped, escaped ? '写到了目录外！' : '');
+  check('tarball: 穿越路径被归一化到目录内', inside || !escaped);
+  await fs.rm(d3, { recursive: true, force: true });
 }
 
 await testWebhookAndStream();
@@ -958,6 +1040,14 @@ async function testModulesLoad() {
     '../src/updater.js',
     '../src/webhook.js',
     '../src/sign.js',
+    '../src/tarball.js',
+    '../src/services/index.js',
+    '../src/services/base.js',
+    '../src/services/health.js',
+    '../src/services/cleanup.js',
+    '../src/services/config-watch.js',
+    '../src/services/restart.js',
+    '../src/services/auto-update.js',
     '../src/web/server.js',
     '../src/plugin/config.js',
     '../src/plugin/context.js',
