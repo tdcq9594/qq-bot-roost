@@ -366,6 +366,24 @@ export async function updatePlugins({ tmp, index, pluginsDir, ids, localVersions
     const backup = path.join(pluginsDir, `.bak-${entry.id}`);
     try {
       const src = await resolvePluginDir(tmp, entry);
+
+      /**
+       * 更新也要校验内容，和首次安装一样。
+       *
+       * 以前只在 `installPlugin` 里校验，更新路径漏了——那等于
+       * 「第一次装的时候小心，以后随便覆盖」，供应链校验的意义就没了。
+       * 校验放在**动旧目录之前**：对不上就什么都不碰，用户手上的插件还是好的。
+       */
+      if (entry.sha256) {
+        const got = await hashDir(src);
+        if (got !== String(entry.sha256).toLowerCase()) {
+          throw new Error(
+            `内容校验失败（sha256 不匹配）\n  索引 ${entry.sha256}\n  实际 ${got}\n` +
+              '可能仓库被改动、或索引与插件仓库不同步。已中止，原有插件未动。',
+          );
+        }
+      }
+
       const hadOld = await fs.stat(dest).catch(() => null);
       if (hadOld) await fs.rename(dest, backup);
 
