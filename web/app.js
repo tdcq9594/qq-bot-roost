@@ -2155,6 +2155,7 @@ function switchPPTab(name) {
   $('#ppData').hidden = name !== 'data';
   $('#ppDash').hidden = name !== 'dash';
   $('#ppSave').hidden = name !== 'config';
+  $('#ppReset').hidden = name !== 'config';
 }
 
 /**
@@ -2383,6 +2384,49 @@ async function savePPConfig() {
   }
 }
 
+/**
+ * 恢复出厂配置。
+ *
+ * 走单独接口，而不是「把每个默认值提交一遍」：那个接口是合并语义，
+ * 插件升级后遗留的旧键会一直留在文件里。后端是删了重建，才真的干净。
+ *
+ * **会连 API Key 一起清掉**，所以必须让用户明确确认——这不是「改一下」，
+ * 是「清空重来」。
+ */
+async function resetPPConfig() {
+  const ok = await confirmDialog({
+    title: `恢复「${PP.name}」的默认设置`,
+    message:
+      '所有配置项会恢复成插件声明的默认值。<br><br>' +
+      '<b>填过的内容会一起清空</b>，包括 API 密钥这类需要重新申请或重新粘贴的值。' +
+      '<br><br>确定要恢复吗？',
+    okText: '恢复默认',
+    danger: true,
+  });
+  if (!ok) return;
+
+  const btn = $('#ppReset');
+  btn.disabled = true;
+  try {
+    const r = await api(`/api/plugins/${encodeURIComponent(PP.id)}/resetconfig`, {
+      method: 'POST',
+      body: '{}',
+    });
+    PP.config = r.config ?? {};
+    // 重新渲染，让表单显示新的（默认）值
+    renderPPConfig();
+    await confirmDialog({
+      title: '已恢复默认',
+      message: '配置已重置。需要重新填的项（比如 API 密钥）请补上再保存。',
+      okText: '知道了',
+    });
+  } catch (e) {
+    await confirmDialog({ title: '恢复失败', message: e.message, okText: '知道了' });
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function savePPData(key, btn) {
   const ta = document.querySelector(`[data-val="${CSS.escape(key)}"]`);
   if (!ta) return;
@@ -2435,6 +2479,7 @@ $('#ppClose')?.addEventListener('click', () => {
   $('#pluginPanelMask').hidden = true;
 });
 $('#ppSave')?.addEventListener('click', savePPConfig);
+$('#ppReset')?.addEventListener('click', resetPPConfig);
 $('#pluginPanelMask')?.addEventListener('click', (e) => {
   if (e.target === $('#pluginPanelMask')) $('#pluginPanelMask').hidden = true;
 });

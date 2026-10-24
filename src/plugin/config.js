@@ -253,4 +253,20 @@ export class PluginConfig {
     await fs.writeFile(tmp, JSON.stringify(this.data ?? {}, null, 2) + '\n', 'utf8');
     await fs.rename(tmp, this.file);
   }
+
+  /**
+   * 恢复出厂设置：删掉配置文件，按插件声明的默认值重新生成。
+   *
+   * 为什么是「删了重建」而不是「把每个键写回默认值」：
+   * `set()` 是合并语义，插件升级后遗留的旧键会一直躺在文件里。
+   * 删掉重建才是真的干净——文件内容和刚装完时一模一样。
+   *
+   * **会连 API Key 这类敏感值一起清掉**，调用方必须先跟用户确认。
+   */
+  async reset() {
+    await fs.rm(this.file, { force: true }).catch(() => {});
+    this.data = fillDefaults({}, this.defaults);
+    await this.save();
+    return this.data;
+  }
 }

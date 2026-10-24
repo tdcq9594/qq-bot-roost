@@ -314,6 +314,22 @@ const RUN = Date.now().toString(36);
   await c2.set({ nested: { y: 2 } });
   check('setConfig 深合并保留旧键', c2.value.nested.x === 1 && c2.value.nested.y === 2);
 
+  /**
+   * 恢复默认：必须连「插件升级后遗留的旧键」一起清掉。
+   *
+   * 只把每个已知键写回默认值是不够的——set 是合并语义，
+   * 旧键会一直躺在文件里。所以后端实现成「删文件重建」。
+   */
+  await c2.set({ userOnly: 'stale', b: 42 });
+  check('恢复前：用户值和遗留键都在', c2.value.b === 42 && c2.value.userOnly === 'stale');
+  const afterReset = await c2.reset();
+  check('恢复默认：已知项回到默认值', afterReset.a === 1 && afterReset.b === 2, JSON.stringify(afterReset));
+  check('恢复默认：遗留的旧键被清掉', afterReset.userOnly === undefined, JSON.stringify(afterReset));
+  check('恢复默认：深层的默认值也在', afterReset.nested?.x === 1, JSON.stringify(afterReset.nested));
+  // 磁盘上也要是干净的，不能只在内存里干净
+  const onDisk = JSON.parse(await fs.readFile(file, 'utf8'));
+  check('恢复默认：写回文件', onDisk.userOnly === undefined && onDisk.a === 1, JSON.stringify(onDisk));
+
   // 没声明 defaults 且文件不存在 → 不生成空文件
   const file2 = path.join(dir, 'empty.json');
   const c3 = new PluginConfig({ id: 'e', defaults: {}, file: file2 });

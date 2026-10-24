@@ -809,6 +809,22 @@ export class PluginManager {
     return next ?? (await item.configStore.load());
   }
 
+  /**
+   * 恢复插件的出厂配置。
+   *
+   * 删文件重新生成，连插件升级后遗留的旧键一起清掉。
+   * 面板调用前必须让用户确认——API Key 这类值会被一起清空。
+   */
+  async resetConfig(id) {
+    const item = this.loaded.get(id);
+    if (!item?.configStore) throw new Error('插件没加载，改不了配置');
+    const next = await item.configStore.reset();
+    // 插件读的是 ctx.config，不重新指的话它还在用旧值，得重启才生效
+    if (item.ctx) item.ctx.config = next;
+    log.info(`插件 ${id} 的配置已恢复默认`);
+    return next;
+  }
+
   /** 改一条插件存档（面板用） */
   async setData(id, key, value) {
     const st = this.loaded.get(id)?.ctx?.storage;

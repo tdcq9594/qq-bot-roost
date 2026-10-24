@@ -1068,7 +1068,7 @@ export async function startWebServer({
           }
         }
 
-        const m = pathname.match(/^\/api\/plugins\/([^/]+)\/(enable|disable|reload|remove)$/);
+        const m = pathname.match(/^\/api\/plugins\/([^/]+)\/(enable|disable|reload|remove|resetconfig)$/);
         if (m && req.method === 'POST') {
           const [, rawId, action] = m;
           /**
@@ -1113,6 +1113,23 @@ export async function startWebServer({
               suspendPluginWatch(1000);
               log.error(`卸载插件 ${id} 失败：${e.message}`);
               return json(res, 500, { error: e.message });
+            }
+          }
+
+          /**
+           * 恢复出厂配置。
+           *
+           * 单独一个动作而不是走 `PUT /config`：那个是合并语义，
+           * 插件升级后遗留的旧键清不掉。这里删文件重新生成，才真的干净。
+           *
+           * 面板那边必须先弹确认——API Key 这类值会被一起清空。
+           */
+          if (action === 'resetconfig') {
+            try {
+              const config = await plugins.resetConfig(id);
+              return json(res, 200, { ok: true, config });
+            } catch (e) {
+              return json(res, 400, { error: e.message });
             }
           }
 
