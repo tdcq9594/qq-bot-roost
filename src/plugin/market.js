@@ -112,10 +112,21 @@ async function fetchIndexOnce(url) {
   for (let attempt = 0; attempt < 2; attempt++) {
     if (attempt > 0) await new Promise((r) => setTimeout(r, 1500));
 
+    /**
+     * 加个时间戳参数，绕开 CDN / 代理的缓存。
+     *
+     * 不加的话会出现这种连环套：索引是缓存的旧版、tarball 是新的，
+     * 于是 sha256 校验失败，用户以为仓库坏了。
+     * （实测过：`curl` 走代理拿到新索引、Node 直连拿到旧的，同一台机器。）
+     *
+     * 重试那一轮参数不同，等于强制要一份新的。
+     */
+    const bust = `${url}${url.includes('?') ? '&' : '?'}_t=${Date.now()}-${attempt}`;
+
     let res;
     try {
       // 走下载源：直连超时会自动换镜像（见 src/mirror.js）
-      res = await fetchViaMirror(url, { signal: AbortSignal.timeout(20000) });
+      res = await fetchViaMirror(bust, { signal: AbortSignal.timeout(20000) });
     } catch (e) {
       lastErr = new Error(`连不上插件市场：${e.message}`);
       continue;
@@ -159,6 +170,64 @@ async function fetchIndexOnce(url) {
  * @param {string|null} [p.sha256] 索引里给的仓库包校验值，有就验
  * @returns {Promise<{id:string, dir:string}>}
  */
+/**
+ * 校验失败时说清楚：到底是「索引过期」还是「内容真被改了」。
+ *
+ * 这两种情况用户要做的事完全不同：
+ *   · 索引过期 → 刷新市场 / 重启，重试即可（我们自己的缓存问题）
+ *   · 内容不符 → 仓库被改动，该去查，不该硬装
+ *
+ * 以前两种情况都说「可能仓库被改动」，用户一头雾水——明明刚发的版本。
+ */
+async function shaMismatchError(entry, dir, got) {
+  const actualVer = await readVersionLoose(dir);
+  const idxVer = String(entry.version ?? '');
+  if (actualVer && idxVer && actualVer !== idxVer) {
+    return new Error(
+      '插件市场索引过期了\n' +
+        `  索引里是 v${idxVer}，实际下载到 v${actualVer}\n` +
+        '  面板「插件 → 市场」点「刷新」，或重启程序后重试。\n' +
+        '  已中止，原有插件未动。',
+    );
+  }
+  return new Error(
+    '插件内容校验失败（sha256 不匹配）\n' +
+      `  索引 ${entry.sha256}\n  实际 ${got}\n` +
+      '  索引和实际内容对不上，可能是仓库被改动。已中止，原有插件未动。',
+  );
+}
+
+/**
+ * 只读文件里的 version，不 import 模块。
+ *
+ * 不用 `readPluginVersion`：那个会 import 插件模块，对「刚下载到临时目录、
+ * 还没信任过」的代码执行顶层语句，没必要。
+ */
+async function readVersionLoose(dir) {
+  try {
+    const s = await fs.readFile(path.join(dir, 'index.js'), 'utf8');
+    const m = s.match(/^\s*version:\s*['"]([^'"]+)['"]/m);
+    if (m) return m[1];
+  } catch {
+    /* 没有 index.js，试试 plugin.json */
+  }
+  try {
+    const j = JSON.parse(await fs.readFile(path.join(dir, 'plugin.json'), 'utf8'));
+    return j.version ? String(j.version) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 插件安装时用，逻辑同 installPlugin 里的校验 */
+export async function verifyPluginDir(entry, dir) {
+  if (!entry?.sha256) return;
+  const got = await hashDir(dir);
+  if (got !== String(entry.sha256).toLowerCase()) {
+    throw await shaMismatchError(entry, dir, got);
+  }
+}
+
 export async function installPlugin({ entry, pluginsDir, repo, branch = 'main', exists, sha256 = null }) {
   const id = String(entry?.id ?? '').trim();
   if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(id)) throw new Error(`插件 id 不合法：${id}`);
@@ -205,10 +274,7 @@ export async function installPlugin({ entry, pluginsDir, repo, branch = 'main', 
     if (entry.sha256) {
       const got = await hashDir(resolved);
       if (got !== String(entry.sha256).toLowerCase()) {
-        throw new Error(
-          `插件内容校验失败（sha256 不匹配）\n  期望 ${entry.sha256}\n  实际 ${got}\n` +
-            '可能是仓库被改动、或索引与插件仓库不同步。已中止，未写入 plugins/。',
-        );
+        throw await shaMismatchError(entry, resolved, got);
       }
       log.info(`插件 ${id} 内容 sha256 校验通过`);
     } else {
@@ -377,10 +443,7 @@ export async function updatePlugins({ tmp, index, pluginsDir, ids, localVersions
       if (entry.sha256) {
         const got = await hashDir(src);
         if (got !== String(entry.sha256).toLowerCase()) {
-          throw new Error(
-            `内容校验失败（sha256 不匹配）\n  索引 ${entry.sha256}\n  实际 ${got}\n` +
-              '可能仓库被改动、或索引与插件仓库不同步。已中止，原有插件未动。',
-          );
+          throw await shaMismatchError(entry, src, got);
         }
       }
 
