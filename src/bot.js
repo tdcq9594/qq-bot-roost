@@ -14,6 +14,7 @@ import { EVENTS, isKnownEvent } from './events.js';
 import { runtime as globalRuntime } from './runtime.js';
 import { claimInstance, releaseInstance } from './instance.js';
 import { botPaths, DIRS, rel } from './paths.js';
+import { StatsStore } from './storage/index.js';
 
 /**
  * 一个机器人的完整运行时。
@@ -130,6 +131,16 @@ export class BotRuntime {
       isSticky: (chatId) => this.session.isSticky(chatId),
     });
 
+    /**
+     * 统计库：每个机器人一份 stats.db。
+     * 没装 SQLite 或版本太低时 available=false，record() 直接返回，不影响收消息。
+     */
+    this.stats = new StatsStore({
+      file: this.paths.stats,
+      enabled: cfg.stats?.enabled !== false,
+      retentionDays: cfg.stats?.retentionDays ?? 90,
+    });
+
     this.plugins = new PluginManager({
       pluginsDir: DIRS.plugins,
       paths: this.paths,
@@ -143,11 +154,16 @@ export class BotRuntime {
       session: this.session,
       pipeline: this.pipeline,
       isOwner: (uid) => cfg.owners.includes(uid),
+      // 插件声明了 frameworkVersion 就做兼容校验；作者本地调试可以关掉
+      ignoreCompat: this.globalCfg.plugins?.ignoreFrameworkVersion === true,
     });
 
     if (this.registerCore) {
       this.registerCore(this);
     }
+
+    // 统计库要在插件之前打开：插件上报的运行数据也算统计的一部分
+    this.stats.open();
 
     // 按配置过滤要加载的插件
     await this.plugins.scan({ filter: pluginFilterOf(cfg.plugins) });
@@ -272,6 +288,7 @@ export class BotRuntime {
     await this.outbound?.flush().catch(() => {});
     await this.groups?.flush().catch(() => {});
     await this.roles?.flush().catch(() => {});
+    this.stats?.close();
     if (!this.mock) await releaseInstance(this.cfg.appId).catch(() => {});
     this.state = 'stopped';
   }
@@ -345,6 +362,18 @@ export class BotRuntime {
       }
 
       this.logIncoming(msg);
+
+      /**
+       * 统计：只记「谁、在哪、什么时候、是不是命令」，**不记正文**。
+       * record() 只进内存缓冲，1 秒批量落盘，不会拖慢回复。
+       */
+      this.stats?.record({
+        scope: msg.kind,
+        chatId: msg.chatId,
+        userId: msg.userId,
+        isCommand: msg.isCommand,
+        command: msg.command,
+      });
 
       if (msg.mentioned || msg.isCommand) session.markAddressed(msg.chatId);
 

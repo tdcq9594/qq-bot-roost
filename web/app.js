@@ -418,6 +418,12 @@ function activateTab(name) {
     stopPluginDashPolling();
   }
   if (name === 'events') loadEvents();
+  if (name === 'stats') loadStats();
+  // 插件自定义页面：第一次点开才真正去拉 html，不点不请求
+  if (name.startsWith('page:')) {
+    const frame = $(`#tab-${CSS.escape(name)} .plugin-page`);
+    if (frame && !frame.src) frame.src = frame.dataset.src;
+  }
   if (name === 'config') loadConfig();
   if (name === 'groups') loadGroups();
   if (name === 'roles') loadRoles();
@@ -1048,6 +1054,172 @@ $('#cfgForm').addEventListener('submit', async (e) => {
   }
 });
 
+/* ---------------- 插件注册的面板页面 ---------------- */
+
+/**
+ * 把插件注册的页面挂到标签栏上。
+ *
+ * 每次插件列表刷新都重跑一遍：插件装了/卸了/重载了，页面也跟着变。
+ * 已存在的标签不重建，避免正在看的页面被刷掉。
+ */
+async function loadPluginPages() {
+  let list = [];
+  try {
+    list = await api('/api/pages');
+  } catch {
+    return; // 拿不到就不显示，不影响其它页
+  }
+
+  const nav = $('.tabs');
+  const main = $('main');
+  if (!nav || !main) return;
+
+  const wanted = new Set(list.map((p) => `page:${p.key}`));
+
+  // 去掉已经不存在的
+  $$('.tab[data-plugin-page]').forEach((b) => {
+    if (!wanted.has(b.dataset.tab)) b.remove();
+  });
+  $$('.panel[data-plugin-page]').forEach((p) => {
+    if (!wanted.has(p.dataset.tab)) p.remove();
+  });
+
+  for (const p of list) {
+    const tabName = `page:${p.key}`;
+    if ($$('.tab').some((b) => b.dataset.tab === tabName)) continue;
+
+    const btn = document.createElement('button');
+    btn.className = 'tab';
+    btn.dataset.tab = tabName;
+    btn.dataset.pluginPage = p.key;
+    btn.textContent = p.label;
+    btn.title = `来自插件 ${p.pluginId}`;
+    nav.appendChild(btn);
+
+    const sec = document.createElement('section');
+    sec.className = 'panel';
+    sec.id = `tab-${tabName}`;
+    sec.dataset.pluginPage = p.key;
+    sec.dataset.tab = tabName;
+
+    const frame = document.createElement('iframe');
+    frame.className = 'plugin-page';
+    frame.title = p.label;
+    /**
+     * allow-same-origin 是为了让页面能调 /api/ 拿数据；
+     * allow-scripts 让它能跑自己的脚本。插件本来就是可信代码
+     * （内建插件跑在主进程），这里隔离的是**样式**，不是权限。
+     */
+    frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms');
+    frame.dataset.src = `/api/pages/${encodeURIComponent(p.key)}/html${
+      ACCESS_KEY ? `?key=${encodeURIComponent(ACCESS_KEY)}` : ''
+    }`;
+    sec.appendChild(frame);
+    main.appendChild(sec);
+  }
+}
+
+/* ---------------- 统计 ---------------- */
+
+/** 每天一根柱子，纯 CSS 不用图表库——多引一个库就破了零依赖 */
+function renderStatsChart(series) {
+  if (!series?.length) return '<div class="empty">还没有数据</div>';
+  const max = Math.max(1, ...series.map((s) => s.messages));
+  return (
+    '<div class="bars">' +
+    series
+      .map((s) => {
+        const h = Math.max(2, Math.round((s.messages / max) * 100));
+        const zero = s.messages === 0 ? ' zero' : '';
+        return `<div class="bar-wrap" title="${escapeHtml(s.day)}：${s.messages} 条 / ${s.commands} 个命令">
+          <div class="bar${zero}" style="height:${h}%"></div>
+          <span class="bar-day">${escapeHtml(s.day.slice(5))}</span>
+        </div>`;
+      })
+      .join('') +
+    '</div>'
+  );
+}
+
+/** 排行条：名字 + 占比条 + 数值 */
+function renderStatList(items, label, value, unit = '') {
+  if (!items?.length) return '<div class="empty">暂无数据</div>';
+  const max = Math.max(1, ...items.map(value));
+  return items
+    .map(
+      (it) => `<div class="stat-row">
+        <span class="stat-name" title="${escapeHtml(label(it))}">${escapeHtml(label(it))}</span>
+        <span class="stat-track"><i style="width:${Math.round((value(it) / max) * 100)}%"></i></span>
+        <span class="stat-val">${value(it)}${unit}</span>
+      </div>`,
+    )
+    .join('');
+}
+
+async function loadStats() {
+  const days = Number($('#statsDays')?.value) || 7;
+  const tip = $('#statsUnavailable');
+  const cards = $('#statsCards');
+  const chart = $('#statsChart');
+  const foot = $('#statsFoot');
+
+  let d;
+  try {
+    d = await api(`/api/stats?days=${days}`);
+  } catch (e) {
+    if (tip) {
+      tip.hidden = false;
+      tip.textContent = `统计读取失败：${e.message}`;
+    }
+    return;
+  }
+
+  if (!d?.available) {
+    if (tip) {
+      tip.hidden = false;
+      tip.textContent =
+        '统计不可用：当前 Node 不支持内置 SQLite（需要 22.5 以上）。其它功能不受影响。';
+    }
+    if (cards) cards.innerHTML = '';
+    if (chart) chart.innerHTML = '';
+    if (foot) foot.textContent = '';
+    return;
+  }
+
+  if (tip) tip.hidden = true;
+
+  if (cards) {
+    cards.innerHTML = [
+      ['今日消息', d.today.messages],
+      ['今日活跃', d.today.users],
+      ['今日命令', d.today.commands],
+      ['累计消息', d.total],
+      ['成员档案', d.members.total],
+      ['7 日活跃成员', d.members.active],
+    ]
+      .map(([k, v]) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div></div>`)
+      .join('');
+  }
+
+  if (chart) chart.innerHTML = renderStatsChart(d.series);
+  if (foot) {
+    foot.textContent = `明细保留 ${d.retentionDays} 天；只记录数量与时间，不存消息正文。`;
+  }
+
+  const cmds = $('#statsTopCommands');
+  if (cmds) cmds.innerHTML = renderStatList(d.topCommands, (x) => '/' + x.name, (x) => x.count, ' 次');
+
+  const chats = $('#statsTopChats');
+  if (chats) {
+    chats.innerHTML = renderStatList(
+      d.topChats,
+      (x) => `${x.scope === 'group' ? '群' : x.scope === 'channel' ? '频道' : '私聊'} ${x.chatId.slice(0, 10)}…`,
+      (x) => x.messages,
+      ' 条',
+    );
+  }
+}
+
 /* ---------------- 插件 ---------------- */
 
 /** 把插件上报的指标渲染成小 chip，最多 3 个 */
@@ -1117,6 +1289,8 @@ function stopPluginDashPolling() {
 
 async function loadPlugins() {
   const wrap = $('#pluginList');
+  // 插件装了/卸了，它注册的面板页面也会变，顺带刷一下标签栏
+  loadPluginPages();
   try {
     // 运行数据单独一个接口，拿不到不影响列表显示
     const [list, dash, upd] = await Promise.all([
@@ -1141,7 +1315,11 @@ async function loadPlugins() {
       return `
       <div class="plugin" data-id="${escapeHtml(p.id)}" data-name="${escapeHtml(p.name || p.id)}">
         <div class="info">
-          <div class="name">${escapeHtml(p.name || p.id)} <span class="hint">v${escapeHtml(p.version || '0.0.0')}</span>
+          <div class="name">${
+            p.icon
+              ? `<img class="plugin-icon" src="${escapeHtml(p.icon)}" alt="" loading="lazy">`
+              : ''
+          }${escapeHtml(p.name || p.id)} <span class="hint">v${escapeHtml(p.version || '0.0.0')}</span>
             ${u ? `<span class="upd-tag">可更新 ${escapeHtml(u.latest)}</span>` : ''}
           </div>
           <div class="meta">
@@ -1150,7 +1328,12 @@ async function loadPlugins() {
               ${p.kind === 'external' ? '外部 · ' + escapeHtml(p.runtime) : '内建 · node'}
             </span>
             ${p.pid ? `<span class="hint">pid ${p.pid}</span>` : ''}
-            ${p.description ? '<br>' + escapeHtml(p.description) : ''}
+            ${
+              p.frameworkVersion
+                ? `<span class="hint" title="插件声明的框架版本要求">需框架 ${escapeHtml(p.frameworkVersion)}</span>`
+                : ''
+            }
+            ${(p.shortDesc || p.description) ? '<br>' + escapeHtml(p.shortDesc || p.description) : ''}
           </div>
           ${chips ? `<div class="plugin-metrics">${chips}</div>` : ''}
           ${p.error ? `<div class="err">加载失败: ${escapeHtml(p.error)}</div>` : ''}
@@ -1503,6 +1686,10 @@ async function installFromMarket(id, btn) {
 }
 
 $('#btnRescanPlugins')?.addEventListener('click', rescanPlugins);
+
+// 统计：换时间范围、手动刷新
+$('#btnRefreshStats')?.addEventListener('click', loadStats);
+$('#statsDays')?.addEventListener('change', loadStats);
 $('#btnRefreshMarket')?.addEventListener('click', loadMarket);
 $('#btnLoadMarket')?.addEventListener('click', () => {
   const box = $('#marketBox');
@@ -2054,6 +2241,17 @@ function connectStream() {
 /* ---------------- 启动 ---------------- */
 
 (async function init() {
+  /**
+   * 插件注册的页面标签 + 深链接先处理。
+   *
+   * 这两步放在最前面：/#page:xxx 这类地址要**立刻**切过去，
+   * 不能等 loadBots / pollStatus / 日志这些网络请求跑完——
+   * 用户看到的应该是自己点的那一页，而不是先闪一下概览。
+   */
+  await loadPluginPages();
+  const initial = location.hash.slice(1);
+  if (initial) activateTab(initial);
+
   await loadBots(); // 先确定当前机器人，后面的请求都会带上 ?bot=
   await pollStatus();
   await initLogs();
@@ -2066,7 +2264,7 @@ function connectStream() {
   // 后台服务状态：detail 会变（内存、下次重启时间），30 秒刷一次够了
   loadServices();
   setInterval(loadServices, 30000);
-  const initial = location.hash.slice(1);
+  // 机器人确定后再刷一次：上面那次是抢时间，这次才是准数据
   if (initial) activateTab(initial);
   // 调试用：?openmenu 直接展开机器人下拉，方便截图和检查样式
   if (location.search.includes('openmenu')) openBotMenu();

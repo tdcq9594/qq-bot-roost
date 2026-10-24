@@ -9,6 +9,46 @@ import { Pipeline, dedupMiddleware } from '../src/pipeline.js';
 import { PluginConfig } from '../src/plugin/config.js';
 import { browserCommand } from '../src/browser.js';
 
+/**
+ * 清掉测试写进额度账本的条目。
+ *
+ * **开始和结束各跑一次**：上一次跑崩了（某个断言抛异常、或中途语法错误）
+ * 会把记录留在账本里，下次跑就撞上「主动消息额度已用完」——
+ * 测试自己把自己弄挂，排查起来非常费劲。
+ */
+async function cleanQuotaLedger() {
+  const { DIRS } = await import('../src/paths.js');
+  const candidates = [path.join(DIRS.data, 'quota.json')];
+  try {
+    for (const d of await fs.readdir(DIRS.botsData)) {
+      candidates.push(path.join(DIRS.botsData, d, 'quota.json'));
+    }
+  } catch {
+    /* 还没有 bots 目录 */
+  }
+
+  for (const file of candidates) {
+    try {
+      const data = JSON.parse(await fs.readFile(file, 'utf8'));
+      for (const day of Object.keys(data)) {
+        for (const k of Object.keys(data[day])) {
+          if (k.includes('__t') || k.includes('__selftest__') || k.includes('__ratetest__')) {
+            delete data[day][k];
+          }
+        }
+        if (!Object.keys(data[day]).length) delete data[day];
+      }
+      await fs.writeFile(file, JSON.stringify(data, null, 2), 'utf8');
+    } catch {
+      /* 文件不存在就算了 */
+    }
+  }
+}
+
+// 开跑前先清一次，避免上一次崩溃留下的脏数据
+await cleanQuotaLedger();
+
+
 const results = [];
 function check(name, ok, extra = '') {
   results.push({ name, ok });
@@ -592,6 +632,7 @@ async function testDashboard() {
 
   // 声明式 dashboard 支持函数，也支持直接给对象
   const { PluginManager } = await import('../src/plugin/loader.js');
+  const { Registry } = await import('../src/plugin/context.js');
   const pm = Object.create(PluginManager.prototype);
   pm.loaded = new Map();
   pm.dashCache = new Map();
@@ -1033,6 +1074,391 @@ async function testConfigOwnership() {
 
 await testConfigOwnership();
 
+/* ---------- 插件热重载 ---------- */
+
+async function testPluginWatch() {
+  const { PluginWatchService } = await import('../src/services/plugin-watch.js');
+
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'roost-watch-'));
+  const put = async (id, rel, body) => {
+    const p = path.join(root, id, rel);
+    await fs.mkdir(path.dirname(p), { recursive: true });
+    await fs.writeFile(p, body);
+  };
+  /** 把 mtime 往前拨，模拟「文件已经写完一会儿了」 */
+  const age = async (id, rel = 'index.js') => {
+    const p = path.join(root, id, rel);
+    const past = new Date(Date.now() - 5000);
+    await fs.utimes(p, past, past);
+  };
+
+  await put('alpha', 'index.js', 'export default { id:"alpha", v:1 }');
+
+  const calls = { reload: [], rescan: 0 };
+  const rt = {
+    id: 'main',
+    plugins: {
+      loaded: new Map([['alpha', {}]]),
+      state: {},
+      async reload(id) {
+        calls.reload.push(id);
+        return true;
+      },
+      async rescan() {
+        calls.rescan += 1;
+        return { added: [], removed: [] };
+      },
+    },
+  };
+  const w = new PluginWatchService({ globalCfg: {}, getRuntimes: () => [rt], dir: root });
+
+  // 首次扫描只记录基线，不能一启动就把所有插件重载一遍
+  await w.tick();
+  check('热重载: 首次扫描只建基线，不重载', calls.reload.length === 0);
+
+  await w.tick();
+  check('热重载: 内容没变不重载', calls.reload.length === 0);
+
+  // 刚写完先不动手：编辑器可能还在写。
+  // 这里把 settleMs 调大，让判断不依赖真实时钟——否则机器一卡就假失败。
+  w.settleMs = 60000;
+  await put('alpha', 'index.js', 'export default { id:"alpha", v:2 }');
+  await w.tick();
+  check('热重载: 文件刚改完先等稳定', calls.reload.length === 0);
+
+  // settleMs 归零，等价于「写完已经一会儿了」
+  w.settleMs = 0;
+  await w.tick();
+  check('热重载: 文件稳定后触发重载', calls.reload.join() === 'alpha', `reload=${calls.reload.join()}`);
+
+  // 新增插件目录 → 走 rescan（它认得「装了什么」）
+  await put('beta', 'index.js', 'export default { id:"beta" }');
+  await w.tick();
+  check('热重载: 新增插件目录触发 rescan', calls.rescan === 1, `rescan=${calls.rescan}`);
+
+  // 依赖目录的变化不该触发重载，否则 npm install 一次能重载十遍
+  await put('alpha', 'node_modules/foo/index.js', 'module.exports = 1');
+  await age('alpha', 'node_modules/foo/index.js');
+  await w.tick();
+  await w.tick();
+  check('热重载: node_modules 变化被忽略', calls.reload.length === 1, `reload=${calls.reload.length}`);
+
+  // 运行时产物（__pycache__ / .log / .db）同理
+  await put('alpha', '__pycache__/x.pyc', 'x');
+  await put('alpha', 'run.log', 'x');
+  await age('alpha', 'run.log');
+  await w.tick();
+  await w.tick();
+  check('热重载: __pycache__ 和 .log 变化被忽略', calls.reload.length === 1);
+
+  // 被禁用的插件不重载——用户关掉它就是因为不想让它跑
+  rt.plugins.state.alpha = false;
+  await put('alpha', 'index.js', 'export default { id:"alpha", v:3 }');
+  await age('alpha');
+  await w.tick();
+  await w.tick();
+  check('热重载: 已禁用的插件不重载', calls.reload.length === 1);
+  rt.plugins.state.alpha = true;
+
+  // 挂起期间完全不动作（安装/卸载插件时会挂起）
+  w.suspend(5000);
+  await put('alpha', 'index.js', 'export default { id:"alpha", v:4 }');
+  await age('alpha');
+  await w.tick();
+  check('热重载: 挂起期间不重载', calls.reload.length === 1);
+
+  // 恢复后要重建基线，不能把挂起期间的改动当新变化
+  w.suspendedUntil = 0;
+  await w.tick();
+  await w.tick();
+  check('热重载: 恢复后重建基线，不补触发', calls.reload.length === 1);
+
+  await w.stop();
+  await fs.rm(root, { recursive: true, force: true }).catch(() => {});
+}
+
+await testPluginWatch();
+
+/* ---------- 版本范围匹配 ---------- */
+
+async function testSemver() {
+  const { satisfies, compareVersion, frameworkVersion, parseVersion } = await import(
+    '../src/semver.js'
+  );
+
+  check('版本: 精确匹配', satisfies('0.5.6', '0.5.6'));
+  check('版本: 精确不匹配', !satisfies('0.5.6', '0.5.5'));
+  check('版本: >= 通过', satisfies('0.5.6', '>=0.5.0'));
+  check('版本: >= 不通过', !satisfies('0.4.9', '>=0.5.0'));
+  check('版本: 区间写法', satisfies('0.5.6', '>=0.5.0 <1.0.0'));
+  check('版本: 区间上界不含', !satisfies('1.0.0', '>=0.5.0 <1.0.0'));
+  check('版本: ^0.5.0 到 0.6.0 之前', satisfies('0.5.9', '^0.5.0') && !satisfies('0.6.0', '^0.5.0'));
+  check('版本: ^1.2.3 到 2.0.0 之前', satisfies('1.9.0', '^1.2.3') && !satisfies('2.0.0', '^1.2.3'));
+  check('版本: ~0.5.0 只到 0.6.0 之前', satisfies('0.5.9', '~0.5.0') && !satisfies('0.6.0', '~0.5.0'));
+  check('版本: 通配 0.5.x', satisfies('0.5.6', '0.5.x') && !satisfies('0.6.0', '0.5.x'));
+  check('版本: 或的写法', satisfies('0.3.0', '>=0.5.0 || ^0.3.0'));
+  check('版本: 空范围放行', satisfies('0.5.6', '') && satisfies('0.5.6', '*'));
+  check('版本: 写歪的范围不拦（放行）', satisfies('0.5.6', '随便写的'));
+  // 预发行版：范围没写 - 就不认，免得作者以为测的是正式版
+  check('版本: 预发行版默认不满足', !satisfies('0.6.0-beta.1', '>=0.5.0'));
+  check('版本: 预发行版明确写了才认', satisfies('0.6.0-beta.1', '>=0.6.0-beta.1'));
+  check('版本: 解析带 v 前缀', parseVersion('v1.2.3')?.nums.join('.') === '1.2.3');
+  check('版本: compareVersion 仍可用', compareVersion('0.5.1', '0.5.2') === -1);
+  check('版本: 框架版本读得到', /^\d+\.\d+\.\d+/.test(frameworkVersion()), frameworkVersion());
+
+  /**
+   * 光 import 模块抓不到「函数体里引用了没导入的名字」——
+   * 那次把 compareVersion 改成 re-export 之后，market.js 里的 detectUpdates
+   * 直接 ReferenceError，但模块导入测试照样通过。所以这里真的调一遍。
+   */
+  const { detectUpdates } = await import('../src/plugin/market.js');
+  const ups = detectUpdates(
+    [{ id: 'a', version: '2.0.0' }, { id: 'b', version: '1.0.0' }],
+    { a: '1.0.0', b: '1.0.0' },
+  );
+  check(
+    '版本: detectUpdates 能跑（引用没断）',
+    ups.length === 1 && ups[0].id === 'a',
+    JSON.stringify(ups.map((u) => u.id)),
+  );
+}
+
+await testSemver();
+
+/* ---------- 插件框架版本兼容 ---------- */
+
+async function testPluginCompat() {
+  const { PluginManager } = await import('../src/plugin/loader.js');
+  const { Registry } = await import('../src/plugin/context.js');
+
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'roost-compat-'));
+  const mk = async (id, body) => {
+    await fs.mkdir(path.join(root, id), { recursive: true });
+    await fs.writeFile(path.join(root, id, 'index.js'), body);
+  };
+  const quiet = { logs: { enabled: false } };
+  const makePm = (ignoreCompat = false) =>
+    new PluginManager({
+      pluginsDir: root,
+      paths: {
+        id: 'main',
+        pluginConfig: () => path.join(root, '.cfg.json'),
+        pluginLog: () => path.join(root, '.log'),
+        pluginDataDirFor: () => root,
+        pluginData: (name) => path.join(root, 'data', name),
+      },
+      // 用真的 Registry：假对象缺方法会让「加载成功」这个用例变成假阴性
+      registry: new Registry(),
+      api: {},
+      cfg: quiet,
+      goBin: null,
+      groups: {},
+      roles: {},
+      outbound: {},
+      session: {},
+      pipeline: { removeByPlugin() {} },
+      isOwner: () => false,
+      ignoreCompat,
+    });
+
+  // 要求一个不可能满足的版本 → 必须拒绝加载，并说清原因
+  await mk(
+    'needs-new',
+    `export default { id:'needs-new', name:'要新框架', frameworkVersion:'>=99.0.0',
+       setup(ctx){ ctx.command('x','x', async()=>'x'); } };`,
+  );
+  const pm = makePm();
+  const ok = await pm.load('needs-new');
+  const err = pm.errors.get('needs-new') ?? '';
+  check('兼容: 框架版本不满足时拒绝加载', ok === false);
+  check('兼容: 报错说清要求与当前版本', /99\.0\.0/.test(err) && /当前/.test(err), err.slice(0, 60));
+
+  // 放宽开关后能装（作者本地调试用）
+  const pm2 = makePm(true);
+  const ok2 = await pm2.load('needs-new');
+  check('兼容: ignoreFrameworkVersion 可跳过校验', ok2 === true);
+
+  // 满足要求就正常加载
+  await mk(
+    'fine',
+    `export default { id:'fine', name:'正常', frameworkVersion:'>=0.1.0',
+       setup(ctx){ ctx.command('y','y', async()=>'y'); } };`,
+  );
+  const pm3 = makePm();
+  const ok3 = await pm3.load('fine');
+  check('兼容: 满足要求正常加载', ok3 === true);
+
+  // 不写 frameworkVersion 的老插件照旧能跑
+  await mk('plain', `export default { id:'plain', setup(ctx){ ctx.command('z','z', async()=>'z'); } };`);
+  const pm4 = makePm();
+  check('兼容: 没声明版本要求的插件不受影响', (await pm4.load('plain')) === true);
+
+  await fs.rm(root, { recursive: true, force: true }).catch(() => {});
+}
+
+await testPluginCompat();
+
+/* ---------- 统计库（SQLite） ---------- */
+
+async function testStats() {
+  const { StatsStore, dayKey } = await import('../src/storage/index.js');
+  const { probeSqlite } = await import('../src/storage/db.js');
+
+  if (!probeSqlite()) {
+    // 环境不支持就不算失败，但要说清为什么跳过
+    check('统计: 当前 Node 无内置 SQLite，跳过', true, '（需 22.5+）');
+    return;
+  }
+
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'roost-stats-'));
+  const file = path.join(root, 'stats.db');
+  const store = new StatsStore({ file, retentionDays: 30 });
+
+  check('统计: 能打开并建表', store.open() === true && store.available);
+
+  const now = Date.now();
+  store.record({ scope: 'group', chatId: 'g1', userId: 'u1', ts: now });
+  store.record({ scope: 'group', chatId: 'g1', userId: 'u2', ts: now });
+  store.record({ scope: 'group', chatId: 'g1', userId: 'u1', isCommand: true, command: 'dice', ts: now });
+  store.record({ scope: 'c2c', chatId: 'u9', userId: 'u9', isCommand: true, command: 'dice', ts: now });
+
+  check('统计: 写入是缓冲的（flush 前不落盘）', store.buf.length === 4);
+  check('统计: flush 返回写入条数', store.flush() === 4);
+  check('统计: flush 后缓冲清空', store.buf.length === 0);
+
+  const ov = store.overview(7);
+  check('统计: 总消息数正确', ov.total === 4, `total=${ov.total}`);
+  check('统计: 今日消息数正确', ov.today.messages === 4);
+  check('统计: 今日命令数正确', ov.today.commands === 2, `cmd=${ov.today.commands}`);
+  check('统计: 今日活跃去重正确', ov.today.users === 3, `users=${ov.today.users}`);
+  check('统计: 命令排行正确', ov.topCommands[0]?.name === 'dice' && ov.topCommands[0].count === 2);
+  check('统计: 会话排行正确', ov.topChats[0]?.chatId === 'g1' && ov.topChats[0].messages === 3);
+  check('统计: 成员档案去重正确', ov.members.total === 3, `members=${ov.members.total}`);
+  check('统计: 折线补齐空白天', ov.series.length === 7 && ov.series.at(-1).day === dayKey(), `len=${ov.series.length}`);
+
+  // 只记数量不记正文——这是隐私底线，用表结构验证
+  const cols = store.db.prepare('PRAGMA table_info(messages)').all().map((c) => c.name);
+  check('统计: 不存消息正文', !cols.includes('content') && !cols.includes('text'), cols.join(','));
+
+  // 过期清理
+  const old = now - 40 * 86400_000;
+  store.record({ scope: 'group', chatId: 'g1', userId: 'u3', ts: old });
+  store.flush();
+  const before = store.overview(7).total;
+  const membersBefore = store.overview(7).members.total;
+  const pruned = store.prune();
+  check('统计: 过期明细被清掉', pruned.messages >= 1, `删除 ${pruned.messages} 条`);
+  check('统计: 清理后总量减少', store.overview(7).total === before - 1);
+  check(
+    '统计: 成员档案不被清理',
+    store.overview(7).members.total === membersBefore,
+    `清理前 ${membersBefore} → 清理后 ${store.overview(7).members.total}`,
+  );
+
+  // 重开同一个库：迁移要幂等，数据要还在
+  store.close();
+  const again = new StatsStore({ file, retentionDays: 30 });
+  again.open();
+  check('统计: 重新打开数据还在', again.overview(7).total === 4, `total=${again.overview(7).total}`);
+  again.close();
+
+  // 关闭之后 record 不能抛错（退出阶段可能还有消息进来）
+  let threw = false;
+  try {
+    again.record({ scope: 'group', chatId: 'g1', userId: 'u1' });
+  } catch {
+    threw = true;
+  }
+  check('统计: 关闭后写入不抛错', !threw);
+
+  await fs.rm(root, { recursive: true, force: true }).catch(() => {});
+}
+
+await testStats();
+
+/* ---------- 素材缓存与模板消息 ---------- */
+
+async function testMediaAndTemplate() {
+  const { QQApi, FILE_TYPE } = await import('../src/api.js');
+
+  // 把 fetch 换掉，数一数到底发了几次上传请求
+  const realFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ file_uuid: 'u1', file_info: 'fi1', ttl: 300 }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  try {
+    const api = new QQApi({
+      tokenManager: { get: async () => 'tok', appId: 'app', refresh: async () => {} },
+      baseUrl: 'http://127.0.0.1:1',
+    });
+
+    const a = await api.uploadMedia('group', 'g1', { url: 'https://x/1.png' });
+    const b = await api.uploadMedia('group', 'g1', { url: 'https://x/1.png' });
+    check('素材: 同一个 url 只上传一次', calls === 1 && b?.file_info === 'fi1', `calls=${calls}`);
+    check('素材: 命中缓存返回同样的 file_info', a?.file_info === b?.file_info);
+
+    await api.uploadMedia('group', 'g2', { url: 'https://x/1.png' });
+    check('素材: 换一个目标要重新上传', calls === 2, `calls=${calls}`);
+
+    await api.uploadMedia('group', 'g1', { url: 'https://x/1.png', reuse: false });
+    check('素材: reuse=false 强制重新上传', calls === 3, `calls=${calls}`);
+
+    await api.uploadMedia('group', 'g1', { fileType: FILE_TYPE.IMAGE, fileData: 'AAAA' });
+    await api.uploadMedia('group', 'g1', { fileType: FILE_TYPE.IMAGE, fileData: 'AAAA' });
+    check('素材: base64 上传不缓存（每次都传）', calls === 5, `calls=${calls}`);
+
+    // 缓存有上限，不能无限长
+    for (let i = 0; i < 210; i++) {
+      await api.uploadMedia('group', 'g1', { url: `https://x/${i}.png` });
+    }
+    check('素材: 缓存不超过 200 条', api.mediaCache.size <= 200, `size=${api.mediaCache.size}`);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  // 模板消息：markdown + 按钮一次带出去，而不是发三条
+  const { buildMessage } = await import('../src/message.js');
+  const sent = [];
+  const fakeApi = {
+    sendGroup: async (target, body) => {
+      sent.push({ target, body });
+      return { id: 'x' };
+    },
+    sendC2C: async (target, body) => {
+      sent.push({ target, body });
+      return { id: 'x' };
+    },
+  };
+  const msg = buildMessage(
+    'GROUP_AT_MESSAGE_CREATE',
+    {
+      id: 'm2',
+      content: '测试',
+      group_openid: 'g1',
+      author: { member_openid: 'u1' },
+      timestamp: String(Date.now()),
+    },
+    { api: fakeApi, cfg: { commandPrefix: '/' } },
+  );
+
+  const kb = { content: { rows: [{ buttons: [{ id: '1', render_data: { label: '按钮' } }] }] } };
+  await msg.replyCard({ markdown: { content: '## 标题' }, keyboard: kb });
+  check('模板: 一条消息带上 markdown 和按钮', sent.length === 1 && !!sent[0].body.markdown);
+  check('模板: 按钮没被丢掉', JSON.stringify(sent[0].body.keyboard ?? {}) === JSON.stringify(kb));
+
+  sent.length = 0;
+  await msg.replyCard({});
+  check('模板: 空内容不发消息', sent.length === 0);
+}
+
+await testMediaAndTemplate();
+
 /* ---------- 模块可导入性（防止改了导出忘了改引用） ---------- */
 
 async function testModulesLoad() {
@@ -1054,6 +1480,10 @@ async function testModulesLoad() {
     '../src/pipeline.js',
     '../src/roles.js',
     '../src/runtime.js',
+    '../src/semver.js',
+    '../src/storage/db.js',
+    '../src/storage/schema.js',
+    '../src/storage/index.js',
     '../src/session.js',
     '../src/token.js',
     '../src/updater.js',
@@ -1067,6 +1497,7 @@ async function testModulesLoad() {
     '../src/services/config-watch.js',
     '../src/services/restart.js',
     '../src/services/auto-update.js',
+    '../src/services/plugin-watch.js',
     '../src/web/server.js',
     '../src/plugin/config.js',
     '../src/plugin/context.js',
@@ -1095,39 +1526,7 @@ async function testModulesLoad() {
 await testModulesLoad();
 
 /* ---------- 汇总 ---------- */
-// 清掉测试写进额度账本的条目，别污染真实数据。
-// 多机器人后账本在 data/bots/<id>/quota.json，所以两边都要扫。
-{
-  const fs = await import('node:fs/promises');
-  const path = await import('node:path');
-  const { DIRS } = await import('../src/paths.js');
-
-  const candidates = [path.join(DIRS.data, 'quota.json')];
-  try {
-    for (const d of await fs.readdir(DIRS.botsData)) {
-      candidates.push(path.join(DIRS.botsData, d, 'quota.json'));
-    }
-  } catch {
-    /* 还没有 bots 目录 */
-  }
-
-  for (const file of candidates) {
-    try {
-      const data = JSON.parse(await fs.readFile(file, 'utf8'));
-      for (const day of Object.keys(data)) {
-        for (const k of Object.keys(data[day])) {
-          if (k.includes('__t') || k.includes('__selftest__') || k.includes('__ratetest__')) {
-            delete data[day][k];
-          }
-        }
-        if (!Object.keys(data[day]).length) delete data[day];
-      }
-      await fs.writeFile(file, JSON.stringify(data, null, 2), 'utf8');
-    } catch {
-      /* 文件不存在就算了 */
-    }
-  }
-}
+await cleanQuotaLedger();
 
 const fail = results.filter((r) => !r.ok);
 console.log(`\n${results.length - fail.length}/${results.length} 通过`);

@@ -8,6 +8,13 @@ const log = createLogger('api');
 export const FILE_TYPE = { IMAGE: 1, VIDEO: 2, VOICE: 3, FILE: 4 };
 
 /**
+ * 素材 file_info 的缓存时长。
+ * 官方说有效期 3 天，这里按 2 天算——过期前就换新的，
+ * 免得刚好卡在边界上收到「file_info 已失效」。
+ */
+const MEDIA_TTL = 2 * 86400_000;
+
+/**
  * QQ 开放平台 HTTP API 封装。
  * 鉴权头固定为 "QQBot {access_token}"。
  */
@@ -21,6 +28,15 @@ export class QQApi {
     this.groupInvited = false;
     // 群角色查询缓存：groupOpenid -> { at, value }。bot_state 只有 30 QPM
     this.roleCache = new Map();
+    /**
+     * 素材上传缓存：key -> { value, at }。
+     *
+     * 官方返回的 file_info 有效期 3 天，同一个 url 反复发（比如每日一图）
+     * 没必要每次重新上传——富媒体上传有独立频控，大文件还很慢。
+     * 键里带 scene + target：file_info 是跟着上传时那个会话走的，
+     * 换个群必须重新传，不能跨目标复用。
+     */
+    this.mediaCache = new Map();
   }
 
   async #request(method, path, body, { retried = false, headers } = {}) {
@@ -109,13 +125,34 @@ export class QQApi {
    * @param {object} opts { fileType, url?, fileData?(base64) }
    * @returns {Promise<{file_uuid:string, file_info:string, ttl:number}>}
    */
-  uploadMedia(scene, target, { fileType = FILE_TYPE.IMAGE, url, fileData } = {}) {
+  async uploadMedia(scene, target, { fileType = FILE_TYPE.IMAGE, url, fileData, reuse = true } = {}) {
+    // 只有按 url 传的才缓存：base64 数据做键得先算哈希，不值当
+    const cacheKey = reuse && url ? `${scene}:${target}:${fileType}:${url}` : null;
+    if (cacheKey) {
+      const hit = this.mediaCache.get(cacheKey);
+      if (hit && Date.now() - hit.at < MEDIA_TTL) {
+        log.debug(`素材命中缓存，跳过上传: ${url}`);
+        return hit.value;
+      }
+      if (hit) this.mediaCache.delete(cacheKey);
+    }
+
     const path =
       scene === 'group' ? `/v2/groups/${target}/files` : `/v2/users/${target}/files`;
     const body = { file_type: fileType, srv_send_msg: false };
     if (url) body.url = url;
     if (fileData) body.file_data = fileData;
-    return this.#request('POST', path, body);
+    const r = await this.#request('POST', path, body);
+
+    if (cacheKey && r?.file_info) {
+      this.mediaCache.set(cacheKey, { value: r, at: Date.now() });
+      // 缓存不能无限长：留最近 200 个，超了丢最早的那个
+      if (this.mediaCache.size > 200) {
+        const oldest = this.mediaCache.keys().next().value;
+        if (oldest) this.mediaCache.delete(oldest);
+      }
+    }
+    return r;
   }
 
   /** 从本地文件读取并上传（自动转 base64） */

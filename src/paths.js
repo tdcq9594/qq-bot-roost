@@ -83,6 +83,8 @@ export function botPaths(id) {
     groups: path.join(base, 'groups.json'),
     roles: path.join(base, 'roles.json'),
     quota: path.join(base, 'quota.json'),
+    /** 统计库（SQLite，存消息计数与成员活跃，不存正文） */
+    stats: path.join(base, 'stats.db'),
     pluginState: path.join(base, 'plugins.json'),
     pluginDataDir: path.join(base, 'plugins'),
     /** 日志根目录 */

@@ -14,6 +14,7 @@
  * 下载用 GitHub 的 tarball 接口，不依赖 git（用户可能是下载 zip 用的，没装 git）。
  */
 import fs from 'node:fs/promises';
+import { compareVersion } from './semver.js';
 import path from 'node:path';
 import { createLogger } from './logger.js';
 import { fetchAndExtract } from './tarball.js';
@@ -31,23 +32,13 @@ const CODE_ENTRIES = ['src', 'web', 'test', 'docs', 'package.json', 'README.md',
 const PROTECTED = new Set(['config', 'data', 'logs', 'plugins', 'node_modules', '.git']);
 
 /**
- * 比较语义化版本。和插件市场那套逻辑一致，但这里单独实现：
- * 框架更新不该依赖插件模块。
- * @returns {number} 1 = a 更新，-1 = b 更新，0 = 相等
+ * 比较语义化版本。
+ *
+ * 实现放在 `src/semver.js` —— 插件市场、框架更新、插件版本兼容校验
+ * 三处共用一份，避免出现「市场说能升、更新器说不能」这种自相矛盾。
+ * 这里再导出一次，是为了不破坏既有的导入路径。
  */
-export function compareVersion(a, b) {
-  const parse = (v) => {
-    const m = String(v ?? '').match(/^v?(\d+)\.(\d+)\.(\d+)/);
-    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
-  };
-  const pa = parse(a);
-  const pb = parse(b);
-  if (!pa || !pb) return 0;
-  for (let i = 0; i < 3; i++) {
-    if (pa[i] !== pb[i]) return pa[i] > pb[i] ? 1 : -1;
-  }
-  return 0;
-}
+export { compareVersion } from './semver.js';
 
 /** 读当前版本 */
 export async function currentVersion() {

@@ -218,7 +218,7 @@ export class PluginStorage {
 /**
  * 插件上下文：插件能用的全部能力都在这里，不暴露内部实现。
  */
-export function createContext({ meta, paths, registry, api, cfg, config, configStore, groups, roles, levels, outbound, session, pipeline, isOwner }) {
+export function createContext({ meta, paths, registry, api, cfg, config, configStore, groups, roles, levels, outbound, session, pipeline, isOwner, pages = null }) {
   const id = meta.id;
   // 日志 tag 带机器人 id，多机器人下同名插件的日志不会串
   const logger = createLogger(`plugin:${paths?.id ?? '-'}:${id}`);
@@ -268,6 +268,28 @@ export function createContext({ meta, paths, registry, api, cfg, config, configS
     /** 框架内部用：取插件推的最后一份运行数据 */
     getDashboard() {
       return dashboardCache;
+    },
+
+    /**
+     * 往面板注册一个自己的页面。
+     *
+     *   ctx.registerPage({
+     *     key: 'board',            // 只在本插件内唯一
+     *     label: '战绩榜',          // 面板标签上显示的名字
+     *     html: '<h1>...</h1>',    // 一段完整或片段 HTML 都行
+     *   });
+     *
+     * 页面在 iframe 里渲染：CSS 不会漏到面板上，也不会反过来影响面板。
+     * 插件卸载或重载时页面自动消失，不用自己清理。
+     *
+     * @returns {string|null} 完整 key（`插件id:key`），环境不支持时返回 null
+     */
+    registerPage(page) {
+      if (!pages) {
+        logger.warn('当前环境不支持注册面板页面');
+        return null;
+      }
+      return pages.register(id, page);
     },
 
     /**

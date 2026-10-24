@@ -94,6 +94,19 @@ const GLOBAL_DEFAULTS = {
     goBin: '',
     /** 插件市场索引地址，换成你自己的插件仓库即可 */
     marketUrl: 'https://raw.githubusercontent.com/tdcq9594/qq-bot-roost-plugins/main/index.json',
+    /**
+     * 插件热重载：改完插件代码存盘两秒后自动生效。
+     * 默认开——开发插件时不用反复重启或点「重载」。
+     * 生产环境想省这点 CPU 可以关掉，改完手动点重载。
+     */
+    hotReload: true,
+    /** 轮询间隔（毫秒），默认 2 秒 */
+    hotReloadInterval: 2000,
+    /**
+     * 跳过插件的框架版本校验。插件在 plugin.json 里写了 frameworkVersion，
+     * 当前框架不满足时会拒绝加载；作者本地调试想硬跑可以打开这个开关。
+     */
+    ignoreFrameworkVersion: false,
   },
 };
 
@@ -147,6 +160,17 @@ const BOT_DEFAULTS = {
   session: {
     stickySec: 180,
     promptTimeoutSec: 120,
+  },
+
+  /**
+   * 统计：消息量、活跃人数、命令排行。
+   * 只记数量与时间，**不记消息正文**——正文落库会让人不敢用。
+   * 需要 Node 22.5+ 的内置 SQLite，没有就自动降级为不统计。
+   */
+  stats: {
+    enabled: true,
+    /** 明细保留天数，超出的自动清掉；成员档案不清 */
+    retentionDays: 90,
   },
 
   /**
@@ -352,6 +376,7 @@ export async function saveBotConfig(id, cfg) {
     messageLog: cfg.messageLog,
     outbound: cfg.outbound,
     session: cfg.session,
+    stats: cfg.stats ?? { enabled: true, retentionDays: 90 },
     plugins: cfg.plugins,
     groupManage: cfg.groupManage ?? { invited: false },
   });

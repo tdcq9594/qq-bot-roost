@@ -18,6 +18,7 @@ import { CleanupService } from './cleanup.js';
 import { ConfigWatchService } from './config-watch.js';
 import { RestartService } from './restart.js';
 import { AutoUpdateService } from './auto-update.js';
+import { PluginWatchService } from './plugin-watch.js';
 
 const log = createLogger('services');
 
@@ -42,7 +43,7 @@ export class Services {
     }
     // 清理：默认开。只删明确过期的临时/备份文件
     if (cfg.cleanup !== false) {
-      this.list.push(new CleanupService({ globalCfg }));
+      this.list.push(new CleanupService({ globalCfg, getRuntimes }));
     }
     // 配置热加载：默认开。手改 config/*.json 不用重启
     if (cfg.configWatch !== false) {
@@ -55,6 +56,10 @@ export class Services {
     // 自动检查更新：默认开（只检查不安装），发现新版写日志 + 面板提示
     if (globalCfg.update?.autoCheck !== false) {
       this.list.push(new AutoUpdateService({ globalCfg }));
+    }
+    // 插件热重载：默认开。改完插件代码存盘即生效，不用重启也不用点重载
+    if (globalCfg.plugins?.hotReload !== false) {
+      this.list.push(new PluginWatchService({ globalCfg, getRuntimes }));
     }
   }
 

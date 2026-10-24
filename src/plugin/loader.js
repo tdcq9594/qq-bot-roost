@@ -10,6 +10,8 @@ import { PluginConfig, schemaOf } from './config.js';
 import { normalizeDashboard } from './dashboard.js';
 import { readPluginVersion } from './market.js';
 import { ensurePluginDeps } from './deps.js';
+import { satisfies, frameworkVersion } from '../semver.js';
+import { PageRegistry } from './pages.js';
 
 const log = createLogger('plugins');
 
@@ -24,7 +26,7 @@ const log = createLogger('plugins');
  * 启用状态存在 data/bots/<机器人id>/plugins.json，删掉文件夹即等于卸载。
  */
 export class PluginManager {
-  constructor({ pluginsDir, paths, registry, api, cfg, goBin, groups, roles, outbound, session, pipeline, isOwner }) {
+  constructor({ pluginsDir, paths, registry, api, cfg, goBin, groups, roles, outbound, session, pipeline, isOwner, ignoreCompat }) {
     this.dir = pluginsDir;
     // 该机器人的全套路径（配置/数据/日志），多机器人下互不干扰
     this.paths = paths;
@@ -39,7 +41,11 @@ export class PluginManager {
     this.session = session;
     this.pipeline = pipeline;
     this.isOwner = isOwner;
+    /** 跳过插件声明的 frameworkVersion 校验（作者本地调试用） */
+    this.ignoreCompat = Boolean(ignoreCompat);
     this.loaded = new Map(); // id -> { meta, ctx?, host?, dir, kind, menuMissing }
+    /** 插件注册的面板页面（每机器人一份，互不干扰） */
+    this.pages = new PageRegistry();
     /** 磁盘上实际存在的插件目录，含未启用的 */
     this.diskIds = new Set();
     this.state = {}; // id -> enabled
@@ -160,6 +166,10 @@ export class PluginManager {
       if (allIds.includes(id)) continue;
       try {
         await this.unload(id);
+        // 目录没了就把它留下的元信息、错误记录、开关状态一起清掉。
+        // 不清的话 list() 会继续把这个不存在的插件列出来（meta 里还有它），
+        // 面板上就出现一个「已禁用、v0.0.0」的幽灵条目。
+        await this.forget(id);
         removed.push(id);
       } catch {}
     }
@@ -180,6 +190,27 @@ export class PluginManager {
     }
 
     return { added, removed, errors };
+  }
+
+  /**
+   * 校验插件声明的框架版本要求。
+   *
+   * 为什么要在**加载前**拦：插件用到了新版本才有的 ctx 方法，
+   * 装到旧框架上会在运行到那一行时才炸，报错还指向插件内部，
+   * 作者和用户都看不出真正原因是「框架太旧」。
+   *
+   * 两种写法都认：plugin.json 里的 frameworkVersion，
+   * 或内建插件默认导出里的 frameworkVersion。
+   */
+  #assertCompatible(id, meta) {
+    const need = meta?.frameworkVersion ?? meta?.requires?.framework;
+    if (!need || this.ignoreCompat) return;
+    const cur = frameworkVersion();
+    if (satisfies(cur, need)) return;
+    throw new Error(
+      `要求框架 ${need}，当前是 ${cur}。升级框架后再启用，` +
+        '或者把插件里的 frameworkVersion 改成兼容的范围',
+    );
   }
 
   async #detectKind(dir) {
@@ -258,6 +289,8 @@ export class PluginManager {
       log.warn(`插件目录 ${id} 里声明的 id 是 ${meta.id}，与目录名不一致，以目录名为准`);
     }
     meta.id = id;
+    // 版本兼容在 setup 之前拦——跑起来才发现「ctx.xxx 不是函数」就太晚了
+    this.#assertCompatible(id, meta);
 
     // 每个插件一份自己的日志文件：logs/bots/<机器人>/plugins/<id>.log
     if (this.cfg.logs?.enabled !== false) {
@@ -291,6 +324,7 @@ export class PluginManager {
       session: this.session,
       pipeline: this.pipeline,
       isOwner: this.isOwner,
+      pages: this.pages,
     });
 
     await meta.setup(ctx);
@@ -322,7 +356,15 @@ export class PluginManager {
       name: raw.name ?? id,
       version: raw.version ?? '0.0.0',
       description: raw.description ?? '',
+      // 面板和市场卡片用的补充信息，全部可选
+      shortDesc: raw.shortDesc ?? '',
+      icon: raw.icon ?? '',
+      repo: raw.repo ?? '',
+      supportPlatforms: Array.isArray(raw.supportPlatforms) ? raw.supportPlatforms : [],
+      frameworkVersion: raw.frameworkVersion ?? raw.requires?.framework ?? '',
     };
+
+    this.#assertCompatible(id, meta);
 
     // 每个插件一份自己的日志文件：logs/bots/<机器人>/plugins/<id>.log
     if (this.cfg.logs?.enabled !== false) {
@@ -452,6 +494,8 @@ export class PluginManager {
     this.registry.clearPlugin(id);
     // 插件注册的中间件也要一起摘掉，否则卸载后它还挡着别人的消息
     this.pipeline?.removeByPlugin?.(id);
+    // 面板页面同样要清，否则标签还在但点开是空白
+    this.pages?.clearPlugin(id);
     // 关掉它的日志文件句柄，免得句柄泄漏
     detachLogFile(`plugin:${this.paths.id}/${id}`);
     this.loaded.delete(id);
@@ -523,6 +567,12 @@ export class PluginManager {
       name: meta?.name || id,
       version: meta?.version || '',
       description: meta?.description || '',
+      // 下面这几项都是可选的，插件不写就是空
+      shortDesc: meta?.shortDesc || '',
+      icon: meta?.icon || '',
+      repo: meta?.repo || '',
+      supportPlatforms: Array.isArray(meta?.supportPlatforms) ? meta.supportPlatforms : [],
+      frameworkVersion: meta?.frameworkVersion || meta?.requires?.framework || '',
       kind,
       runtime,
     });
@@ -715,6 +765,12 @@ export class PluginManager {
         name: item?.meta?.name ?? cached?.name ?? id,
         version: item?.meta?.version ?? cached?.version ?? '',
         description: item?.meta?.description ?? cached?.description ?? '',
+        // 卡片上的一行简介优先用 shortDesc，没写就退回 description
+        shortDesc: item?.meta?.shortDesc ?? cached?.shortDesc ?? '',
+        icon: item?.meta?.icon ?? cached?.icon ?? '',
+        repo: item?.meta?.repo ?? cached?.repo ?? '',
+        supportPlatforms: item?.meta?.supportPlatforms ?? cached?.supportPlatforms ?? [],
+        frameworkVersion: item?.meta?.frameworkVersion ?? cached?.frameworkVersion ?? '',
         enabled: this.isEnabled(id),
         loaded: Boolean(item),
         // 未加载时用缓存里的类型，别一律当成 internal

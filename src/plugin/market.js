@@ -5,6 +5,8 @@ import { pathToFileURL } from 'node:url';
 import { createLogger } from '../logger.js';
 import { fetchAndExtract, branchTarballUrl } from '../tarball.js';
 import { DIRS } from '../paths.js';
+// re-export 不会在本模块内绑定名字，内部还要用就必须单独 import
+import { compareVersion } from '../semver.js';
 
 const log = createLogger('market');
 
@@ -190,35 +192,11 @@ export function mergeWithInstalled(indexPlugins, installedIds) {
 
 /**
  * 比较两个语义化版本号。
- * 只认 `主.次.修订[-预发行]`，其余部分忽略，不抛错——插件作者版本号写歪了
- * 不该让整个市场挂掉。
  *
- * @returns {number} 1 表示 a 更新，-1 表示 b 更新，0 表示相等
+ * 实现在 `src/semver.js`，和框架更新、插件兼容校验共用一份。
+ * 这里再导出一次，是为了不破坏既有的导入路径。
  */
-export function compareVersion(a, b) {
-  const parse = (v) => {
-    const m = String(v ?? '').match(/^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/);
-    if (!m) return null;
-    return {
-      nums: [Number(m[1]), Number(m[2]), Number(m[3])],
-      pre: m[4] ?? '',
-    };
-  };
-
-  const pa = parse(a);
-  const pb = parse(b);
-  // 有一边解析不了就当作相等，交给人工判断，不擅自提示更新
-  if (!pa || !pb) return 0;
-
-  for (let i = 0; i < 3; i++) {
-    if (pa.nums[i] !== pb.nums[i]) return pa.nums[i] > pb.nums[i] ? 1 : -1;
-  }
-  // 预发行版本低于正式版：1.0.0-beta < 1.0.0
-  if (pa.pre === pb.pre) return 0;
-  if (!pa.pre) return 1;
-  if (!pb.pre) return -1;
-  return pa.pre > pb.pre ? 1 : -1;
-}
+export { compareVersion } from '../semver.js';
 
 /**
  * 对照市场索引，找出本地有新版可用的插件。

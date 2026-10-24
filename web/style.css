@@ -978,3 +978,94 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
   padding: 1px 6px;
   font-size: 11.5px;
 }
+
+/* 插件图标：可选，插件没提供 icon 就不占位 */
+.plugin-icon {
+  width: 18px; height: 18px; border-radius: 5px;
+  object-fit: cover; vertical-align: -3px;
+  margin-right: 6px;
+  background: var(--panel-3);
+}
+
+/* ---------------- 统计页 ---------------- */
+
+.mini-select {
+  width: auto; padding: 5px 8px; font-size: 12.5px;
+  border-radius: var(--radius-sm);
+}
+
+/* 柱状图：纯 CSS，高度按比例撑开，不引图表库 */
+.stat-chart { margin: 4px 0 10px; }
+
+.bars {
+  display: flex; align-items: flex-end; gap: 4px;
+  height: 150px; padding: 8px 2px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.bar-wrap {
+  flex: 1 1 0; min-width: 0;
+  display: flex; flex-direction: column; justify-content: flex-end;
+  align-items: center; height: 100%;
+  cursor: default;
+}
+
+.bar {
+  width: 100%; max-width: 34px;
+  background: linear-gradient(180deg, var(--primary), var(--primary-border));
+  border-radius: 3px 3px 0 0;
+  transition: opacity .14s var(--ease);
+  min-height: 2px;
+}
+
+.bar-wrap:hover .bar { opacity: .75; }
+
+.bar-day {
+  font-size: 10px; color: var(--faint);
+  margin-top: 5px; white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 排行条 */
+.stat-list { display: flex; flex-direction: column; gap: 7px; }
+
+.stat-row {
+  display: grid;
+  grid-template-columns: minmax(72px, 34%) 1fr auto;
+  align-items: center; gap: 10px;
+  font-size: 13px;
+}
+
+.stat-name {
+  color: var(--text-2); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+
+.stat-track {
+  height: 6px; border-radius: 3px;
+  background: var(--panel-3); overflow: hidden;
+}
+
+.stat-track > i {
+  display: block; height: 100%;
+  background: var(--primary); border-radius: 3px;
+  transition: width .3s var(--ease);
+}
+
+.stat-val {
+  color: var(--muted); font-size: 12.5px;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+
+/* 零消息的那天：只留一条淡淡的底线，别看起来像真有数据 */
+.bar.zero {
+  background: var(--panel-3);
+}
+
+/* 插件自定义页面：iframe 撑满内容区，样式和面板互不影响 */
+.plugin-page {
+  display: block; width: 100%;
+  height: calc(100vh - 148px); min-height: 420px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--panel);
+}

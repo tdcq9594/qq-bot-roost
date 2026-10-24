@@ -431,6 +431,56 @@ async function testSendAndCred() {
   ok('凭证: 刷新接口可用', tk.status === 200 || tk.status === 400, tk.data?.error || '');
 }
 
+/* ---------------- 统计与插件页面 ---------------- */
+
+async function testStatsAndPages() {
+  const st = await api('/api/stats?days=7');
+  ok('统计: 接口可用', st.status === 200, st.data?.error || '');
+  ok('统计: 带 available 字段', typeof st.data?.available === 'boolean');
+
+  if (st.data?.available) {
+    ok('统计: 折线补齐 7 天', Array.isArray(st.data.series) && st.data.series.length === 7);
+    ok('统计: 今日字段齐全', typeof st.data.today?.messages === 'number');
+
+    const before = st.data.total;
+    const d = await api('/api/mock/dispatch', {
+      method: 'POST',
+      body: JSON.stringify({ content: 'e2e 统计', groupId: 'g-e2e', userId: 'u-e2e' }),
+    });
+    ok('统计: mock 能注入消息', d.status === 200, d.data?.error || '');
+
+    // 统计是 1 秒一批落盘的，等它刷完再查
+    await new Promise((r) => setTimeout(r, 1300));
+    const st2 = await api('/api/stats?days=7');
+    ok('统计: 注入后总数增加', st2.data?.total > before, `${before} → ${st2.data?.total}`);
+  } else {
+    skip('统计: 当前 Node 不支持内置 SQLite，跳过统计断言');
+  }
+
+  const recent = await api('/api/stats/recent?limit=5');
+  ok('统计: 最近消息接口可用', recent.status === 200 && Array.isArray(recent.data));
+
+  // 插件自定义页面
+  const pages = await api('/api/pages');
+  ok('页面: 列表接口可用', pages.status === 200 && Array.isArray(pages.data), pages.data?.error || '');
+
+  if (pages.data?.length) {
+    const key = pages.data[0].key;
+    const html = await fetch(`${BASE}/api/pages/${encodeURIComponent(key)}/html`);
+    const text = await html.text();
+    ok('页面: 能取到 HTML', html.status === 200 && text.includes('<'), `status=${html.status}`);
+    ok(
+      '页面: 返回的是 HTML 而不是 JSON',
+      (html.headers.get('content-type') || '').includes('text/html'),
+    );
+  } else {
+    skip('页面: 当前没有插件注册页面，跳过内容断言');
+  }
+
+  const miss = await fetch(`${BASE}/api/pages/nope%3Ax/html`);
+  ok('页面: 不存在的页面返回 404', miss.status === 404, `status=${miss.status}`);
+}
+
 /* ---------------- 主流程 ---------------- */
 
 async function main() {
@@ -449,6 +499,7 @@ async function main() {
   await testGroupsAndRoles();
   await testEventsAndLogs();
   await testWebhook();
+  await testStatsAndPages();
   await testSendAndCred();
 
   const fail = results.filter((r) => !r.pass);

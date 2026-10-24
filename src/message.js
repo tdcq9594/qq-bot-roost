@@ -218,8 +218,32 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
     return msg.replyMarkdown({ content }, opts.keyboard);
   };
 
-  /** 发富媒体：上传后以 msg_type=7 发送。图片是独立消息，先把攒的文本发掉 */
-  const replyMedia = async (fileType, source, { local = false } = {}) => {
+  /**
+   * 发一条**模板消息**：markdown 正文 + 按钮 + ark 结构化模板一次带出去。
+   *
+   * 为什么不直接用 replyMarkdown：这三样属于同一条消息的不同部分，
+   * 分三次发会变成三条独立消息，用户看到的是三块碎片。
+   *
+   *   await msg.replyCard({
+   *     markdown: { content: '## 今日运势\n> 大吉' },
+   *     keyboard: { content: { rows: [...] } },
+   *   });
+   *
+   * ark 和 markdown 同时给时以 markdown 为准（官方不支持一条消息两种富文本）。
+   *
+   * @param {{markdown?:object, keyboard?:object, ark?:object}} card
+   */
+  msg.replyCard = async (card = {}) => {
+    const { markdown, keyboard, ark } = card;
+    if (!markdown && !ark) return null;
+    await msg.flushReplies();
+    return send({ markdown, keyboard, ark }, true).catch((e) => {
+      log.error('发送模板消息失败:', e.message);
+      return null;
+    });
+  };
+
+  /** 发富媒体：上传后以 msg_type=7 发送。图片是独立消息，先把攒的文本发掉 */  const replyMedia = async (fileType, source, { local = false } = {}) => {
     if (!source) return null;
     await msg.flushReplies();
     try {
@@ -243,6 +267,33 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
   msg.replyVideo = (src, opts) => replyMedia(FILE_TYPE.VIDEO, src, opts);
   msg.replyVoice = (src, opts) => replyMedia(FILE_TYPE.VOICE, src, opts);
   msg.replyFile = (src, opts) => replyMedia(FILE_TYPE.FILE, src, opts);
+
+  /**
+   * 发一张内存里的图片（Buffer）。
+   *
+   * 渲染类插件用得上：画完直接发，不用先落盘再读回来，
+   * 也不用自己拼 base64 和 file_info。
+   */
+  msg.replyImageBuffer = async (buf, { fileType = FILE_TYPE.IMAGE } = {}) => {
+    if (!buf?.length) return null;
+    await msg.flushReplies();
+    try {
+      const scene = kind === 'group' ? 'group' : 'c2c';
+      const target = kind === 'group' ? groupId : userId;
+      if (scene !== 'group' && scene !== 'c2c') return null;
+
+      const up = await api.uploadMedia(scene, target, {
+        fileType,
+        fileData: Buffer.from(buf).toString('base64'),
+        reuse: false, // base64 本来就不进缓存
+      });
+      if (!up?.file_info) throw new Error('未返回 file_info');
+      return await send({ msgType: 7, content: ' ', media: { file_info: up.file_info } }, true);
+    } catch (e) {
+      log.error('发送图片 Buffer 失败:', e.message);
+      return null;
+    }
+  };
 
   /**
    * 流式回复（**仅单聊**，官方没有群聊的流式接口）。

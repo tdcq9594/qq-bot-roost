@@ -23,6 +23,7 @@ import {
 } from '../updater.js';
 // 面板改插件启停时要同步机器人配置里的过滤器，两边不能各说各的
 import { pluginFilterOf } from '../bot.js';
+import { suspendPluginWatch } from '../services/plugin-watch.js';
 
 const log = createLogger('webui');
 const WEB_ROOT = path.join(ROOT, 'web');
@@ -122,6 +123,7 @@ export async function startWebServer({
   onBotRemove,
   onShutdown,
   services = null,
+  mock = false,
 }) {
   const wc = globalCfg.webui ?? {};
   // 启动时读一次版本号，status 里带给面板
@@ -566,9 +568,77 @@ export async function startWebServer({
           return json(res, 200, plugins.list());
         }
 
+        /**
+         * 统计概览：消息量、活跃人数、命令排行、会话排行。
+         * ?days=7 控制窗口（1~365）。SQLite 不可用时返回 available:false，
+         * 面板据此显示「统计不可用」而不是画一堆 0。
+         */
+        if (pathname === '/api/stats' && req.method === 'GET') {
+          const days = Number(url.searchParams.get('days')) || 7;
+          try {
+            return json(res, 200, rt.stats?.overview(days) ?? { available: false });
+          } catch (e) {
+            return json(res, 500, { error: e.message, available: false });
+          }
+        }
+
+        // 最近消息（不含正文，只有时间/会话/是否命令）
+        if (pathname === '/api/stats/recent' && req.method === 'GET') {
+          const limit = Number(url.searchParams.get('limit')) || 50;
+          try {
+            return json(res, 200, rt.stats?.recent(limit) ?? []);
+          } catch (e) {
+            return json(res, 500, { error: e.message });
+          }
+        }
+
+        /**
+         * **只在 --mock 模式下注册**：往运行时塞一条假消息。
+         *
+         * 用途：没有真机也能验证整条链路——统计、权限、命令、限流。
+         * 连真 QQ 时这个路由根本不存在，所以不构成额外入口。
+         */
+        if (mock && pathname === '/api/mock/dispatch' && req.method === 'POST') {
+          const body = await readBody(req);
+          const event = String(body.event || 'GROUP_AT_MESSAGE_CREATE');
+          const data = body.data ?? {
+            id: `mock-${Date.now()}`,
+            content: String(body.content ?? ''),
+            timestamp: new Date().toISOString(),
+            group_openid: String(body.groupId ?? 'mock-group'),
+            author: { member_openid: String(body.userId ?? 'mock-user'), username: '测试用户' },
+          };
+          await rt.dispatch(event, data);
+          return json(res, 200, { ok: true, event });
+        }
+
         // 插件自定义运行数据：一次拿全部，面板轮询这个接口
         if (pathname === '/api/plugins/dashboard' && req.method === 'GET') {
           return json(res, 200, await plugins.dashboards());
+        }
+
+        /* ---------------- 插件注册的面板页面 ---------------- */
+
+        // 有哪些页面（不含 html，可能很大）
+        if (pathname === '/api/pages' && req.method === 'GET') {
+          return json(res, 200, plugins.pages?.list() ?? []);
+        }
+
+        // 页面本体。iframe 直接 src 到这里，所以返回 text/html 而不是 JSON
+        const pageM = pathname.match(/^\/api\/pages\/(.+)\/html$/);
+        if (pageM && req.method === 'GET') {
+          const key = decodeURIComponent(pageM[1]);
+          const p = plugins.pages?.get(key);
+          if (!p) {
+            res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+            return res.end('页面不存在（插件可能已卸载或重载）');
+          }
+          res.writeHead(200, {
+            'Content-Type': 'text/html; charset=utf-8',
+            // 插件页面可能随插件更新而变，不缓存
+            'Cache-Control': 'no-store',
+          });
+          return res.end(p.html);
         }
 
         // 有哪些插件能更新。结果缓存 5 分钟，?force=1 强制重新查
@@ -683,6 +753,8 @@ export async function startWebServer({
             if (!st?.isDirectory()) return json(res, 404, { error: `插件 ${id} 没装` });
 
             try {
+              // 删目录时同样要挂起热重载：文件一个个消失会被当成「用户改代码」
+              suspendPluginWatch(15000);
               // 先卸运行时再删文件，顺序反了会出现进程还在读已删除的代码
               if (plugins.loaded.has(id)) await plugins.unload(id).catch(() => {});
               await ensurePluginInList(rt, id, false).catch(() => {});
@@ -690,9 +762,11 @@ export async function startWebServer({
               // 清掉 state 里的残留，否则重装会被旧的 false 挡住
               await plugins.forget(id).catch(() => {});
               const scanned = await plugins.rescan();
+              suspendPluginWatch(1000);
               log.info(`已卸载插件 ${id}（数据目录保留，重装可继续用）`);
               return json(res, 200, { ok: true, id, ...scanned });
             } catch (e) {
+              suspendPluginWatch(1000);
               log.error(`卸载插件 ${id} 失败：${e.message}`);
               return json(res, 500, { error: e.message });
             }
@@ -760,6 +834,15 @@ export async function startWebServer({
             const entry = idx.plugins.find((p) => p.id === id);
             if (!entry) return json(res, 404, { error: `市场里没有 ${id}` });
 
+            /**
+             * 下载 + 解包期间要挂起插件热重载。
+             *
+             * 插件是逐个文件复制进 plugins/ 的，中途会短暂出现「只有一半文件」
+             * 的状态。热重载若在那时触发，会读到半个 index.js 报语法错，
+             * 用户看到的就是「装完提示加载失败」，而其实装得好好的。
+             */
+            suspendPluginWatch(30000);
+
             const r = await installPlugin({
               entry,
               pluginsDir: DIRS.plugins,
@@ -779,8 +862,11 @@ export async function startWebServer({
 
             // 装完立刻扫一遍，用户不用重启
             const scanned = await plugins.rescan();
+            // 收窄挂起窗口：装完了，1 秒后恢复监视并重建基线
+            suspendPluginWatch(1000);
             return json(res, 200, { ok: true, id: r.id, ...scanned });
           } catch (e) {
+            suspendPluginWatch(1000);
             return json(res, 400, { error: e.message });
           }
         }

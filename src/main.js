@@ -955,6 +955,7 @@ async function main() {
   web = await startWebServer({
     globalCfg,
     runtimes,
+    mock: MOCK,
     saveBotConfig,
     saveGlobalConfig,
     onShutdown: shutdown,

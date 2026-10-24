@@ -52,6 +52,7 @@
 
   <nav class="tabs">
     <button class="tab active" data-tab="overview">概览</button>
+    <button class="tab" data-tab="stats">统计</button>
     <button class="tab" data-tab="config">配置</button>
     <button class="tab" data-tab="plugins">插件</button>
     <button class="tab" data-tab="events">事件</button>
@@ -298,6 +299,44 @@
         <button type="submit" class="btn primary">保存配置</button>
       </div>
     </form>
+  </section>
+
+  <!-- 统计 -->
+  <section id="tab-stats" class="panel">
+    <div class="box">
+      <div class="box-hd">
+        <h3>消息统计</h3>
+        <div class="plugin-tools">
+          <select id="statsDays" class="mini-select" aria-label="统计范围">
+            <option value="7">最近 7 天</option>
+            <option value="14">最近 14 天</option>
+            <option value="30">最近 30 天</option>
+          </select>
+          <button class="btn small" id="btnRefreshStats">刷新</button>
+        </div>
+      </div>
+      <div id="statsUnavailable" class="empty" hidden></div>
+      <div class="cards" id="statsCards"></div>
+      <div class="stat-chart" id="statsChart"></div>
+      <div class="hint" id="statsFoot"></div>
+    </div>
+
+    <div class="row">
+      <div class="box grow">
+        <div class="box-hd">
+          <h3>命令排行</h3>
+          <span class="hint">按调用次数</span>
+        </div>
+        <div id="statsTopCommands" class="stat-list"></div>
+      </div>
+      <div class="box grow">
+        <div class="box-hd">
+          <h3>会话排行</h3>
+          <span class="hint">按消息数</span>
+        </div>
+        <div id="statsTopChats" class="stat-list"></div>
+      </div>
+    </div>
   </section>
 
   <!-- 插件 -->

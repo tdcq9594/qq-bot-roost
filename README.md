@@ -8,9 +8,9 @@
 
 <img src="https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white" alt="Node.js 22+">
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
-<img src="https://img.shields.io/badge/tests-259%20passed-brightgreen" alt="测试 259 项">
+<img src="https://img.shields.io/badge/tests-335%20passed-brightgreen" alt="测试 335 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
-<img src="https://img.shields.io/badge/version-0.5.6-blueviolet" alt="版本 0.5.6">
+<img src="https://img.shields.io/badge/version-0.5.7-blueviolet" alt="版本 0.5.7">
 <img src="https://img.shields.io/badge/license-Non--Commercial-red" alt="禁止商用">
 
 [快速开始](#3-分钟跑起来) ｜ [写插件](docs/插件开发规范.md) ｜ [外部插件协议](docs/插件协议.md) ｜ [配置参考](docs/配置参考.md) ｜ [常见问题](docs/常见问题.md) ｜ [贡献](CONTRIBUTING.md)
@@ -65,6 +65,8 @@
 - **免@粘性**：@ 过一次后 N 分钟内该会话免@ 也算在跟机器人说话
 - **多轮对话**：`ctx.prompt()` 问一句等回答，文字游戏的地基
 - **流式回复**：`msg.replyStream()` 做 AI 打字机效果，自动维护分片序号；群聊自动降级成普通消息
+- **模板消息**：`msg.replyCard()` 一次带上 markdown 正文 + 按钮 + ark 模板，不会拆成三条碎片
+- **素材缓存**：同一个图片 url 两天内只上传一次，省富媒体频控和流量
 - **中间件管道**：去重、白名单、限流、命令冷却都可插拔
 
 **连接与容错**
@@ -91,6 +93,16 @@
 - **独立配置、独立日志、独立存档**，卸载自动清理定时器和中间件
 - **依赖自动隔离**：第三方包装进插件目录的 `.venv`，不污染系统
 - **面板可改数据**：插件在「设置」页自动获得配置表单和存档编辑，**不需要写前端代码**
+- **存盘即生效**：改完插件代码 2 秒内自动热重载，不用重启也不用点重载；新增/删除插件目录同样自动识别
+- **插件能加自己的面板页**：`ctx.registerPage()` 注册一段 HTML，标签栏就多一页，样式和面板互不影响
+- **元数据能表达兼容性**：`frameworkVersion` 声明需要的框架版本，不满足时**在加载前拦住**并说清原因，而不是跑起来才报「xxx 不是函数」
+
+**统计**
+
+- 消息量、活跃人数、命令排行、会话排行，按天出柱状图
+- 存在每个机器人自己的 SQLite（Node 22 内置 `node:sqlite`，**不引第三方包**）
+- **只记数量与时间，不存消息正文**——统计不该以牺牲隐私为代价
+- 没有 SQLite 的环境自动降级成「不统计」，其它功能不受影响
 
 **权限**
 
@@ -106,7 +118,7 @@
 
 **可视化面板**
 
-- 7 个页签：概览 / 配置 / 插件 / 事件 / 群组 / 权限 / 日志
+- 8 个页签：概览 / 统计 / 配置 / 插件 / 事件 / 群组 / 权限 / 日志（插件还能自己加页）
 - 实时日志流（SSE），按级别和来源着色
 - 一个面板管多个机器人，顶栏随时切换
 - 插件卡片直接显示它自己上报的运行数据（已回复条数、在线人数…）
@@ -374,16 +386,18 @@ bot/
 │   ├── sign.js                 Webhook 回调签名（Ed25519）
 │   ├── tarball.js              tar.gz 下载解包（不依赖 git）
 │   ├── updater.js              框架自身检查更新与升级
+│   ├── semver.js               版本比较与范围匹配（框架更新/市场/兼容校验共用）
 │   ├── api.js                  HTTP API
 │   ├── message.js              事件 → 统一 Message
 │   ├── roles.js                权限存储
 │   ├── logger.js               日志：控制台 + 落盘 + 轮转
-│   ├── services/               后台服务：健康巡检、清理、配置热加载、定时重启
+│   ├── services/               后台服务：健康巡检、清理、配置热加载、定时重启、插件热重载
+│   ├── storage/                统计库：SQLite 连接、表结构迁移、消息与成员统计
 │   ├── web/server.js           面板服务端（REST + SSE）
-│   └── plugin/                 插件加载、配置、依赖、子进程宿主
+│   └── plugin/                 插件加载、配置、依赖、子进程宿主、面板页面注册
 ├── test/
-│   ├── selftest.mjs            框架自检（159 项）
-│   └── e2e.mjs                 端到端测试（95 项，起真实服务打接口）
+│   ├── selftest.mjs            框架自检（220 项）
+│   └── e2e.mjs                 端到端测试（115 项，起真实服务打接口）
 ├── web/                        面板前端（原生 JS/CSS，无构建）
 └── docs/
 ```
@@ -439,6 +453,12 @@ mock 模式下：直接输入文本 = 模拟一条群 @ 消息；`!as <openid>` 
   确认没权限就直接给友好错误；查不到时不拦截
 - **单进程**：插件与框架同进程，插件里写死循环会拖垮整个机器人
 - **存储是 JSON**：适合中小规模，大型游戏存档建议插件里直接接 SQLite
+  （统计库已经用上了 Node 内置的 `node:sqlite`，但业务存档仍是 JSON）
+- **语音不能转码**：官方要 SILK 格式，框架只能发**已经是 silk** 的音频。
+  要把 mp3/wav 转 silk，得自己接 ffmpeg + silk 编码器，这在插件层做
+  （转码器是原生二进制，塞进框架就破了零依赖）
+- **图片渲染要自己装依赖**：`plugins/render` 是示例，依赖 `@napi-rs/canvas` 可选安装，
+  没装时命令会明确告诉你怎么装，不会静默失败
 - **面板无登录态**：只有访问密钥校验，没有会话，别直接暴露到公网
 
 细节和应对方式见 [docs/官方接口限制.md](docs/官方接口限制.md)。

@@ -23,9 +23,10 @@ const log = createLogger('cleanup');
 const FORBIDDEN = ['config', 'plugins', path.join('data', 'bots')];
 
 export class CleanupService extends BaseService {
-  constructor({ globalCfg }) {
+  constructor({ globalCfg, getRuntimes }) {
     super('cleanup', '文件清理');
     this.cfg = globalCfg?.cleanup ?? {};
+    this.getRuntimes = getRuntimes;
     // 6 小时跑一次就够了
     this.intervalMs = 6 * 60 * 60_000;
     this.keepBackups = this.cfg.keepBackups ?? 3;
@@ -38,6 +39,7 @@ export class CleanupService extends BaseService {
     removed.push(...(await this.#cleanTempDirs()));
     removed.push(...(await this.#cleanBackups()));
     removed.push(...(await this.#cleanOldLogs()));
+    removed.push(...(await this.#pruneStats()));
 
     if (removed.length) {
       this.detail = `清理 ${removed.length} 项`;
@@ -45,6 +47,27 @@ export class CleanupService extends BaseService {
     } else {
       this.detail = '无过期文件';
     }
+  }
+
+  /**
+   * 清统计库里的过期明细。
+   *
+   * 只删 messages/daily/commands 三张表的旧行，**members 不删**——
+   * 成员档案的价值恰恰在「很久没来」这个信息上，删了就算不出留存。
+   */
+  async #pruneStats() {
+    const out = [];
+    for (const rt of this.getRuntimes?.() ?? []) {
+      try {
+        const n = rt?.stats?.prune?.();
+        if (n && (n.messages || n.daily || n.commands)) {
+          out.push(`${rt.id} 统计 -${n.messages} 条`);
+        }
+      } catch (e) {
+        log.warn(`清理 ${rt.id} 统计失败: ${e.message}`);
+      }
+    }
+    return out;
   }
 
   /** 更新中断留下的 data/.update-xxx */
