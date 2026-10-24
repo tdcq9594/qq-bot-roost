@@ -870,8 +870,21 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 .pp-body { overflow: auto; flex: 0 1 auto; max-height: 58vh; }
 .pp-body[hidden] { display: none; }
 
-.pp-field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 14px; }
-.pp-field > span { font-size: 12.5px; font-weight: 500; color: var(--text-2); }
+/*
+ * 插件配置的「快速填入」预设。
+ *
+ * 换服务商要同时改地址和模型名，手输容易漏 /v1 然后拿到 404。
+ * 这排按钮点了只填表、不保存，所以样式做得像「辅助」而不是「主操作」。
+ */
+.pp-presets {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  margin-bottom: 14px; padding: 10px 12px;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.pp-presets-label { font-size: 12px; color: var(--muted); margin-right: 2px; }
+.pp-presets-tip { margin: -6px 0 12px; }
+
+.pp-field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 14px; }.pp-field > span { font-size: 12.5px; font-weight: 500; color: var(--text-2); }
 .pp-field > i { font-size: 11.5px; color: var(--muted); font-style: normal; }
 .pp-field input[type="text"], .pp-field input[type="number"],
 .pp-field select, .pp-field textarea {

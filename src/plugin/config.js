@@ -131,6 +131,14 @@ export function schemaOf(defaults) {
         type: v.type === 'string' ? 'text' : (v.type ?? inferType(v.default)),
         default: v.default ?? null,
         desc: v.desc ?? '',
+        /**
+         * 面板上显示的标题，不填就显示键名。
+         *
+         * 键名是代码里用的（`ctx.config.apiKey`），不能随便改成中文；
+         * 但给用户看的表单写 `apiKey` 太不友好，所以拆成两个：
+         * 键名给代码，label 给人。
+         */
+        ...(v.label ? { label: String(v.label) } : {}),
         ...(Array.isArray(v.options) ? { options: v.options } : {}),
         // 校验规则原样透给面板，填错时当场提示，不用等运行时
         ...(v.required ? { required: true } : {}),

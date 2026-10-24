@@ -2078,39 +2078,87 @@ async function testAiChat() {
     };
   };
 
-  const base = { apiKey: 'sk-test', model: 'deepseek-chat', requireMention: true };
+  const base = { apiKey: 'sk-test', model: 'deepseek-chat' };
+
+  /**
+   * 发一句 `/ai 内容`，返回那条 msg（好断言 replies）。
+   *
+   * 对话入口是命令不是监听器了，所以不能再用 runListeners。
+   * 统一走这个，免得每处都写一遍 content 拼装。
+   */
+  const ask = async (ctx, text, opts = {}) => {
+    const r = await runCommand(plugin, 'ai', { content: `/ai ${text}`, ...opts, ctx });
+    return r.msg;
+  };
 
   try {
-    /* ---- 基本对话 ---- */
+    /* ---- 基本对话：固定格式 /ai ---- */
 
     {
       calls.length = 0;
       responder = null;
       const ctx = makeCtx({ id: 'ai-chat', config: base });
-      const msg = makeMsg({ content: '你好', mentioned: true });
-      await runListeners(plugin, msg, ctx);
+      const r = await runCommand(plugin, 'ai', { content: '/ai 你好', ctx });
 
-      check('AI: 群聊 @ 后能回', msg.replies.length === 1, msg.replies[0] ?? '无回复');
-      check('AI: 回复内容来自模型', (msg.replies[0] ?? '').includes('回声：你好'), msg.replies[0] ?? '');
+      check('AI: /ai 能回', r.replies.length === 1, r.replies[0] ?? '无回复');
+      check('AI: 回复内容来自模型', (r.replies[0] ?? '').includes('回声：你好'), r.replies[0] ?? '');
       check('AI: 请求带上了 Authorization', /^Bearer sk-test$/.test(calls[0]?.headers?.Authorization ?? ''), calls[0]?.headers?.Authorization ?? '');
       check('AI: 请求打到 /chat/completions', String(calls[0]?.url ?? '').endsWith('/chat/completions'), calls[0]?.url ?? '');
       check('AI: 没开流式', calls[0]?.body?.stream === false);
     }
 
-    /* ---- 群聊不 @ 就不回 ---- */
+    /* ---- 指令要剔除，AI 只看到问题本身 ---- */
 
     {
       calls.length = 0;
       responder = null;
       const ctx = makeCtx({ id: 'ai-chat', config: base });
-      const msg = makeMsg({ content: '随便聊聊', mentioned: false });
-      await runListeners(plugin, msg, ctx);
+      await runCommand(plugin, 'ai', { content: '/ai 什么是递归', ctx });
 
-      check('AI: 群聊没 @ 不回复', msg.replies.length === 0, `replies=${msg.replies.length}`);
-      check('AI: 没 @ 时压根不发请求', calls.length === 0, `calls=${calls.length}`);
+      const sent = calls[0]?.body?.messages?.at(-1)?.content ?? '';
+      check('AI: 发给模型的是问题本身', sent === '什么是递归', JSON.stringify(sent));
+      check('AI: 指令 /ai 被剔除', !String(sent).includes('/ai'), JSON.stringify(sent));
     }
 
-    /* ---- 免 @ 窗口内继续聊 ---- */
+    /* ---- 多词问题要完整保留 ---- */
+
+    {
+      calls.length = 0;
+      responder = null;
+      const ctx = makeCtx({ id: 'ai-chat', config: base });
+      await runCommand(plugin, 'ai', { content: '/ai 用一句话  解释   什么是 递归', ctx });
+
+      const sent = calls[0]?.body?.messages?.at(-1)?.content ?? '';
+      check('AI: 多词问题完整保留', sent.includes('解释') && sent.includes('递归'), JSON.stringify(sent));
+      check('AI: 多词问题里没有指令', !sent.startsWith('/ai'), JSON.stringify(sent));
+    }
+
+    /* ---- 不带内容时提示用法 ---- */
+
+    {
+      calls.length = 0;
+      responder = null;
+      const ctx = makeCtx({ id: 'ai-chat', config: base });
+      const r = await runCommand(plugin, 'ai', { content: '/ai', ctx });
+
+      check('AI: 光发 /ai 提示格式', (r.replies[0] ?? '').includes('/ai'), r.replies[0] ?? '无回复');
+      check('AI: 光发 /ai 不发请求', calls.length === 0, `calls=${calls.length}`);
+    }
+
+    /* ---- 普通聊天不再触发（必须用 /ai） ---- */
+
+    {
+      calls.length = 0;
+      responder = null;
+      const ctx = makeCtx({ id: 'ai-chat', config: base });
+      const msg = makeMsg({ content: '随便聊聊', mentioned: true });
+      await runListeners(plugin, msg, ctx);
+
+      check('AI: 只 @ 不带 /ai 不回复', msg.replies.length === 0, `replies=${msg.replies.length}`);
+      check('AI: 只 @ 不带 /ai 不发请求', calls.length === 0, `calls=${calls.length}`);
+    }
+
+    /* ---- 免 @ 窗口也不再触发 ---- */
 
     {
       calls.length = 0;
@@ -2119,19 +2167,23 @@ async function testAiChat() {
       const msg = makeMsg({ content: '接着说', mentioned: false, sticky: true });
       await runListeners(plugin, msg, ctx);
 
-      check('AI: 免 @ 窗口内能接着聊', msg.replies.length === 1, `replies=${msg.replies.length}`);
+      check('AI: 免 @ 窗口内也不会自动接话', msg.replies.length === 0, `replies=${msg.replies.length}`);
     }
 
-    /* ---- 私聊不用 @ ---- */
+    /* ---- 私聊也要用 /ai ---- */
 
     {
       calls.length = 0;
       responder = null;
       const ctx = makeCtx({ id: 'ai-chat', config: base });
-      const msg = makeMsg({ content: '私聊问一句', kind: 'c2c', userId: 'u9', mentioned: false });
-      await runListeners(plugin, msg, ctx);
+      const r = await runCommand(plugin, 'ai', {
+        content: '/ai 私聊问一句',
+        kind: 'c2c',
+        userId: 'u9',
+        ctx,
+      });
 
-      check('AI: 私聊不用 @ 也回', msg.replies.length === 1, `replies=${msg.replies.length}`);
+      check('AI: 私聊用 /ai 能回', r.replies.length === 1, `replies=${r.replies.length}`);
     }
 
     /* ---- 上下文累积 ---- */
@@ -2141,10 +2193,8 @@ async function testAiChat() {
       responder = null;
       const ctx = makeCtx({ id: 'ai-chat', config: { ...base, systemPrompt: '你是测试助手' } });
 
-      const m1 = makeMsg({ content: '我叫小明', mentioned: true, groupId: 'g-ctx' });
-      await runListeners(plugin, m1, ctx);
-      const m2 = makeMsg({ content: '我叫什么', mentioned: true, groupId: 'g-ctx' });
-      await runListeners(plugin, m2, ctx);
+      const m1 = await ask(ctx, '我叫小明', { groupId: 'g-ctx' });
+      await ask(ctx, '我叫什么', { groupId: 'g-ctx' });
 
       const second = calls[1]?.body?.messages ?? [];
       check('AI: 第二轮带上了上一轮', second.length >= 4, `messages=${second.length}`);
@@ -2160,8 +2210,8 @@ async function testAiChat() {
       responder = null;
       const ctx = makeCtx({ id: 'ai-chat', config: base });
 
-      await runListeners(plugin, makeMsg({ content: 'A群的话', mentioned: true, groupId: 'g-a' }), ctx);
-      await runListeners(plugin, makeMsg({ content: 'B群的话', mentioned: true, groupId: 'g-b' }), ctx);
+      await ask(ctx, 'A群的话', { groupId: 'g-a' });
+      await ask(ctx, 'B群的话', { groupId: 'g-b' });
 
       const bReq = calls[1]?.body?.messages ?? [];
       check('AI: 两个群的上下文互不影响', !bReq.some((m) => m.content === 'A群的话'), JSON.stringify(bReq.map((m) => m.content)));
@@ -2174,12 +2224,11 @@ async function testAiChat() {
       responder = null;
       const ctx = makeCtx({ id: 'ai-chat', config: base });
 
-      await runListeners(plugin, makeMsg({ content: '记住这句', mentioned: true, groupId: 'g-r' }), ctx);
+      await ask(ctx, '记住这句', { groupId: 'g-r' });
       // runCommand 会自己造 msg，所以要用 content + groupId 传，不能传 msg 对象
       await runCommand(plugin, '新会话', { content: '/新会话', groupId: 'g-r', ctx }).catch(() => null);
 
-      const m3 = makeMsg({ content: '还记得吗', mentioned: true, groupId: 'g-r' });
-      await runListeners(plugin, m3, ctx);
+      await ask(ctx, '还记得吗', { groupId: 'g-r' });
       const after = calls.at(-1)?.body?.messages ?? [];
       check('AI: /新会话 之后上下文清空', !after.some((m) => m.content === '记住这句'), JSON.stringify(after.map((m) => m.content)));
       check('AI: /新会话 之后模型还认得新问题', after.some((m) => m.content === '还记得吗'), JSON.stringify(after.map((m) => m.content)));
@@ -2190,8 +2239,7 @@ async function testAiChat() {
     {
       calls.length = 0;
       const ctx = makeCtx({ id: 'ai-chat', config: { ...base, apiKey: '' } });
-      const msg = makeMsg({ content: '在吗', mentioned: true });
-      await runListeners(plugin, msg, ctx);
+      const msg = await ask(ctx, '在吗');
 
       check('AI: 没配 Key 时提示怎么配', (msg.replies[0] ?? '').includes('API Key'), msg.replies[0] ?? '无回复');
       check('AI: 没配 Key 时不发请求', calls.length === 0, `calls=${calls.length}`);
@@ -2207,12 +2255,10 @@ async function testAiChat() {
         config: { ...base, access: 'allowlist', allowList: ['g-yes'] },
       });
 
-      const no = makeMsg({ content: '不在名单', mentioned: true, groupId: 'g-no' });
-      await runListeners(plugin, no, ctx);
-      check('AI: 白名单外的群不回复', no.replies.length === 0, `replies=${no.replies.length}`);
+      const no = await ask(ctx, '不在名单', { groupId: 'g-no' });
+      check('AI: 白名单外的群不回复', no.replies.length === 0 || !no.replies[0].includes('回声'), `replies=${JSON.stringify(no.replies)}`);
 
-      const yes = makeMsg({ content: '在名单里', mentioned: true, groupId: 'g-yes' });
-      await runListeners(plugin, yes, ctx);
+      const yes = await ask(ctx, '在名单里', { groupId: 'g-yes' });
       check('AI: 白名单内的群正常回', yes.replies.length === 1, `replies=${yes.replies.length}`);
     }
 
@@ -2233,8 +2279,7 @@ async function testAiChat() {
           text: async () => 'upstream says no',
           json: async () => ({}),
         });
-        const msg = makeMsg({ content: '试试', mentioned: true });
-        await runListeners(plugin, msg, ctx);
+        const msg = await ask(ctx, '试试');
         const reply = msg.replies[0] ?? '';
         check(`AI: HTTP ${status} 翻译成人话`, reply.includes(keyword), reply.slice(0, 60));
       }
@@ -2251,8 +2296,7 @@ async function testAiChat() {
         json: async () => ({ choices: [{ message: { content: '   ' }, finish_reason: 'stop' }] }),
         text: async () => '',
       });
-      const msg = makeMsg({ content: '空回复', mentioned: true });
-      await runListeners(plugin, msg, ctx);
+      const msg = await ask(ctx, '空回复');
       check('AI: 模型返回空内容时报错而不是发空白', (msg.replies[0] ?? '').includes('空内容'), msg.replies[0] ?? '无回复');
       responder = null;
     }
@@ -2267,8 +2311,7 @@ async function testAiChat() {
         json: async () => ({ choices: [{ message: { content: '' }, finish_reason: 'content_filter' }] }),
         text: async () => '',
       });
-      const msg = makeMsg({ content: '敏感内容', mentioned: true });
-      await runListeners(plugin, msg, ctx);
+      const msg = await ask(ctx, '敏感内容');
       check('AI: 被内容审核拦下时说清楚', (msg.replies[0] ?? '').includes('审核'), msg.replies[0] ?? '无回复');
       responder = null;
     }
@@ -2287,13 +2330,11 @@ async function testAiChat() {
         text: async () => '',
       }));
 
-      const m1 = makeMsg({ content: '第一个问题', mentioned: true, groupId: 'g-busy' });
-      const first = runListeners(plugin, m1, ctx);
+      const first = ask(ctx, '第一个问题', { groupId: 'g-busy' });
       // 让第一个请求真正进到 await fetch 里
       await new Promise((r) => setTimeout(r, 20));
 
-      const m2 = makeMsg({ content: '第二个问题', mentioned: true, groupId: 'g-busy' });
-      await runListeners(plugin, m2, ctx);
+      const m2 = await ask(ctx, '第二个问题', { groupId: 'g-busy' });
       check('AI: 同会话正在生成时提示等待', (m2.replies[0] ?? '').includes('稍等'), m2.replies[0] ?? '无回复');
 
       release();

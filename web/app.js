@@ -2202,7 +2202,30 @@ function renderPPConfig() {
     return;
   }
 
-  box.innerHTML = keys
+  /**
+   * 「快速填入」预设。
+   *
+   * 一次填好几个字段（比如换了服务商，baseUrl 和 model 要一起改），
+   * 所以按钮放在整个表单上面，不是挂在某一个字段旁边。
+   * 只填表，不保存——用户还能改完再点保存，填错了也不会直接落盘。
+   */
+  const presets = Array.isArray(PP.presets) ? PP.presets : [];
+  const presetBar = presets.length
+    ? `<div class="pp-presets">
+         <span class="pp-presets-label">快速填入</span>
+         ${presets
+           .map(
+             (p, i) =>
+               `<button type="button" class="btn small" data-preset="${i}" title="${escapeHtml(
+                 p.desc || '',
+               )}">${escapeHtml(p.name || '预设')}</button>`,
+           )
+           .join('')}
+       </div>
+       <div class="pp-hint pp-presets-tip" hidden></div>`
+    : '';
+
+  box.innerHTML = presetBar + keys
     .map((k) => {
       const s = PP.schema[k];
       const v = PP.config?.[k] ?? s.default;
@@ -2221,23 +2244,75 @@ function renderPPConfig() {
         .join(' ');
 
       if (s.type === 'boolean') {
-        input = `<label class="pp-switch"><input type="checkbox" data-cfg="${id}" ${v ? 'checked' : ''}> ${v ? '开' : '关'}</label>`;
+        /**
+         * 内层**不能用 label**：外层已经是 `<label class="pp-field">`，
+         * HTML 规范不允许 label 嵌套 label，浏览器会重新解析这段，
+         * 结果就是复选框和文字竖着排、位置也歪。
+         */
+        input = `<span class="pp-switch"><input type="checkbox" data-cfg="${id}" ${
+          v ? 'checked' : ''
+        }> <span class="pp-switch-text">${v ? '开' : '关'}</span></span>`;
       } else if (s.type === 'number') {
         input = `<input type="number" data-cfg="${id}" value="${Number(v) || 0}" ${attrs}>`;
       } else if (s.type === 'select') {
+        /**
+         * 选项可以是纯字符串，也可以是 `{ value, label }`。
+         *
+         * 后者是为了「值给代码、文字给人」：比如 access 的值必须是
+         * `allowlist`（代码里要判断），但下拉里写「只白名单」才好懂。
+         * 值用 value 属性带上，显示用 label。
+         */
         input = `<select data-cfg="${id}">${(s.options || [])
-          .map((o) => `<option ${o === v ? 'selected' : ''}>${escapeHtml(o)}</option>`)
+          .map((o) => {
+            const val = o && typeof o === 'object' ? o.value : o;
+            const text = o && typeof o === 'object' ? (o.label ?? o.value) : o;
+            return `<option value="${escapeHtml(String(val))}" ${
+              val === v ? 'selected' : ''
+            }>${escapeHtml(String(text))}</option>`;
+          })
           .join('')}</select>`;
       } else if (s.type === 'json') {
         input = `<textarea data-cfg="${id}" rows="4">${escapeHtml(JSON.stringify(v ?? null, null, 2))}</textarea>`;
       } else {
         input = `<input type="text" data-cfg="${id}" value="${escapeHtml(v ?? '')}" ${attrs}>`;
       }
-      return `<label class="pp-field"><span>${id}${
+      return `<label class="pp-field"><span>${escapeHtml(s.label || k)}${
         s.required ? '<i class="req">*</i>' : ''
       }</span>${input}${s.desc ? `<i>${escapeHtml(s.desc)}</i>` : ''}</label>`;
     })
     .join('');
+
+  /**
+   * 预设按钮：把值填进表单，**不自动保存**。
+   *
+   * 用户可能还要改模型名或者接着填 API Key，自动保存会把半成品写进配置。
+   */
+  box.querySelectorAll('button[data-preset]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const p = presets[Number(btn.dataset.preset)];
+      if (!p?.values) return;
+      for (const [k, val] of Object.entries(p.values)) {
+        const el = box.querySelector(`[data-cfg="${CSS.escape(k)}"]`);
+        if (!el) continue;
+        if (el.type === 'checkbox') el.checked = Boolean(val);
+        else el.value = String(val ?? '');
+      }
+      // 让用户知道「填好了但没保存」，否则以为已经生效
+      const hint = box.querySelector('.pp-presets-tip');
+      if (hint) {
+        hint.textContent = `已填入「${p.name}」的参数，检查后点下面的保存才会生效`;
+        hint.hidden = false;
+      }
+    });
+  });
+
+  // 开关旁边那个「开/关」要跟着勾选变，否则勾了还显示「关」，看着像没点上
+  box.querySelectorAll('.pp-switch input[type="checkbox"]').forEach((el) => {
+    el.addEventListener('change', () => {
+      const t = el.parentElement?.querySelector('.pp-switch-text');
+      if (t) t.textContent = el.checked ? '开' : '关';
+    });
+  });
 }
 
 function renderPPData() {

@@ -705,6 +705,14 @@ export class PluginManager {
       kind: item.kind,
       config,
       schema,
+      /**
+       * 「快速填入」的预设，插件在 meta 上声明：
+       *   configPresets: [{ name:'DeepSeek', values:{ baseUrl:'…', model:'…' } }]
+       *
+       * 放在 meta 而不是 config 里，是因为它跨字段（一次填好几个），
+       * 也不该被存进用户配置——用户选了哪个由填进去的值本身体现。
+       */
+      presets: Array.isArray(item.meta?.configPresets) ? item.meta.configPresets : [],
       data,
       // 存档键里哪些像玩家数据，给面板分组用
       dataKeys: Object.keys(data),
