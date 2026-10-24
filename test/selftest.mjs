@@ -55,6 +55,18 @@ function check(name, ok, extra = '') {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${extra ? '  ' + extra : ''}`);
 }
 
+/**
+ * 记一条「跳过」。
+ *
+ * 为什么不写成 check(x, true)：跳过和通过是两件事。
+ * 通过意味着「验证过了没问题」，跳过意味着「这里没验证」——
+ * 混在一起会让人以为覆盖到了，实际 CI 上什么都没跑。
+ */
+function skip(name, why = '') {
+  results.push({ name, ok: true, skipped: true });
+  console.log(`SKIP  ${name}${why ? '  ' + why : ''}`);
+}
+
 const cfg = {
   dedupWindowSec: 120,
   outbound: { perSec: 4, dailyActive: 2, downgradeToActive: true },
@@ -2022,7 +2034,25 @@ await testHashDir();
  */
 async function testAiChat() {
   const { makeCtx, makeMsg, runCommand, runListeners } = await import('../src/plugin/testkit.js');
-  const plugin = (await import('../plugins/ai-chat/index.js')).default;
+
+  /**
+   * 插件代码在**另一个仓库**（qq-bot-roost-plugins），主仓库的 .gitignore
+   * 排除了 plugins/。所以 CI 干净克隆时这里没有 ai-chat——直接 import
+   * 会抛 ERR_MODULE_NOT_FOUND，把整个自检带崩（不是断言失败，是崩溃）。
+   *
+   * 本机装了才测，没装就明确跳过。这和 e2e 对示例插件的处理一致。
+   */
+  let plugin;
+  try {
+    plugin = (await import('../plugins/ai-chat/index.js')).default;
+  } catch (e) {
+    const missing = e?.code === 'ERR_MODULE_NOT_FOUND';
+    skip(
+      missing ? 'AI 对话: 插件未安装，跳过 33 项' : 'AI 对话: 插件加载失败，跳过 33 项',
+      missing ? '（本机没装 ai-chat，CI 上正常）' : e.message,
+    );
+    return;
+  }
 
   const realFetch = globalThis.fetch;
   /** 记录每次请求的 body，用来断言上下文有没有带上 */
@@ -2321,7 +2351,16 @@ await testAiChat();
 await cleanQuotaLedger();
 
 const fail = results.filter((r) => !r.ok);
-console.log(`\n${results.length - fail.length}/${results.length} 通过`);
+const skipped = results.filter((r) => r.skipped);
+const passed = results.length - fail.length - skipped.length;
+// 跳过的不算进分母：分母是「真正跑过的项」，否则数字会虚高
+console.log(
+  `\n${passed}/${results.length - skipped.length} 通过` +
+    (skipped.length ? `（${skipped.length} 项跳过）` : ''),
+);
+if (skipped.length) {
+  console.log('跳过项: ' + skipped.map((s) => s.name).join('、'));
+}
 if (fail.length) {
   console.log('失败项: ' + fail.map((f) => f.name).join('、'));
   process.exitCode = 1;
