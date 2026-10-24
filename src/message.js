@@ -234,8 +234,18 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
    * @param {{markdown?:object, keyboard?:object, ark?:object}} card
    */
   msg.replyCard = async (card = {}) => {
-    const { markdown, keyboard, ark } = card;
+    const { markdown, keyboard } = card;
+    let { ark } = card;
     if (!markdown && !ark) return null;
+    /**
+     * 一条消息只能有一种富文本：两个都给时**以 markdown 为准**，ark 丢掉。
+     * 必须在这里丢，不能靠下层——api 的 #payload 是先写 markdown 后写 ark，
+     * 两个都传进去 msg_type 会被改成 3（ark 赢），和这里说的正好相反。
+     */
+    if (markdown && ark) {
+      log.warn('replyCard 同时给了 markdown 和 ark，已忽略 ark（一条消息只支持一种富文本）');
+      ark = undefined;
+    }
     await msg.flushReplies();
     return send({ markdown, keyboard, ark }, true).catch((e) => {
       log.error('发送模板消息失败:', e.message);

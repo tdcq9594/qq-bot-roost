@@ -104,7 +104,7 @@ ctx.registerPage({
 
 ```bash
 npm test          # 220 项（+61）
-npm run test:e2e  # 115 项（+20）
+npm run test:e2e  # 115 项（+15）
 ```
 
 新增覆盖：热重载（10，含「刚写完不重载」「依赖目录忽略」「禁用不重载」）、

@@ -47,6 +47,13 @@ const SKIP_DIRS = new Set([
 const SKIP_EXT = new Set(['.pyc', '.pyo', '.log', '.db', '.sqlite', '.sqlite3', '.tmp', '.swp', '.lock']);
 
 /**
+ * 这些**文件名**一律忽略（按后缀判断不了）。
+ * `.deps.json` 是 deps.js 装完依赖后写的标记，出现在插件目录里很正常，
+ * 不能当成「用户改了代码」。
+ */
+const SKIP_FILES = new Set(['.deps.json']);
+
+/**
  * 全局唯一的实例。
  *
  * 面板在安装 / 卸载插件时会往 `plugins/` 里写文件，
@@ -91,6 +98,10 @@ export class PluginWatchService extends BaseService {
     this.suspendedUntil = 0;
     /** 正在重载的 `机器人/插件`，防止同一插件被并发重载两次 */
     this.busy = new Set();
+    /** 插件 id -> 最近几次重载的时间戳，用来识别「自己写自己」的死循环 */
+    this.reloadTimes = new Map();
+    /** 插件 id -> 熔断解禁时间 */
+    this.tripped = new Map();
     instance = this;
   }
 
@@ -132,6 +143,7 @@ export class PluginWatchService extends BaseService {
           await walk(p);
           continue;
         }
+        if (SKIP_FILES.has(e.name)) continue;
         if (SKIP_EXT.has(path.extname(e.name).toLowerCase())) continue;
         const st = await fs.stat(p).catch(() => null);
         if (!st) continue;
@@ -232,19 +244,52 @@ export class PluginWatchService extends BaseService {
         if (!pm.loaded.has(id)) continue;
         if (pm.state?.[id] === false) continue;
 
+        // 熔断中：跳过。见 #noteReload 里的说明
+        const until = this.tripped.get(id);
+        if (until && Date.now() < until) continue;
+
         const key = `${rt.id}/${id}`;
         if (this.busy.has(key)) continue;
         this.busy.add(key);
         try {
           const ok = await pm.reload(id);
-          if (ok) log.info(`[${rt.id}] 插件 ${id} 已热重载`);
-          else log.warn(`[${rt.id}] 插件 ${id} 重载失败，详见插件日志`);
+          if (ok) {
+            log.info(`[${rt.id}] 插件 ${id} 已热重载`);
+            this.#noteReload(id);
+          } else {
+            log.warn(`[${rt.id}] 插件 ${id} 重载失败，详见插件日志`);
+          }
         } catch (e) {
           log.warn(`[${rt.id}] 插件 ${id} 重载出错: ${e.message}`);
         } finally {
           this.busy.delete(key);
         }
       }
+    }
+  }
+
+  /**
+   * 记录重载次数，必要时熔断。
+   *
+   * 防的是这种情况：插件在 setup 里往**自己目录**写文件（缓存、数据库、日志），
+   * 写完 → 签名变了 → 重载 → 又写 → 又重载，2 秒一轮永远停不下来。
+   * 这不是热重载的 bug，但不设防线会烧 CPU 并把日志刷爆，而且用户很难自己看出来。
+   *
+   * 30 秒内重载到第 3 次就熔断 60 秒，并明确告诉用户该怎么改。
+   */
+  #noteReload(id) {
+    const now = Date.now();
+    const arr = (this.reloadTimes.get(id) ?? []).filter((t) => now - t < 30000);
+    arr.push(now);
+    this.reloadTimes.set(id, arr);
+
+    if (arr.length >= 3) {
+      this.reloadTimes.delete(id);
+      this.tripped.set(id, now + 60000);
+      log.warn(
+        `插件 ${id} 30 秒内被重载了 3 次，疑似它自己往插件目录里写文件。` +
+          `已暂停该插件的热重载 60 秒。运行时数据请用 ctx.storage（落在 data/ 下），不要写进插件目录。`,
+      );
     }
   }
 }

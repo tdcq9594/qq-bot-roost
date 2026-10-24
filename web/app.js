@@ -220,12 +220,19 @@ async function selectBot(id) {
   updateBotTrigger();
   // 所有页签的数据都跟机器人走，重拉一遍
   await pollStatus();
+  // 插件注册的页面也跟着机器人走：不同机器人启用的插件不一样
+  await loadPluginPages();
   const tab = location.hash.slice(1) || 'overview';
   if (tab === 'config') loadConfig();
   if (tab === 'plugins') loadPlugins();
   if (tab === 'events') loadEvents();
   if (tab === 'groups') loadGroups();
   if (tab === 'roles') loadRoles();
+  if (tab === 'stats') loadStats();
+  // 停在插件页面上切机器人：这一页在新机器人下可能不存在，退回到概览
+  if (tab.startsWith('page:')) {
+    activateTab($$('.tab').some((b) => b.dataset.tab === tab) ? tab : 'overview');
+  }
   await loadBots();
 }
 
@@ -418,11 +425,20 @@ function activateTab(name) {
     stopPluginDashPolling();
   }
   if (name === 'events') loadEvents();
-  if (name === 'stats') loadStats();
-  // 插件自定义页面：第一次点开才真正去拉 html，不点不请求
+  // 统计页：进来先拉一次，之后 10 秒一轮（统计本身是 1 秒批量落盘的，不用更密）
+  if (name === 'stats') {
+    loadStats();
+    startStatsPolling();
+  } else {
+    stopStatsPolling();
+  }
+  // 插件自定义页面：第一次点开才真正去拉 html，不点不请求；切机器人后地址会变，重新加载
   if (name.startsWith('page:')) {
     const frame = $(`#tab-${CSS.escape(name)} .plugin-page`);
-    if (frame && !frame.src) frame.src = frame.dataset.src;
+    if (frame?.dataset.key) {
+      const url = pluginPageUrl(frame.dataset.key);
+      if (frame.getAttribute('src') !== url) frame.src = url;
+    }
   }
   if (name === 'config') loadConfig();
   if (name === 'groups') loadGroups();
@@ -1111,12 +1127,23 @@ async function loadPluginPages() {
      * （内建插件跑在主进程），这里隔离的是**样式**，不是权限。
      */
     frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms');
-    frame.dataset.src = `/api/pages/${encodeURIComponent(p.key)}/html${
-      ACCESS_KEY ? `?key=${encodeURIComponent(ACCESS_KEY)}` : ''
-    }`;
+    /**
+     * 地址在「点开的时候」才算，不在这里定死：
+     * 页面数据是跟着当前机器人的，切了机器人必须重新拼地址才能拿到对的 bot。
+     */
+    frame.dataset.key = p.key;
     sec.appendChild(frame);
     main.appendChild(sec);
   }
+}
+
+/** 插件页面 iframe 的地址：带上密钥和当前机器人 */
+function pluginPageUrl(key) {
+  const q = new URLSearchParams();
+  if (ACCESS_KEY) q.set('key', ACCESS_KEY);
+  if (CURRENT_BOT) q.set('bot', CURRENT_BOT);
+  const s = q.toString();
+  return `/api/pages/${encodeURIComponent(key)}/html${s ? `?${s}` : ''}`;
 }
 
 /* ---------------- 统计 ---------------- */
@@ -1154,6 +1181,19 @@ function renderStatList(items, label, value, unit = '') {
       </div>`,
     )
     .join('');
+}
+
+let statsTimer = null;
+
+/** 统计页只在打开时轮询，切走就停——和插件指标一个思路，不在后台白耗请求 */
+function startStatsPolling() {
+  stopStatsPolling();
+  statsTimer = setInterval(loadStats, 10000);
+}
+
+function stopStatsPolling() {
+  if (statsTimer) clearInterval(statsTimer);
+  statsTimer = null;
 }
 
 async function loadStats() {
@@ -1203,7 +1243,8 @@ async function loadStats() {
 
   if (chart) chart.innerHTML = renderStatsChart(d.series);
   if (foot) {
-    foot.textContent = `明细保留 ${d.retentionDays} 天；只记录数量与时间，不存消息正文。`;
+    // 措辞要和表结构对得上：确实存了会话/成员 id，别写成「只有数量」
+    foot.textContent = `明细保留 ${d.retentionDays} 天；只记录数量、时间与会话/成员 id，不存消息正文。`;
   }
 
   const cmds = $('#statsTopCommands');
@@ -1211,9 +1252,14 @@ async function loadStats() {
 
   const chats = $('#statsTopChats');
   if (chats) {
+    /**
+     * scope 存的是 msg.kind，取值只有 group / c2c / guild / dm
+     * （见 src/events.js 的 message 字段）。别写成 'channel'——那个值不存在。
+     */
+    const scopeName = (s) => (s === 'group' ? '群' : s === 'guild' ? '频道' : '私聊');
     chats.innerHTML = renderStatList(
       d.topChats,
-      (x) => `${x.scope === 'group' ? '群' : x.scope === 'channel' ? '频道' : '私聊'} ${x.chatId.slice(0, 10)}…`,
+      (x) => `${scopeName(x.scope)} ${x.chatId.slice(0, 10)}…`,
       (x) => x.messages,
       ' 条',
     );

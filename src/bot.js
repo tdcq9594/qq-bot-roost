@@ -363,8 +363,20 @@ export class BotRuntime {
 
       this.logIncoming(msg);
 
+      if (msg.mentioned || msg.isCommand) session.markAddressed(msg.chatId);
+
+      const commandEntry = msg.isCommand ? registry.commands.get(msg.command) ?? null : null;
+      const passed = await pipeline.run({ msg, cfg, commandEntry });
+      if (!passed) return;
+
       /**
        * 统计：只记「谁、在哪、什么时候、是不是命令」，**不记正文**。
+       *
+       * 放在 pipeline 之后是有意的：被去重 / 白名单 / 限流拦下的消息不计入，
+       * 统计出来的是「实际处理量」。QQ 偶尔会重推同一条消息，
+       * 计进去会让数字虚高，用户还以为是自己的群突然热闹了。
+       * （想看得更全可以看概览页的「收到消息」，那个是 pipeline 之前计数的。）
+       *
        * record() 只进内存缓冲，1 秒批量落盘，不会拖慢回复。
        */
       this.stats?.record({
@@ -374,12 +386,6 @@ export class BotRuntime {
         isCommand: msg.isCommand,
         command: msg.command,
       });
-
-      if (msg.mentioned || msg.isCommand) session.markAddressed(msg.chatId);
-
-      const commandEntry = msg.isCommand ? registry.commands.get(msg.command) ?? null : null;
-      const passed = await pipeline.run({ msg, cfg, commandEntry });
-      if (!passed) return;
 
       if (msg.isCommand && commandEntry) {
         const scope = scopeOf(msg);

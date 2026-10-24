@@ -608,8 +608,13 @@ export async function startWebServer({
             group_openid: String(body.groupId ?? 'mock-group'),
             author: { member_openid: String(body.userId ?? 'mock-user'), username: '测试用户' },
           };
-          await rt.dispatch(event, data);
-          return json(res, 200, { ok: true, event });
+          try {
+            await rt.dispatch(event, data);
+            return json(res, 200, { ok: true, event });
+          } catch (e) {
+            // 插件在处理里抛错不该让接口 500——调用方要能看到「消息收下了但处理失败」
+            return json(res, 200, { ok: false, event, error: e.message });
+          }
         }
 
         // 插件自定义运行数据：一次拿全部，面板轮询这个接口

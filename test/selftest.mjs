@@ -1173,6 +1173,30 @@ async function testPluginWatch() {
   await w.tick();
   check('热重载: 恢复后重建基线，不补触发', calls.reload.length === 1);
 
+  // 依赖标记文件（deps.js 写的）不该算「改了代码」
+  const beforeDeps = calls.reload.length;
+  await put('alpha', '.deps.json', '{"requirements":"abc"}');
+  await w.tick();
+  await w.tick();
+  check('热重载: .deps.json 变化被忽略', calls.reload.length === beforeDeps);
+
+  /**
+   * 熔断：插件自己往目录里写文件会造成 2 秒一轮的死循环。
+   * 30 秒内重载 3 次就暂停 60 秒，不能一直烧 CPU。
+   */
+  w.settleMs = 0;
+  let last = -1;
+  let rounds = 0;
+  while (calls.reload.length !== last && rounds < 8) {
+    last = calls.reload.length;
+    await put('alpha', 'index.js', `export default { id:"alpha", loop:${rounds} }`);
+    await w.tick();
+    rounds += 1;
+  }
+  const afterTrip = calls.reload.length;
+  check('热重载: 反复重载后触发熔断', w.tripped.has('alpha'), `rounds=${rounds}`);
+  check('热重载: 熔断后不再重载', calls.reload.length === afterTrip && rounds < 8, `reload=${afterTrip}`);
+
   await w.stop();
   await fs.rm(root, { recursive: true, force: true }).catch(() => {});
 }
@@ -1455,6 +1479,19 @@ async function testMediaAndTemplate() {
   sent.length = 0;
   await msg.replyCard({});
   check('模板: 空内容不发消息', sent.length === 0);
+
+  /**
+   * 一条消息只能有一种富文本。两个都给时以 markdown 为准，
+   * 不能两个都塞进 payload——api 的 #payload 会让 ark 赢（msg_type=3），
+   * 和文档说的相反，所以必须在 replyCard 里就把 ark 丢掉。
+   */
+  sent.length = 0;
+  await msg.replyCard({ markdown: { content: '## x' }, ark: { template_id: 1 } });
+  check(
+    '模板: markdown 与 ark 同时给时只发 markdown',
+    sent.length === 1 && !!sent[0].body.markdown && sent[0].body.ark === undefined,
+    JSON.stringify(Object.keys(sent[0]?.body ?? {})),
+  );
 }
 
 await testMediaAndTemplate();

@@ -8,9 +8,9 @@
 
 <img src="https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white" alt="Node.js 22+">
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
-<img src="https://img.shields.io/badge/tests-335%20passed-brightgreen" alt="测试 335 项">
+<img src="https://img.shields.io/badge/tests-339%20passed-brightgreen" alt="测试 339 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
-<img src="https://img.shields.io/badge/version-0.5.7-blueviolet" alt="版本 0.5.7">
+<img src="https://img.shields.io/badge/version-0.5.8-blueviolet" alt="版本 0.5.8">
 <img src="https://img.shields.io/badge/license-Non--Commercial-red" alt="禁止商用">
 
 [快速开始](#3-分钟跑起来) ｜ [写插件](docs/插件开发规范.md) ｜ [外部插件协议](docs/插件协议.md) ｜ [配置参考](docs/配置参考.md) ｜ [常见问题](docs/常见问题.md) ｜ [贡献](CONTRIBUTING.md)
@@ -101,7 +101,7 @@
 
 - 消息量、活跃人数、命令排行、会话排行，按天出柱状图
 - 存在每个机器人自己的 SQLite（Node 22 内置 `node:sqlite`，**不引第三方包**）
-- **只记数量与时间，不存消息正文**——统计不该以牺牲隐私为代价
+- **只记「谁、在哪、什么时候、是不是命令」，不存消息正文**——统计不该以牺牲隐私为代价
 - 没有 SQLite 的环境自动降级成「不统计」，其它功能不受影响
 
 **权限**
@@ -396,7 +396,7 @@ bot/
 │   ├── web/server.js           面板服务端（REST + SSE）
 │   └── plugin/                 插件加载、配置、依赖、子进程宿主、面板页面注册
 ├── test/
-│   ├── selftest.mjs            框架自检（220 项）
+│   ├── selftest.mjs            框架自检（224 项）
 │   └── e2e.mjs                 端到端测试（115 项，起真实服务打接口）
 ├── web/                        面板前端（原生 JS/CSS，无构建）
 └── docs/
@@ -420,6 +420,7 @@ openid 完全不同。共享 `roles.json` 等于所有权限记录全部对不�
 | [权限模型](docs/权限模型.md) | 作用域 × 等级、号段分配、授权规则 |
 | [官方接口限制](docs/官方接口限制.md) | 官方限制清单、免@粘性原理、实现要点对照 |
 | [常见问题](docs/常见问题.md) | 收不到消息、发不出去、面板打不开、数据在哪 |
+| [对标 ElainaBot](docs/对标ElainaBot.md) | 与主流 Python 框架的逐项对比、差距与取舍 |
 | [事件与接口清单](docs/事件与接口清单.md) | 官方 43 个事件、72 个接口的覆盖审计 |
 | [架构说明](docs/架构说明.md) | 进程模型、数据隔离、事件流、插件加载、面板多机器人实现 |
 | [DSH 接入指南](docs/DSH接入.md) | 装进 DeepSeek Harness，用 AI 管机器人：安装、配置、验证、排查 |
