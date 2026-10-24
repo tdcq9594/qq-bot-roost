@@ -52,6 +52,28 @@ export async function currentVersion() {
 }
 
 /**
+ * 代码已经换成新版、但进程还在跑旧代码？
+ *
+ * 更新只替换磁盘上的文件，正在运行的进程还是旧代码。判断依据：
+ * **package.json 的修改时间晚于本进程的启动时间**，说明更新发生在启动之后。
+ *
+ * 为什么需要这个：不重启的话「检查更新」会说「已是最新 v0.6.9」，
+ * 而用户实际用的还是 0.6.7 的行为——看起来像更新没成功，于是反复点。
+ * 把这个状态说出来，用户才知道该做的是重启，不是再点一次。
+ *
+ * 留 2 秒容差：解压/拷贝和 stat 之间总有毫秒级误差。
+ */
+async function updatedButNotRestarted() {
+  try {
+    const st = await fs.stat(path.join(ROOT, 'package.json'));
+    const startedAt = Date.now() - process.uptime() * 1000;
+    return st.mtimeMs > startedAt + 2000;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 查最新版本。
  *
  * **不用 GitHub API**：未认证的 API 每小时只有 60 次，而且是按 IP 算的，
@@ -65,7 +87,19 @@ export async function currentVersion() {
  *   - tarball: `.../archive/refs/tags/v<版本>.tar.gz`（公开直链）
  *   - notes：让用户点 htmlUrl 自己看
  */
+/**
+ * 查最新版本，并顺带说明「是不是已经更新了但还没重启」。
+ *
+ * 包一层而不是往 checkUpdate 里塞：里面有好几个返回分支（MirrorChyan /
+ * 主站 302 / API 兜底 / 404 / 失败），每个都手写一遍 needsRestart 迟早漏一个。
+ */
 export async function checkUpdate() {
+  const needsRestart = await updatedButNotRestarted();
+  const r = await checkUpdateCore();
+  return { ...r, needsRestart };
+}
+
+async function checkUpdateCore() {
   const cur = await currentVersion();
 
   /**

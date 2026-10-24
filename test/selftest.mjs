@@ -2347,6 +2347,48 @@ async function testAiChat() {
 
 await testAiChat();
 
+/* ---------- 更新器：更新了但没重启 ---------- */
+
+/**
+ * 这一组防的是「更新完没重启，面板显示旧版本、检查更新却说已是最新」。
+ *
+ * 真机上的表现：版本号闪一下新版又刷回旧版，用户以为更新坏了反复点。
+ * 根因是版本号有两个来源（启动时快照 vs 现读文件），对不上。
+ *
+ * 这里不打网络：`checkUpdate` 会真去请求 GitHub，测试里只用
+ * `needsRestart` 那个判断——它是纯本地逻辑，靠 package.json 的 mtime
+ * 和进程启动时间比较。
+ */
+async function testUpdaterRestartHint() {
+  const fsp = await import('node:fs/promises');
+  const pkg = path.resolve(import.meta.dirname, '..', 'package.json');
+  const orig = await fsp.stat(pkg);
+  const m = await import('../src/updater.js');
+
+  try {
+    // 正常情况：package.json 比进程启动早，不需要重启
+    const r1 = await m.checkUpdate();
+    check('更新: 正常时不提示重启', r1.needsRestart === false, `needsRestart=${r1.needsRestart}`);
+    check('更新: 返回值带 current', typeof r1.current === 'string' && r1.current.length > 0, r1.current);
+
+    // 模拟「刚更新完、还没重启」：把 package.json 的 mtime 拨到未来
+    const future = new Date(Date.now() + 60_000);
+    await fsp.utimes(pkg, future, future);
+    const r2 = await m.checkUpdate();
+    check('更新: 文件比进程新时提示重启', r2.needsRestart === true, `needsRestart=${r2.needsRestart}`);
+    check(
+      '更新: 已是最新但需重启时 hasUpdate 为 false',
+      r2.hasUpdate === false,
+      `hasUpdate=${r2.hasUpdate}`,
+    );
+  } finally {
+    // 必须还原：改坏 mtime 会让后面的「需要重启」判断全部错乱
+    await fsp.utimes(pkg, orig.atime, orig.mtime);
+  }
+}
+
+await testUpdaterRestartHint();
+
 /* ---------- 汇总 ---------- */
 await cleanQuotaLedger();
 

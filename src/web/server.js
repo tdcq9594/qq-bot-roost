@@ -1,5 +1,6 @@
 import http from 'node:http';
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { ROOT } from '../config.js';
@@ -207,8 +208,30 @@ export async function startWebServer({
   mock = false,
 }) {
   const wc = globalCfg.webui ?? {};
-  // 启动时读一次版本号，status 里带给面板
-  const frameworkVersion = await currentVersion().catch(() => '0.0.0');
+
+  /**
+   * 当前版本号——**每次现读，不能启动时算一次就固定住**。
+   *
+   * 踩过的坑：以前这里是 `const frameworkVersion = await currentVersion()`，
+   * 只算一次。更新会把 package.json 换成新版，但进程要重启才生效，
+   * 于是面板显示 0.6.7（启动时的常量）、点「检查更新」却回「已是最新 v0.6.9」
+   * （那个是现读文件的）——两个数字来自不同源，用户看到版本号闪一下 0.6.9
+   * 又被轮询刷回 0.6.7，以为更新坏了，反复点。
+   *
+   * 2 秒缓存只为省掉 status 轮询（5 秒一次）每次都碰磁盘，不影响「更新后立刻反映」。
+   */
+  let verCache = { at: 0, v: '' };
+  const versionNow = () => {
+    if (verCache.v && Date.now() - verCache.at < 2000) return verCache.v;
+    try {
+      const raw = fsSync.readFileSync(path.join(ROOT, 'package.json'), 'utf8');
+      verCache = { at: Date.now(), v: JSON.parse(raw).version ?? '0.0.0' };
+    } catch {
+      verCache = { at: Date.now(), v: '0.0.0' };
+    }
+    return verCache.v;
+  };
+
   if (wc.enabled === false) {
     log.info('可视化面板已禁用（config/bot.json → webui.enabled = false）');
     return null;
@@ -305,7 +328,7 @@ export async function startWebServer({
       // 上下线按钮要看机器人自己的状态：idle / starting / online / offline / error / stopped
       state: rt?.state ?? 'offline',
       // 面板「框架版本」直接显示，不用等用户点「检查更新」才有值
-      version: frameworkVersion,
+      version: versionNow(),
     });
 
     /**

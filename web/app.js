@@ -723,7 +723,19 @@ async function checkFrameworkUpdate() {
       return;
     }
     if (!d.hasUpdate) {
-      msg.textContent = `已是最新版本 v${d.current}`;
+      /**
+       * 磁盘上已经是新版、但进程还在跑旧代码。
+       *
+       * 这时候说「已是最新」会让人以为更新没成功——明明行为还是旧的。
+       * 该做的是重启，不是再点一次「检查更新」。
+       */
+      if (d.needsRestart) {
+        msg.innerHTML =
+          `代码已更新到 <b>v${escapeHtml(d.current)}</b>，但程序还在跑更新前的版本。<br>` +
+          '<b>重启程序后新版本才会生效</b>（配置、存档、插件都不受影响）。';
+      } else {
+        msg.textContent = `已是最新版本 v${d.current}`;
+      }
       $('#btnApplyUpdate').hidden = true;
       pendingUpdate = null;
       return;
