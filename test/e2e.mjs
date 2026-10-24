@@ -435,13 +435,13 @@ async function testWebhook() {
 
   try {
     wh.register('app1', {
-      secret: 'g8b4Y2X2tleXRLGB741zxwvvwxz147BG',
+      secret: 'e2e-fake-secret-not-a-real-key',
       onEvent: (name, d, payload) => received.push({ name, d, payload }),
     });
     const port = await wh.start();
     ok('webhook: 启动监听', wh.running === true, `端口 ${port}`);
 
-    const WH_SECRET = 'g8b4Y2X2tleXRLGB741zxwvvwxz147BG';
+    const WH_SECRET = 'e2e-fake-secret-not-a-real-key';
 
     /**
      * 平台推事件时一定带签名，所以这里默认就签。
@@ -467,7 +467,7 @@ async function testWebhook() {
     );
     const j1 = await r1.json();
     ok('webhook: op=13 返回签名', r1.status === 200 && j1.plain_token === 'tok123' && /^[0-9a-f]{128}$/.test(j1.signature || ''));
-    ok('webhook: 签名可被公钥验证', j1.signature === signCallback('g8b4Y2X2tleXRLGB741zxwvvwxz147BG', '1729555200', 'tok123'));
+    ok('webhook: 签名可被公钥验证', j1.signature === signCallback('e2e-fake-secret-not-a-real-key', '1729555200', 'tok123'));
 
     // 2) 缺 appid
     const r2 = await post({ t: 'GROUP_AT_MESSAGE_CREATE', d: {} });
