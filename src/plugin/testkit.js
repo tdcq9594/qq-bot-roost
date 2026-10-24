@@ -173,6 +173,8 @@ export function makeMsg({
   sticky = false,
 } = {}) {
   const replies = [];
+  /** markdown 消息单独记一份，好断言「走的是富文本还是纯文本」 */
+  const markdowns = [];
   const prefix = '/';
   const isCommand = content.startsWith(prefix);
   const body = isCommand ? content.slice(prefix.length).trim() : content;
@@ -197,6 +199,7 @@ export function makeMsg({
     receivedAt: Date.now(),
     replied: false,
     replies,
+    markdowns,
 
     async reply(text) {
       msg.replied = true;
@@ -214,7 +217,9 @@ export function makeMsg({
     },
     async replyMarkdown(md) {
       msg.replied = true;
-      replies.push(md?.content ?? '');
+      const content = md?.content ?? '';
+      replies.push(content);
+      markdowns.push({ ...md, content });
       return { id: 'x' };
     },
     async replyMenu(title, groups) {

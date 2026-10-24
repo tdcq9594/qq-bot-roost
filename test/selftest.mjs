@@ -2078,7 +2078,7 @@ async function testAiChat() {
     };
   };
 
-  const base = { apiKey: 'sk-test', model: 'deepseek-chat' };
+  const base = { apiKey: 'sk-test', model: 'deepseek-flash' };
 
   /**
    * 发一句 `/ai 内容`，返回那条 msg（好断言 replies）。
@@ -2345,10 +2345,10 @@ async function testAiChat() {
     /* ---- 命令 ---- */
 
     {
-      const ctx = makeCtx({ id: 'ai-chat', config: { ...base, model: 'deepseek-chat' } });
+      const ctx = makeCtx({ id: 'ai-chat', config: { ...base, model: 'deepseek-flash' } });
 
       const r1 = await runCommand(plugin, '模型', { content: '/模型', ctx });
-      check('AI: /模型 显示当前模型', (r1.replies[0] ?? '').includes('deepseek-chat'), r1.replies[0] ?? '无回复');
+      check('AI: /模型 显示当前模型', (r1.replies[0] ?? '').includes('deepseek-flash'), r1.replies[0] ?? '无回复');
 
       const r2 = await runCommand(plugin, 'AI帮助', { content: '/AI帮助', ctx });
       check('AI: /AI帮助 有内容', (r2.replies[0] ?? '').length > 20, `长度=${(r2.replies[0] ?? '').length}`);
@@ -2380,6 +2380,124 @@ async function testAiChat() {
       const msg = makeMsg({ content: '/新会话', mentioned: true });
       await runListeners(plugin, msg, ctx);
       check('AI: 命令不会被当成聊天发给模型', calls.length === 0, `calls=${calls.length}`);
+    }
+
+    /* ---- DeepSeek 思考模式参数 ---- */
+
+    /**
+     * 这几条防的是「参数格式不对，真实 API 直接 400」。
+     *
+     * 关键事实（查官方文档确认的）：
+     *   · DeepSeek 的思考模式**默认是开的、强度默认 high**，不显式关掉
+     *     就会又慢又贵，而且思考 token 按输出价计费
+     *   · `thinking` 是 DeepSeek 独有参数，别家不认，塞过去可能 400
+     *   · 思考模式下 temperature 不生效（不报错，但被忽略）
+     */
+    {
+      const ds = { ...base, baseUrl: 'https://api.deepseek.com' };
+
+      calls.length = 0;
+      responder = null;
+      const ctx1 = makeCtx({ id: 'ai-chat', config: ds });
+      await ask(ctx1, '你好');
+      check(
+        'AI: 默认显式关闭思考模式',
+        calls[0]?.body?.thinking?.type === 'disabled',
+        JSON.stringify(calls[0]?.body?.thinking),
+      );
+      check(
+        'AI: 关思考时不传 reasoning_effort',
+        calls[0]?.body?.reasoning_effort === undefined,
+        String(calls[0]?.body?.reasoning_effort),
+      );
+      check(
+        'AI: 关思考时正常传 temperature',
+        calls[0]?.body?.temperature === 1,
+        String(calls[0]?.body?.temperature),
+      );
+
+      calls.length = 0;
+      const ctx2 = makeCtx({ id: 'ai-chat', config: { ...ds, thinking: true, reasoningEffort: 'max' } });
+      await ask(ctx2, '难题');
+      check(
+        'AI: 开思考时传 enabled',
+        calls[0]?.body?.thinking?.type === 'enabled',
+        JSON.stringify(calls[0]?.body?.thinking),
+      );
+      check(
+        'AI: 开思考时传思考强度',
+        calls[0]?.body?.reasoning_effort === 'max',
+        String(calls[0]?.body?.reasoning_effort),
+      );
+      check(
+        'AI: 开思考时不传 temperature（传了也不生效）',
+        calls[0]?.body?.temperature === undefined,
+        String(calls[0]?.body?.temperature),
+      );
+
+      calls.length = 0;
+      const ctx3 = makeCtx({
+        id: 'ai-chat',
+        config: { ...base, baseUrl: 'https://api.moonshot.cn/v1', thinking: true },
+      });
+      await ask(ctx3, '你好');
+      check(
+        'AI: 非 DeepSeek 服务商不传 thinking',
+        calls[0]?.body?.thinking === undefined,
+        JSON.stringify(calls[0]?.body?.thinking),
+      );
+    }
+
+    /* ---- 默认人设 ---- */
+
+    {
+      calls.length = 0;
+      responder = null;
+      /**
+       * 要用插件声明的默认配置。
+       *
+       * testkit 的 makeCtx 只认传进去的 config，不会去合并插件的默认值
+       * （真实运行时 PluginConfig 会合）。所以这里手动带上 systemPrompt 的默认值。
+       */
+      const defaults = plugin.config ?? {};
+      const sysDefault = defaults.systemPrompt?.default ?? '';
+      const ctx = makeCtx({ id: 'ai-chat', config: { apiKey: 'sk-test', systemPrompt: sysDefault } });
+      await ask(ctx, '你好');
+      const sys = calls[0]?.body?.messages?.[0];
+      check(
+        'AI: 默认人设非空',
+        sys?.role === 'system' && String(sys.content).length > 20,
+        JSON.stringify(String(sys?.content ?? '').slice(0, 40)),
+      );
+      check(
+        'AI: 默认人设提到可以 Markdown',
+        /markdown/i.test(sys?.content ?? ''),
+        JSON.stringify(String(sys?.content ?? '').slice(0, 60)),
+      );
+      check(
+        'AI: 默认人设要求简短',
+        /简短|两三句/.test(sys?.content ?? ''),
+        JSON.stringify(String(sys?.content ?? '').slice(0, 60)),
+      );
+    }
+
+    /* ---- Markdown 发送 ---- */
+
+    {
+      const ctx = makeCtx({ id: 'ai-chat', config: { ...base, markdown: true } });
+      const msg = await ask(ctx, '你好');
+      check('AI: 开 markdown 时走 markdown 消息', msg.markdowns?.length === 1, JSON.stringify(msg.replies));
+      check(
+        'AI: markdown 内容就是模型回复',
+        String(msg.markdowns?.[0]?.content ?? '').includes('回声：你好'),
+        JSON.stringify(msg.markdowns?.[0] ?? null),
+      );
+    }
+
+    {
+      const ctx = makeCtx({ id: 'ai-chat', config: { ...base, markdown: false } });
+      const msg = await ask(ctx, '你好');
+      check('AI: 关 markdown 时走纯文本', (msg.markdowns?.length ?? 0) === 0 && msg.replies.length === 1, JSON.stringify(msg.replies));
     }
   } finally {
     globalThis.fetch = realFetch;

@@ -46,12 +46,24 @@
 
 | 服务商 | baseUrl | model 举例 |
 |---|---|---|
-| DeepSeek | `https://api.deepseek.com` | `deepseek-chat`（日常）、`deepseek-reasoner`（推理） |
+| DeepSeek | `https://api.deepseek.com` | `deepseek-flash`（便宜、日常）、`deepseek-v4-pro`（更强、贵几倍） |
 | 月之暗面 | `https://api.moonshot.cn/v1` | `moonshot-v1-8k` |
 | 阿里通义 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` |
 | 本地 Ollama | `http://127.0.0.1:11434/v1` | `qwen2.5:7b` |
 
 只要对方兼容 OpenAI 的 `/chat/completions` 就能用。
+
+### DeepSeek 的两个坑
+
+**模型名换过。** 现在是 `deepseek-flash` 和 `deepseek-v4-pro`。
+以前的 `deepseek-chat` / `deepseek-reasoner` 文档里已经没有了，别再用。
+
+**思考模式默认是开的**，而且强度默认 `high`。也就是说不做处理的话，
+群里问一句「在吗」它也要先想半天——慢，而且思考过程按输出 token 计费，贵。
+所以插件默认显式关掉（`thinking: {type: disabled}`），需要更准的答案再去面板打开。
+
+还有一点：**思考模式下 `temperature` 不生效**（传了不报错，但会被忽略）。
+所以「发散程度」这项只在关掉思考时有用。
 `baseUrl` 末尾的 `/` 会自动去掉，不用纠结。
 
 ---
@@ -61,7 +73,7 @@
 | 指令 | 作用 |
 |---|---|
 | `/新会话` | 清空当前会话的上下文，重新开始（别名 `/清空` `/重置`） |
-| `/模型` | 看当前模型；`/模型 deepseek-reasoner` 换一个（只影响这个会话） |
+| `/模型` | 看当前模型；`/模型 deepseek-v4-pro` 换一个（只影响这个会话） |
 | `/停止` | 中止正在生成的回答 |
 | `/对话状态` | 看这个会话聊了几轮、存了几条、还有多久闲置清空 |
 | `/AI帮助` | 用法速查 |
@@ -114,7 +126,10 @@
 |---|---|---|
 | `apiKey` | 空 | 必填，留空时只提示怎么配 |
 | `baseUrl` | `https://api.deepseek.com` | 接口地址，OpenAI 兼容即可 |
-| `model` | `deepseek-chat` | 默认模型 |
+| `model` | `deepseek-flash` | 默认模型 |
+| `thinking` | `false` | 思考模式。开了更准但慢好几倍、更贵 |
+| `reasoningEffort` | `high` | 思考强度，只在思考模式开启时有意义 |
+| `markdown` | `true` | 用 QQ 的 markdown 消息类型发回复 |
 | `maxTokens` | `1024` | 单条回复最大 token |
 | `temperature` | `1` | 越高越发散 |
 | `timeoutSec` | `90` | 单次请求超时，超了就放弃 |
@@ -196,7 +211,7 @@
 | 提示「API Key 不对」 | Key 错了或没权限 | 重新复制一遍，注意别带空格 |
 | 提示「余额不足」 | 账户没钱了 | 去服务商充值 |
 | 提示「请求太频繁」 | 撞上限流 | 等几秒 |
-| 回复很慢 | 模型本身慢 / 网络差 | 换 `deepseek-chat` 这类快的模型 |
+| 回复很慢 | 模型本身慢 / 网络差 | 换 `deepseek-flash` 这类快的模型 |
 | 上一轮聊的内容它不记得 | 闲置超时清空了，或发了 `/新会话` | 正常行为 |
 | 重启后不记得之前聊的 | 上下文只存内存 | 正常行为 |
 

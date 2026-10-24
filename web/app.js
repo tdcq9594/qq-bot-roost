@@ -2273,6 +2273,11 @@ function renderPPConfig() {
           .join('')}</select>`;
       } else if (s.type === 'json') {
         input = `<textarea data-cfg="${id}" rows="4">${escapeHtml(JSON.stringify(v ?? null, null, 2))}</textarea>`;
+      } else if (s.type === 'textarea') {
+        // 人设、提示词这类长文本，单行 input 没法编辑
+        input = `<textarea data-cfg="${id}" rows="4" ${
+          s.placeholder ? `placeholder="${escapeHtml(s.placeholder)}"` : ''
+        }>${escapeHtml(v ?? '')}</textarea>`;
       } else {
         input = `<input type="text" data-cfg="${id}" value="${escapeHtml(v ?? '')}" ${attrs}>`;
       }
