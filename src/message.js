@@ -219,7 +219,22 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
    */
   msg.reply = (text, opts = {}) => {
     if (text === undefined || text === null || text === '') return Promise.resolve(null);
-    replyBuf.push({ text: String(text), opts });
+    /**
+     * 记下是谁在回。
+     *
+     * 同一条消息可能有好几个插件都想回（比如「回声」接关键词、
+     * 「AI 对话」接提问）。这些回复会攒起来合并成一条发出去，
+     * 合并时得让人看出哪句是谁说的——不然群里看到一坨混在一起的文字，
+     * 根本分不清是哪个功能在说话。
+     *
+     * 这两个字段由 bot.js 在调用插件前设上，插件自己不用管。
+     */
+    replyBuf.push({
+      text: String(text),
+      opts,
+      pluginId: msg.pluginId ?? '',
+      pluginName: msg.pluginName ?? '',
+    });
     msg.replied = true; // 立刻标记，内核据此判断「这条消息有人管」
     return Promise.resolve(null);
   };
@@ -238,7 +253,40 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
     if (!replyBuf.length) return null;
     const items = replyBuf.splice(0, replyBuf.length);
     const opts = items[0].opts ?? {};
-    const merged = items.map((x) => x.text).join('\n');
+
+    /**
+     * 合并策略：**多个插件都回了才加标题**。
+     *
+     *   【回声】          ← 只有出现两个及以上插件时才有这行
+     *   你好呀
+     *
+     *   【AI 对话】
+     *   你好，我是 AI
+     *
+     * 只有一个插件回时不加——那种情况下加标题纯属噪音，
+     * 而且会把现有插件的输出格式全改掉。
+     *
+     * 同一个插件的多段回复并进它自己那一块，不重复加标题。
+     */
+    const groups = new Map(); // pluginId -> { name, texts[] }
+    for (const it of items) {
+      const key = it.pluginId || '';
+      if (!groups.has(key)) groups.set(key, { name: it.pluginName || '', texts: [] });
+      groups.get(key).texts.push(it.text);
+    }
+
+    let merged;
+    if (groups.size > 1) {
+      merged = [...groups.values()]
+        .map((g) => {
+          const body = g.texts.join('\n');
+          // 拿不到插件名（匿名回复）就只放正文，别留个空标题
+          return g.name ? `【${g.name}】\n${body}` : body;
+        })
+        .join('\n\n');
+    } else {
+      merged = items.map((x) => x.text).join('\n');
+    }
 
     // 超长按行切，避免一条消息塞不下被平台拒
     const chunks = [];

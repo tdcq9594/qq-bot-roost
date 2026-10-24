@@ -156,7 +156,22 @@ export function makeCtx({ id = 'test', config = {}, quiet = true } = {}) {
  * 造一条假消息，回复会被收集到 replies 里。
  * @param {object} [p]
  */
-export function makeMsg({ content = '', userId = 'u1', userName = '测试用户', groupId = 'g1', kind = 'group' } = {}) {
+/**
+ * 造一条假消息。
+ *
+ * `mentioned` / `sticky` 是可选的：大部分插件不关心「是不是 @ 来的」，
+ * 但 AI 对话这类「必须 @ 才回」的插件要靠它区分。
+ * 默认 false 保持和以前一样的行为。
+ */
+export function makeMsg({
+  content = '',
+  userId = 'u1',
+  userName = '测试用户',
+  groupId = 'g1',
+  kind = 'group',
+  mentioned = false,
+  sticky = false,
+} = {}) {
   const replies = [];
   const prefix = '/';
   const isCommand = content.startsWith(prefix);
@@ -175,8 +190,10 @@ export function makeMsg({ content = '', userId = 'u1', userName = '测试用户'
     command: isCommand ? parts[0] ?? '' : '',
     args: isCommand ? parts.slice(1) : parts,
     isCommand,
-    mentioned: false,
-    addressed: isCommand,
+    mentioned,
+    // 和 message.js 保持一致：@ 了、是命令、或还在免 @ 窗口里，都算「在跟我说话」
+    addressed: mentioned || isCommand || sticky,
+    sticky,
     receivedAt: Date.now(),
     replied: false,
     replies,

@@ -380,6 +380,8 @@ export function createContext({ meta, paths, registry, api, cfg, config, configS
         pattern: String(name).trim(),
         admin: Boolean(meta2?.admin),
         plugin: meta.name ?? id,
+        // 合并多插件回复时要靠 id 分组，name 只用来显示
+        pluginId: id,
       }, handler);
     },
 

@@ -519,6 +519,14 @@ export class BotRuntime {
           return msg.reply(`参数不够\n用法: ${commandEntry.usage}`).catch(() => {});
         }
         globalRuntime.bump('commands');
+        /**
+         * 标上「现在是哪个插件在回」，合并回复时要用它加标题。
+         *
+         * 命令是排他的（同一个命令名只属于一个插件），本来不会冲突；
+         * 但命令和监听器可能都往这条消息里回，所以一样要标。
+         */
+        msg.pluginId = commandEntry.pluginId ?? '';
+        msg.pluginName = commandEntry.plugin ?? '';
         try {
           await commandEntry.handler(msg, { args: msg.args, raw: msg.content, bot: this });
         } catch (e) {
@@ -548,6 +556,15 @@ export class BotRuntime {
         for (const l of registry.listeners.get(evt) ?? []) {
           // 分群开关对被动触发同样生效，否则「禁用了还在回关键词」
           if (!pluginAllowedIn(cfg.plugins, msg.chatId, l.pluginId)) continue;
+          /**
+           * 标上当前插件，让 msg.reply 知道这句是谁说的。
+           *
+           * **不是排他分发**：所有 listener 都会被调用，各自往 replyBuf 里攒，
+           * 最后合并成一条发出。多个插件都回时，flushReplies 会按插件分组
+           * 并加上【插件名】标题，群里才分得清哪句是哪个功能说的。
+           */
+          msg.pluginId = l.pluginId ?? '';
+          msg.pluginName = this.plugins?.loaded?.get(l.pluginId)?.meta?.name ?? l.pluginId ?? '';
           try {
             const ret = await l.handler(msg);
             if (ret === true || msg.replied) handled = true;
