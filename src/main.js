@@ -14,6 +14,7 @@ import {
 } from './config.js';
 import { DIRS, PATHS, botPaths, listBotIds, ensureDirs, rel } from './paths.js';
 import { createLogger, setLevel, getLevel, attachLogFile, flushLogs } from './logger.js';
+import { configureMirror } from './mirror.js';
 import { BotRuntime } from './bot.js';
 import { runtime, sanitizePayload } from './runtime.js';
 import { LEVEL, NO_PERM, levelName, parseLevel, parseScope, scopeOf } from './roles.js';
@@ -797,6 +798,8 @@ async function runMock(runtimes) {
 
 async function main() {
   const globalCfg = await loadGlobalConfig();
+  // 下载源是全局的，模块里缓存一份，免得每个调用点都传配置
+  configureMirror(globalCfg);
   setLevel(globalCfg.logLevel);
   runtime.startedAt = Date.now();
 

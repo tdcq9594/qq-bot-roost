@@ -46,6 +46,25 @@ const GLOBAL_DEFAULTS = {
   },
 
   /**
+   * 下载源。国内直连 GitHub 经常超时，插件市场和框架更新都会失败。
+   * 这里让用户自己选，面板上有「测速」按钮，按自己网络实际情况挑。
+   *
+   *   mirror      auto（直连优先，失败切镜像）/ github / ghfast / ghproxy
+   *               / gh-proxy / kkgithub / custom
+   *   mirrorCustom  选 custom 时的前缀，如 https://my-proxy.example/
+   *   mirrorChyanResId / mirrorChyanCdk
+   *               MirrorChyan（BGI / MAA 用的 CDN）的资源 ID 与 CDK。
+   *               填了才启用，且**只用来查版本**——它分发的是项目方上传的包，
+   *               格式不一定是我们的 tar.gz。
+   */
+  network: {
+    mirror: 'auto',
+    mirrorCustom: '',
+    mirrorChyanResId: '',
+    mirrorChyanCdk: '',
+  },
+
+  /**
    * 后台服务开关。都是增强，关掉不影响机器人跑。
    */
   services: {
@@ -306,6 +325,10 @@ export async function saveGlobalConfig(cfg) {
     cooldownHint: cfg.cooldownHint,
     webui: cfg.webui,
     logs: cfg.logs,
+    // 白名单漏了这两项会把用户配好的 webhook / 下载源从文件里抹掉：
+    // 面板保存任意全局设置都会走到这里，重启后配置就悄悄回默认了。
+    webhook: cfg.webhook,
+    network: cfg.network,
     plugins: cfg.plugins,
   });
 }

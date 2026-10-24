@@ -362,6 +362,21 @@
           <button class="btn small" id="btnRefreshMarket">重新获取</button>
         </div>
       </div>
+
+      <!-- 下载源：国内直连 GitHub 经常超时，这里可以换镜像 -->
+      <div class="mirror-bar">
+        <span class="hint">下载源</span>
+        <select id="mirrorSelect" class="mini-select" aria-label="下载源"></select>
+        <input
+          id="mirrorCustom"
+          class="mini-input"
+          placeholder="自定义前缀，如 https://gh.example/"
+          hidden
+        />
+        <button class="btn small" id="btnMirrorTest" title="并发测一遍，按你这边实际网络选">测速</button>
+        <span class="hint" id="mirrorTip"></span>
+      </div>
+
       <div id="marketList" class="plugin-list"></div>
     </div>
   </section>

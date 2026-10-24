@@ -1190,6 +1190,9 @@ async function testPluginWatch() {
   while (calls.reload.length !== last && rounds < 8) {
     last = calls.reload.length;
     await put('alpha', 'index.js', `export default { id:"alpha", loop:${rounds} }`);
+    // 把 mtime 拨到过去：文件系统的 mtime 有时比当前时间晚 1ms，
+    // 那一轮会被判成「还没安静够」进 pending，测试就假失败了
+    await age('alpha');
     await w.tick();
     rounds += 1;
   }
@@ -1496,6 +1499,100 @@ async function testMediaAndTemplate() {
 
 await testMediaAndTemplate();
 
+/* ---------- 下载源（镜像） ---------- */
+
+async function testMirror() {
+  const {
+    applyMirror,
+    mirrorCandidates,
+    configureMirror,
+    currentMirror,
+    presetOf,
+    fetchViaMirror,
+  } = await import('../src/mirror.js');
+
+  const raw = 'https://raw.githubusercontent.com/a/b/main/index.json';
+  const tar = 'https://github.com/a/b/archive/refs/heads/main.tar.gz';
+
+  // 直连：什么都不改
+  configureMirror({ network: { mirror: 'github' } });
+  check('镜像: 直连不改地址', applyMirror(tar, presetOf('github')) === tar);
+  check('镜像: 直连只有一个候选', mirrorCandidates(tar).length === 1);
+
+  // 前缀型
+  configureMirror({ network: { mirror: 'ghfast' } });
+  check(
+    '镜像: 前缀型拼在原始地址前面',
+    applyMirror(tar, presetOf('ghfast')) === `https://ghfast.top/${tar}`,
+  );
+  check('镜像: raw 地址同样能加前缀', mirrorCandidates(raw)[0].startsWith('https://ghfast.top/'));
+
+  // 域名替换型
+  configureMirror({ network: { mirror: 'kkgithub' } });
+  check(
+    '镜像: 域名替换型换 host 保留路径',
+    applyMirror(tar, presetOf('kkgithub')) ===
+      'https://kkgithub.com/a/b/archive/refs/heads/main.tar.gz',
+  );
+  check(
+    '镜像: raw 域名也跟着换',
+    applyMirror(raw, presetOf('kkgithub')) === 'https://raw.kkgithub.com/a/b/main/index.json',
+  );
+
+  // 非 GitHub 地址一律不碰（自建图床、MirrorChyan 等）
+  const other = 'https://example.com/x.tar.gz';
+  check('镜像: 非 GitHub 地址原样返回', applyMirror(other, presetOf('ghfast')) === other);
+  check('镜像: 非 GitHub 地址不参与兜底', mirrorCandidates(other).length === 1);
+
+  // 自定义前缀：没填就退回直连，不能把请求发到空地址
+  configureMirror({ network: { mirror: 'custom', mirrorCustom: '' } });
+  check('镜像: 自定义前缀为空时退回直连', mirrorCandidates(tar)[0] === tar);
+  configureMirror({ network: { mirror: 'custom', mirrorCustom: 'gh.example.com' } });
+  check(
+    '镜像: 自定义前缀自动补协议和斜杠',
+    mirrorCandidates(tar)[0] === 'https://gh.example.com/https://github.com/a/b/archive/refs/heads/main.tar.gz',
+  );
+
+  // auto：直连排第一，后面跟一串镜像
+  configureMirror({ network: { mirror: 'auto' } });
+  const auto = mirrorCandidates(tar);
+  check('镜像: auto 直连优先', auto[0] === tar);
+  check('镜像: auto 带多个备用源', auto.length >= 4, `${auto.length} 个候选`);
+
+  // 配置写歪了要能兜住
+  configureMirror({ network: { mirror: '不存在的源' } });
+  check('镜像: 未知源退回 auto', currentMirror().id === 'auto');
+
+  // 兜底 fetch：第一个源抛错，第二个能成功
+  const realFetch = globalThis.fetch;
+  const tried = [];
+  globalThis.fetch = async (u) => {
+    tried.push(u);
+    if (tried.length === 1) throw new Error('模拟直连超时');
+    return new Response('ok', { status: 200 });
+  };
+  try {
+    configureMirror({ network: { mirror: 'auto' } });
+    const res = await fetchViaMirror(tar);
+    check('镜像: 直连失败会自动换源', res.ok && tried.length === 2, `试了 ${tried.length} 次`);
+    check('镜像: 换的是镜像地址', tried[1].startsWith('https://'), tried[1].slice(0, 30));
+
+    // 4xx 不该无脑换源（地址错了换源也没用）
+    tried.length = 0;
+    globalThis.fetch = async (u) => {
+      tried.push(u);
+      return new Response('nope', { status: 404 });
+    };
+    const r404 = await fetchViaMirror(tar);
+    check('镜像: 404 直接返回不重试', r404.status === 404 && tried.length === 1);
+  } finally {
+    globalThis.fetch = realFetch;
+    configureMirror({});
+  }
+}
+
+await testMirror();
+
 /* ---------- 模块可导入性（防止改了导出忘了改引用） ---------- */
 
 async function testModulesLoad() {
@@ -1518,6 +1615,7 @@ async function testModulesLoad() {
     '../src/roles.js',
     '../src/runtime.js',
     '../src/semver.js',
+    '../src/mirror.js',
     '../src/storage/db.js',
     '../src/storage/schema.js',
     '../src/storage/index.js',

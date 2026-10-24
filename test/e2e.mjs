@@ -481,6 +481,45 @@ async function testStatsAndPages() {
   ok('页面: 不存在的页面返回 404', miss.status === 404, `status=${miss.status}`);
 }
 
+/* ---------------- 下载源 ---------------- */
+
+async function testMirror() {
+  const m = await api('/api/mirror');
+  ok('下载源: 接口可用', m.status === 200 && Array.isArray(m.data?.presets), m.data?.error || '');
+  ok('下载源: 有当前选中项', typeof m.data?.current?.id === 'string', m.data?.current?.id);
+  ok('下载源: 带测速地址', typeof m.data?.probeUrl === 'string');
+
+  // 记下原设置，测完还原——这是用户的真实配置文件，别留脏数据
+  const orig = m.data?.current ?? {};
+
+  const put = await api('/api/mirror', {
+    method: 'PUT',
+    body: JSON.stringify({ mirror: 'ghfast' }),
+  });
+  ok('下载源: 可以切换', put.status === 200 && put.data?.current?.id === 'ghfast', put.data?.error || '');
+
+  const after = await api('/api/mirror');
+  ok('下载源: 切换后立即生效', after.data?.current?.id === 'ghfast', after.data?.current?.id);
+
+  const bad = await api('/api/mirror', {
+    method: 'PUT',
+    body: JSON.stringify({ mirror: '不存在的源' }),
+  });
+  ok('下载源: 非法值被拒', bad.status === 400, `status=${bad.status}`);
+
+  await api('/api/mirror', {
+    method: 'PUT',
+    body: JSON.stringify({
+      mirror: orig.id || 'auto',
+      mirrorCustom: orig.custom || '',
+      mirrorChyanResId: orig.chyanResId || '',
+      mirrorChyanCdk: orig.chyanCdk || '',
+    }),
+  });
+  const back = await api('/api/mirror');
+  ok('下载源: 能还原原设置', back.data?.current?.id === (orig.id || 'auto'));
+}
+
 /* ---------------- 主流程 ---------------- */
 
 async function main() {
@@ -499,6 +538,7 @@ async function main() {
   await testGroupsAndRoles();
   await testEventsAndLogs();
   await testWebhook();
+  await testMirror();
   await testStatsAndPages();
   await testSendAndCred();
 

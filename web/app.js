@@ -1542,6 +1542,97 @@ async function rescanPlugins() {
   }
 }
 
+/* ---------------- 下载源 ---------------- */
+
+let MIRRORS = null;
+
+/**
+ * 下载源选择器。
+ *
+ * 国内直连 GitHub 经常超时，插件市场和框架更新都会失败。
+ * 这里不猜哪个快——把源列出来，配一个测速按钮，用户按自己网络挑。
+ */
+async function loadMirrorBar() {
+  const sel = $('#mirrorSelect');
+  if (!sel) return;
+
+  try {
+    const d = await api('/api/mirror');
+    MIRRORS = d;
+    sel.innerHTML = (d.presets || [])
+      .map(
+        (p) =>
+          `<option value="${escapeHtml(p.id)}"${p.id === d.current?.id ? ' selected' : ''}>${escapeHtml(
+            p.name,
+          )}</option>`,
+      )
+      .join('');
+    syncMirrorCustom();
+    const preset = (d.presets || []).find((p) => p.id === d.current?.id);
+    $('#mirrorTip').textContent = preset?.note ?? '';
+  } catch {
+    sel.innerHTML = '<option value="auto">自动</option>';
+  }
+}
+
+/** 选了「自定义前缀」才显示输入框 */
+function syncMirrorCustom() {
+  const sel = $('#mirrorSelect');
+  const inp = $('#mirrorCustom');
+  if (!sel || !inp) return;
+  inp.hidden = sel.value !== 'custom';
+  if (!inp.hidden && !inp.value) inp.value = MIRRORS?.current?.custom ?? '';
+}
+
+async function saveMirror() {
+  const sel = $('#mirrorSelect');
+  const inp = $('#mirrorCustom');
+  const tip = $('#mirrorTip');
+  if (!sel) return;
+
+  try {
+    const r = await api('/api/mirror', {
+      method: 'PUT',
+      body: JSON.stringify({
+        mirror: sel.value,
+        mirrorCustom: inp?.value ?? '',
+        // 这两项在插件市场页不展示，原样带回去，别把用户填的清空
+        mirrorChyanResId: MIRRORS?.current?.chyanResId ?? '',
+        mirrorChyanCdk: MIRRORS?.current?.chyanCdk ?? '',
+      }),
+    });
+    MIRRORS = { ...(MIRRORS ?? {}), current: r.current };
+    const preset = (MIRRORS.presets || []).find((p) => p.id === sel.value);
+    if (tip) tip.textContent = `已切换：${preset?.name ?? sel.value}（立即生效）`;
+  } catch (e) {
+    if (tip) tip.textContent = `切换失败：${e.message}`;
+  }
+}
+
+async function testMirrors() {
+  const tip = $('#mirrorTip');
+  const btn = $('#btnMirrorTest');
+  if (!tip || !btn) return;
+
+  btn.disabled = true;
+  tip.textContent = '测速中（最多 6 秒）…';
+  try {
+    const d = await api('/api/mirror/test', {
+      method: 'POST',
+      body: JSON.stringify({ custom: $('#mirrorCustom')?.value ?? '' }),
+    });
+    const rows = (d.results || []).map((r) =>
+      r.ok ? `${r.name} ${r.ms}ms` : `${r.name} ✗`,
+    );
+    const okCount = (d.results || []).filter((r) => r.ok).length;
+    tip.textContent = `${okCount}/${(d.results || []).length} 可用：${rows.join(' · ')}`;
+  } catch (e) {
+    tip.textContent = `测速失败：${e.message}`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function loadMarket() {
   const box = $('#marketBox');
   const list = $('#marketList');
@@ -1549,6 +1640,8 @@ async function loadMarket() {
   box.hidden = false;
   meta.textContent = '获取中…';
   list.innerHTML = '<div class="empty">正在从 GitHub 获取插件列表…</div>';
+  // 下载源选择器：第一次打开市场时拉一次
+  if (!MIRRORS) loadMirrorBar();
 
   let d;
   try {
@@ -1737,6 +1830,14 @@ $('#btnRescanPlugins')?.addEventListener('click', rescanPlugins);
 $('#btnRefreshStats')?.addEventListener('click', loadStats);
 $('#statsDays')?.addEventListener('change', loadStats);
 $('#btnRefreshMarket')?.addEventListener('click', loadMarket);
+
+// 下载源：换源立即保存并生效，测速只是给个参考
+$('#btnMirrorTest')?.addEventListener('click', testMirrors);
+$('#mirrorSelect')?.addEventListener('change', () => {
+  syncMirrorCustom();
+  saveMirror();
+});
+$('#mirrorCustom')?.addEventListener('change', saveMirror);
 $('#btnLoadMarket')?.addEventListener('click', () => {
   const box = $('#marketBox');
   if (box.hidden) loadMarket();

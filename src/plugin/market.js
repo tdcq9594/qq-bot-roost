@@ -7,6 +7,7 @@ import { fetchAndExtract, branchTarballUrl } from '../tarball.js';
 import { DIRS } from '../paths.js';
 // re-export 不会在本模块内绑定名字，内部还要用就必须单独 import
 import { compareVersion } from '../semver.js';
+import { fetchViaMirror } from '../mirror.js';
 
 const log = createLogger('market');
 
@@ -88,7 +89,8 @@ async function fetchIndexOnce(url) {
 
     let res;
     try {
-      res = await fetch(url, { signal: AbortSignal.timeout(20000) });
+      // 走下载源：直连超时会自动换镜像（见 src/mirror.js）
+      res = await fetchViaMirror(url, { signal: AbortSignal.timeout(20000) });
     } catch (e) {
       lastErr = new Error(`连不上插件市场：${e.message}`);
       continue;
@@ -145,6 +147,8 @@ export async function installPlugin({ entry, pluginsDir, repo, branch = 'main', 
     await fetchAndExtract(branchTarballUrl(repo, branch), tmp, {
       timeoutMs: 120000,
       onRetry: (m) => log.warn(m),
+      // 同上：下载源可在面板切换，国内直连 GitHub 经常断
+      fetcher: (u, init) => fetchViaMirror(u, init),
     });
 
     const src = path.join(tmp, entry.path);

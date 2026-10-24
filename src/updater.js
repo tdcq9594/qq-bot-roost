@@ -18,6 +18,7 @@ import { compareVersion } from './semver.js';
 import path from 'node:path';
 import { createLogger } from './logger.js';
 import { fetchAndExtract } from './tarball.js';
+import { fetchViaMirror, checkViaMirrorChyan } from './mirror.js';
 import { ROOT } from './config.js';
 
 const log = createLogger('update');
@@ -67,13 +68,29 @@ export async function currentVersion() {
 export async function checkUpdate() {
   const cur = await currentVersion();
 
+  /**
+   * 先问 MirrorChyan（配了 res_id 才启用）。
+   *
+   * 这是 BGI / MAA / M9A 那一套的做法：CDN 覆盖国内外、不限速、不消耗
+   * GitHub 配额，用来**查版本**最省事。下载仍然走镜像 tarball——
+   * 它分发的包格式由上传方决定，不一定是我们能解的 tar.gz。
+   */
+  const chyan = await checkViaMirrorChyan(cur);
+  if (chyan && !chyan.ok) log.warn(`MirrorChyan 检查失败，改问 GitHub：${chyan.error}`);
+  if (chyan?.ok && chyan.version) {
+    return buildResult(cur, `v${chyan.version}`, {
+      source: 'mirrorchyan',
+      releaseNote: chyan.releaseNote,
+    });
+  }
+
   let res = null;
   let lastErr = null;
   // 国内访问 github.com 经常抖（代理、DNS），重试一次再报错
   for (let attempt = 0; attempt < 2; attempt++) {
     if (attempt > 0) await new Promise((r) => setTimeout(r, 1500));
     try {
-      res = await fetch(`https://github.com/${REPO}/releases/latest`, {
+      res = await fetchViaMirror(`https://github.com/${REPO}/releases/latest`, {
         method: 'GET',
         redirect: 'manual', // 要自己看 Location
         headers: { 'User-Agent': 'qq-bot-roost-updater' },
@@ -87,11 +104,16 @@ export async function checkUpdate() {
   }
 
   if (!res) {
-    return {
-      ok: false,
-      current: cur,
-      error: `连不上 GitHub：${lastErr?.message ?? '未知错误'}（检查网络或代理）`,
-    };
+    // 连不上主站：还有一次机会——问 API（走的是另一套域名和 CDN）
+    try {
+      return buildResult(cur, await fetchLatestTagViaApi(), { source: 'github-api' });
+    } catch (e) {
+      return {
+        ok: false,
+        current: cur,
+        error: `连不上 GitHub：${lastErr?.message ?? e.message}（换个下载源试试）`,
+      };
+    }
   }
 
   // 302 → Location: https://github.com/OWNER/REPO/releases/tag/v0.5.1
@@ -103,27 +125,57 @@ export async function checkUpdate() {
     if (res.status === 404) {
       return { ok: true, current: cur, latest: cur, hasUpdate: false, note: '仓库还没有发布版本' };
     }
-    // 3xx 但取不到 tag，说明被重定向到别处（登录页、限流页），不能当成「已是最新」
-    return {
-      ok: false,
-      current: cur,
-      error: `无法解析最新版本（HTTP ${res.status}）`,
-    };
+    /**
+     * 3xx 但取不到 tag：可能被重定向到别处（登录页、限流页），
+     * 也可能是镜像把 302 变成了 200 直出 HTML。再问一次 API，
+     * 它返回的是 JSON，不受重定向影响。
+     */
+    try {
+      return buildResult(cur, await fetchLatestTagViaApi(), { source: 'github-api' });
+    } catch (e) {
+      return {
+        ok: false,
+        current: cur,
+        error: `无法解析最新版本（HTTP ${res.status}）：${e.message}`,
+      };
+    }
   }
 
-  const tag = m[1];
-  const latest = tag.replace(/^v/, '');
-  const hasUpdate = compareVersion(cur, latest) < 0;
+  return buildResult(cur, m[1], { source: 'github' });
+}
 
+/**
+ * 问 GitHub API 要最新 tag。
+ * 会消耗匿名配额（60 次/小时/IP），只在主站走不通时兜底用。
+ */
+async function fetchLatestTagViaApi() {
+  const res = await fetchViaMirror(`https://api.github.com/repos/${REPO}/releases/latest`, {
+    headers: {
+      'User-Agent': 'qq-bot-roost-updater',
+      Accept: 'application/vnd.github+json',
+    },
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!res.ok) throw new Error(`GitHub API 返回 HTTP ${res.status}`);
+  const data = await res.json().catch(() => null);
+  const tag = String(data?.tag_name ?? '');
+  if (!tag) throw new Error('GitHub API 没返回 tag_name');
+  return tag;
+}
+
+/** 把 tag 组装成面板要的结构 */
+function buildResult(cur, tag, extra = {}) {
+  const latest = String(tag).replace(/^v/, '');
   return {
     ok: true,
     current: cur,
     latest,
-    hasUpdate,
+    hasUpdate: compareVersion(cur, latest) < 0,
     tag,
     htmlUrl: `https://github.com/${REPO}/releases/tag/${tag}`,
-    // 公开直链，不需要 API
+    // 公开直链，不需要 API；实际下载时会按「下载源」设置改写
     tarball: `https://github.com/${REPO}/archive/refs/tags/${tag}.tar.gz`,
+    ...extra,
   };
 }
 
@@ -139,6 +191,8 @@ async function downloadTo(tmpDir, tarballUrl) {
     timeoutMs: 120000,
     retries: 1,
     onRetry: (m) => log.warn(m),
+    // 走下载源：面板里选了镜像或 auto，这里就自动用上
+    fetcher: (u, init) => fetchViaMirror(u, init),
   });
   return tmpDir;
 }

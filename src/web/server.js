@@ -24,6 +24,13 @@ import {
 // 面板改插件启停时要同步机器人配置里的过滤器，两边不能各说各的
 import { pluginFilterOf } from '../bot.js';
 import { suspendPluginWatch } from '../services/plugin-watch.js';
+import {
+  PRESETS,
+  PROBE_URL,
+  configureMirror,
+  currentMirror,
+  probeMirrors,
+} from '../mirror.js';
 
 const log = createLogger('webui');
 const WEB_ROOT = path.join(ROOT, 'web');
@@ -498,6 +505,7 @@ export async function startWebServer({
             globalCfg.logLevel = body.logLevel;
             setLevel(body.logLevel);
             await saveGlobalConfig?.(globalCfg).catch(() => {});
+            configureMirror(globalCfg);
           }
           if (body.whitelist && typeof body.whitelist === 'object') {
             cfg.whitelist = {
@@ -529,6 +537,7 @@ export async function startWebServer({
             // 结果是面板提示「已保存」但什么都没变。
             globalCfg.webui = { ...globalCfg.webui, ...body.webui };
             await saveGlobalConfig?.(globalCfg).catch(() => {});
+            configureMirror(globalCfg);
           }
           // 群管内邀开关：同步给 api 层，否则要等重启才生效
           if (body.groupManage && typeof body.groupManage === 'object') {
@@ -622,7 +631,47 @@ export async function startWebServer({
           return json(res, 200, await plugins.dashboards());
         }
 
-        /* ---------------- 插件注册的面板页面 ---------------- */
+        /* ---------------- 下载源 ---------------- */
+
+        // 有哪些源可选、当前选的是哪个
+        if (pathname === '/api/mirror' && req.method === 'GET') {
+          return json(res, 200, {
+            current: currentMirror(),
+            presets: PRESETS,
+            probeUrl: PROBE_URL,
+          });
+        }
+
+        // 一键测速：并发打一遍，让用户按自己网络选
+        if (pathname === '/api/mirror/test' && req.method === 'POST') {
+          const body = await readBody(req);
+          const results = await probeMirrors({
+            timeoutMs: Math.min(15000, Number(body?.timeoutMs) || 6000),
+            custom: body?.custom ?? globalCfg.network?.mirrorCustom ?? '',
+          });
+          return json(res, 200, { results });
+        }
+
+        // 改下载源
+        if (pathname === '/api/mirror' && req.method === 'PUT') {
+          const body = await readBody(req);
+          const id = String(body?.mirror ?? '').trim();
+          if (!PRESETS.some((p) => p.id === id)) {
+            return json(res, 400, { error: `没有这个下载源：${id}` });
+          }
+          globalCfg.network = {
+            ...(globalCfg.network ?? {}),
+            mirror: id,
+            mirrorCustom: String(body?.mirrorCustom ?? '').trim(),
+            mirrorChyanResId: String(body?.mirrorChyanResId ?? '').trim(),
+            mirrorChyanCdk: String(body?.mirrorChyanCdk ?? '').trim(),
+          };
+          // 立刻生效：模块里缓存的那份要同步，不然要等重启
+          configureMirror(globalCfg);
+          await saveGlobalConfig?.(globalCfg).catch(() => {});
+          return json(res, 200, { ok: true, current: currentMirror() });
+        }
+
 
         // 有哪些页面（不含 html，可能很大）
         if (pathname === '/api/pages' && req.method === 'GET') {
@@ -938,6 +987,7 @@ export async function startWebServer({
           setLevel(body.level);
           globalCfg.logLevel = body.level;
           await saveGlobalConfig?.(globalCfg).catch(() => {});
+          configureMirror(globalCfg);
           return json(res, 200, { ok: true, level: getLevel() });
         }
 

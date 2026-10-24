@@ -19,6 +19,7 @@ import { BaseService } from './base.js';
 import { createLogger, setLevel } from '../logger.js';
 import { DIRS, PATHS } from '../paths.js';
 import { loadGlobalConfig, loadBotConfig } from '../config.js';
+import { configureMirror } from '../mirror.js';
 
 const log = createLogger('config-watch');
 
@@ -94,6 +95,8 @@ export class ConfigWatchService extends BaseService {
 
         // 日志级别可以立刻生效
         if (after.logLevel) setLevel(after.logLevel);
+        // 下载源改了也要立刻生效，不然得重启（用户改的就是这个文件）
+        configureMirror(this.globalCfg);
 
         this.onReload?.(after, null);
         log.info('全局配置已重新加载');

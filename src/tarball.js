@@ -112,7 +112,9 @@ export async function extractEntries(entries, destDir) {
  * @returns {Promise<number>} 写出的文件数
  */
 export async function fetchAndExtract(url, destDir, opts = {}) {
-  const { timeoutMs = 120000, retries = 1, onRetry } = opts;
+  const { timeoutMs = 120000, retries = 1, onRetry, fetcher } = opts;
+  // 默认裸 fetch；插件市场和框架更新会传一个带镜像兜底的实现
+  const doFetch = fetcher ?? fetch;
 
   let res = null;
   let lastErr = null;
@@ -123,7 +125,7 @@ export async function fetchAndExtract(url, destDir, opts = {}) {
       await new Promise((r) => setTimeout(r, 1500));
     }
     try {
-      res = await fetch(url, {
+      res = await doFetch(url, {
         headers: { 'User-Agent': 'qq-bot-roost' },
         signal: AbortSignal.timeout(timeoutMs),
       });
