@@ -20,6 +20,10 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import crypto from 'node:crypto';
+import { createLogger } from './logger.js';
+
+const log = createLogger('tarball');
 
 /**
  * 解析 tar 缓冲区。
@@ -112,7 +116,7 @@ export async function extractEntries(entries, destDir) {
  * @returns {Promise<number>} 写出的文件数
  */
 export async function fetchAndExtract(url, destDir, opts = {}) {
-  const { timeoutMs = 120000, retries = 1, onRetry, fetcher } = opts;
+  const { timeoutMs = 120000, retries = 1, onRetry, fetcher, expectSha256 = null } = opts;
   // 默认裸 fetch；插件市场和框架更新会传一个带镜像兜底的实现
   const doFetch = fetcher ?? fetch;
 
@@ -143,6 +147,24 @@ export async function fetchAndExtract(url, destDir, opts = {}) {
   if (!res) throw new Error(`下载失败：${lastErr?.message ?? '未知错误'}`);
 
   const gz = Buffer.from(await res.arrayBuffer());
+
+  /**
+   * 供应链校验：索引里给了 sha256 就必须对上。
+   * 镜像运营方或被中间人换掉的 tar.gz 直接就是进程里的代码（RCE）。
+   * 没给就只提示一句，不阻断——老索引没有这个字段，硬卡会让所有人装不了插件。
+   */
+  if (expectSha256) {
+    const got = crypto.createHash('sha256').update(gz).digest('hex');
+    if (got.toLowerCase() !== String(expectSha256).toLowerCase()) {
+      throw new Error(
+        `下载内容校验失败（sha256 不匹配）\n  期望 ${expectSha256}\n  实际 ${got}\n` +
+          '镜像可能被篡改，或索引与包不同步。已中止，未写入任何文件。',
+      );
+    }
+    log.info('下载内容 sha256 校验通过');
+  } else {
+    log.warn('索引没有提供 sha256，本次安装未做内容校验');
+  }
   /**
    * 解压必须带上限。
    * 一个几十 KB 的 gzip 炸弹能解出几十 GB，直接把进程内存打爆。

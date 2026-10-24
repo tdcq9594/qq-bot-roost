@@ -1130,9 +1130,11 @@ $('#cfgForm').addEventListener('submit', async (e) => {
     const r = await api('/api/config', { method: 'PUT', body: JSON.stringify(payload) });
     // 后端在填完 AppID / AppSecret 后会把占位名换成官方昵称，这里同步显示
     const renamed = r?.name && r.name !== botById(CURRENT_BOT)?.name;
-    $('#cfgMsg').textContent =
-      (renamed ? `已保存，机器人昵称同步为「${r.name}」` : '已保存') +
-      (payload.appId ? '' : '（AppID 为空）');
+    // 换连接方式要重启才生效，后端会带 restartRequired + message，原样转达
+    $('#cfgMsg').textContent = r?.message
+      ? r.message
+      : (renamed ? `已保存，机器人昵称同步为「${r.name}」` : '已保存') +
+        (payload.appId ? '' : '（AppID 为空）');
     f.appSecret.value = '';
     setTimeout(() => ($('#cfgMsg').textContent = ''), 4000);
     await loadBots();
@@ -1298,6 +1300,28 @@ const DOCTOR_ICON = { ok: '✓', warn: '!', error: '✕' };
  * 自动跑一次：用户最常问的就是「我配好了为什么没反应」，与其等他去点，
  * 不如打开面板就告诉他。只有出现 error 时才自动展开，全绿就只留一行字。
  */
+/**
+ * 首次体检：等网关就绪再跑。
+ *
+ * 以前是打开面板立刻体检。刚启动时网关还在握手，state 是 starting，
+ * 体检必定报「还没连上」——用户打开面板看到的第一个东西就是一条黄字，
+ * 而他其实什么都没做错，几秒后自己就好了。
+ *
+ * 现在：状态还在 starting / idle 就等，连上（或明确失败、被下线）再跑。
+ * 最多等 12 秒——12 秒还没连上，那是真有问题，这时候报出来才有意义。
+ */
+async function doctorWhenReady({ maxWaitMs = 12000 } = {}) {
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    const s = await api('/api/status').catch(() => null);
+    const st = s?.state;
+    // 已经就绪，或者明确失败 / 被下线：都别等了
+    if (st === 'online' || st === 'offline' || st === 'stopped' || st === 'error' || s?.mock) break;
+    await new Promise((r) => setTimeout(r, 800));
+  }
+  loadDoctor();
+}
+
 async function loadDoctor({ expand } = {}) {
   const list = $('#doctorList');
   const summary = $('#doctorSummary');
@@ -2382,6 +2406,7 @@ function renderGroups(list) {
         <td><span class="badge ${g.enabled ? 'on' : 'off'}">${g.enabled ? '在用' : '已移出'}</span></td>
         <td>${g.lastActiveAt ? fmtAgo(g.lastActiveAt) : '-'}</td>
         <td class="num">
+          <button class="btn small" data-act="plugins" title="这个群能用哪些插件">插件</button>
           <button class="btn small danger" data-act="del">删除</button>
         </td>
       </tr>`)
@@ -2390,6 +2415,10 @@ function renderGroups(list) {
   body.querySelectorAll('button[data-act]').forEach((btn) => {
     btn.addEventListener('click', async () => {
       const id = btn.closest('tr').dataset.id;
+      if (btn.dataset.act === 'plugins') {
+        openGroupPlugins(id);
+        return;
+      }
       if (!confirm('确定删除这个群的档案？机器人不会退群，只是忘掉这条记录（权限不受影响）。')) {
         return;
       }
@@ -2403,6 +2432,92 @@ function renderGroups(list) {
       }
     });
   });
+}
+
+/**
+ * 分群插件开关。
+ *
+ * 一个机器人常在好几个群里，有的群要骰子、有的群嫌吵。这里给每个群
+ * 一份独立的启用名单，不配的群跟着全局走。
+ *
+ * 只改「分发时」的判断，不动加载——插件在进程里是全局加载的，
+ * 按群卸载等于每个群一套运行时。
+ *
+ * @param {string} chatId 群 openid
+ */
+async function openGroupPlugins(chatId) {
+  const mask = $('#gplugMask');
+  const list = $('#gplugList');
+  const save = $('#gplugSave');
+  const cancel = $('#gplugCancel');
+  if (!mask || !list || !save || !cancel) return;
+
+  let d;
+  try {
+    d = await api(`/api/groups/${encodeURIComponent(chatId)}/plugins`);
+  } catch (e) {
+    return alert('读取失败: ' + e.message);
+  }
+
+  const own = d.own;
+  const g = d.global ?? { mode: 'all', list: [] };
+  $('#gplugSub').textContent = `群 ${shortId(chatId)}：只影响这一个群，其它群不受影响。`;
+  $('#gplugGlobalHint').textContent =
+    g.mode === 'all'
+      ? '（全局：全部启用）'
+      : `（全局：${g.mode === 'exclude' ? '排除' : '仅启用'} ${(g.list ?? []).length} 个）`;
+
+  for (const r of document.querySelectorAll('input[name="gplugMode"]')) {
+    r.checked = r.value === (own ? 'custom' : 'global');
+  }
+
+  list.innerHTML = d.plugins?.length
+    ? d.plugins
+        .map(
+          (p) => `<label class="gplug-item">
+            <input type="checkbox" value="${escapeHtml(p.id)}" ${p.enabled ? 'checked' : ''}>
+            <span class="gp-name">${escapeHtml(p.name)}</span>
+            <span class="gp-id">${escapeHtml(p.id)}</span>
+            <span class="gp-ver">${escapeHtml(p.version || '')}</span>
+          </label>`,
+        )
+        .join('')
+    : '<div class="gplug-empty">这个机器人还没加载任何插件</div>';
+
+  const syncMode = () => {
+    const custom = document.querySelector('input[name="gplugMode"]:checked')?.value === 'custom';
+    list.hidden = !custom;
+  };
+  for (const r of document.querySelectorAll('input[name="gplugMode"]')) r.onchange = syncMode;
+  syncMode();
+
+  mask.hidden = false;
+
+  cancel.onclick = () => {
+    mask.hidden = true;
+  };
+  save.onclick = async () => {
+    const custom = document.querySelector('input[name="gplugMode"]:checked')?.value === 'custom';
+    save.disabled = true;
+    try {
+      const body = custom
+        ? {
+            mode: 'include',
+            list: [...list.querySelectorAll('input[type=checkbox]:checked')].map((x) => x.value),
+          }
+        : { reset: true };
+      await api(`/api/groups/${encodeURIComponent(chatId)}/plugins`, {
+        method: 'PUT',
+        body: JSON.stringify(body),
+      });
+      mask.hidden = true;
+      await loadGroups();
+    } catch (e) {
+      alert('保存失败: ' + e.message);
+    } finally {
+      save.disabled = false;
+    }
+  };
 }
 
 $('#btnReloadGroups')?.addEventListener('click', loadGroups);
@@ -2761,8 +2876,8 @@ function connectStream() {
   // 后台服务状态：detail 会变（内存、下次重启时间），30 秒刷一次够了
   loadServices();
   setInterval(loadServices, 30000);
-  // 打开面板就体检一次：有问题直接摆在概览最上面，不用等用户去点
-  loadDoctor();
+  // 打开面板就体检一次：等网关就绪再跑，别在握手阶段就报「还没连上」
+  doctorWhenReady();
   // 机器人确定后再刷一次：上面那次是抢时间，这次才是准数据
   if (initial) activateTab(initial);
 })();

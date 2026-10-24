@@ -85,11 +85,17 @@ export class Registry {
     }
     this.commands.set(key, { pluginId, name: key, ...meta, handler });
 
-    // 命令自动进菜单的「指令」分组，插件不用重复声明
+    /**
+     * 命令自动进菜单。分组默认是「指令」，可以用 `meta.section` 指定。
+     *
+     * 内核的十几个命令全靠这个分到「基础 / 管理 / 其它」三组——
+     * 不然 `/help` 主菜单会把它们全部平铺出来，二十多行，
+     * 在手机上要滑两屏才看得完。
+     */
     this.addMenuSection(
       pluginId,
       { name: meta.plugin },
-      '指令',
+      meta.section ?? '指令',
       [{ cmd: meta.pattern ?? key, desc: meta.desc ?? '', admin: meta.admin, globalAdmin: meta.globalAdmin }],
     );
   }

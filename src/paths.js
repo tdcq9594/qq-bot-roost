@@ -33,20 +33,30 @@ import path from 'node:path';
  * 同一个用户在不同机器人下的 openid 完全不同，共享存档等于全部对不上。
  */
 
+/** 代码根目录（src/ web/ plugins/ package.json 都在这下面），永远跟着仓库走 */
 export const ROOT = path.resolve(import.meta.dirname, '..');
 
+/**
+ * 运行数据根目录：config / logs / data 放哪。
+ *
+ * 默认就是仓库根。设  可以整体挪走——
+ * 测试要的就是这个：跑 e2e 不该写开发者自己的 config 和权限表。
+ * plugins/ 不跟着走，它是代码不是数据。
+ */
+const HOME = process.env.ROOST_HOME ? path.resolve(process.env.ROOST_HOME) : ROOT;
+
 export const DIRS = {
-  config: path.join(ROOT, 'config'),
-  logs: path.join(ROOT, 'logs'),
-  data: path.join(ROOT, 'data'),
-  /** 插件代码目录，全局共享 */
+  config: path.join(HOME, 'config'),
+  logs: path.join(HOME, 'logs'),
+  data: path.join(HOME, 'data'),
+  /** 插件代码目录，全局共享（**不跟着 HOME 走**，它是代码不是数据） */
   plugins: path.join(ROOT, 'plugins'),
   /** 机器人配置文件目录 */
-  botsConfig: path.join(ROOT, 'config', 'bots'),
+  botsConfig: path.join(HOME, 'config', 'bots'),
   /** 机器人数据目录 */
-  botsData: path.join(ROOT, 'data', 'bots'),
+  botsData: path.join(HOME, 'data', 'bots'),
   /** 机器人日志目录 */
-  botsLogs: path.join(ROOT, 'logs', 'bots'),
+  botsLogs: path.join(HOME, 'logs', 'bots'),
 };
 
 export const PATHS = {

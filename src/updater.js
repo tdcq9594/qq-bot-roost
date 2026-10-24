@@ -186,8 +186,10 @@ function buildResult(cur, tag, extra = {}) {
  * 解析逻辑统一放在 src/tarball.js，插件市场和框架更新共用一份，
  * 免得两处 tar 解析以后跑偏。
  */
-async function downloadTo(tmpDir, tarballUrl) {
+async function downloadTo(tmpDir, tarballUrl, sha256 = null) {
   await fetchAndExtract(tarballUrl, tmpDir, {
+    // 版本信息里带了 sha256 就校验（发布说明里没写就是 null，只 warn）
+    expectSha256: sha256,
     timeoutMs: 120000,
     retries: 1,
     onRetry: (m) => log.warn(m),
@@ -229,12 +231,92 @@ async function pruneBackups(keep = 3) {
 }
 
 /**
+ * 启动时检查「上次更新有没有半路被打断」，有就回滚。
+ *
+ * 只有一种情况会留下标记：替换过程中进程被强杀（断电、任务管理器结束）。
+ * 那时 src/ 可能是半新半旧，直接启动会在各种莫名其妙的地方报错。
+ *
+ * 回滚来源是标记里记的备份目录，幂等——回滚完删标记，下次不会再跑。
+ *
+ * @returns {Promise<{recovered:boolean, from?:string, to?:string, error?:string}>}
+ */
+export async function recoverInterruptedUpdate() {
+  /**
+   * 这里用 `ROOT/data` 而不是 `DIRS.data`，是有意的。
+   *
+   * 更新相关的临时文件和备份必须**跟代码在同一棵目录树下**：
+   * 备份是用来还原 `src/` 的，放到 ROOST_HOME 指的临时目录里，
+   * 一次重启就没了，还原就成了一句空话。
+   */
+  const marker = path.join(ROOT, 'data', '.update-pending.json');
+  let info;
+  try {
+    info = JSON.parse(await fs.readFile(marker, 'utf8'));
+  } catch {
+    return { recovered: false }; // 没有标记，正常启动
+  }
+
+  const backupDir = info.backup;
+  const hasBackup = backupDir
+    ? await fs.access(backupDir).then(() => true, () => false)
+    : false;
+
+  if (!hasBackup) {
+    // 备份都没了，回滚不了。留着标记只会每次启动都报一遍，删掉并说清楚。
+    await fs.rm(marker, { force: true }).catch(() => {});
+    const msg = `上次更新（${info.from} → ${info.to}）被打断，且备份目录已不存在，无法自动回滚`;
+    log.error(msg);
+    return { recovered: false, error: msg };
+  }
+
+  log.warn(
+    `检测到上次更新（${info.from} → ${info.to}）没有完成，正在回滚到 ${info.from}…`,
+  );
+  let failed = 0;
+  for (const name of CODE_ENTRIES) {
+    const from = path.join(backupDir, name);
+    const exists = await fs.access(from).then(() => true, () => false);
+    if (!exists) continue;
+    const to = path.join(ROOT, name);
+    await fs.rm(to, { recursive: true, force: true }).catch(() => {});
+    await fs.cp(from, to, { recursive: true }).catch(() => {
+      failed += 1;
+    });
+  }
+
+  if (failed) {
+    const msg = `回滚时有 ${failed} 个目录没拷回去，备份仍在 ${path.relative(ROOT, backupDir)}`;
+    log.error(msg);
+    return { recovered: false, error: msg };
+  }
+
+  await fs.rm(marker, { force: true }).catch(() => {});
+  log.info(`已回滚到 ${info.from}，可以正常启动`);
+  return { recovered: true, from: info.from, to: info.to };
+}
+
+/**
  * 执行更新。
  *
  * @param {object} [info] checkUpdate() 的返回值；不传就现查
  * @returns {Promise<{ok:boolean, from:string, to:string, backup?:string, error?:string}>}
  */
+/** 进程内互斥：面板点更新和自动更新同时来，会互相踩文件 */
+let applying = false;
+
 export async function applyUpdate(info) {
+  if (applying) {
+    throw new Error('已经有一个更新在进行中，等它完成再试');
+  }
+  applying = true;
+  try {
+    return await applyUpdateOnce(info);
+  } finally {
+    applying = false;
+  }
+}
+
+async function applyUpdateOnce(info) {
   const cur = await currentVersion();
   const rel = info ?? (await checkUpdate());
   if (!rel.ok) throw new Error(rel.error || '检查更新失败');
@@ -249,7 +331,7 @@ export async function applyUpdate(info) {
   await fs.mkdir(workDir, { recursive: true });
 
   try {
-    await downloadTo(workDir, rel.tarball);
+    await downloadTo(workDir, rel.tarball, rel.sha256 ?? null);
 
     // 校验：新版本里必须有 src/main.js，否则不是我们要的包
     const mainJs = path.join(workDir, 'src', 'main.js');
@@ -270,6 +352,26 @@ export async function applyUpdate(info) {
     await pruneBackups(3).catch(() => {});
 
     // 替换
+    /**
+     * 写「正在更新」标记，成功后才删掉。
+     *
+     * 这一步是给「进程被强杀」准备的：rm + cp 是逐个目录覆盖的，
+     * 中途断电 / 任务管理器结束进程，catch 根本不会执行，
+     * 下次启动看到的就是一半新版一半旧版的 src/，报错都看不出原因。
+     *
+     * 为什么不直接「目录交换」（rename 旧的走、rename 新的进来）：
+     * Windows 上重命名一个还有打开句柄的目录会 EBUSY，而 src/ 正是
+     * 当前进程正在执行的那份代码。交换失败反而更危险。
+     * 所以保留 rm+cp，用标记 + 启动时自愈来兜底。
+     */
+    const marker = path.join(ROOT, 'data', '.update-pending.json');
+    await fs.mkdir(path.dirname(marker), { recursive: true });
+    await fs.writeFile(
+      marker,
+      JSON.stringify({ from: cur, to: rel.latest, backup: backupDir, at: Date.now() }, null, 2),
+      'utf8',
+    );
+
     for (const name of CODE_ENTRIES) {
       if (PROTECTED.has(name)) continue; // 理论上不会进来，双保险
       const from = path.join(workDir, name);
@@ -280,18 +382,30 @@ export async function applyUpdate(info) {
       await fs.cp(from, to, { recursive: true });
     }
 
+    // 全部换完了，标记才算失效
+    await fs.rm(marker, { force: true }).catch(() => {});
+
     log.info(`更新完成：${cur} → ${rel.latest}，重启后生效`);
     return { ok: true, from: cur, to: rel.latest, backup: path.relative(ROOT, backupDir) };
   } catch (e) {
     log.error(`更新失败，正在还原：${e.message}`);
     // 还原：把备份原样拷回去
+    let failed = 0;
     for (const name of CODE_ENTRIES) {
       const from = path.join(backupDir, name);
       const exists = await fs.access(from).then(() => true, () => false);
       if (!exists) continue;
       const to = path.join(ROOT, name);
       await fs.rm(to, { recursive: true, force: true }).catch(() => {});
-      await fs.cp(from, to, { recursive: true }).catch(() => {});
+      await fs.cp(from, to, { recursive: true }).catch(() => {
+        failed += 1;
+      });
+    }
+    // 还原干净了才撤标记；还有目录没拷回去就留着，下次启动再试一遍
+    if (!failed) {
+      await fs.rm(path.join(ROOT, 'data', '.update-pending.json'), { force: true }).catch(() => {});
+    } else {
+      log.warn(`有 ${failed} 个目录没能还原，标记保留，下次启动会自动再试`);
     }
     return { ok: false, from: cur, to: rel.latest, error: e.message };
   } finally {

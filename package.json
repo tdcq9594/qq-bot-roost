@@ -1,6 +1,6 @@
 {
   "name": "qq-bot-roost",
-  "version": "0.6.0",
+  "version": "0.6.5",
   "type": "module",
   "description": "栖 Roost：零依赖的 QQ 官方机器人框架，填 AppID/AppSecret 即连，插件可写任意语言",
   "license": "SEE LICENSE IN LICENSE",

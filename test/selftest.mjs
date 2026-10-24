@@ -951,6 +951,43 @@ async function testWebhookAndStream() {
   // 缺省值应该等价于 all，不是「全禁用」
   const fDefault = pluginFilterOf({});
   check('插件过滤: 缺省按 include 处理（需显式给 mode）', fDefault('any') === false);
+
+  /**
+   * 分群插件开关（分发时过滤）。
+   *
+   * 和上面的 pluginFilterOf 是两件事：那个决定**加载**哪些插件（进程级），
+   * 这个决定**某个会话里**能不能用。混起来就会出「A 群禁用把 B 群也搞没了」。
+   */
+  const { pluginAllowedIn } = await import('../src/bot.js');
+  const G1 = 'group-1';
+  const G2 = 'group-2';
+
+  const spec = {
+    mode: 'all',
+    list: [],
+    groups: {
+      [G1]: { mode: 'include', list: ['dice'] },
+      [G2]: { mode: 'exclude', list: ['kun'] },
+    },
+  };
+  check('分群: 没配的会话跟着全局', pluginAllowedIn(spec, 'other-group', 'kun') === true);
+  check('分群: include 只放行名单内', pluginAllowedIn(spec, G1, 'dice') === true);
+  check('分群: include 挡住名单外', pluginAllowedIn(spec, G1, 'kun') === false);
+  check('分群: exclude 挡住名单内', pluginAllowedIn(spec, G2, 'kun') === false);
+  check('分群: exclude 放行名单外', pluginAllowedIn(spec, G2, 'dice') === true);
+  check('分群: 两个群互不影响', pluginAllowedIn(spec, G1, 'echo') === false && pluginAllowedIn(spec, G2, 'echo') === true);
+
+  // 内核命令不能被锁在门外，否则群里连 /help 都没了
+  check('分群: 内核命令永远放行', pluginAllowedIn(spec, G1, '__core') === true);
+
+  // include + 空名单 = 这个群不响应任何插件（面板上「一个都不勾」）
+  check(
+    '分群: include+空名单等于本群全禁用',
+    pluginAllowedIn({ groups: { [G1]: { mode: 'include', list: [] } } }, G1, 'dice') === false,
+  );
+
+  // 没配 groups 字段（老配置）不能炸
+  check('分群: 老配置没有 groups 也正常', pluginAllowedIn({ mode: 'all' }, G1, 'dice') === true);
 }
 
 /**
@@ -1852,6 +1889,50 @@ async function testModulesLoad() {
 }
 
 await testModulesLoad();
+
+/* ---------------- 目录指纹（供应链校验用） ---------------- */
+
+async function testHashDir() {
+  const { hashDir } = await import('../src/hashdir.js');
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'roost-hash-'));
+  try {
+    const mk = async (name, files) => {
+      const d = path.join(tmp, name);
+      for (const [rel, body] of Object.entries(files)) {
+        const f = path.join(d, rel);
+        await fs.mkdir(path.dirname(f), { recursive: true });
+        await fs.writeFile(f, body);
+      }
+      return d;
+    };
+
+    const a = await mk('a', { 'index.js': 'export default 1\n', 'lib/x.js': 'x\n' });
+    const b = await mk('b', { 'index.js': 'export default 1\n', 'lib/x.js': 'x\n' });
+    check('目录指纹: 同样内容算出同样的值', (await hashDir(a)) === (await hashDir(b)));
+
+    const c = await mk('c', { 'index.js': 'export default 2\n', 'lib/x.js': 'x\n' });
+    check('目录指纹: 改一个字节就变', (await hashDir(a)) !== (await hashDir(c)));
+
+    // Windows 上 autocrlf 检出是 CRLF，GitHub tarball 是 LF，两边必须算出一个值
+    const d1 = await mk('d1', { 'index.js': 'a\nb\n' });
+    const d2 = await mk('d2', { 'index.js': 'a\r\nb\r\n' });
+    check('目录指纹: CRLF 与 LF 视为同一份', (await hashDir(d1)) === (await hashDir(d2)));
+
+    // 依赖目录不该影响指纹：每台机器装出来的 node_modules 都不一样
+    const e1 = await mk('e1', { 'index.js': 'y\n' });
+    const e2 = await mk('e2', { 'index.js': 'y\n', 'node_modules/ms/index.js': 'ms\n' });
+    check('目录指纹: 忽略 node_modules', (await hashDir(e1)) === (await hashDir(e2)));
+
+    // 文件名也要进哈希，否则换个文件名能绕过
+    const f1 = await mk('f1', { 'a.js': 'same\n' });
+    const f2 = await mk('f2', { 'b.js': 'same\n' });
+    check('目录指纹: 文件名参与计算', (await hashDir(f1)) !== (await hashDir(f2)));
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+await testHashDir();
 
 /* ---------- 汇总 ---------- */
 await cleanQuotaLedger();

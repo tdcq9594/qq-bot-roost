@@ -369,6 +369,8 @@ export class BotRuntime {
 
       const meta = EVENTS[eventName] ?? null;
       for (const l of registry.listeners.get(eventName) ?? []) {
+        // 事件里的群：有 group_openid 就按群开关过滤，没有（如私聊事件）就放行
+        if (d?.group_openid && !pluginAllowedIn(cfg.plugins, d.group_openid, l.pluginId)) continue;
         try {
           await l.handler(d, {
             event: eventName,
@@ -430,6 +432,17 @@ export class BotRuntime {
       this.#rememberPerson(msg);
 
       if (msg.isCommand && commandEntry) {
+        /**
+         * 分群插件开关：这个群没启用这个插件就**静默忽略**。
+         *
+         * 不回复「本群未启用」是有意的：机器人在多个群里，一条被禁用的
+         * 命令如果在群里回一句提示，等于把这个开关变成了噪音源。
+         * 从群成员视角看，这个功能就是不存在。
+         */
+        if (!pluginAllowedIn(cfg.plugins, msg.chatId, commandEntry.pluginId)) {
+          globalRuntime.bump('ignored');
+          return;
+        }
         const scope = scopeOf(msg);
         if (commandEntry.admin || commandEntry.globalAdmin) {
           const lv = await roles.effective(scope, msg.userId, { owners: cfg.owners });
@@ -482,6 +495,8 @@ export class BotRuntime {
       let handled = false;
       for (const evt of ['message', eventName]) {
         for (const l of registry.listeners.get(evt) ?? []) {
+          // 分群开关对被动触发同样生效，否则「禁用了还在回关键词」
+          if (!pluginAllowedIn(cfg.plugins, msg.chatId, l.pluginId)) continue;
           try {
             const ret = await l.handler(msg);
             if (ret === true || msg.replied) handled = true;
@@ -502,12 +517,32 @@ export class BotRuntime {
     const ml = this.cfg.messageLog ?? {};
     if (ml.enabled === false) return;
     if ((ml.muteKinds ?? []).includes(msg.kind)) return;
-    const content = msg.content.length > 120 ? msg.content.slice(0, 120) + '…' : msg.content;
+
+    /**
+     * 把正文里的 `<@openid>` 换回 `@昵称` 再打。
+     *
+     * 官方在 content 里把 @ 写成 `<@member_openid>`，而 `msg.content` 为了能
+     * 解析命令已经把 @ 全删掉了——直接打出来是「/禁言 1m」，看不出这条消息
+     * @ 了谁。排查群管、点名类问题时这点很关键。
+     *
+     * 原始正文在 `msg.raw.content`；昵称从 `msg.allMentions` 拿（官方在 mentions
+     * 里给了 username）。这里必须用 allMentions 而不是 mentions——后者把机器人
+     * 自己过滤掉了，而 `@机器人 /禁言 1m` 里被 @ 的机器人恰恰是最常出现的那个。
+     * 认不出昵称就退到 openid 前 8 位，总比一串尖括号好读。
+     */
+    let text = String(msg.raw?.content ?? msg.content ?? '');
+    for (const m of msg.allMentions ?? msg.mentions ?? []) {
+      if (!m.id) continue;
+      const shown = m.name || `${m.id.slice(0, 8)}…`;
+      text = text.split(`<@${m.id}>`).join(`@${shown}`);
+    }
+    if (text.length > 120) text = `${text.slice(0, 120)}…`;
+
     const who = msg.userName
       ? `${msg.userName}(${msg.userId.slice(0, 8)})`
       : msg.userId.slice(0, 8) || '-';
     const where = msg.groupId ? msg.groupId.slice(0, 10) : '-';
-    this.log.info(`收到 ${msg.kind} 会话:${where} 来自:${who} 内容:${content || '(空)'}`);
+    this.log.info(`收到 ${msg.kind} 会话:${where} 来自:${who} 内容:${text || '(空)'}`);
   }
 }
 
@@ -523,4 +558,39 @@ export function pluginFilterOf(spec) {
   if (mode === 'all') return () => true;
   if (mode === 'exclude') return (id) => !list.has(id);
   return (id) => list.has(id); // include
+}
+
+/**
+ * 这个会话里能不能用某个插件（分群开关）。
+ *
+ * 全局配置 `plugins.mode/list` 决定**加载**哪些插件——那是进程级的，
+ * 装了就是装了。但一个机器人常在好几个群里，有的群想要骰子、有的群嫌吵，
+ * 所以再加一层**按会话的覆盖**：
+ *
+ *   cfg.plugins.groups = {
+ *     "<群 openid>": { mode: "include", list: ["dice", "kun"] }
+ *   }
+ *
+ * 语义：配了的会话用自己那份，没配的跟着全局走。
+ * 面板上「恢复跟随全局」= 把这个键删掉。
+ *
+ * 键是 `chatId`，群聊就是群 openid，私聊是用户 openid——同一套逻辑。
+ *
+ * 内核命令（pluginId = `__core`）永远放行：否则群里连 /help 都没了，
+ * 用户还没法用面板，等于把自己锁在门外。
+ *
+ * @param {object} spec   cfg.plugins
+ * @param {string} chatId 会话 id
+ * @param {string} pluginId 插件 id
+ * @returns {boolean}
+ */
+export function pluginAllowedIn(spec, chatId, pluginId) {
+  if (!pluginId || pluginId === '__core') return true;
+  const own = spec?.groups?.[chatId];
+  if (!own) return true; // 这个会话没单独配，跟着全局
+  const mode = own.mode ?? 'include';
+  const list = new Set(own.list ?? []);
+  if (mode === 'all') return true;
+  if (mode === 'exclude') return !list.has(pluginId);
+  return list.has(pluginId); // include
 }

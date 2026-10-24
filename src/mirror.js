@@ -195,6 +195,12 @@ export function mirrorCandidates(url) {
  * 只有「网络层失败 / 5xx / 403 限流」才换源；4xx（除了 403）说明地址本身有问题，
  * 换源也没用，直接返回给调用方判断。
  *
+ * **3xx 必须算成功。** 这是踩过的坑：`checkUpdate` 用 `redirect: 'manual'`
+ * 去读 `releases/latest` 的 302 Location，而 `Response.ok` 只对 2xx 为真。
+ * 以前这里写的是 `res.ok || (4xx…)`，于是直连拿到 302 被判成「失败」，
+ * 转去试镜像、镜像又超时，最后报「连不上 GitHub」——
+ * 明明直连一秒就通了，用户看到的是永远检查不出来。
+ *
  * @param {string} url
  * @param {RequestInit} [init]
  * @returns {Promise<Response>}
@@ -207,7 +213,12 @@ export async function fetchViaMirror(url, init = {}) {
     const target = candidates[i];
     try {
       const res = await fetch(target, init);
-      if (res.ok || (res.status >= 400 && res.status < 500 && res.status !== 403)) {
+      // 3xx：调用方多半在等 Location，不能当失败
+      const accepted =
+        res.ok ||
+        (res.status >= 300 && res.status < 400) ||
+        (res.status >= 400 && res.status < 500 && res.status !== 403);
+      if (accepted) {
         // 成功了，记一下是哪个源（只有 auto 且不是直连时才记）
         if (res.ok && i > 0) rememberPick(target, url);
         return res;

@@ -312,8 +312,23 @@ export class Gateway {
         break;
       }
       case OP.DISPATCH: {
-        if (typeof p.s === 'number') this.lastSeq = p.s;
         const t = p.t;
+        /**
+         * seq 去重。
+         *
+         * resume 时服务端会把 lastSeq 之后（含边界）的事件重放一遍，
+         * 同一条命令于是执行两次——签到领两份奖励、掷骰子记两次。
+         * READY / RESUMED 是连接生命周期事件，必须放过，否则重连后卡在 starting。
+         */
+        const lifecycle = t === 'READY' || t === 'RESUMED';
+        if (typeof p.s === 'number') {
+          if (!lifecycle && this.lastSeq !== null && p.s <= this.lastSeq) {
+            log.debug(`跳过重复事件 t=${t} s=${p.s}（已处理到 ${this.lastSeq}）`);
+            runtime.bump('dedup');
+            break;
+          }
+          this.lastSeq = p.s;
+        }
         if (t === 'READY') {
           this.sessionId = p.d?.session_id ?? '';
           this.attempt = 0;
@@ -355,6 +370,12 @@ export class Gateway {
   }
 
   async #identify() {
+    /**
+     * 全新会话的 seq 从 1 重新开始。
+     * 不清掉 lastSeq 的话，上一段连接攒到 500，新会话前 500 个事件
+     * 会被上面的去重逻辑全当成「重复」丢掉。
+     */
+    this.lastSeq = null;
     this.#send({
       op: OP.IDENTIFY,
       d: {

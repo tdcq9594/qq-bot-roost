@@ -46,19 +46,34 @@ export async function runDoctor({ cfg, globalCfg, rt, mock = false }) {
   } else if (mock) {
     add('credential', 'ok', '凭证已填（mock 模式不校验）', `AppID ${cfg.appId}`);
   } else {
-    try {
-      const tokens = rt?.api?.tokens;
-      if (!tokens?.get) throw new Error('拿不到 API 实例');
-      await tokens.get();
-      add('credential', 'ok', '凭证有效', '已成功换取 access_token');
-    } catch (e) {
+    const tokens = rt?.api?.tokens;
+    if (!tokens?.get) {
+      /**
+       * 启动瞬间 rt 可能还没把 api 建好。以前这里直接 throw，
+       * 被下面的 catch 接住变成红色的「凭证换不到 access_token」——
+       * 用户什么都没做错，却先看到一条 error。
+       * 这种情况不是凭证的问题，如实说「还在初始化」就行。
+       */
       add(
         'credential',
-        'error',
-        '凭证换不到 access_token',
-        e.message,
-        '检查 AppSecret 有没有复制全、机器人是否被停用。',
+        'ok',
+        '凭证已填（暂未校验）',
+        '机器人还在初始化，拿不到 API 实例。',
+        '等几秒再点一次「检查」即可。',
       );
+    } else {
+      try {
+        await tokens.get();
+        add('credential', 'ok', '凭证有效', '已成功换取 access_token');
+      } catch (e) {
+        add(
+          'credential',
+          'error',
+          '凭证换不到 access_token',
+          e.message,
+          '检查 AppSecret 有没有复制全、机器人是否被停用。',
+        );
+      }
     }
   }
 
@@ -67,6 +82,32 @@ export async function runDoctor({ cfg, globalCfg, rt, mock = false }) {
     add('connection', 'ok', 'mock 模式', '没有连真实网关，收不到真消息是正常的。');
   } else if (rt?.state === 'online') {
     add('connection', 'ok', '已连上', `网关状态：${rt.state}`);
+  } else if (rt?.state === 'starting' || rt?.state === 'idle') {
+    /**
+     * 刚启动时网关还在握手。这时候报「还没连上」是误导：
+     * 用户什么都没做错，几秒后自己就好了，却先看到一条黄字。
+     *
+     * 20 秒是个宽松的界：正常启动 1~3 秒就连上，
+     * 超过 20 秒还停在 starting，那就不是「正在连」而是真卡住了。
+     */
+    const sec = Math.round(process.uptime());
+    if (sec < 20) {
+      add(
+        'connection',
+        'ok',
+        '正在连接',
+        `网关正在握手（${rt.state}），进程刚启动 ${sec} 秒。`,
+        '稍等几秒再点一次「检查」即可，不用改任何配置。',
+      );
+    } else {
+      add(
+        'connection',
+        'warn',
+        '还没连上',
+        `当前状态：${rt.state}，已经启动 ${sec} 秒仍未就绪。`,
+        '看「日志」页有没有 4014（没开通群聊能力）或 4902（同一 AppID 重复启动）。',
+      );
+    }
   } else {
     add(
       'connection',
@@ -155,13 +196,18 @@ export async function runDoctor({ cfg, globalCfg, rt, mock = false }) {
   if (people.length) {
     add('traffic', 'ok', '收到过消息', `最近一条来自 ${people[0].name || people[0].openid}`);
   } else if (!mock && rt?.state === 'online') {
-    add(
-      'traffic',
-      'warn',
-      '还没收到任何消息',
-      '已连上网关，但一条消息都没进来。',
-      '去群里 @ 一下机器人，或者看「事件」页里对应事件有没有计数。',
-    );
+    // 刚连上几十秒内没消息是正常的，别急着提醒
+    if (process.uptime() < 60) {
+      add('traffic', 'ok', '刚连上，还没有消息', '进程启动不到 60 秒，等群里 @ 一下就会有。');
+    } else {
+      add(
+        'traffic',
+        'warn',
+        '还没收到任何消息',
+        '已连上网关，但一条消息都没进来。',
+        '去群里 @ 一下机器人，或者看「事件」页里对应事件有没有计数。',
+      );
+    }
   }
 
   return out;

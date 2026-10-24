@@ -93,8 +93,14 @@ export class SessionManager {
     }
 
     this.stats.prompts += 1;
-    // 等待期间顺便续上免@窗口，否则用户回话还得再 @ 一次
-    this.markAddressed(chatId, Math.max(this.stickyMs, timeoutMs));
+    /**
+     * 等待期间续一下免@窗口，否则用户回话还得再 @ 一次。
+     *
+     * 但**不能**用 max(stickyMs, timeoutMs)：timeoutMs 可能是 5 分钟，
+     * 那等于让整个群在这 5 分钟里都被当成「在跟机器人说话」，
+     * 群里任何一个人开口都会被塞给插件。窗口上限就是配置的 stickyMs。
+     */
+    this.markAddressed(chatId, this.stickyMs);
 
     const self = this;
     return new Promise((resolve) => {

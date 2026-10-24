@@ -277,6 +277,28 @@ export class PluginManager {
       this.errors.set(id, e.message);
       this.errorStacks.set(id, e.stack || e.message);
       log.error(`插件 ${id} 加载失败: ${e.stack || e.message}`);
+      /**
+       * 失败时把已经建起来的东西收干净。
+       *
+       * 外部插件的子进程如果已经起来了但注册阶段失败，它不在 loaded 里，
+       * shutdown() 遍历不到它，它却还活着；内建插件可能已经注册了半套命令，
+       * 指向一个马上要被丢掉的 ctx。不清理就是「幽灵进程 + 半生效命令」。
+       */
+      try {
+        const partial = this.loaded.get(id);
+        if (partial?.host) await partial.host.stop().catch(() => {});
+        if (partial) {
+          this.loaded.delete(id);
+          this.registry.clearPlugin(id);
+          this.pipeline?.removeByPlugin?.(id);
+          this.pages?.clearPlugin(id);
+        } else {
+          // 还没进 loaded：至少把注册表里可能残留的入口摘掉
+          this.registry.clearPlugin(id);
+        }
+      } catch (cleanupErr) {
+        log.warn(`清理未加载成功的插件 ${id} 时出错：${cleanupErr.message}`);
+      }
       return false;
     }
   }

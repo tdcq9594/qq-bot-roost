@@ -23,7 +23,7 @@ import {
   currentVersion,
 } from '../updater.js';
 // 面板改插件启停时要同步机器人配置里的过滤器，两边不能各说各的
-import { pluginFilterOf } from '../bot.js';
+import { pluginFilterOf, pluginAllowedIn } from '../bot.js';
 import { suspendPluginWatch } from '../services/plugin-watch.js';
 import { runDoctor, summarize } from '../doctor.js';
 import {
@@ -675,6 +675,19 @@ export async function startWebServer({
           if (body.dedupWindowSec !== undefined) {
             cfg.dedupWindowSec = Math.max(0, Number(body.dedupWindowSec) || 0);
           }
+          /**
+           * 连接方式：面板一直在提交这个字段，但服务端从来没读过——
+           * 用户选「Webhook」保存后毫无变化、也没有任何提示，以为已经切了。
+           */
+          let connectionChanged = false;
+          if (body.connection && typeof body.connection === 'object') {
+            const mode = String(body.connection.mode || 'websocket').trim();
+            if (mode !== 'websocket' && mode !== 'webhook') {
+              return json(res, 400, { error: 'connection.mode 只能是 websocket 或 webhook' });
+            }
+            if ((cfg.connection?.mode ?? 'websocket') !== mode) connectionChanged = true;
+            cfg.connection = { ...(cfg.connection ?? {}), mode };
+          }
           if (body.messageLog && typeof body.messageLog === 'object') {
             cfg.messageLog = {
               enabled: body.messageLog.enabled !== false,
@@ -725,7 +738,21 @@ export async function startWebServer({
 
           // 填完 AppID / AppSecret 顺手把「默认机器人」换成官方昵称
           const name = await syncBotName(rt);
-          return json(res, 200, { ok: true, name: name ?? rt.name });
+          return json(res, 200, {
+            ok: true,
+            name: name ?? rt.name,
+            // 换了连接方式必须重启才生效，明确告诉前端，别让用户以为已经切了
+            ...(connectionChanged
+              ? {
+                  restartRequired: true,
+                  message:
+                    '连接方式已保存，需要重启程序才生效' +
+                    (cfg.connection?.mode === 'webhook' && !globalCfg.webhook?.enabled
+                      ? '；注意全局 webhook.enabled 还是 false，Webhook 服务没开'
+                      : ''),
+                }
+              : {}),
+          });
         }
 
         // 插件
@@ -1122,6 +1149,8 @@ export async function startWebServer({
               pluginsDir: DIRS.plugins,
               repo: idx.repo,
               branch: idx.branch || 'main',
+              // 索引给了仓库包校验值就带上，tarball 那边会比对
+              sha256: idx?.archive?.sha256 ?? idx?.sha256 ?? null,
               exists: (pid) => plugins.loaded.has(pid),
             });
 
@@ -1178,6 +1207,60 @@ export async function startWebServer({
           if (body.note !== undefined) patch.note = String(body.note);
           const g = await groups.upsert(id, patch);
           return json(res, 200, g);
+        }
+
+        /**
+         * 分群插件开关。
+         *
+         * 一个机器人常在好几个群里，有的群要骰子、有的群嫌吵。
+         * 这里只改**分发时**的判断（`pluginAllowedIn`），不碰加载——
+         * 插件在进程里是全局加载的，按群卸载等于每个群一套运行时，
+         * 内存和重载逻辑都会炸。
+         *
+         * `groups` 的键是 chatId：群聊是群 openid，私聊是用户 openid。
+         */
+        const gpm = pathname.match(/^\/api\/groups\/([^/]+)\/plugins$/);
+        if (gpm) {
+          const chatId = decodeURIComponent(gpm[1]);
+          const spec = rt.cfg.plugins ?? { mode: 'all', list: [] };
+          const own = spec.groups?.[chatId] ?? null;
+
+          if (req.method === 'GET') {
+            const all = [...rt.plugins.loaded.values()]
+              .map((p) => ({
+                id: p.meta?.id ?? '',
+                name: p.meta?.name ?? p.meta?.id ?? '',
+                version: p.meta?.version ?? '',
+              }))
+              .filter((p) => p.id && p.id !== '__core')
+              .sort((a, b) => a.id.localeCompare(b.id));
+            return json(res, 200, {
+              chatId,
+              global: { mode: spec.mode ?? 'all', list: spec.list ?? [] },
+              own,
+              plugins: all.map((p) => ({ ...p, enabled: pluginAllowedIn(spec, chatId, p.id) })),
+            });
+          }
+
+          if (req.method === 'PUT') {
+            const body = await readBody(req);
+            const groupsCfg = { ...(spec.groups ?? {}) };
+            if (body.reset) {
+              delete groupsCfg[chatId];
+            } else {
+              const mode = String(body.mode ?? 'include');
+              if (!['all', 'include', 'exclude'].includes(mode)) {
+                return json(res, 400, { error: 'mode 只能是 all / include / exclude' });
+              }
+              const list = Array.isArray(body.list)
+                ? [...new Set(body.list.map((x) => String(x).trim()).filter(Boolean))]
+                : [];
+              groupsCfg[chatId] = { mode, list };
+            }
+            rt.cfg.plugins = { ...spec, groups: groupsCfg };
+            await saveBotConfig(rt.id, rt.cfg);
+            return json(res, 200, { ok: true, own: groupsCfg[chatId] ?? null });
+          }
         }
 
         // 权限

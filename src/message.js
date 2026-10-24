@@ -17,7 +17,7 @@ export function isMessageEvent(name) {
  * @ 的格式：<@2409AB55F21D2ACFED13223632472280>
  * ID 可能是十进制，也可能是十六进制大写串，所以不能只匹配 \d+。
  */
-const MENTION_RE = /<@!?[0-9A-Za-z]+>/g;
+const MENTION_RE = /<@!?([0-9A-Za-z]+)>/g;
 const MENTION_TEST = /<@!?[0-9A-Za-z]+>/;
 
 /** 去掉正文里的 @xxx，保留其余内容 */
@@ -26,6 +26,29 @@ function stripMention(content) {
     .replace(MENTION_RE, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/**
+ * 从正文里捞 @ 的 openid。
+ *
+ * 官方文档说：消息里 @ 某成员时，content 里会写成 `<@member_openid>`。
+ * 也就是说**「@ 了谁」这个信息本来就在正文里**——只是 `stripMention()`
+ * 为了让命令解析能正常跑（`<@xxx> /ping` 开头不是 `/`，会被判成非命令），
+ * 把它连同其余 @ 一起删掉了。
+ *
+ * 所以这里在删除**之前**先捞一份出来，和 `d.mentions` 合并。
+ * 这样即使官方某个事件类型不返回 mentions 字段，插件照样能知道 @ 了谁。
+ *
+ * `<@all>` 是 @全体，不是具体的人，跳过。
+ */
+function mentionsFromContent(content) {
+  const out = [];
+  for (const m of String(content ?? '').matchAll(MENTION_RE)) {
+    const id = m[1];
+    if (!id || id.toLowerCase() === 'all') continue;
+    if (!out.includes(id)) out.push(id);
+  }
+  return out;
 }
 
 /**
@@ -88,15 +111,63 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
     mentioned,
     /**
      * 本条消息 @ 了谁（不含机器人自己）。
-     * 官方在 d.mentions 里给的是 [{ id / member_openid / user_openid, is_you, bot }]，
-     * 各事件字段名不统一，这里统一成 [{ id, isBot }]，做 PvP、点名类玩法直接用。
+     *
+     * 两个来源合并：
+     *   1. `d.mentions`——字段名各事件不统一，可能是 id / member_openid / user_openid，
+     *      而且带 `is_you` / `bot` 标记，能准确排除机器人自己
+     *   2. **正文里的 `<@openid>`**——官方文档明确说 @ 成员时 content 里就是这个格式。
+     *      以前 `stripMention()` 把它删了，于是「@ 了谁」这个信息白白丢掉，
+     *      插件只能让用户手填 openid。现在删之前先捞一份。
+     *
+     * 合并时 declared 优先：它知道谁是机器人，正文里认不出来。
      */
-    mentions: (Array.isArray(d?.mentions) ? d.mentions : [])
-      .map((m) => ({
-        id: m?.id ?? m?.member_openid ?? m?.user_openid ?? '',
-        isBot: Boolean(m?.is_you || m?.bot),
-      }))
-      .filter((m) => m.id && !m.isBot),
+    mentions: (() => {
+      const declared = (Array.isArray(d?.mentions) ? d.mentions : [])
+        .map((m) => ({
+          id: m?.id ?? m?.member_openid ?? m?.user_openid ?? '',
+          isBot: Boolean(m?.is_you || m?.bot),
+          // 昵称带上：禁言/踢人成功时能回「已禁言 张三」，比一串 openid 好认
+          name: String(m?.username ?? '').trim(),
+        }))
+        .filter((m) => m.id);
+      const fromText = mentionsFromContent(d?.content).map((id) => ({ id, isBot: false, name: '' }));
+
+      const seen = new Set();
+      const out = [];
+      for (const m of [...declared, ...fromText]) {
+        if (seen.has(m.id)) continue;
+        seen.add(m.id);
+        if (!m.isBot) out.push(m);
+      }
+      return out;
+    })(),
+
+    /**
+     * 同上，但**不排除机器人自己**。
+     *
+     * 插件用 `mentions`（点名单选人的时候不该把机器人算进去），
+     * 日志和排查用这个——`@机器人 /禁言 1m` 里被 @ 的机器人恰好是
+     * mentions 过滤掉的那个，日志里只剩 `<@2409AB55…>`，看不出 @ 了谁。
+     */
+    allMentions: (() => {
+      const declared = (Array.isArray(d?.mentions) ? d.mentions : [])
+        .map((m) => ({
+          id: m?.id ?? m?.member_openid ?? m?.user_openid ?? '',
+          isBot: Boolean(m?.is_you || m?.bot),
+          name: String(m?.username ?? '').trim(),
+        }))
+        .filter((m) => m.id);
+      const fromText = mentionsFromContent(d?.content).map((id) => ({ id, isBot: false, name: '' }));
+
+      const seen = new Set();
+      const out = [];
+      for (const m of [...declared, ...fromText]) {
+        if (seen.has(m.id)) continue;
+        seen.add(m.id);
+        out.push(m);
+      }
+      return out;
+    })(),
     sticky,
     addressed,
     isCommand,

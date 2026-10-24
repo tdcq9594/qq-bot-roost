@@ -22,6 +22,7 @@ import { openBrowser } from './browser.js';
 import { WebhookServer } from './webhook.js';
 import { startWebServer } from './web/server.js';
 import { Services } from './services/index.js';
+import { recoverInterruptedUpdate } from './updater.js';
 
 /* ------------------------------------------------------------------ */
 /* 开箱即用：先把运行环境检查清楚，别让人对着莫名其妙的报错猜              */
@@ -92,8 +93,34 @@ function registerCoreCommands(rt) {
   const P = cfg.commandPrefix || '/';
   const isOwner = (uid) => cfg.owners.includes(uid);
 
+  /**
+   * 内核命令分到哪一组。
+   *
+   * 以前所有命令都塞进「指令」一组，`/help` 主菜单二十多行。
+   * 现在分三组，主菜单只放「常用 + 分类入口」，具体命令进下级菜单。
+   */
+  const CORE_SECTION = {
+    ping: '基础',
+    whoami: '基础',
+    status: '基础',
+    stats: '基础',
+    admin: '管理',
+    plugins: '管理',
+    enable: '管理',
+    disable: '管理',
+    reload: '管理',
+    help: '其它',
+    menu: '其它',
+    claim: '其它',
+  };
+
   const core = (name, meta, handler) =>
-    registry.addCommand('__core', name, { plugin: '内核', ...meta }, handler);
+    registry.addCommand(
+      '__core',
+      name,
+      { plugin: '内核', section: CORE_SECTION[name] ?? '其它', ...meta },
+      handler,
+    );
 
   /** 把某插件的菜单渲染成文本 */
   /**
@@ -130,78 +157,120 @@ function registerCoreCommands(rt) {
   }
 
   /** 全局菜单 */
-  core('help', { desc: '全局菜单；加插件 id 看下级菜单' }, async (msg) => {
-    const arg = (msg.args[0] || '').toLowerCase();
+  core('help', { desc: '全局菜单；加插件 id 或分类名看下级菜单' }, async (msg) => {
+    const raw = (msg.args[0] || '').trim();
+    const arg = raw.toLowerCase();
+    const myLv = await roles.effective(scopeOf(msg), msg.userId, { owners: cfg.owners });
 
-    // /help <插件id> → 下级菜单
-    if (arg) {
-      const m = registry.menus.get(arg);
-      if (!m) {
-        const ids = [...registry.menus.keys()].filter((k) => k !== '__core');
-        return msg.reply(`没有「${arg}」这个插件。\n可用: ${ids.join('、') || '无'}`);
+    /** 内核命令按权限过滤后的分组（分组名 → 菜单项） */
+    const coreSections = () => {
+      const out = new Map();
+      for (const sec of registry.menus.get('__core')?.sections ?? []) {
+        const items = [];
+        for (const it of sec.items) {
+          if (it.admin && myLv > LEVEL.admin) continue;
+          if (it.globalAdmin && myLv > LEVEL.admin) continue;
+          items.push(menuItemOf(it));
+        }
+        if (items.length) out.set(sec.title, items);
       }
-      return msg.replyMenu(`${m.title}${m.version ? ' v' + m.version : ''}`, menuGroupsOf(m));
+      return out;
+    };
+
+    const pluginMenus = [...registry.menus.values()].filter((m) => m.id !== '__core');
+
+    /* ---------- 有参数：进下级 ---------- */
+    if (arg) {
+      // 1) 插件 id
+      const m = registry.menus.get(arg);
+      if (m) {
+        return msg.replyMenu(`${m.title}${m.version ? ' v' + m.version : ''}`, menuGroupsOf(m));
+      }
+
+      // 2) 「插件」→ 插件列表
+      if (raw === '插件' || arg === 'plugins') {
+        if (!pluginMenus.length) {
+          return msg.reply('还没有安装插件。把文件夹放进 plugins/ 就会出现在这里。');
+        }
+        return msg.replyMenu('插件', [
+          {
+            title: `共 ${pluginMenus.length} 个`,
+            items: pluginMenus.map((x) => {
+              const cnt = x.sections.reduce((n, s) => n + s.items.length, 0);
+              return {
+                text: x.id,
+                desc: `${x.title}${cnt ? ` · ${cnt} 条` : ' · 未提供菜单'}`,
+                cmd: `${P}help ${x.id}`,
+              };
+            }),
+          },
+        ]);
+      }
+
+      // 3) 内核分组名（基础 / 管理 / 其它）
+      const secs = coreSections();
+      const hit = secs.get(raw);
+      if (hit) return msg.replyMenu(`内核 · ${raw}`, [{ title: raw, items: hit }]);
+
+      const names = [...secs.keys(), '插件', ...pluginMenus.map((x) => x.id)];
+      return msg.reply(`没有「${raw}」这个分类或插件。\n可用：${names.join('、')}`);
     }
 
-    // /help → 全局
-    const myLv = await roles.effective(scopeOf(msg), msg.userId, { owners: cfg.owners });
-    const coreMenu = registry.menus.get('__core');
+    /* ---------- 没参数：简短主菜单 ---------- */
+    /**
+     * 主菜单只放两样东西：最常用的三条命令，和分类入口。
+     *
+     * 以前是把内核十几个命令全平铺出来，加上插件列表二十多行，
+     * 手机上要滑两屏，而且大部分命令一个普通群成员根本用不到。
+     */
+    const secs = coreSections();
     const groups = [];
 
-    // 内核指令：按权限过滤掉用不了的
-    const coreItems = [];
-    for (const sec of coreMenu?.sections ?? []) {
-      for (const it of sec.items) {
-        if (it.admin && myLv > LEVEL.admin) continue;
-        coreItems.push(menuItemOf(it));
+    const common = [];
+    for (const name of ['ping', 'whoami', 'help']) {
+      for (const items of secs.values()) {
+        const it = items.find((x) => x.text === `${P}${name}`);
+        if (it) {
+          common.push(it);
+          break;
+        }
       }
     }
-    if (coreItems.length) groups.push({ title: '内核', items: coreItems });
+    if (common.length) groups.push({ title: '常用', items: common });
 
-    // 插件列表：点一下直接把 /help <id> 填进输入框
-    const menus = [...registry.menus.values()].filter((m) => m.id !== '__core');
-    if (!menus.length) {
-      groups.push({
-        title: '插件',
-        items: [{ text: '还没有安装插件，把文件夹放进 plugins/ 即可', desc: '', cmd: null }],
-      });
-    } else {
-      groups.push({
-        title: `插件（${menus.length} 个）`,
-        items: menus.map((m) => {
-          const cnt = m.sections.reduce((n, s) => n + s.items.length, 0);
-          return {
-            text: m.id,
-            desc: `${m.title}${cnt ? ` · ${cnt} 条` : ' · 未提供菜单'}`,
-            cmd: `${P}help ${m.id}`,
-          };
-        }),
+    const entries = [];
+    for (const [title, items] of secs) {
+      if (title === '其它') continue;
+      // /admin 的 7 个子命令都显示成 `/admin`，去重后再列，否则一行全是重复
+      const uniq = [...new Set(items.map((x) => x.text))];
+      entries.push({
+        text: title,
+        desc: `${items.length} 条 · ${uniq.join(' ')}`,
+        cmd: `${P}help ${title}`,
       });
     }
+    if (pluginMenus.length) {
+      entries.push({
+        text: '插件',
+        desc: `${pluginMenus.length} 个：${pluginMenus.map((x) => x.id).join('、')}`,
+        cmd: `${P}help 插件`,
+      });
+    }
+    if (entries.length) groups.push({ title: '分类', items: entries });
 
-    const bot = runtime.botName || '全局菜单';
+    const bot = runtime.botName || '菜单';
     await msg.replyMenu(bot, groups);
   });
 
-  /** /menu 是 /help 的别名 */
-  core('menu', { desc: '等同 /help，查看菜单' }, async (msg, { args }) => {
-    const arg = (args[0] || '').toLowerCase();
-    if (arg) {
-      const m = registry.menus.get(arg);
-      if (!m) return msg.reply(`没有「${arg}」这个插件`);
-      return msg.replyMenu(`${m.title}${m.version ? ' v' + m.version : ''}`, menuGroupsOf(m));
-    }
-    const menus = [...registry.menus.values()].filter((m) => m.id !== '__core');
-    await msg.replyMenu('插件菜单', [
-      {
-        title: `共 ${menus.length} 个`,
-        items: menus.map((m) => ({
-          text: m.id,
-          desc: m.title,
-          cmd: `${P}help ${m.id}`,
-        })),
-      },
-    ]);
+  /**
+   * /menu 是 /help 的别名。
+   *
+   * 直接复用 help 的 handler，而不是再写一份——两份菜单各自演化，
+   * 迟早会出现「/help 里有、/menu 里没有」这种对不上的情况。
+   */
+  core('menu', { desc: '等同 /help，查看菜单' }, async (msg) => {
+    const h = registry.commands.get('help')?.handler;
+    if (h) await h(msg, { args: msg.args, raw: msg.content, bot: rt });
   });
 
   core('ping', { desc: '测试机器人是否在线' }, async (msg) => {
@@ -321,7 +390,9 @@ function registerCoreCommands(rt) {
   });
 
   // 把 /admin 的子命令也写进菜单，保证「所有指令都能在菜单里查到」
-  registry.addMenuSection('__core', { name: '内核' }, '权限子命令', [
+  // 归到「管理」组：单独开一组会让 /help 主菜单多出一个「权限子命令」入口，
+  // 而它本来就是管理的一部分
+  registry.addMenuSection('__core', { name: '内核' }, '管理', [
     { cmd: 'admin me', desc: '查看自己在各作用域的权限', admin: true },
     { cmd: 'admin list [作用域]', desc: '列出某作用域的管理员', admin: true },
     { cmd: 'admin set <openid> <等级> [作用域]', desc: '设置权限，只能授予数字更大的等级', admin: true },
@@ -819,6 +890,29 @@ async function main() {
 
   if (globalCfg.logs?.enabled !== false) {
     await attachLogFile('core', PATHS.coreLog, { maxBytes: globalCfg.logs?.maxBytes });
+  }
+
+  /**
+   * 上次更新如果被强杀（断电 / 任务管理器结束），src/ 可能是半新半旧。
+   * 必须在加载任何代码之前回滚——晚一步就是在混着两个版本的进程里跑。
+   */
+  const recovered = await recoverInterruptedUpdate().catch((e) => {
+    log.error(`检查未完成的更新时出错：${e.message}`);
+    return { recovered: false };
+  });
+  if (recovered.recovered) {
+    /**
+     * 回滚后**必须退出**，不能接着跑。
+     *
+     * 模块是在这行之前 import 的，此刻内存里装的还是「被打断的那一版」，
+     * 而磁盘已经回到旧版了。继续跑就是「用新代码读旧文件」，
+     * 报错会指向一堆莫名其妙的地方。让用户重启一次，两边就一致了。
+     */
+    log.warn(
+      `已回滚上次未完成的更新（${recovered.from} → ${recovered.to}），请重新启动一次`,
+    );
+    await flushLogs().catch(() => {});
+    process.exit(0);
   }
 
   // 单机器人 → 多机器人结构迁移（只跑一次）

@@ -1,0 +1,75 @@
+name: CI
+
+# 跑什么：语法检查 + 单元自检 + 端到端（e2e 自己起 mock 服务，不需要真 QQ）
+#
+# 注意 e2e 的设计前提：它必须能在**干净克隆**上全绿。
+# 所以：
+#   - 运行数据全在临时目录（ROOST_HOME），不碰仓库里的 config / data
+#   - 端口是运行时挑的空闲端口，不和别的进程抢
+#   - 示例插件在另一个仓库，本机没装时相关断言会 SKIP 而不是 FAIL
+# 这三条任一被破坏，CI 就会变成一片红——改测试前先想清楚。
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ['22.x', '24.x']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: 打印环境
+        run: |
+          node -v
+          npm -v
+
+      - name: 语法检查（全部 js/mjs）
+        shell: bash
+        run: |
+          fail=0
+          for f in $(find src web test scripts sdk -type f \( -name '*.js' -o -name '*.mjs' \) 2>/dev/null); do
+            node --check "$f" || { echo "语法错误: $f"; fail=1; }
+          done
+          exit $fail
+
+      - name: 单元自检
+        run: npm test
+
+      - name: 端到端
+        run: npm run test:e2e
+
+      - name: 真机驱动自测（假 OneBot 服务端，不需要 QQ）
+        run: node test/live-driver.mjs
+
+  # 换行符单独一个 job：Windows 开发者本地检出是 CRLF，
+  # 一不小心就提交进去，而这种问题在 Windows 上跑测试是看不出来的。
+  eol:
+    name: 换行符检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 代码文件不应含 CRLF
+        shell: bash
+        run: |
+          bad=$(git grep -Il $'\r' -- 'src/**' 'web/**' 'test/**' 'scripts/**' 'docs/**' '*.md' '*.json' || true)
+          if [ -n "$bad" ]; then
+            echo "以下文件含 CRLF，请转成 LF："
+            echo "$bad"
+            exit 1
+          fi
+          echo "OK：没有 CRLF"

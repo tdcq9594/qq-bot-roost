@@ -157,6 +157,12 @@ export class SubprocessPlugin {
     const readyTimer = setTimeout(() => {
       this.lastError = `插件 ${DEFAULTS.readyTimeout / 1000}s 内没有返回 ready`;
       this.log.error(this.lastError);
+      /**
+       * 超时只 reject 不 kill 的话，子进程会一直活着：
+       * 它不在 loader 的 loaded 里，shutdown() 停不到它，
+       * 但 #onExit 又会在 800ms 后自动把它拉起来——幽灵进程 + 幽灵重启。
+       */
+      this.#killChild('ready 超时');
       this.readyResolve?.reject(new Error(this.lastError));
     }, DEFAULTS.readyTimeout);
     readyTimer.unref?.();
@@ -190,9 +196,33 @@ export class SubprocessPlugin {
     } catch (e) {
       this.state = 'crashed';
       this.lastError = e.message;
+      // 没起来的进程必须收掉，否则它既不在 loaded 里、又会自己重启
+      this.#killChild('启动失败');
       throw e;
     } finally {
       clearTimeout(readyTimer);
+    }
+  }
+
+  /**
+   * 立刻杀掉子进程（不等优雅退出）。
+   *
+   * 用在「插件根本没起来」的失败路径上：ready 超时、注册失败、启动抛错。
+   * 这类进程不在 loader 的 loaded 里，shutdown() 停不到它，
+   * 但它自己的 #onExit 又会在 800ms 后重启自己——不杀就是幽灵进程。
+   */
+  #killChild(why = '') {
+    const child = this.child;
+    this.child = null;
+    if (!child) return;
+    this.stopping = true; // 别让 #onExit 再拉起来
+    if (why) this.log.warn(`结束子进程（${why}）`);
+    try {
+      child.kill('SIGKILL');
+    } catch {
+      try {
+        child.kill();
+      } catch {}
     }
   }
 

@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { createLogger } from '../logger.js';
 import { fetchAndExtract, branchTarballUrl } from '../tarball.js';
 import { DIRS } from '../paths.js';
+import { hashDir } from '../hashdir.js';
 // re-export 不会在本模块内绑定名字，内部还要用就必须单独 import
 import { compareVersion } from '../semver.js';
 import { fetchViaMirror } from '../mirror.js';
@@ -155,9 +156,10 @@ async function fetchIndexOnce(url) {
  * @param {string} [p.repo]   仓库，如 tdcq9594/qq-bot-roost-plugins
  * @param {string} [p.branch] 分支
  * @param {(id:string)=>boolean} [p.exists] 判断插件是否已存在
+ * @param {string|null} [p.sha256] 索引里给的仓库包校验值，有就验
  * @returns {Promise<{id:string, dir:string}>}
  */
-export async function installPlugin({ entry, pluginsDir, repo, branch = 'main', exists }) {
+export async function installPlugin({ entry, pluginsDir, repo, branch = 'main', exists, sha256 = null }) {
   const id = String(entry?.id ?? '').trim();
   if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(id)) throw new Error(`插件 id 不合法：${id}`);
   if (!entry?.path) throw new Error('索引里缺少 path 字段');
@@ -169,6 +171,8 @@ export async function installPlugin({ entry, pluginsDir, repo, branch = 'main', 
   try {
     log.info(`开始下载插件 ${id}（来自 ${repo}）`);
     await fetchAndExtract(branchTarballUrl(repo, branch), tmp, {
+      // 索引里带了校验值就验；没带会在 tarball 那边 warn 一句
+      expectSha256: sha256,
       timeoutMs: 120000,
       onRetry: (m) => log.warn(m),
       // 同上：下载源可在面板切换，国内直连 GitHub 经常断
@@ -189,6 +193,26 @@ export async function installPlugin({ entry, pluginsDir, repo, branch = 'main', 
     const files = await fs.readdir(resolved);
     if (!files.includes('index.js') && !files.includes('plugin.json')) {
       throw new Error('这个目录既没有 index.js 也没有 plugin.json，不是合法插件');
+    }
+
+    /**
+     * 内容校验：索引里存了插件目录的指纹，这里算一遍对上才装。
+     *
+     * 这是唯一能真正实现的校验方式——GitHub 的分支 tarball 是现场打包的，
+     * 没有稳定的压缩包哈希可对。校验放在**拷贝进 plugins/ 之前**，
+     * 对不上就什么都不留。
+     */
+    if (entry.sha256) {
+      const got = await hashDir(resolved);
+      if (got !== String(entry.sha256).toLowerCase()) {
+        throw new Error(
+          `插件内容校验失败（sha256 不匹配）\n  期望 ${entry.sha256}\n  实际 ${got}\n` +
+            '可能是仓库被改动、或索引与插件仓库不同步。已中止，未写入 plugins/。',
+        );
+      }
+      log.info(`插件 ${id} 内容 sha256 校验通过`);
+    } else {
+      log.warn(`索引里没有 ${id} 的 sha256，本次安装未做内容校验`);
     }
 
     const dest = path.join(pluginsDir, id);
@@ -264,6 +288,8 @@ export async function syncRepo({ repo, branch = 'main', indexUrl } = {}) {
   try {
     log.info(`正在下载插件仓库 ${repo}@${branch}…`);
     await fetchAndExtract(branchTarballUrl(repo, branch), tmp, {
+      // 索引里带了校验值就验；没带会在 tarball 那边 warn 一句
+      expectSha256: index?.archive?.sha256 ?? index?.sha256 ?? null,
       timeoutMs: 180000,
       onRetry: (m) => log.warn(m),
     });

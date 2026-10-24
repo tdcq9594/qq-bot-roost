@@ -131,16 +131,6 @@
 <main>
   <!-- 概览 -->
   <section id="tab-overview" class="panel active">
-    <!-- 体检：把「配好了为什么没反应」一次说清楚 -->
-    <div class="box" id="doctorBox">
-      <div class="box-hd">
-        <h3>体检</h3>
-        <span class="hint" id="doctorSummary">点一下，看看哪里还没通</span>
-        <button class="btn small" id="btnDoctor">检查</button>
-      </div>
-      <div id="doctorList" class="doctor-list" hidden></div>
-    </div>
-
     <div class="cards">
       <div class="card"><div class="k">连接状态</div><div class="v" id="c-conn">-</div></div>
       <div class="card"><div class="k">运行时长</div><div class="v" id="c-uptime">-</div></div>
@@ -218,6 +208,16 @@
       <div id="serviceList" class="service-list">
         <div class="empty">加载中…</div>
       </div>
+    </div>
+
+    <!-- 体检：放最后。它是排查工具，不是每次都要看的指标 -->
+    <div class="box" id="doctorBox">
+      <div class="box-hd">
+        <h3>体检</h3>
+        <span class="hint" id="doctorSummary">点一下，看看哪里还没通</span>
+        <button class="btn small" id="btnDoctor">检查</button>
+      </div>
+      <div id="doctorList" class="doctor-list" hidden></div>
     </div>
   </section>
 
@@ -669,6 +669,32 @@
     <div class="modal-actions">
       <button class="btn" id="modalCancel">取消</button>
       <button class="btn danger" id="modalOk">确定</button>
+    </div>
+  </div>
+</div>
+
+<!-- 分群插件开关：这个群能用哪些插件 -->
+<div class="modal-mask" id="gplugMask" hidden>
+  <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="gplugTitle">
+    <h3 class="modal-title" id="gplugTitle">分群插件开关</h3>
+    <div class="hint" id="gplugSub" style="margin-bottom:10px"></div>
+
+    <div class="gplug-mode">
+      <label class="gplug-radio">
+        <input type="radio" name="gplugMode" value="global" checked>
+        <span>跟随全局<em id="gplugGlobalHint"></em></span>
+      </label>
+      <label class="gplug-radio">
+        <input type="radio" name="gplugMode" value="custom">
+        <span>本群单独配置</span>
+      </label>
+    </div>
+
+    <div class="gplug-list" id="gplugList" hidden></div>
+
+    <div class="modal-actions">
+      <button class="btn" id="gplugCancel">取消</button>
+      <button class="btn primary" id="gplugSave">保存</button>
     </div>
   </div>
 </div>

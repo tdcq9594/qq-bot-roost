@@ -26,6 +26,33 @@ const PASSIVE_SAFE_MS = PASSIVE_WINDOW_MS - 15_000;
 /** 主动消息进入审核的返回码，属于正常结果 */
 const CODE_AUDIT = 304023;
 
+/**
+ * 把出站 payload 压成一行人能看懂的文字，用于日志。
+ *
+ * 排查时最常遇到的问题是「机器人到底回没回、回了什么」——发送侧以前
+ * 一行日志都没有，只能去翻 QQ 客户端对着猜。现在打出来。
+ *
+ * @param {object} payload api.js 驼峰字段的 payload
+ * @returns {string}
+ */
+function briefOf(payload) {
+  const b = payload ?? {};
+  const parts = [];
+  if (typeof b.content === 'string' && b.content.trim()) parts.push(b.content.trim());
+  if (b.markdown?.content) {
+    parts.push(`[markdown] ${String(b.markdown.content).replace(/\s+/g, ' ').trim()}`);
+  }
+  if (b.ark) parts.push('[ark 卡片]');
+  if (b.media) parts.push(`[媒体 ${b.media.fileType ?? '?'}]`);
+  if (b.keyboard) parts.push('[按钮键盘]');
+  if (b.image) parts.push('[图片]');
+  if (b.file_uuid) parts.push('[文件]');
+
+  let text = parts.join(' | ');
+  if (text.length > 120) text = `${text.slice(0, 120)}…`;
+  return text;
+}
+
 /** 带错误码的发送异常，方便调用方分辨该提示用户什么 */
 export class SendError extends Error {
   constructor(message, code, detail) {
@@ -229,7 +256,7 @@ export class Outbound {
       }
 
       try {
-        const r = await this.#post(kind, target, body);
+        const r = await this.#post(kind, target, body, active ? '主动' : '被动');
         if (active) this.stats.active += 1;
         else this.stats.passive += 1;
         if (r?.pending) this.stats.audit += 1;
@@ -255,7 +282,7 @@ export class Outbound {
         delete fallback.msgId;
         delete fallback.msgSeq;
         log.warn(`被动回复被拒（${e.message}），改发主动消息 · ${chatKey}`);
-        const r = await this.#post(kind, target, fallback);
+        const r = await this.#post(kind, target, fallback, '降级主动');
         this.stats.degraded += 1;
         this.stats.active += 1;
         if (r?.pending) this.stats.audit += 1;
@@ -266,15 +293,22 @@ export class Outbound {
 
   /* ---------------- 内部 ---------------- */
 
-  async #post(kind, target, body) {
+  async #post(kind, target, body, how = '') {
     const r = kind === 'group'
       ? await this.api.sendGroup(target, body)
       : await this.api.sendC2C(target, body);
 
+    // 发出去了什么。放在这里而不是调用处：三个调用点（正常 / 降级 / 审核中）
+    // 都要打，写在一处不会漏
+    const where = String(target ?? '').slice(0, 10) || '-';
+    const what = briefOf(body) || '(空)';
+
     // 主动消息需要审核，接口会用业务码返回「审核中」，这不是失败
     if (r && typeof r === 'object' && Number(r.code) === CODE_AUDIT) {
+      log.info(`发出 ${kind} →${where}（${how}·审核中）：${what}`);
       return { pending: true, id: r.id ?? '', raw: r };
     }
+    log.info(`发出 ${kind} →${where}${how ? `（${how}）` : ''}：${what}`);
     return { id: r?.id ?? '', raw: r };
   }
 
