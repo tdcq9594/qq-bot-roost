@@ -466,19 +466,41 @@ async function testStatsAndPages() {
 
   if (pages.data?.length) {
     const key = pages.data[0].key;
-    const html = await fetch(`${BASE}/api/pages/${encodeURIComponent(key)}/html`);
+    const html = await fetch(`${BASE}/api/pages/${encodeURIComponent(key)}/html?theme=dark`);
     const text = await html.text();
     ok('页面: 能取到 HTML', html.status === 200 && text.includes('<'), `status=${html.status}`);
     ok(
       '页面: 返回的是 HTML 而不是 JSON',
       (html.headers.get('content-type') || '').includes('text/html'),
     );
+    // 注入的主题变量要真的进去了，插件页面才能跟着面板切深浅色
+    ok('页面: 注入了主题变量', text.includes('--panel:') && text.includes('color-scheme:dark'));
+    // doctype 被挤到第二位会让浏览器进怪异模式
+    if (/<!doctype/i.test(text)) {
+      ok('页面: doctype 仍在最前面', /^<!doctype/i.test(text.trimStart()), text.slice(0, 40));
+    }
   } else {
     skip('页面: 当前没有插件注册页面，跳过内容断言');
   }
 
   const miss = await fetch(`${BASE}/api/pages/nope%3Ax/html`);
   ok('页面: 不存在的页面返回 404', miss.status === 404, `status=${miss.status}`);
+
+  // 权限页候选人：openid 是长串，不该让人手输
+  await api('/api/mock/dispatch', {
+    method: 'POST',
+    body: JSON.stringify({ content: '我在群里说话', groupId: 'g-people', userId: 'u-people' }),
+  });
+  await new Promise((r) => setTimeout(r, 300));
+
+  const ppl = await api('/api/roles/candidates');
+  ok('权限候选人: 接口可用', ppl.status === 200 && Array.isArray(ppl.data), ppl.data?.error || '');
+  const me = (ppl.data || []).find((p) => p.openid === 'u-people');
+  ok('权限候选人: 包含刚发过消息的人', !!me, `共 ${(ppl.data || []).length} 人`);
+  if (me) {
+    ok('权限候选人: 带昵称', me.name === '测试用户', me.name);
+    ok('权限候选人: 带作用域和会话', me.scope === 'group' && me.chatId === 'g-people', `${me.scope}/${me.chatId}`);
+  }
 }
 
 /* ---------------- 下载源 ---------------- */
@@ -520,6 +542,65 @@ async function testMirror() {
   ok('下载源: 能还原原设置', back.data?.current?.id === (orig.id || 'auto'));
 }
 
+/* ---------------- 体检 / 导出 / 手动登记群 ---------------- */
+
+async function testDoctorAndExport() {
+  const d = await api('/api/doctor');
+  ok('体检: 接口可用', d.status === 200 && Array.isArray(d.data?.items), d.data?.error || '');
+  ok('体检: 有摘要', typeof d.data?.summary === 'string', d.data?.summary);
+  ok('体检: 每项都有标题', (d.data?.items ?? []).every((x) => x.title && x.detail));
+
+  const csv = await fetch(`${BASE}/api/stats/export?days=7`);
+  ok('导出: 返回 CSV', csv.status === 200, `status=${csv.status}`);
+  ok(
+    '导出: content-type 是 csv',
+    (csv.headers.get('content-type') || '').includes('text/csv'),
+    csv.headers.get('content-type'),
+  );
+  const buf = Buffer.from(await csv.arrayBuffer());
+  // Excel 打开中文 CSV 必须有 BOM，否则乱码。
+  // 注意要看字节：fetch 的 .text() 会按规范把 BOM 吃掉，看字符是查不出来的
+  ok('导出: 带 UTF-8 BOM', buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf, `前 3 字节 ${buf.subarray(0, 3).toString('hex')}`);
+  const text = buf.toString('utf8');
+  ok('导出: 有表头', text.includes('日期,消息数'), text.slice(1, 30).replace(/\n/g, ' '));
+
+  const g = await api('/api/groups', {
+    method: 'POST',
+    body: JSON.stringify({ groupOpenid: 'g-manual', note: 'e2e' }),
+  });
+  ok('群: 可手动登记', g.status === 200, g.data?.error || '');
+  const list = await api('/api/groups');
+  ok(
+    '群: 登记后出现在列表里',
+    (list.data || []).some((x) => x.groupOpenid === 'g-manual'),
+  );
+
+  const bad = await api('/api/groups', { method: 'POST', body: JSON.stringify({}) });
+  ok('群: 空 openid 被拒', bad.status === 400, `status=${bad.status}`);
+
+  // 收拾干净：这是用户真实的数据文件，别留测试垃圾
+  await api('/api/groups/g-manual', { method: 'DELETE' });
+  const after = await api('/api/groups');
+  ok('群: 测试数据已清理', !(after.data || []).some((x) => x.groupOpenid === 'g-manual'));
+}
+
+/* ---------------- 导航结构 ---------------- */
+
+async function testNav() {
+  const res = await fetch(BASE);
+  const html = await res.text();
+
+  // 页签收进三个下拉里，一级只留四个
+  ok('导航: 有分组下拉', html.includes('data-group="data"') && html.includes('data-group="plugins"'));
+  ok('导航: 插件页面有独立容器', html.includes('id="pluginPageItems"'));
+  ok('导航: 分组按钮带 aria-expanded', /aria-haspopup="true"/.test(html));
+
+  // 原来的 8 个页签都还在，只是挪进了菜单里
+  const tabs = ['overview', 'stats', 'config', 'plugins', 'events', 'groups', 'roles', 'logs'];
+  const missing = tabs.filter((t) => !html.includes(`data-tab="${t}"`));
+  ok('导航: 8 个页面一个没少', missing.length === 0, missing.join(','));
+}
+
 /* ---------------- 主流程 ---------------- */
 
 async function main() {
@@ -539,6 +620,8 @@ async function main() {
   await testEventsAndLogs();
   await testWebhook();
   await testMirror();
+  await testDoctorAndExport();
+  await testNav();
   await testStatsAndPages();
   await testSendAndCred();
 

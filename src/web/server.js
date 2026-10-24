@@ -24,6 +24,7 @@ import {
 // 面板改插件启停时要同步机器人配置里的过滤器，两边不能各说各的
 import { pluginFilterOf } from '../bot.js';
 import { suspendPluginWatch } from '../services/plugin-watch.js';
+import { runDoctor, summarize } from '../doctor.js';
 import {
   PRESETS,
   PROBE_URL,
@@ -114,6 +115,43 @@ function listenWithFallback(server, host, startPort, { tries = 20, onBusy } = {}
     tryOnce();
   });
 }
+
+/**
+ * 插件页面的基础样式与主题变量。
+ *
+ * 目的是让插件作者**不用管深浅色**：直接用 `var(--panel)` `var(--text)` 就行。
+ * 变量名和 web/style.css **必须保持一致**——插件作者在面板里看到的是
+ * `var(--text)`，在插件页面里也应该是同一个名字，不能自创一套。
+ * 面板切主题时 iframe 会带着 theme 参数重新加载，页面自动跟着变。
+ */
+const BASE_CSS = `
+body{margin:0;padding:16px;background:var(--panel);color:var(--text);
+font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+a{color:var(--primary)}
+h1,h2,h3{color:var(--text);font-weight:600}
+table{border-collapse:collapse;width:100%}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--border)}
+th{font-size:12px;font-weight:600;color:var(--muted)}
+code{background:var(--panel-2);padding:1px 5px;border-radius:4px}
+`;
+
+/** 两套主题的变量值，和 web/style.css 的 :root 一一对应 */
+const PAGE_THEME = {
+  light: `<style>
+:root{color-scheme:light;--bg:#f8f5f1;--panel:#fffdfb;--panel-2:#f6f2ed;--panel-3:#efeae4;
+--border:#e2dbd4;--border-strong:#c5bcb3;--text:#251d19;--text-2:#534b45;--muted:#787069;
+--faint:#a39d97;--primary:#af5504;--primary-hover:#993800;--ok:#137d41;--warn:#a56300;
+--err:#b3382c;--radius:9px;--radius-sm:6px}
+${BASE_CSS}
+</style>`,
+  dark: `<style>
+:root{color-scheme:dark;--bg:#19120e;--panel:#211a16;--panel-2:#2a221d;--panel-3:#342c26;
+--border:#372e29;--border-strong:#50453f;--text:#ede7df;--text-2:#c1b9b1;--muted:#928b83;
+--faint:#635c56;--primary:#eca342;--primary-hover:#fdbd63;--ok:#63d18f;--warn:#f5b75b;
+--err:#f97676;--radius:9px;--radius-sm:6px}
+${BASE_CSS}
+</style>`,
+};
 
 /**
  * 可视化面板。
@@ -591,6 +629,37 @@ export async function startWebServer({
           }
         }
 
+        /**
+         * 导出 CSV。
+         *
+         * 导的是**汇总**（按天 / 按会话 / 按命令），不是逐条明细——
+         * 明细带 openid 和时间戳，做表格分析用不上那么细，还会把隐私带出去。
+         * 开头加 BOM，Excel 打开中文才不乱码。
+         */
+        if (pathname === '/api/stats/export' && req.method === 'GET') {
+          const days = Math.max(1, Math.min(365, Number(url.searchParams.get('days')) || 30));
+          const data = rt.stats?.exportSummary?.(days) ?? { daily: [], chats: [], commands: [] };
+          const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+          const lines = [
+            `# 栖 Roost 统计导出（最近 ${days} 天）`,
+            '',
+            '日期,消息数,命令数,活跃会话',
+            ...data.daily.map((r) => [r.day, r.messages, r.commands, r.chats].map(q).join(',')),
+            '',
+            '场景,会话,消息数,命令数',
+            ...data.chats.map((r) => [r.scope, r.chatId, r.messages, r.commands].map(q).join(',')),
+            '',
+            '命令,次数',
+            ...data.commands.map((r) => [r.name, r.count].map(q).join(',')),
+          ];
+          res.writeHead(200, {
+            'Content-Type': 'text/csv; charset=utf-8',
+            'Content-Disposition': `attachment; filename="roost-stats-${rt.id}-${days}d.csv"`,
+            'Cache-Control': 'no-store',
+          });
+          return res.end(`\ufeff${lines.join('\n')}\n`);
+        }
+
         // 最近消息（不含正文，只有时间/会话/是否命令）
         if (pathname === '/api/stats/recent' && req.method === 'GET') {
           const limit = Number(url.searchParams.get('limit')) || 50;
@@ -629,6 +698,17 @@ export async function startWebServer({
         // 插件自定义运行数据：一次拿全部，面板轮询这个接口
         if (pathname === '/api/plugins/dashboard' && req.method === 'GET') {
           return json(res, 200, await plugins.dashboards());
+        }
+
+        /* ---------------- 体检 ---------------- */
+
+        /**
+         * 「我配好了为什么没反应」——一次把可能的卡点都查一遍。
+         * 只读，不改任何东西。
+         */
+        if (pathname === '/api/doctor' && req.method === 'GET') {
+          const items = await runDoctor({ cfg, globalCfg, rt, mock });
+          return json(res, 200, { items, summary: summarize(items) });
         }
 
         /* ---------------- 下载源 ---------------- */
@@ -692,7 +772,18 @@ export async function startWebServer({
             // 插件页面可能随插件更新而变，不缓存
             'Cache-Control': 'no-store',
           });
-          return res.end(p.html);
+          // 带上主题变量，插件页面不用自己适配深浅色
+          const theme = url.searchParams.get('theme') === 'dark' ? 'dark' : 'light';
+          /**
+           * doctype 必须是文档里的第一个东西。
+           * 直接拼在最前面会让浏览器进怪异模式（盒模型、行高全变），
+           * 所以有 doctype 就插在它后面。
+           */
+          const style = PAGE_THEME[theme];
+          const html = /^<!doctype/i.test(p.html.trimStart())
+            ? p.html.replace(/^(\s*<!doctype[^>]*>)/i, `$1${style}`)
+            : style + p.html;
+          return res.end(html);
         }
 
         // 有哪些插件能更新。结果缓存 5 分钟，?force=1 强制重新查
@@ -928,6 +1019,23 @@ export async function startWebServer({
         if (pathname === '/api/groups' && req.method === 'GET') {
           return json(res, 200, await groups.list());
         }
+
+        /**
+         * 手动登记一个群。
+         *
+         * 官方没有「列出机器人所在的群」的接口，群档案只能靠事件被动发现——
+         * 没被 @ 过的群根本不会出现。所以给一个手动入口，配合权限页一起用。
+         */
+        if (pathname === '/api/groups' && req.method === 'POST') {
+          const body = await readBody(req);
+          const gid = String(body?.groupOpenid ?? '').trim();
+          if (!gid) return json(res, 400, { error: 'groupOpenid 不能为空' });
+          const saved = await groups.upsert(gid, {
+            note: String(body?.note ?? '').trim(),
+            manual: true,
+          });
+          return json(res, 200, { ok: true, group: saved });
+        }
         const gm = pathname.match(/^\/api\/groups\/([^/]+)$/);
         if (gm && (req.method === 'PUT' || req.method === 'DELETE')) {
           const id = decodeURIComponent(gm[1]);
@@ -944,6 +1052,16 @@ export async function startWebServer({
         }
 
         // 权限
+        /**
+         * 最近说过话的人，给「权限」页做候选人。
+         *
+         * openid 是每个机器人独立的长串，用户不可能手输。让他从「刚在群里
+         * 说过话的人」里点一下，比去日志里翻要靠谱得多。
+         */
+        if (pathname === '/api/roles/candidates' && req.method === 'GET') {
+          return json(res, 200, rt.listRecentPeople?.() ?? []);
+        }
+
         if (pathname === '/api/roles' && req.method === 'GET') {
           const all = await roles.all();
           const rows = [];

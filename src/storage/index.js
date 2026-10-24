@@ -273,6 +273,59 @@ export class StatsStore {
       }));
   }
 
+  /**
+   * 导出用：按天 + 按会话 + 按命令三张汇总表。
+   *
+   * 导出的是**汇总**，不是逐条明细——明细里有 openid 和时间戳，
+   * 拿去做表格分析用不上那么细，还会把隐私带出去。
+   *
+   * @param {number} days 最近多少天
+   */
+  exportSummary(days = 30) {
+    if (!this.available) return { daily: [], chats: [], commands: [] };
+    this.flush();
+
+    const from = dayKey(Date.now() - Math.max(1, days) * 86400_000);
+
+    const daily = this.db
+      .prepare(
+        `SELECT day, SUM(messages) AS messages, SUM(commands) AS commands,
+                COUNT(DISTINCT chat_id) AS chats
+           FROM daily WHERE day >= ? GROUP BY day ORDER BY day`,
+      )
+      .all(from)
+      .map((r) => ({
+        day: r.day,
+        messages: Number(r.messages) || 0,
+        commands: Number(r.commands) || 0,
+        chats: Number(r.chats) || 0,
+      }));
+
+    const chats = this.db
+      .prepare(
+        `SELECT scope, chat_id, SUM(messages) AS messages, SUM(commands) AS commands
+           FROM daily WHERE day >= ? GROUP BY scope, chat_id
+          ORDER BY messages DESC`,
+      )
+      .all(from)
+      .map((r) => ({
+        scope: r.scope,
+        chatId: r.chat_id,
+        messages: Number(r.messages) || 0,
+        commands: Number(r.commands) || 0,
+      }));
+
+    const commands = this.db
+      .prepare(
+        `SELECT name, SUM(count) AS count FROM commands
+          WHERE day >= ? GROUP BY name ORDER BY count DESC`,
+      )
+      .all(from)
+      .map((r) => ({ name: r.name, count: Number(r.count) || 0 }));
+
+    return { daily, chats, commands };
+  }
+
   /** 按保留天数清掉过期明细。members 不清——人走了档案还在，有用 */
   prune(now = Date.now()) {
     if (!this.available) return { messages: 0, daily: 0, commands: 0 };

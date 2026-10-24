@@ -1,0 +1,15 @@
+{
+  "//": "只为编辑器补全，不参与运行。checkJs 关着：写插件时不会满屏红波浪线，但 ctx 的方法名、参数、返回值都有提示。",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "checkJs": false,
+    "allowJs": true,
+    "noEmit": true,
+    "strict": false,
+    "lib": ["ES2022"]
+  },
+  "include": ["types/**/*.d.ts", "plugins/**/*.js"],
+  "exclude": ["node_modules", "plugins/**/node_modules", "plugins/**/.venv"]
+}

@@ -484,7 +484,13 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 
 @media (max-width: 860px) {
   .topbar { flex-wrap: wrap; height: auto; padding: 10px 14px; gap: 10px; }
-  .tabs { order: 3; width: 100%; overflow-x: auto; }
+  /**
+   * 导航独占一行。
+   * flex-basis 必须是 100%：原来只有 flex:1 + width:100%，basis 是 0，
+   * 浏览器认为它「放得下」，于是挤在 brand 后面，里面的 tab 被压成一列。
+   * 另外 overflow-x 会把下拉菜单裁掉，这里改成换行。
+   */
+  .tabs { order: 3; flex: 1 0 100%; width: 100%; overflow: visible; flex-wrap: wrap; }
   .row > .box:not(.grow) { width: 100%; }
   .grid2 { grid-template-columns: 1fr; }
   main { padding: 14px; }
@@ -1086,3 +1092,159 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 }
 
 .mirror-bar .hint { margin: 0; }
+
+/* 插件加载失败的堆栈：默认折叠，别把卡片撑爆 */
+.err-stack { margin-top: 6px; }
+.err-stack summary {
+  cursor: pointer; font-size: 12px; opacity: .75;
+  user-select: none;
+}
+.err-stack summary:hover { opacity: 1; }
+.err-stack pre {
+  margin: 6px 0 0; padding: 8px 10px; max-height: 260px; overflow: auto;
+  font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-all;
+  background: var(--panel-3); border-radius: var(--radius-sm);
+}
+
+/* ---------------- 权限页：最近说过话的人 ---------------- */
+
+.people-list {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  padding: 4px 0;
+}
+
+.person {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  padding: 8px 12px; min-width: 150px;
+  text-align: left; cursor: pointer;
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  transition: border-color .15s, transform .1s;
+}
+.person:hover { border-color: var(--primary); }
+.person:active { transform: scale(.98); }
+.person b { font-size: 13px; font-weight: 600; }
+.person .mono { font-size: 11px; opacity: .55; }
+.person i { font-size: 11px; font-style: normal; opacity: .5; }
+
+/* ---------------- 体检 ---------------- */
+
+.doctor-list { display: flex; flex-direction: column; gap: 8px; }
+
+.doctor-item {
+  display: flex; gap: 10px; align-items: flex-start;
+  padding: 9px 11px;
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-left-width: 3px; border-radius: var(--radius-sm);
+}
+.doctor-item.ok { border-left-color: var(--ok); }
+.doctor-item.warn { border-left-color: var(--warn); }
+.doctor-item.error { border-left-color: var(--err); }
+
+.doctor-icon {
+  flex: none; width: 18px; text-align: center; font-weight: 700; opacity: .8;
+}
+.doctor-item.ok .doctor-icon { color: var(--ok); }
+.doctor-item.warn .doctor-icon { color: var(--warn); }
+.doctor-item.error .doctor-icon { color: var(--err); }
+
+.doctor-body { min-width: 0; }
+.doctor-body b { font-size: 13px; }
+.doctor-detail { font-size: 12.5px; opacity: .72; margin-top: 2px; word-break: break-word; }
+.doctor-fix { font-size: 12.5px; margin-top: 4px; color: var(--primary); }
+.err-text { color: var(--err); }
+
+/* ---------------- 市场筛选 ---------------- */
+
+.market-filter {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.market-filter .mini-input { flex: 1 1 220px; width: auto; }
+
+/* ---------------- 窄屏 ---------------- */
+
+@media (max-width: 720px) {
+  /* 下拉菜单会被 overflow 裁掉，所以窄屏改成换行而不是横向滚动 */
+  .tabs {
+    flex-wrap: wrap;
+    overflow: visible;
+    row-gap: 2px;
+  }
+  .tab { white-space: nowrap; padding: 8px 11px; }
+  .tab::after { bottom: 2px; left: 11px; right: 11px; }
+  .tab-menu { min-width: 160px; }
+
+  .cards { grid-template-columns: repeat(2, 1fr); }
+  .form-inline { flex-wrap: wrap; }
+  .form-inline input, .form-inline select { min-width: 0; flex: 1 1 100%; }
+  .mirror-bar .mini-input { width: 100%; }
+  .plugin-page { height: calc(100vh - 210px); }
+  .table-wrap { overflow-x: auto; }
+  table { min-width: 520px; }
+  .people-list { gap: 6px; }
+  .person { min-width: 120px; }
+}
+
+/* 必填标记 */
+.pp-field .req { color: var(--err); font-style: normal; margin-left: 3px; }
+
+/* [hidden] 会被 display:flex 顶掉，得显式声明 */
+.doctor-list[hidden] { display: none; }
+
+/* ---------------- 分组下拉菜单 ---------------- */
+
+.tab-group { position: relative; display: flex; align-items: stretch; }
+
+.tab-parent { gap: 3px; }
+.tab-parent .chev {
+  width: 13px; height: 13px; opacity: .5;
+  transition: transform .18s var(--ease), opacity .18s;
+}
+.tab-group.open .tab-parent .chev,
+.tab-group.has-active .tab-parent .chev { opacity: .9; }
+.tab-group.open .tab-parent .chev { transform: rotate(180deg); }
+
+/* 父级有子项被选中时，下划线也要亮——和普通 tab 一致 */
+.tab-parent.active::after { transform: scaleX(1); }
+
+.tab-menu {
+  position: absolute; top: calc(100% + 1px); left: 0; z-index: 60;
+  min-width: 176px; padding: 5px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  animation: menu-in .14s var(--ease);
+}
+.tab-menu[hidden] { display: none; }
+
+@keyframes menu-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+
+.tab-item {
+  display: block; width: 100%; text-align: left;
+  padding: 7px 10px; border: 0; border-radius: var(--radius-sm);
+  background: transparent; cursor: pointer;
+  font: inherit; font-size: 13px; color: var(--text-2);
+  transition: background .12s, color .12s;
+}
+.tab-item:hover { background: var(--panel-2); color: var(--text); }
+.tab-item.active { background: var(--primary-soft); color: var(--primary); font-weight: 600; }
+
+.tab-menu-sep { height: 1px; margin: 5px 4px; background: var(--border); }
+.tab-menu-sep[hidden] { display: none; }
+
+.tab-menu-label {
+  padding: 3px 10px 2px;
+  font-size: 11px; letter-spacing: .04em; color: var(--muted);
+}
+.tab-menu-label[hidden] { display: none; }
+
+/* 插件页面可能很多，给个上限别把屏幕撑爆 */
+.tab-menu-sub { max-height: min(52vh, 420px); overflow-y: auto; }
+
+/* 最后一个分组的下拉靠右对齐，免得在窄屏顶到屏幕外 */
+.tab-group:last-of-type .tab-menu { left: auto; right: 0; }

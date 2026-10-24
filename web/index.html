@@ -52,13 +52,53 @@
 
   <nav class="tabs">
     <button class="tab active" data-tab="overview">概览</button>
-    <button class="tab" data-tab="stats">统计</button>
-    <button class="tab" data-tab="config">配置</button>
-    <button class="tab" data-tab="plugins">插件</button>
-    <button class="tab" data-tab="events">事件</button>
-    <button class="tab" data-tab="groups">群组</button>
-    <button class="tab" data-tab="roles">权限</button>
-    <button class="tab" data-tab="logs">日志</button>
+
+    <div class="tab-group" data-group="data">
+      <button class="tab tab-parent" aria-haspopup="true" aria-expanded="false">
+        数据
+        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M6 9l6 6 6-6"/>
+        </svg>
+      </button>
+      <div class="tab-menu" hidden>
+        <button class="tab-item" data-tab="stats">统计</button>
+        <button class="tab-item" data-tab="events">事件</button>
+        <button class="tab-item" data-tab="logs">日志</button>
+      </div>
+    </div>
+
+    <div class="tab-group" data-group="settings">
+      <button class="tab tab-parent" aria-haspopup="true" aria-expanded="false">
+        设置
+        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M6 9l6 6 6-6"/>
+        </svg>
+      </button>
+      <div class="tab-menu" hidden>
+        <button class="tab-item" data-tab="config">配置</button>
+        <button class="tab-item" data-tab="groups">群组</button>
+        <button class="tab-item" data-tab="roles">权限</button>
+      </div>
+    </div>
+
+    <div class="tab-group" data-group="plugins">
+      <button class="tab tab-parent" aria-haspopup="true" aria-expanded="false">
+        插件
+        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M6 9l6 6 6-6"/>
+        </svg>
+      </button>
+      <div class="tab-menu" hidden>
+        <button class="tab-item" data-tab="plugins">插件管理</button>
+        <!-- 插件注册的页面挂到这里，见 loadPluginPages() -->
+        <div class="tab-menu-sep" id="pluginPageSep" hidden></div>
+        <div class="tab-menu-label" id="pluginPageLabel" hidden>插件页面</div>
+        <div class="tab-menu-sub" id="pluginPageItems"></div>
+      </div>
+    </div>
   </nav>
   <button class="icon-btn" id="btnTheme" title="切换日间 / 夜间" aria-label="切换主题">
     <svg class="ic-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -91,6 +131,16 @@
 <main>
   <!-- 概览 -->
   <section id="tab-overview" class="panel active">
+    <!-- 体检：把「配好了为什么没反应」一次说清楚 -->
+    <div class="box" id="doctorBox">
+      <div class="box-hd">
+        <h3>体检</h3>
+        <span class="hint" id="doctorSummary">点一下，看看哪里还没通</span>
+        <button class="btn small" id="btnDoctor">检查</button>
+      </div>
+      <div id="doctorList" class="doctor-list" hidden></div>
+    </div>
+
     <div class="cards">
       <div class="card"><div class="k">连接状态</div><div class="v" id="c-conn">-</div></div>
       <div class="card"><div class="k">运行时长</div><div class="v" id="c-uptime">-</div></div>
@@ -313,6 +363,7 @@
             <option value="30">最近 30 天</option>
           </select>
           <button class="btn small" id="btnRefreshStats">刷新</button>
+          <button class="btn small" id="btnExportStats" title="导出汇总 CSV（不含消息正文）">导出</button>
         </div>
       </div>
       <div id="statsUnavailable" class="empty" hidden></div>
@@ -377,6 +428,12 @@
         <span class="hint" id="mirrorTip"></span>
       </div>
 
+      <!-- 插件一多就得能找 -->
+      <div class="market-filter">
+        <input id="marketSearch" class="mini-input" placeholder="搜索插件名 / 描述 / 标签" />
+        <select id="marketCat" class="mini-select" aria-label="分类"></select>
+      </div>
+
       <div id="marketList" class="plugin-list"></div>
     </div>
   </section>
@@ -428,6 +485,23 @@
       <div class="hint" style="margin-top:8px">
         要调整或撤销，去「权限」页改对应的 <code>group:xxx</code> 作用域。
         全局主人只能在 config.json 的 owners 里配，或首次启动时用认领码认领。
+      </div>
+    </div>
+
+    <div class="box">
+      <div class="box-hd">
+        <h3>手动登记群</h3>
+        <span class="hint">官方没有「列出机器人所在的群」的接口，群只能靠事件发现</span>
+      </div>
+      <ul class="tips">
+        <li>机器人被拉进群、或在群里被 @ 过一次，下面列表里就会自动出现</li>
+        <li><b>一直不出现</b>：多半是没开「群聊与私聊」intent——去概览页点「检查」能看到</li>
+        <li>已经知道群 openid 的话，可以手动登记，方便提前配 <code>group:xxx</code> 权限</li>
+      </ul>
+      <div class="form-inline" style="margin-top:12px">
+        <input id="groupOpenidInput" placeholder="群 openid" />
+        <input id="groupNoteInput" placeholder="备注（可选）" style="width:200px" />
+        <button class="btn primary" id="btnAddGroup">登记</button>
       </div>
     </div>
 
@@ -518,6 +592,17 @@
       </div>
       <div class="hint" style="margin-top:8px">
         面板操作视为本机管理员行为，不受等级限制；聊天里请用 /admin set。
+      </div>
+    </div>
+
+    <div class="box">
+      <div class="box-hd">
+        <h3>最近说过话的人</h3>
+        <span class="hint">点一下自动填好 openid 和作用域，不用去日志里翻</span>
+        <button class="btn small" id="btnReloadPeople">刷新</button>
+      </div>
+      <div id="peopleList" class="people-list">
+        <div class="empty">还没有收到消息。让要授权的人在群里说句话，这里就会出现。</div>
       </div>
     </div>
 

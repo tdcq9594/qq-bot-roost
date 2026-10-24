@@ -218,7 +218,7 @@ export class PluginStorage {
 /**
  * 插件上下文：插件能用的全部能力都在这里，不暴露内部实现。
  */
-export function createContext({ meta, paths, registry, api, cfg, config, configStore, groups, roles, levels, outbound, session, pipeline, isOwner, pages = null }) {
+export function createContext({ meta, paths, registry, api, cfg, config, configStore, groups, roles, levels, outbound, session, pipeline, isOwner, pages = null, state = null }) {
   const id = meta.id;
   // 日志 tag 带机器人 id，多机器人下同名插件的日志不会串
   const logger = createLogger(`plugin:${paths?.id ?? '-'}:${id}`);
@@ -236,6 +236,15 @@ export function createContext({ meta, paths, registry, api, cfg, config, configS
     version: meta.version ?? '0.0.0',
     // 已与默认值合并的用户配置，来自 config/bots/<机器人id>/plugins/<id>.json
     config: config ?? meta.config ?? {},
+    /**
+     * 插件自己的内存状态，**跨热重载保留**。
+     *
+     * 模块顶层变量在重载时会重建（ESM 的行为，不是 bug），
+     * 想留的东西挂到 ctx.state 上就行；要真正持久化还是用 ctx.storage。
+     *
+     *   ctx.state.cache ??= {};
+     */
+    state: state ?? {},
     api,
     logger,
     storage: new PluginStorage(paths.pluginData(id)),

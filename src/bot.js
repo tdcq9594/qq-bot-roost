@@ -56,6 +56,15 @@ export class BotRuntime {
     this.gateway = null;
     this.registry = new Registry();
     this.groups = new GroupStore(this.paths.groups);
+
+    /**
+     * 最近说过话的人：openid -> { openid, name, chatId, scope, at }
+     *
+     * **只放内存，不落盘。** 用途只有一个：面板「权限」页让人点一下就能加权限，
+     * 不用去日志里翻 openid——openid 是每个机器人独立的长串，用户根本记不住。
+     * 重启后清空，重新说句话就又有了。
+     */
+    this.recentPeople = new Map();
     this.roles = new RoleStore(this.paths.roles);
     this.outbound = null;
     this.session = null;
@@ -276,6 +285,37 @@ export class BotRuntime {
     return this.state;
   }
 
+  /**
+   * 记下「这个人刚说过话」，给面板权限页用。
+   * 只留最近 200 个，超了按最后发言时间淘汰——内存里的一点索引，不值得落盘。
+   */
+  #rememberPerson(msg) {
+    if (!msg?.userId) return;
+    const prev = this.recentPeople.get(msg.userId);
+    this.recentPeople.set(msg.userId, {
+      openid: msg.userId,
+      // 有的场景拿不到昵称（频道事件），保留上一次的
+      name: msg.userName || prev?.name || '',
+      scope: msg.kind,
+      chatId: msg.chatId,
+      at: Date.now(),
+    });
+
+    if (this.recentPeople.size > 200) {
+      const keep = [...this.recentPeople.values()]
+        .sort((a, b) => b.at - a.at)
+        .slice(0, 200);
+      this.recentPeople = new Map(keep.map((p) => [p.openid, p]));
+    }
+  }
+
+  /** 面板「权限」页的候选人列表，最近的排前面 */
+  listRecentPeople(limit = 40) {
+    return [...this.recentPeople.values()]
+      .sort((a, b) => b.at - a.at)
+      .slice(0, limit);
+  }
+
   async stop() {
     try {
       this.gateway?.stop();
@@ -386,6 +426,8 @@ export class BotRuntime {
         isCommand: msg.isCommand,
         command: msg.command,
       });
+
+      this.#rememberPerson(msg);
 
       if (msg.isCommand && commandEntry) {
         const scope = scopeOf(msg);

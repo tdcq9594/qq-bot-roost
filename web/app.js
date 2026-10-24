@@ -227,11 +227,13 @@ async function selectBot(id) {
   if (tab === 'plugins') loadPlugins();
   if (tab === 'events') loadEvents();
   if (tab === 'groups') loadGroups();
-  if (tab === 'roles') loadRoles();
+  if (tab === 'roles') { loadRoles(); loadPeople(); }
   if (tab === 'stats') loadStats();
+  // 体检是按机器人做的，切了要重查
+  loadDoctor();
   // 停在插件页面上切机器人：这一页在新机器人下可能不存在，退回到概览
   if (tab.startsWith('page:')) {
-    activateTab($$('.tab').some((b) => b.dataset.tab === tab) ? tab : 'overview');
+    activateTab(tabButton(tab) ? tab : 'overview');
   }
   await loadBots();
 }
@@ -350,6 +352,12 @@ function setTheme(t, { persist = true } = {}) {
     try { localStorage.setItem(THEME_KEY, t); } catch {}
   }
   updateThemeBtn(t);
+  // 插件页面的 CSS 变量是跟着主题走的，切了要让它重新加载一次
+  $$('.plugin-page').forEach((f) => {
+    if (!f.dataset.key || !f.getAttribute('src')) return;
+    const url = pluginPageUrl(f.dataset.key);
+    if (f.getAttribute('src') !== url) f.src = url; // 主题没变就别重载
+  });
 }
 
 function initTheme() {
@@ -412,10 +420,42 @@ function shortId(id) {
 
 /* ---------------- Tab ---------------- */
 
+/** 找到某个页签的按钮：一级按钮，或分组菜单里的项 */
+function tabButton(name) {
+  return (
+    $$('[data-tab]').find(
+      (b) =>
+        b.dataset.tab === name &&
+        (b.classList.contains('tab') || b.classList.contains('tab-item')),
+    ) ?? null
+  );
+}
+
+/** 收起所有下拉，except 那个分组留着 */
+function closeTabMenus(except = null) {
+  $$('.tab-group').forEach((g) => {
+    if (g === except) return;
+    g.classList.remove('open');
+    g.querySelector('.tab-parent')?.setAttribute('aria-expanded', 'false');
+    const menu = g.querySelector('.tab-menu');
+    if (menu) menu.hidden = true;
+  });
+}
+
 function activateTab(name) {
-  const btn = $$('.tab').find((b) => b.dataset.tab === name);
+  const btn = tabButton(name);
   if (!btn) return;
-  $$('.tab').forEach((b) => b.classList.toggle('active', b === btn));
+  $$('.tab[data-tab], .tab-item[data-tab]').forEach((b) => b.classList.toggle('active', b === btn));
+  /**
+   * 选中的项在菜单里时，父级也要亮。
+   * 否则用户看着「概览」亮着、内容却是日志，会以为自己点错了。
+   */
+  $$('.tab-group').forEach((g) => {
+    const on = Boolean(g.querySelector('.tab-item.active'));
+    g.classList.toggle('has-active', on);
+    g.querySelector('.tab-parent')?.classList.toggle('active', on);
+  });
+  closeTabMenus();
   $$('.panel').forEach((p) => p.classList.toggle('active', p.id === `tab-${name}`));
   // 插件指标只在插件页轮询，切走就停——别在后台白耗请求
   if (name === 'plugins') {
@@ -442,15 +482,38 @@ function activateTab(name) {
   }
   if (name === 'config') loadConfig();
   if (name === 'groups') loadGroups();
-  if (name === 'roles') loadRoles();
+  if (name === 'roles') { loadRoles(); loadPeople(); }
 }
 
-$$('.tab').forEach((btn) => {
+// 一级按钮和下拉菜单项都走同一套激活逻辑
+$$('.tab[data-tab], .tab-item[data-tab]').forEach((btn) => {
   btn.addEventListener('click', () => {
     activateTab(btn.dataset.tab);
     // 记进地址栏，刷新后还停在这一页，也方便直接分享 /#config
     history.replaceState(null, '', `#${btn.dataset.tab}`);
   });
+});
+
+/* ---------------- 分组下拉 ---------------- */
+
+$$('.tab-group').forEach((g) => {
+  const parent = g.querySelector('.tab-parent');
+  const menu = g.querySelector('.tab-menu');
+  if (!parent || !menu) return;
+
+  parent.addEventListener('click', (e) => {
+    e.stopPropagation(); // 别让 document 的「点外面就收起」立刻把它关掉
+    const open = !g.classList.contains('open');
+    closeTabMenus(g);
+    g.classList.toggle('open', open);
+    parent.setAttribute('aria-expanded', String(open));
+    menu.hidden = !open;
+  });
+});
+
+document.addEventListener('click', () => closeTabMenus());
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeTabMenus();
 });
 
 // 支持直接打开 /#config 这类地址
@@ -1086,14 +1149,14 @@ async function loadPluginPages() {
     return; // 拿不到就不显示，不影响其它页
   }
 
-  const nav = $('.tabs');
+  const nav = $('#pluginPageItems');
   const main = $('main');
   if (!nav || !main) return;
 
   const wanted = new Set(list.map((p) => `page:${p.key}`));
 
   // 去掉已经不存在的
-  $$('.tab[data-plugin-page]').forEach((b) => {
+  $$('.tab-item[data-plugin-page]').forEach((b) => {
     if (!wanted.has(b.dataset.tab)) b.remove();
   });
   $$('.panel[data-plugin-page]').forEach((p) => {
@@ -1102,10 +1165,10 @@ async function loadPluginPages() {
 
   for (const p of list) {
     const tabName = `page:${p.key}`;
-    if ($$('.tab').some((b) => b.dataset.tab === tabName)) continue;
+    if ($$('.tab-item').some((b) => b.dataset.tab === tabName)) continue;
 
     const btn = document.createElement('button');
-    btn.className = 'tab';
+    btn.className = 'tab-item';
     btn.dataset.tab = tabName;
     btn.dataset.pluginPage = p.key;
     btn.textContent = p.label;
@@ -1135,13 +1198,26 @@ async function loadPluginPages() {
     sec.appendChild(frame);
     main.appendChild(sec);
   }
+
+  // 一个插件页面都没有时，菜单里别留一条空的分隔线和「插件页面」标题
+  const hasPages = nav.children.length > 0;
+  const sep = $('#pluginPageSep');
+  const label = $('#pluginPageLabel');
+  if (sep) sep.hidden = !hasPages;
+  if (label) label.hidden = !hasPages;
+
+  // 正停在被删掉的那个插件页上（插件卸载了），退回概览，别让内容区空着
+  const activeId = $('.panel.active')?.id?.replace(/^tab-/, '') ?? '';
+  if (activeId.startsWith('page:') && !tabButton(activeId)) activateTab('overview');
 }
 
-/** 插件页面 iframe 的地址：带上密钥和当前机器人 */
+/** 插件页面 iframe 的地址：带上密钥、当前机器人和主题 */
 function pluginPageUrl(key) {
   const q = new URLSearchParams();
   if (ACCESS_KEY) q.set('key', ACCESS_KEY);
   if (CURRENT_BOT) q.set('bot', CURRENT_BOT);
+  // 带上主题，页面里的 CSS 变量就能跟着面板切换，插件作者不用自己适配
+  q.set('theme', document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
   const s = q.toString();
   return `/api/pages/${encodeURIComponent(key)}/html${s ? `?${s}` : ''}`;
 }
@@ -1194,6 +1270,54 @@ function startStatsPolling() {
 function stopStatsPolling() {
   if (statsTimer) clearInterval(statsTimer);
   statsTimer = null;
+}
+
+/* ---------------- 体检 ---------------- */
+
+const DOCTOR_ICON = { ok: '✓', warn: '!', error: '✕' };
+
+/**
+ * 跑一遍体检并渲染。
+ *
+ * 自动跑一次：用户最常问的就是「我配好了为什么没反应」，与其等他去点，
+ * 不如打开面板就告诉他。只有出现 error 时才自动展开，全绿就只留一行字。
+ */
+async function loadDoctor({ expand } = {}) {
+  const list = $('#doctorList');
+  const summary = $('#doctorSummary');
+  if (!list || !summary) return;
+
+  summary.textContent = '检查中…';
+  let d;
+  try {
+    d = await api('/api/doctor');
+  } catch (e) {
+    summary.textContent = `检查失败：${e.message}`;
+    return;
+  }
+
+  const items = d.items ?? [];
+  const bad = items.filter((x) => x.level === 'error');
+  const warn = items.filter((x) => x.level === 'warn');
+
+  summary.textContent = d.summary || '';
+  summary.className = bad.length ? 'hint err-text' : 'hint';
+
+  list.innerHTML = items
+    .map(
+      (x) => `<div class="doctor-item ${x.level}">
+        <span class="doctor-icon">${DOCTOR_ICON[x.level] ?? '·'}</span>
+        <div class="doctor-body">
+          <b>${escapeHtml(x.title)}</b>
+          <div class="doctor-detail">${escapeHtml(x.detail)}</div>
+          ${x.fix ? `<div class="doctor-fix">→ ${escapeHtml(x.fix)}</div>` : ''}
+        </div>
+      </div>`,
+    )
+    .join('');
+
+  // 全绿就不占地方，只留标题那一行
+  list.hidden = expand === true ? false : !(bad.length || warn.length);
 }
 
 async function loadStats() {
@@ -1382,7 +1506,17 @@ async function loadPlugins() {
             ${(p.shortDesc || p.description) ? '<br>' + escapeHtml(p.shortDesc || p.description) : ''}
           </div>
           ${chips ? `<div class="plugin-metrics">${chips}</div>` : ''}
-          ${p.error ? `<div class="err">加载失败: ${escapeHtml(p.error)}</div>` : ''}
+          ${
+            p.error
+              ? `<div class="err">加载失败: ${escapeHtml(p.error)}${
+                  p.errorStack
+                    ? `<details class="err-stack"><summary>查看堆栈</summary><pre>${escapeHtml(
+                        p.errorStack,
+                      )}</pre></details>`
+                    : ''
+                }</div>`
+              : ''
+          }
           ${p.menuMissing ? '<div class="err">未提供指令菜单，用户看不到它能做什么</div>' : ''}
         </div>
         <span class="badge ${p.loaded ? 'on' : p.enabled ? '' : 'off'}">
@@ -1659,6 +1793,7 @@ async function loadMarket() {
       `${escapeHtml(d.repo)} · <span class="stale-tip">离线缓存（${escapeHtml(d.staleAge || '未知')}）</span>`;
   }
   if (!d.plugins.length) {
+    MARKET.all = [];
     list.innerHTML = '<div class="empty">市场里还没有插件</div>';
     return;
   }
@@ -1666,7 +1801,60 @@ async function loadMarket() {
   const upd = {};
   for (const u of d.updates || []) upd[u.id] = u;
 
-  list.innerHTML = d.plugins
+  MARKET.all = d.plugins;
+  MARKET.upd = upd;
+  buildMarketCats();
+  renderMarketRows();
+}
+
+/** 市场数据与筛选状态 */
+const MARKET = { all: [], upd: {}, q: '', tag: '' };
+
+/** 搜索框和标签筛选都在前端做——索引就几十条，没必要每次都请求 */
+function matchMarket(p) {
+  const tag = MARKET.tag;
+  if (tag) {
+    const tags = [...(p.tags || []), p.category].filter(Boolean);
+    if (!tags.includes(tag)) return false;
+  }
+  const q = MARKET.q.trim().toLowerCase();
+  if (!q) return true;
+  return [p.id, p.name, p.description, p.author, ...(p.tags || [])]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .includes(q);
+}
+
+/** 用索引里出现过的标签填充筛选下拉 */
+function buildMarketCats() {
+  const sel = $('#marketCat');
+  if (!sel) return;
+  const tags = new Set();
+  for (const p of MARKET.all) {
+    for (const t of p.tags || []) tags.add(t);
+    if (p.category) tags.add(p.category);
+  }
+  const keep = MARKET.tag || '';
+  sel.innerHTML =
+    '<option value="">全部分类</option>' +
+    [...tags].sort().map((t) => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('');
+  sel.value = keep;
+}
+
+function renderMarketRows() {
+  const list = $('#marketList');
+  const upd = MARKET.upd;
+  const shown = MARKET.all.filter(matchMarket);
+
+  if (!shown.length) {
+    list.innerHTML = `<div class="empty">没有匹配的插件${
+      MARKET.q || MARKET.tag ? '，换个关键词或分类试试' : ''
+    }</div>`;
+    return;
+  }
+
+  list.innerHTML = shown
     .map(
       (p) => {
         const u = upd[p.id];
@@ -1828,8 +2016,28 @@ $('#btnRescanPlugins')?.addEventListener('click', rescanPlugins);
 
 // 统计：换时间范围、手动刷新
 $('#btnRefreshStats')?.addEventListener('click', loadStats);
+$('#btnDoctor')?.addEventListener('click', () => loadDoctor({ expand: true }));
+
+// 导出：直接开下载，不用 fetch——浏览器自己会带上 accessKey（拼在地址里）
+$('#btnExportStats')?.addEventListener('click', () => {
+  const days = Number($('#statsDays')?.value) || 7;
+  const q = new URLSearchParams({ days: String(days) });
+  if (ACCESS_KEY) q.set('key', ACCESS_KEY);
+  if (CURRENT_BOT) q.set('bot', CURRENT_BOT);
+  window.location.href = `/api/stats/export?${q}`;
+});
 $('#statsDays')?.addEventListener('change', loadStats);
 $('#btnRefreshMarket')?.addEventListener('click', loadMarket);
+
+// 市场筛选：纯前端过滤，输入即生效
+$('#marketSearch')?.addEventListener('input', (e) => {
+  MARKET.q = e.target.value;
+  renderMarketRows();
+});
+$('#marketCat')?.addEventListener('change', (e) => {
+  MARKET.tag = e.target.value;
+  renderMarketRows();
+});
 
 // 下载源：换源立即保存并生效，测速只是给个参考
 $('#btnMirrorTest')?.addEventListener('click', testMirrors);
@@ -1922,10 +2130,22 @@ function renderPPConfig() {
       const v = PP.config?.[k] ?? s.default;
       const id = escapeHtml(k);
       let input;
+      // 作者声明了 min/max/pattern/required 就带上，浏览器先拦一道；
+      // 后端 setConfig 还会再校验一次（面板不是唯一入口）
+      const attrs = [
+        s.min !== undefined ? `min="${escapeHtml(String(s.min))}"` : '',
+        s.max !== undefined ? `max="${escapeHtml(String(s.max))}"` : '',
+        s.pattern ? `pattern="${escapeHtml(s.pattern)}"` : '',
+        s.required ? 'required' : '',
+        s.placeholder ? `placeholder="${escapeHtml(s.placeholder)}"` : '',
+      ]
+        .filter(Boolean)
+        .join(' ');
+
       if (s.type === 'boolean') {
         input = `<label class="pp-switch"><input type="checkbox" data-cfg="${id}" ${v ? 'checked' : ''}> ${v ? '开' : '关'}</label>`;
       } else if (s.type === 'number') {
-        input = `<input type="number" data-cfg="${id}" value="${Number(v) || 0}">`;
+        input = `<input type="number" data-cfg="${id}" value="${Number(v) || 0}" ${attrs}>`;
       } else if (s.type === 'select') {
         input = `<select data-cfg="${id}">${(s.options || [])
           .map((o) => `<option ${o === v ? 'selected' : ''}>${escapeHtml(o)}</option>`)
@@ -1933,9 +2153,11 @@ function renderPPConfig() {
       } else if (s.type === 'json') {
         input = `<textarea data-cfg="${id}" rows="4">${escapeHtml(JSON.stringify(v ?? null, null, 2))}</textarea>`;
       } else {
-        input = `<input type="text" data-cfg="${id}" value="${escapeHtml(v ?? '')}">`;
+        input = `<input type="text" data-cfg="${id}" value="${escapeHtml(v ?? '')}" ${attrs}>`;
       }
-      return `<label class="pp-field"><span>${id}</span>${input}${s.desc ? `<i>${escapeHtml(s.desc)}</i>` : ''}</label>`;
+      return `<label class="pp-field"><span>${id}${
+        s.required ? '<i class="req">*</i>' : ''
+      }</span>${input}${s.desc ? `<i>${escapeHtml(s.desc)}</i>` : ''}</label>`;
     })
     .join('');
 }
@@ -2156,6 +2378,21 @@ function renderGroups(list) {
 
 $('#btnReloadGroups')?.addEventListener('click', loadGroups);
 
+// 手动登记群：官方没有「列出所在群」的接口，只能靠事件被动发现
+$('#btnAddGroup')?.addEventListener('click', async () => {
+  const gid = $('#groupOpenidInput')?.value.trim();
+  const note = $('#groupNoteInput')?.value.trim();
+  if (!gid) return alert('群 openid 不能为空');
+  try {
+    await api('/api/groups', { method: 'POST', body: JSON.stringify({ groupOpenid: gid, note }) });
+    if ($('#groupOpenidInput')) $('#groupOpenidInput').value = '';
+    if ($('#groupNoteInput')) $('#groupNoteInput').value = '';
+    await loadGroups();
+  } catch (e) {
+    alert(`登记失败：${e.message}`);
+  }
+});
+
 async function addGroupManually() {
   const input = $('#groupInput');
   const id = input.value.trim();
@@ -2181,6 +2418,59 @@ $('#groupInput')?.addEventListener('keydown', (e) => {
 
 const LEVEL_TEXT = { 0: '主人', 1: '管理员', 2: '群管', 3: '助手' };
 const levelText = (n) => LEVEL_TEXT[n] ?? (n >= 9999 ? '普通成员' : `${n} 级管理`);
+
+/** 多久以前说过话 */
+function agoText(ts) {
+  const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (s < 60) return '刚刚';
+  if (s < 3600) return `${Math.round(s / 60)} 分钟前`;
+  if (s < 86400) return `${Math.round(s / 3600)} 小时前`;
+  return `${Math.round(s / 86400)} 天前`;
+}
+
+/** msg.kind → 权限作用域前缀 */
+const SCOPE_OF_KIND = { group: 'group', guild: 'channel', dm: 'channel', c2c: 'user' };
+
+function scopeText(scope) {
+  const [kind, ...rest] = String(scope).split(':');
+  const id = rest.join(':');
+  const label =
+    kind === 'group' ? '群' : kind === 'channel' ? '频道' : kind === 'user' ? '私聊' : kind;
+  return id ? `${label} ${shortId(id)}` : label;
+}
+
+/**
+ * 「最近说过话的人」。
+ *
+ * openid 是每个机器人独立的长串，用户不可能手输。让人从刚说过话的名单里点一下，
+ * 比去日志里翻要靠谱——这也是这一页最容易卡住的地方。
+ */
+async function loadPeople() {
+  const box = $('#peopleList');
+  if (!box) return;
+  try {
+    const list = await api('/api/roles/candidates');
+    if (!Array.isArray(list) || !list.length) {
+      box.innerHTML =
+        '<div class="empty">还没有收到消息。让要授权的人在群里说句话，这里就会出现。</div>';
+      return;
+    }
+    box.innerHTML = list
+      .map((p) => {
+        const scope = `${SCOPE_OF_KIND[p.scope] ?? 'group'}:${p.chatId}`;
+        return `<button class="person" data-openid="${escapeHtml(p.openid)}" data-scope="${escapeHtml(
+          scope,
+        )}" title="${escapeHtml(p.openid)}">
+          <b>${escapeHtml(p.name || '（无昵称）')}</b>
+          <span class="mono">${escapeHtml(shortId(p.openid))}</span>
+          <i>${escapeHtml(scopeText(scope))} · ${escapeHtml(agoText(p.at))}</i>
+        </button>`;
+      })
+      .join('');
+  } catch (e) {
+    box.innerHTML = `<div class="empty">读取失败：${escapeHtml(e.message)}</div>`;
+  }
+}
 
 async function loadRoles() {
   const body = $('#roleBody');
@@ -2234,6 +2524,22 @@ async function loadRoles() {
 }
 
 $('#btnReloadRoles')?.addEventListener('click', loadRoles);
+$('#btnReloadPeople')?.addEventListener('click', loadPeople);
+
+/**
+ * 点一个人 → 把 openid 和作用域填进表单，用户只要选等级再点保存。
+ * 不直接写入权限：授予权限是不可逆的外部状态变更，得让人确认一次。
+ */
+$('#peopleList')?.addEventListener('click', (e) => {
+  const btn = e.target.closest('.person');
+  if (!btn) return;
+  const openid = $('#roleOpenid');
+  const scope = $('#roleScope');
+  if (openid) openid.value = btn.dataset.openid;
+  if (scope) scope.value = btn.dataset.scope;
+  openid?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  $('#roleLevel')?.focus();
+});
 
 $('#btnAddRole')?.addEventListener('click', async () => {
   const scope = $('#roleScope').value.trim();
@@ -2411,8 +2717,8 @@ function connectStream() {
   // 后台服务状态：detail 会变（内存、下次重启时间），30 秒刷一次够了
   loadServices();
   setInterval(loadServices, 30000);
+  // 打开面板就体检一次：有问题直接摆在概览最上面，不用等用户去点
+  loadDoctor();
   // 机器人确定后再刷一次：上面那次是抢时间，这次才是准数据
   if (initial) activateTab(initial);
-  // 调试用：?openmenu 直接展开机器人下拉，方便截图和检查样式
-  if (location.search.includes('openmenu')) openBotMenu();
 })();

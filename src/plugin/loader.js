@@ -49,7 +49,22 @@ export class PluginManager {
     /** 磁盘上实际存在的插件目录，含未启用的 */
     this.diskIds = new Set();
     this.state = {}; // id -> enabled
-    this.errors = new Map(); // id -> 错误信息
+    this.errors = new Map(); // id -> 一句话错误（面板卡片上用）
+    /**
+     * id -> 完整堆栈。
+     *
+     * 只给 message 的话，「Cannot read properties of undefined」这种错误
+     * 完全看不出是哪一行，插件作者只能靠猜。面板上展开就能看到调用栈。
+     */
+    this.errorStacks = new Map();
+    /**
+     * id -> 插件自己的内存状态对象。
+     *
+     * 热重载会重建模块，模块顶层变量全丢——插件作者第一反应是「框架有 bug」。
+     * ctx.state 由框架持有，重载时原样递回去，写小缓存、计数器就不用落盘了。
+     * 卸载时清掉（那是真的不要了）。
+     */
+    this.stateStore = new Map();
     this.allocations = new Map(); // id -> { base, end, index }
     /**
      * 插件元信息缓存：id -> { name, version, description, kind, runtime }
@@ -158,7 +173,8 @@ export class PluginManager {
         added.push(id);
       } catch (e) {
         this.errors.set(id, e.message);
-        log.error(`加载插件 ${id} 失败: ${e.message}`);
+        this.errorStacks.set(id, e.stack || e.message);
+        log.error(`加载插件 ${id} 失败: ${e.stack || e.message}`);
       }
     }
 
@@ -259,9 +275,20 @@ export class PluginManager {
         : await this.#loadInternal(id, dir);
     } catch (e) {
       this.errors.set(id, e.message);
-      log.error(`插件 ${id} 加载失败: ${e.message}`);
+      this.errorStacks.set(id, e.stack || e.message);
+      log.error(`插件 ${id} 加载失败: ${e.stack || e.message}`);
       return false;
     }
+  }
+
+  /** 取（或新建）插件的内存状态对象。热重载时同一个对象会被递回去 */
+  #stateOf(id) {
+    let s = this.stateStore.get(id);
+    if (!s) {
+      s = {};
+      this.stateStore.set(id, s);
+    }
+    return s;
   }
 
   /* ---------------- 内建插件（ESM） ---------------- */
@@ -274,6 +301,21 @@ export class PluginManager {
         entryFile = path.join(dir, c);
         break;
       } catch {}
+    }
+
+    /**
+     * 内建插件也可能有自己的 npm 依赖（比如渲染插件要 @napi-rs/canvas）。
+     * 以前只有外部插件会装依赖，内建插件只能让用户手动 `npm i --prefix`，
+     * 踩坑的人不少。这里复用同一套安装逻辑：有 package.json 就装到插件目录，
+     * 没有就什么都不做（绝大多数内建插件是零依赖的）。
+     */
+    if (await fs.access(path.join(dir, 'package.json')).then(() => true).catch(() => false)) {
+      await ensurePluginDeps({
+        dir,
+        manifest: {},
+        log,
+        enabled: this.cfg?.plugins?.autoInstallDeps !== false,
+      });
     }
 
     // 加时间戳绕过 ESM 缓存，实现热重载
@@ -320,6 +362,8 @@ export class PluginManager {
       groups: this.groups,
       roles: this.roles,
       levels: this.allocations.get(id) ?? null,
+      // 同一个对象跨重载复用，见 stateStore 的注释
+      state: this.#stateOf(id),
       outbound: this.outbound,
       session: this.session,
       pipeline: this.pipeline,
@@ -339,7 +383,9 @@ export class PluginManager {
 
     this.loaded.set(meta.id, { meta, ctx, dir, kind: 'internal', menuMissing, configStore });
     this.#cacheMeta(meta.id, meta, 'internal', 'node');
+    // 加载成功就把上次的报错和堆栈一起清掉，否则修好之后面板还挂着旧红字
     this.errors.delete(meta.id);
+    this.errorStacks.delete(meta.id);
     log.info(`已加载内建插件 ${meta.id} (${meta.name ?? ''})`);
     return true;
   }
@@ -460,6 +506,7 @@ export class PluginManager {
     this.loaded.set(meta.id, { meta, host, dir, kind: 'external', menuMissing, configStore });
     this.#cacheMeta(meta.id, meta, 'external', raw.runtime || 'python');
     this.errors.delete(meta.id);
+    this.errorStacks.delete(meta.id);
     log.info(
       `已加载外部插件 ${meta.id} (${meta.name}) · ${host.status.runtime} · pid ${host.status.pid} · ${host.commands.length} 条命令`,
     );
@@ -522,6 +569,8 @@ export class PluginManager {
       dirty = true;
     }
     this.errors.delete(id);
+    this.errorStacks.delete(id);
+    this.stateStore.delete(id);
     this.meta.delete(id);
     this.diskIds.delete(id);
     if (dirty) await this.#writeState().catch(() => {});
@@ -780,6 +829,7 @@ export class PluginManager {
         pid: ext?.pid ?? null,
         menuMissing: Boolean(item?.menuMissing),
         error: this.errors.get(id) ?? ext?.error ?? '',
+        errorStack: this.errorStacks.get(id) ?? '',
       };
     });
   }

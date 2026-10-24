@@ -45,7 +45,8 @@ function isDescriptor(v) {
     isPlainObject(v) &&
     ('default' in v || 'type' in v) &&
     // 有 type 时必须是认识的类型，避免把普通对象误判
-    (!('type' in v) || ['number', 'text', 'boolean', 'json', 'select'].includes(v.type))
+    // 'string' 当 'text' 的别名：作者十有八九会写 string，别让他因此踩空
+    (!('type' in v) || ['number', 'text', 'string', 'boolean', 'json', 'select'].includes(v.type))
   );
 }
 
@@ -81,16 +82,62 @@ export function resolveDefaults(defaults) {
   return out;
 }
 
+/**
+ * 按 schema 校验一份配置。
+ *
+ * 只检查「作者声明了规则」的项，没声明的一律放过——老插件不受影响。
+ * 返回第一条错误的中文说明，没问题返回 null。
+ *
+ * @param {object} values 合并后的完整配置
+ * @param {object} schema schemaOf() 的结果
+ */
+export function validateConfig(values, schema) {
+  for (const [key, s] of Object.entries(schema ?? {})) {
+    const v = values?.[key];
+
+    if (s.required && (v === undefined || v === null || v === '')) {
+      return `配置项 ${key} 是必填的`;
+    }
+    if (v === undefined || v === null || v === '') continue;
+
+    if (s.type === 'number') {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return `配置项 ${key} 必须是数字`;
+      if (s.min !== undefined && n < s.min) return `配置项 ${key} 不能小于 ${s.min}`;
+      if (s.max !== undefined && n > s.max) return `配置项 ${key} 不能大于 ${s.max}`;
+    }
+
+    if (s.pattern) {
+      let re = null;
+      try {
+        re = new RegExp(s.pattern);
+      } catch {
+        // 作者正则写错了，跳过这一条，别让保存整个失败
+        continue;
+      }
+      if (!re.test(String(v))) return `配置项 ${key} 格式不对（要求 ${s.pattern}）`;
+    }
+  }
+  return null;
+}
+
 /** 生成给面板用的 schema */
 export function schemaOf(defaults) {
   const out = {};
   for (const [k, v] of Object.entries(defaults ?? {})) {
     if (isDescriptor(v)) {
       out[k] = {
-        type: v.type ?? inferType(v.default),
+        // 统一成面板认识的类型名
+        type: v.type === 'string' ? 'text' : (v.type ?? inferType(v.default)),
         default: v.default ?? null,
         desc: v.desc ?? '',
         ...(Array.isArray(v.options) ? { options: v.options } : {}),
+        // 校验规则原样透给面板，填错时当场提示，不用等运行时
+        ...(v.required ? { required: true } : {}),
+        ...(v.min !== undefined ? { min: v.min } : {}),
+        ...(v.max !== undefined ? { max: v.max } : {}),
+        ...(v.pattern ? { pattern: v.pattern } : {}),
+        ...(v.placeholder ? { placeholder: v.placeholder } : {}),
       };
     } else {
       out[k] = { type: inferType(v), default: v, desc: '' };
@@ -170,7 +217,11 @@ export class PluginConfig {
    */
   async set(patch) {
     if (!isPlainObject(patch)) throw new Error('插件配置只能传对象');
-    this.data = deepMerge(this.value, patch);
+    // 先合再验：校验要看「合完之后的完整配置」，只验增量会漏掉必填项
+    const next = deepMerge(this.value, patch);
+    const bad = validateConfig(next, schemaOf(this.rawDefaults));
+    if (bad) throw new Error(bad);
+    this.data = next;
     await this.save();
     return this.data;
   }

@@ -1084,6 +1084,15 @@ async function testPluginWatch() {
     const p = path.join(root, id, rel);
     await fs.mkdir(path.dirname(p), { recursive: true });
     await fs.writeFile(p, body);
+    /**
+     * 写完统一把 mtime 拨到 5 秒前。
+     *
+     * 文件系统的 mtime 有时会比 Date.now() 晚 1ms，那一轮
+     * `now - mtime` 是负数，会被判成「还没安静够」进 pending，
+     * 测试就假失败。拨到过去让判断只依赖 settleMs，不依赖时钟精度。
+     */
+    const past = new Date(Date.now() - 5000);
+    await fs.utimes(p, past, past);
   };
   /** 把 mtime 往前拨，模拟「文件已经写完一会儿了」 */
   const age = async (id, rel = 'index.js') => {
@@ -1320,10 +1329,188 @@ async function testPluginCompat() {
   const pm4 = makePm();
   check('兼容: 没声明版本要求的插件不受影响', (await pm4.load('plain')) === true);
 
+  /**
+   * 加载失败必须留下堆栈。
+   * 只记 e.message 的话，「Cannot read properties of undefined」这种错误
+   * 完全看不出是哪一行，作者只能靠猜。
+   */
+  await mk(
+    'boom',
+    `export default { id:'boom', name:'会炸',
+       setup(){ const x = null; return x.foo(); } };`,
+  );
+  const pm5 = makePm();
+  const okBoom = await pm5.load('boom');
+  const boomMsg = pm5.errors.get('boom') ?? '';
+  const boomStack = pm5.errorStacks.get('boom') ?? '';
+  check('错误: 加载失败被记录', okBoom === false && !!boomMsg);
+  check('错误: 留下完整堆栈', /boom/.test(boomStack) && /\n\s+at /.test(boomStack), boomStack.slice(0, 60));
+
+  // 面板拿到的是 list() 的结果，堆栈得能传出去
+  await pm5.rescan().catch(() => {});
+  const row = pm5.list().find((p) => p.id === 'boom');
+  check(
+    '错误: 面板列表里带得出去',
+    (row?.errorStack ?? '').length > 0,
+    `found=${!!row} len=${(row?.errorStack ?? '').length}`,
+  );
+
+  /**
+   * ctx.state 要跨热重载保留。
+   * 模块顶层变量在重载时必然重建（ESM 行为），框架得给个能留住东西的地方，
+   * 否则作者第一反应是「框架把我数据吃了」。
+   */
+  await mk(
+    'keeper',
+    `export default { id:'keeper', setup(ctx){ ctx.state.n = (ctx.state.n || 0) + 1; } };`,
+  );
+  const pm6 = makePm();
+  await pm6.load('keeper');
+  const stateObj = pm6.stateStore.get('keeper');
+  const after1 = stateObj?.n;
+  await pm6.reload('keeper');
+  const after2 = pm6.stateStore.get('keeper')?.n;
+  check(
+    '状态: ctx.state 跨重载保留',
+    after1 === 1 && after2 === 2 && pm6.stateStore.get('keeper') === stateObj,
+    `${after1} → ${after2}`,
+  );
+
+  /**
+   * 内建插件带 package.json 时也要能正常加载。
+   * 这里不测「真装依赖」（要联网、要几十秒），只测这条路径不会把加载搞挂：
+   * 没依赖的 package.json 应该被识别成「无需安装」，然后照常加载。
+   */
+  await mk(
+    'withpkg',
+    `export default { id:'withpkg', setup(ctx){ ctx.command('w','w', async()=>'w'); } };`,
+  );
+  await fs.writeFile(
+    path.join(root, 'withpkg', 'package.json'),
+    JSON.stringify({ name: 'withpkg', private: true }),
+  );
+  const pm7 = makePm();
+  const okPkg = await pm7.load('withpkg');
+  check('依赖: 内建插件带 package.json 也能加载', okPkg === true, pm7.errors.get('withpkg') ?? '');
+
   await fs.rm(root, { recursive: true, force: true }).catch(() => {});
 }
 
 await testPluginCompat();
+
+/* ---------- 配置校验规则 ---------- */
+
+async function testConfigRules() {
+  const { validateConfig, schemaOf } = await import('../src/plugin/config.js');
+
+  const schema = schemaOf({
+    name: { default: '', type: 'string', required: true, desc: '名字' },
+    count: { default: 3, type: 'number', min: 1, max: 10 },
+    token: { default: '', type: 'string', pattern: '^[a-z]+$' },
+    plain: '随便',
+  });
+
+  check('校验: 必填项为空时报错', /必填/.test(validateConfig({ name: '' }, schema) ?? ''));
+  check('校验: 必填项有值就过', validateConfig({ name: 'x' }, schema) === null);
+  check('校验: 小于最小值报错', /不能小于 1/.test(validateConfig({ name: 'x', count: 0 }, schema) ?? ''));
+  check('校验: 大于最大值报错', /不能大于 10/.test(validateConfig({ name: 'x', count: 99 }, schema) ?? ''));
+  check('校验: 范围内通过', validateConfig({ name: 'x', count: 5 }, schema) === null);
+  check('校验: 正则不匹配报错', /格式不对/.test(validateConfig({ name: 'x', token: 'ABC' }, schema) ?? ''));
+  check('校验: 正则匹配通过', validateConfig({ name: 'x', token: 'abc' }, schema) === null);
+  check('校验: 没声明规则的项一律放过', validateConfig({ name: 'x', plain: {} }, schema) === null);
+
+  // schema 要把规则透给面板，否则前端没法提前拦
+  check('校验: schema 带出 required/min/max/pattern', 
+    schema.name.required === true && schema.count.min === 1 && schema.count.max === 10 && Boolean(schema.token.pattern));
+}
+
+await testConfigRules();
+
+/* ---------- 插件测试夹具 ---------- */
+
+async function testTestkit() {
+  const { makeCtx, makeMsg, runCommand } = await import('../src/plugin/testkit.js');
+
+  const fake = {
+    id: 'fake',
+    setup(ctx) {
+      ctx.command('echo [内容]', { desc: '复读' }, async (msg) => {
+        await msg.reply(`收到：${msg.args.join(' ')}`);
+      });
+      ctx.command('save', { desc: '存一下' }, async (msg) => {
+        await ctx.storage.set('k', 'v');
+        await msg.reply(await ctx.storage.get('k'));
+      });
+    },
+  };
+
+  const r1 = await runCommand(fake, 'echo', { content: '/echo 你好 世界' });
+  check('夹具: 命令能跑并拿到回复', r1.replies[0] === '收到：你好 世界', r1.replies[0]);
+  check('夹具: 标记了 handled', r1.handled === true);
+
+  const r2 = await runCommand(fake, 'save', { content: '/save' });
+  check('夹具: storage 可用', r2.replies[0] === 'v');
+
+  const ctx = makeCtx();
+  await fake.setup(ctx);
+  const m = makeMsg({ content: '随便说说' });
+  check('夹具: 非命令的 args 是整句切分', m.isCommand === false && m.args.join() === '随便说说');
+
+  let missing = '';
+  try {
+    await runCommand(fake, 'nope', { content: '/nope' });
+  } catch (e) {
+    missing = e.message;
+  }
+  check('夹具: 命令不存在时报清楚', /没有注册命令/.test(missing) && /echo/.test(missing), missing.slice(0, 40));
+}
+
+await testTestkit();
+
+/* ---------- 体检 ---------- */
+
+async function testDoctor() {
+  const { runDoctor, summarize } = await import('../src/doctor.js');
+
+  const items = await runDoctor({
+    cfg: { appId: '123', appSecret: 'abc', intents: 1 << 25 },
+    globalCfg: { webui: { host: '127.0.0.1', port: 15207, accessKey: '' } },
+    rt: null,
+    mock: true,
+  });
+
+  const ids = items.map((x) => x.id);
+  check('体检: 能跑出结果', items.length >= 4, `${items.length} 项`);
+  check('体检: 检查了凭证', ids.includes('credential'));
+  check('体检: 检查了 intents', ids.includes('intent-group'));
+  check('体检: 检查了插件目录', ids.includes('plugins-dir'));
+  check('体检: 每项都有标题和说明', items.every((x) => x.title && x.detail));
+
+  // 群聊 intent 没开时必须报错——这是「收不到群消息」最常见的原因
+  const noIntent = await runDoctor({
+    cfg: { appId: '1', appSecret: '2', intents: 0 },
+    globalCfg: {},
+    rt: null,
+    mock: true,
+  });
+  const g = noIntent.find((x) => x.id === 'intent-group');
+  check('体检: 没订阅群聊事件会报 error', g?.level === 'error' && /群消息/.test(g.detail));
+
+  // 面板暴露到公网又没密钥，必须拦
+  const open = await runDoctor({
+    cfg: { appId: '1', appSecret: '2', intents: 1 << 25 },
+    globalCfg: { webui: { host: '0.0.0.0', port: 15207, accessKey: '' } },
+    rt: null,
+    mock: true,
+  });
+  check('体检: 公网无密钥报 error', open.find((x) => x.id === 'webui')?.level === 'error');
+
+  check('体检: 摘要能压成一句话', summarize(items).length > 0, summarize(items));
+}
+
+await testDoctor();
+
+/* ---------- 模块可导入性（防止改了导出忘了改引用） ---------- */
 
 /* ---------- 统计库（SQLite） ---------- */
 

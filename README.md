@@ -8,9 +8,9 @@
 
 <img src="https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white" alt="Node.js 22+">
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
-<img src="https://img.shields.io/badge/tests-362%20passed-brightgreen" alt="测试 362 项">
+<img src="https://img.shields.io/badge/tests-412%20passed-brightgreen" alt="测试 412 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
-<img src="https://img.shields.io/badge/version-0.5.9-blueviolet" alt="版本 0.5.9">
+<img src="https://img.shields.io/badge/version-0.6.0-blueviolet" alt="版本 0.6.0">
 <img src="https://img.shields.io/badge/license-Non--Commercial-red" alt="禁止商用">
 
 [快速开始](#3-分钟跑起来) ｜ [写插件](docs/插件开发规范.md) ｜ [外部插件协议](docs/插件协议.md) ｜ [配置参考](docs/配置参考.md) ｜ [常见问题](docs/常见问题.md) ｜ [贡献](CONTRIBUTING.md)
@@ -95,6 +95,8 @@
 - **独立配置、独立日志、独立存档**，卸载自动清理定时器和中间件
 - **依赖自动隔离**：第三方包装进插件目录的 `.venv`，不污染系统
 - **面板可改数据**：插件在「设置」页自动获得配置表单和存档编辑，**不需要写前端代码**
+- **有脚手架和测试命令**：`npm run create` 生成骨架，`npm run test:plugin` 直接跑命令看回复，
+  不连 QQ 不开面板；外部插件还有单文件 SDK（Python / Node）
 - **存盘即生效**：改完插件代码 2 秒内自动热重载，不用重启也不用点重载；新增/删除插件目录同样自动识别
 - **插件能加自己的面板页**：`ctx.registerPage()` 注册一段 HTML，标签栏就多一页，样式和面板互不影响
 - **元数据能表达兼容性**：`frameworkVersion` 声明需要的框架版本，不满足时**在加载前拦住**并说清原因，而不是跑起来才报「xxx 不是函数」
@@ -120,7 +122,11 @@
 
 **可视化面板**
 
-- 8 个页签：概览 / 统计 / 配置 / 插件 / 事件 / 群组 / 权限 / 日志（插件还能自己加页）
+- **分组导航**：一级只留 4 个入口（概览 / 数据 / 设置 / 插件），
+  统计、事件、日志收进「数据」，配置、群组、权限收进「设置」，
+  **插件自己注册的页面也挂在「插件」下**——插件装多了不会把顶栏挤爆
+- **体检**：打开面板先跑一遍，凭证 / 连接 / intents / 目录权限 / 下载源 / 面板暴露面
+  一次查完，出问题直接摆在最上面并告诉你该去哪儿改
 - 实时日志流（SSE），按级别和来源着色
 - 一个面板管多个机器人，顶栏随时切换
 - 插件卡片直接显示它自己上报的运行数据（已回复条数、在线人数…）
@@ -433,13 +439,25 @@ openid 完全不同。共享 `roles.json` 等于所有权限记录全部对不�
 ## 开发
 
 ```bash
-npm test              # 框架自检 159 项
-npm run test:e2e      # 端到端 95 项（起服务打全部接口）
+npm test              # 框架自检 267 项
+npm run test:e2e      # 端到端 145 项（起服务打全部接口）
 npm run test:all      # 两个都跑
 node src/main.js --mock          # 不连 QQ，命令行发假消息调插件
 node src/main.js --mock --serve  # 只开面板，调界面
 node src/main.js --check         # 只验证凭证和网关
 ```
+
+写插件时最常用的两条：
+
+```bash
+npm run create -- my-plugin "我的插件"      # 生成骨架（含命令、菜单、配置示例）
+npm run test:plugin -- my-plugin hello      # 直接跑，看它回了什么
+npm run test:plugin -- my-plugin --list     # 列出这个插件注册了哪些命令
+```
+
+`test:plugin` 不需要连 QQ、不需要凭证、不开面板：它用 `src/plugin/testkit.js`
+造一个假 ctx 和假 msg，把命令跑一遍看回复。想写断言就在自己的测试里
+`import { runCommand } from './src/plugin/testkit.js'`。
 
 mock 模式下：直接输入文本 = 模拟一条群 @ 消息；`!as <openid>` 切换发送者；
 `!addbot <群openid> <邀请人openid>` 模拟入群。
