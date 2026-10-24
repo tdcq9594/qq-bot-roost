@@ -6,6 +6,46 @@ import { PROTOCOL_VERSION, DEFAULTS, serializeMessage, parseLine } from './proto
 import { scopeOf, LEVEL, NO_PERM } from '../roles.js';
 
 /**
+ * 传给插件子进程的环境变量白名单。
+ *
+ * 只放行「跑起来必需」的那些：PATH 之类决定能不能找到解释器，
+ * 语言运行时的 home / 编码。密钥、面板访问口令、webhook 配置一概不给。
+ */
+const ENV_ALLOW = [
+  'PATH',
+  'Path',
+  'PATHEXT',
+  'SystemRoot',
+  'SystemDrive',
+  'windir',
+  'COMSPEC',
+  'TEMP',
+  'TMP',
+  'TMPDIR',
+  'HOME',
+  'USERPROFILE',
+  'APPDATA',
+  'LOCALAPPDATA',
+  'LANG',
+  'LC_ALL',
+  'PYTHONPATH',
+  'PYTHONHOME',
+  'VIRTUAL_ENV',
+  'GOPATH',
+  'GOROOT',
+  'GOCACHE',
+  'NODE_PATH',
+];
+
+function inheritedEnv() {
+  const out = {};
+  for (const k of ENV_ALLOW) {
+    if (process.env[k] !== undefined) out[k] = process.env[k];
+  }
+  return out;
+}
+
+/**
  * 外部插件宿主：把一个任意语言写的子进程，包装成和内置插件一样的命令源。
  *
  * 并发模型
@@ -77,7 +117,19 @@ export class SubprocessPlugin {
       cwd: this.dir,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
-      env: { ...process.env, ...(this.manifest.env ?? {}), PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8' },
+      /**
+       * 只传必需的环境变量。
+       *
+       * 以前是 `{...process.env}`：`QQ_BOT_SECRET`、`ROOST_WEBUI_KEY`、
+       * `ROOST_WEBHOOK_*` 全部漏给插件，任何从市场装的第三方插件
+       * 都能直接拿到 AppSecret——而文档还写着「彻底隔离」。
+       */
+      env: {
+        ...inheritedEnv(),
+        ...(this.manifest.env ?? {}),
+        PYTHONUNBUFFERED: '1',
+        PYTHONIOENCODING: 'utf-8',
+      },
     });
     this.child = child;
 

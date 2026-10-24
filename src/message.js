@@ -183,7 +183,20 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
     if (cur) chunks.push(cur);
 
     let last = null;
-    for (const c of chunks) last = await send({ content: c, ...opts }, true);
+    for (const c of chunks) {
+      /**
+       * 单条发失败不能把整轮处理带崩。
+       *
+       * 调用方（bot.js 的 finally）是 `await msg.flushReplies()`，这里一抛就变成
+       * 未捕获 rejection；掉线瞬间、被动窗口过期、主动额度用尽都会走到这条路。
+       * 结果是**一个群的一条消息发不出去，所有机器人一起退出**。
+       */
+      try {
+        last = await send({ content: c, ...opts }, true);
+      } catch (e) {
+        log.warn(`回复发送失败（${chunks.length > 1 ? '分段 ' : ''}已跳过）：${e.message}`);
+      }
+    }
     return last;
   };
 

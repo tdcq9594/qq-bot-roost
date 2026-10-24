@@ -63,6 +63,20 @@ export const PATHS = {
 };
 
 /**
+ * 断言 target 在 root 里面。
+ *
+ * id 会被拼进路径，而删除机器人是 `fs.rm(..., {recursive:true})`——
+ * 一旦 id 是 `..` 或 `../..`，删掉的就是 config/ 甚至项目根。
+ * 所有由 id 拼出来的路径都必须过这一关。
+ */
+function assertInside(root, target, what) {
+  const rel = path.relative(root, target);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new Error(`${what} 越界（id 里可能有 .. 或分隔符）：${target}`);
+  }
+}
+
+/**
  * 取某个机器人的全套路径。
  * 所有 Store / Manager 都从这里拿路径，不再自己拼，这样多机器人才能互不干扰。
  *
@@ -72,6 +86,12 @@ export function botPaths(id) {
   if (!id || typeof id !== 'string') throw new Error('botPaths 需要一个机器人 id');
   const base = path.join(DIRS.botsData, id);
   const logs = path.join(DIRS.botsLogs, id);
+
+  // 拼完先验一遍再返回，调用方拿到的路径一定是安全的
+  assertInside(DIRS.botsData, base, '机器人数据目录');
+  assertInside(DIRS.botsLogs, logs, '机器人日志目录');
+  assertInside(DIRS.botsConfig, path.join(DIRS.botsConfig, `${id}.json`), '机器人配置文件');
+
   return {
     id,
     /** 机器人主配置 */

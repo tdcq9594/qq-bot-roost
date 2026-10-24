@@ -803,6 +803,20 @@ async function main() {
   setLevel(globalCfg.logLevel);
   runtime.startedAt = Date.now();
 
+  /**
+   * 兜底：任何漏网的异步异常都不要让进程直接死。
+   *
+   * Node 22+ 对未捕获的 rejection 默认终止进程——一个畸形请求、一条发不出去的
+   * 消息，就会把面板和**所有**机器人一起带走。这里记日志后继续跑；
+   * 真正的清理交给 SIGINT/SIGTERM 那条路。
+   */
+  process.on('unhandledRejection', (e) => {
+    log.error(`未捕获的异步异常（已忽略，进程继续）：${e?.stack || e?.message || e}`);
+  });
+  process.on('uncaughtException', (e) => {
+    log.error(`未捕获的异常（已忽略，进程继续）：${e?.stack || e?.message || e}`);
+  });
+
   if (globalCfg.logs?.enabled !== false) {
     await attachLogFile('core', PATHS.coreLog, { maxBytes: globalCfg.logs?.maxBytes });
   }
@@ -832,6 +846,8 @@ async function main() {
       host: globalCfg.webhook.host,
       port: globalCfg.webhook.port,
       path: globalCfg.webhook.path,
+      // 默认验签；只在排查「验签总是失败」时可以显式关掉
+      verifySignature: globalCfg.webhook.verifySignature !== false,
     });
     try {
       const port = await webhookServer.start();
@@ -996,6 +1012,13 @@ async function main() {
         cfg,
         globalCfg,
         mock: MOCK,
+        /**
+         * webhook 服务必须传进来。
+         * 以前这里漏了：全局开着 webhook 时，面板新建的 webhook 机器人
+         * 会直接报「配置选了 webhook 模式，但 Webhook 服务没启动」——
+         * 而服务其实好端端跑着，必须重启进程才能恢复。
+         */
+        webhook: webhookServer,
         registerCore: (r) => registerCoreCommands(r),
         makeMockApi: (r) => createMockApi(r.name),
       });

@@ -27,6 +27,12 @@ const CLOSE_HINTS = {
 };
 
 /**
+ * 这些关闭码重连多少次都没用——是配置/资质问题，得人去改。
+ * 撞上就停，并把失败传出去，别让启动流程永远卡住。
+ */
+const FATAL_CLOSE_CODES = new Set(Object.keys(CLOSE_HINTS).map(Number));
+
+/**
  * WebSocket 网关客户端。
  *
  * 流程（对应官方文档 api-v2 / 事件订阅）：
@@ -59,13 +65,26 @@ export class Gateway {
     this.retryScheduledFor = null;
 
     this.readyResolve = null;
-    this.readyPromise = new Promise((r) => {
-      this.readyResolve = r;
+    this.readyReject = null;
+    /**
+     * 撞上「永久性错误」后就别再重连了。
+     *
+     * 以前对所有 close 码一视同仁：AppSecret 写错（4004）、intents 没权限（4014）
+     * 会每 30 秒重连一次，日志刷屏，而 readyPromise 永远不 resolve 也不 reject，
+     * 启动流程就卡在 `await gateway.start()` 上——面板和定时任务全都不执行。
+     */
+    this.fatal = false;
+    this.readyPromise = new Promise((resolve, reject) => {
+      this.readyResolve = resolve;
+      this.readyReject = reject;
     });
+    // 没人 await 时也别变成 unhandledRejection
+    this.readyPromise.catch(() => {});
   }
 
   async start() {
     this.stopped = false;
+    this.fatal = false;
     await this.#connect();
     return this.readyPromise;
   }
@@ -115,6 +134,8 @@ export class Gateway {
       this.ws?.close(1000, 'client shutdown');
     } catch {}
     this.ws = null;
+    // 还有地方在 await start() 的话，让它能返回，别把关机流程卡死
+    this.readyResolve?.(this);
   }
 
   #clearTimers() {
@@ -218,6 +239,15 @@ export class Gateway {
       const hint = CLOSE_HINTS[ev.code];
       log.warn(`WebSocket 关闭 code=${ev.code} reason=${ev.reason || '-'}`);
       if (hint) log.error(`原因: ${hint}`);
+
+      if (FATAL_CLOSE_CODES.has(ev.code)) {
+        this.fatal = true;
+        const msg = `连接被平台拒绝（code=${ev.code}）${hint ? `：${hint}` : ''}`;
+        log.error(`${msg}。这类错误重连没用，已停止重连，请按上面的提示改配置`);
+        this.readyReject?.(new Error(msg));
+        return;
+      }
+
       this.#scheduleReconnect();
     });
   }
@@ -303,7 +333,12 @@ export class Gateway {
           this.readyResolve?.(this);
         } else {
           try {
-            this.onDispatch?.(t, p.d, p);
+            // onDispatch 是 async 的，try/catch 只能接住同步抛错；
+            // 返回的 Promise 必须自己挂 catch，否则 rejection 没人管 → 进程退出
+            const r = this.onDispatch?.(t, p.d, p);
+            if (r && typeof r.catch === 'function') {
+              r.catch((e) => log.error(`事件 ${t} 处理异常:`, e?.stack || e?.message || e));
+            }
           } catch (e) {
             log.error(`事件 ${t} 处理异常:`, e.stack || e.message);
           }
@@ -363,6 +398,8 @@ export class Gateway {
 
   #scheduleReconnect() {
     if (this.stopped) return;
+    // 撞过永久性错误就别再试了，重连只会刷日志
+    if (this.fatal) return;
     // 已经有重连排队了就不再叠加，否则 error + close 会各排一个
     if (this.reconnectTimer) {
       log.debug('已有重连排队，跳过');

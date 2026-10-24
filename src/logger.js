@@ -97,22 +97,38 @@ async function closeSink(key) {
   await new Promise((resolve) => s.stream.end(resolve));
 }
 
-/** 轮转：当前文件改名成 .1，重新开一个空的 */
+/**
+ * 轮转：当前文件改名成 .1，重新开一个空的。
+ *
+ * 必须等 stream 真正关闭再 rename：Windows 上文件还被句柄占着时
+ * rename 会 EBUSY，而这里原来是 `s.stream.end()` 后立刻 rename，
+ * 失败还被 `.catch(()=>{})` 吞掉——日志文件于是无限增长。
+ * 另外加了个 in-flight 集合：轮转期间再触发一次会拿到已经关掉的 stream。
+ */
+const rotating = new Set();
+
 async function rotate(key) {
   const s = sinks.get(key);
   if (!s) return;
-  const backup = `${s.file}.1`;
-  s.stream.end();
-  await fsp.rename(s.file, backup).catch(() => {});
-  const stream = fs.createWriteStream(s.file, { flags: 'a' });
-  stream.on('error', () => {});
-  sinks.set(key, { ...s, stream, bytes: 0 });
+  if (rotating.has(key)) return;
+  rotating.add(key);
+  try {
+    await new Promise((resolve) => s.stream.end(resolve));
+    await fsp.rename(s.file, `${s.file}.1`).catch(() => {});
+    const stream = fs.createWriteStream(s.file, { flags: 'a' });
+    stream.on('error', () => {});
+    sinks.set(key, { ...s, stream, bytes: 0 });
+  } finally {
+    rotating.delete(key);
+  }
 }
 
 function writeFile(key, level, line) {
   const s = sinks.get(key);
   if (!s) return;
   if (LEVELS[level] < s.minLevel) return;
+  // 正在换文件，这一行丢掉比写到半关闭的流上安全
+  if (rotating.has(key)) return;
   try {
     s.stream.write(line + '\n');
     s.bytes += Buffer.byteLength(line, 'utf8') + 1;

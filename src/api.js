@@ -1,6 +1,9 @@
 import fs from 'node:fs/promises';
 import { createLogger } from './logger.js';
 import { runtime } from './runtime.js';
+/** 路径里的 id 一律编码：openid / 群号是外部数据，含 / 会拼出别的路径 */
+const enc = (v) => encodeURIComponent(String(v ?? ''));
+
 
 const log = createLogger('api');
 
@@ -62,9 +65,26 @@ export class QQApi {
     }
 
     if (res.status === 401 && !retried) {
-      log.warn('接口返回 401，刷新访问凭证后重试');
-      await this.tokens.refresh();
-      return this.#request(method, path, body, { retried: true, headers });
+      /**
+       * 只对 GET 自动重试。
+       * POST 发消息重试一次就是群里两条一样的消息，宁可直接报错让上层决定。
+       */
+      const stale = this.tokens.token;
+      log.warn('接口返回 401，刷新访问凭证');
+      await this.tokens.refresh(stale);
+      if (method === 'GET') return this.#request(method, path, body, { retried: true, headers });
+      throw new Error(`HTTP 401 ${method} ${path}: 凭证已刷新，但写请求不自动重试（避免重复发送）`);
+    }
+
+    if (res.status === 429) {
+      runtime.bump('errors');
+      const wait = Number(res.headers.get('retry-after')) || 0;
+      const err = new Error(
+        `被平台限流（429）${wait ? `，官方建议 ${wait} 秒后再试` : ''}。主动消息有每日额度，被动回复不受限`,
+      );
+      err.status = 429;
+      err.retryAfter = wait;
+      throw err;
     }
 
     const text = await res.text();
@@ -105,13 +125,13 @@ export class QQApi {
    * @param {object} opts content / msgType / msgId / markdown / keyboard / media / ark
    */
   async sendGroup(groupOpenid, opts = {}) {
-    const r = await this.#request('POST', `/v2/groups/${groupOpenid}/messages`, this.#payload(opts));
+    const r = await this.#request('POST', `/v2/groups/${enc(groupOpenid)}/messages`, this.#payload(opts));
     runtime.bump('sent');
     return r;
   }
 
   async sendC2C(openid, opts = {}) {
-    const r = await this.#request('POST', `/v2/users/${openid}/messages`, this.#payload(opts));
+    const r = await this.#request('POST', `/v2/users/${enc(openid)}/messages`, this.#payload(opts));
     runtime.bump('sent');
     return r;
   }
@@ -127,7 +147,7 @@ export class QQApi {
    */
   async uploadMedia(scene, target, { fileType = FILE_TYPE.IMAGE, url, fileData, reuse = true } = {}) {
     // 只有按 url 传的才缓存：base64 数据做键得先算哈希，不值当
-    const cacheKey = reuse && url ? `${scene}:${target}:${fileType}:${url}` : null;
+    const cacheKey = reuse && url ? `${scene}:${enc(target)}:${fileType}:${url}` : null;
     if (cacheKey) {
       const hit = this.mediaCache.get(cacheKey);
       if (hit && Date.now() - hit.at < MEDIA_TTL) {
@@ -138,7 +158,7 @@ export class QQApi {
     }
 
     const path =
-      scene === 'group' ? `/v2/groups/${target}/files` : `/v2/users/${target}/files`;
+      scene === 'group' ? `/v2/groups/${enc(target)}/files` : `/v2/users/${enc(target)}/files`;
     const body = { file_type: fileType, srv_send_msg: false };
     if (url) body.url = url;
     if (fileData) body.file_data = fileData;
@@ -186,7 +206,7 @@ export class QQApi {
    *   - 群成员的消息 ID 取群消息事件的 d.id；自己发的取发送接口响应
    */
   retractGroupMessage(groupOpenid, messageId) {
-    return this.#request('DELETE', `/v2/groups/${groupOpenid}/messages/${messageId}`);
+    return this.#request('DELETE', `/v2/groups/${enc(groupOpenid)}/messages/${enc(messageId)}`);
   }
 
   /**
@@ -194,7 +214,7 @@ export class QQApi {
    * DELETE /v2/users/{openid}/messages/{message_id}
    */
   retractC2CMessage(openid, messageId) {
-    return this.#request('DELETE', `/v2/users/${openid}/messages/${messageId}`);
+    return this.#request('DELETE', `/v2/users/${enc(openid)}/messages/${enc(messageId)}`);
   }
 
   /* ---------------- 互动 ---------------- */
@@ -272,7 +292,7 @@ export class QQApi {
    */
   async muteMembers(groupOpenid, members, opts) {
     await this.#precheckAdmin(groupOpenid, opts);
-    return this.#request('POST', `/v2/groups/${groupOpenid}/restrict_chat_setting`, { members });
+    return this.#request('POST', `/v2/groups/${enc(groupOpenid)}/restrict_chat_setting`, { members });
   }
 
   /**
@@ -298,7 +318,7 @@ export class QQApi {
    * GET /v2/groups/{group_openid}/restrict_chat_setting
    */
   getMuteStatus(groupOpenid) {
-    return this.#request('GET', `/v2/groups/${groupOpenid}/restrict_chat_setting`);
+    return this.#request('GET', `/v2/groups/${enc(groupOpenid)}/restrict_chat_setting`);
   }
 
   /**
@@ -306,7 +326,7 @@ export class QQApi {
    * GET /v2/groups/{group_openid}/info
    */
   getGroupInfo(groupOpenid) {
-    return this.#request('GET', `/v2/groups/${groupOpenid}/info`);
+    return this.#request('GET', `/v2/groups/${enc(groupOpenid)}/info`);
   }
 
   /**
@@ -322,7 +342,7 @@ export class QQApi {
    */
   getBotGroupState(groupOpenid) {
     this.#needInvite();
-    return this.#request('GET', `/v2/groups/${groupOpenid}/bot_state`);
+    return this.#request('GET', `/v2/groups/${enc(groupOpenid)}/bot_state`);
   }
 
   /**
@@ -379,7 +399,7 @@ export class QQApi {
     if (limit) q.set('limit', String(limit));
     if (startIndex) q.set('start_index', String(startIndex));
     const suffix = q.toString() ? `?${q}` : '';
-    return this.#request('GET', `/v2/groups/${groupOpenid}/members${suffix}`);
+    return this.#request('GET', `/v2/groups/${enc(groupOpenid)}/members${suffix}`);
   }
 
   /**
@@ -388,7 +408,7 @@ export class QQApi {
    */
   getGroupMember(groupOpenid, memberOpenid) {
     this.#needInvite();
-    return this.#request('GET', `/v2/groups/${groupOpenid}/members/${memberOpenid}`);
+    return this.#request('GET', `/v2/groups/${enc(groupOpenid)}/members/${enc(memberOpenid)}`);
   }
 
   /**
@@ -399,7 +419,7 @@ export class QQApi {
   async removeMembers(groupOpenid, memberOpenids, { addToBlacklist = false, precheck } = {}) {
     this.#needInvite();
     await this.#precheckAdmin(groupOpenid, { precheck });
-    return this.#request('POST', `/v2/groups/${groupOpenid}/batch_remove_members`, {
+    return this.#request('POST', `/v2/groups/${enc(groupOpenid)}/batch_remove_members`, {
       member_openids: memberOpenids,
       is_robot_blacklist: Boolean(addToBlacklist),
     });
@@ -411,7 +431,7 @@ export class QQApi {
    */
   getGroupBlacklist(groupOpenid) {
     this.#needInvite();
-    return this.#request('GET', `/v2/groups/${groupOpenid}/member_blacklist`);
+    return this.#request('GET', `/v2/groups/${enc(groupOpenid)}/member_blacklist`);
   }
 
   /**
@@ -421,7 +441,7 @@ export class QQApi {
    */
   operateGroupBlacklist(groupOpenid, { op, memberOpenids }) {
     this.#needInvite();
-    return this.#request('POST', `/v2/groups/${groupOpenid}/member_blacklist`, {
+    return this.#request('POST', `/v2/groups/${enc(groupOpenid)}/member_blacklist`, {
       op,
       member_openids: memberOpenids,
     });
@@ -441,7 +461,7 @@ export class QQApi {
     if (cursor) q.set('cursor', cursor);
     if (limit) q.set('limit', String(limit));
     const suffix = q.toString() ? `?${q}` : '';
-    return this.#request('GET', `/v2/groups/${groupOpenid}/join_request_list${suffix}`);
+    return this.#request('GET', `/v2/groups/${enc(groupOpenid)}/join_request_list${suffix}`);
   }
 
   /**
@@ -461,7 +481,7 @@ export class QQApi {
     if (body.addToBlacklist) payload.add_to_member_blacklist = true;
     return this.#request(
       'POST',
-      `/v2/groups/${groupOpenid}/approval_join_request/${memberOpenid}`,
+      `/v2/groups/${enc(groupOpenid)}/approval_join_request/${enc(memberOpenid)}`,
       payload,
     );
   }
@@ -600,7 +620,7 @@ export class QQApi {
     if (p.msgId) payload.msg_id = p.msgId;
     if (p.eventId) payload.event_id = p.eventId;
     if (p.isWakeup) payload.is_wakeup = true;
-    return this.#request('POST', `/v2/users/${openid}/stream_messages`, payload);
+    return this.#request('POST', `/v2/users/${enc(openid)}/stream_messages`, payload);
   }
 
   /**

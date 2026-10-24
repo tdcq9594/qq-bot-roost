@@ -1,6 +1,8 @@
 # 运行时配置：含 AppSecret，绝对不能入库
 config/bot.json
 config/bots/
+# 真机联调参数（OneBot 地址 / token / 测试群号），每台机器不同
+config/live-test.json
 # 旧版本的配置位置，迁移后留着也不会入库
 config.json
 

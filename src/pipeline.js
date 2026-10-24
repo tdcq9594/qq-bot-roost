@@ -3,6 +3,9 @@ import { runtime } from './runtime.js';
 
 const log = createLogger('pipeline');
 
+/** 中间件主动拦消息时抛的哨兵，用它区分「拦下」和「崩了」 */
+const HALT = Symbol('roost.halt');
+
 /**
  * 中间件管道（洋葱模型）。
  *
@@ -69,6 +72,21 @@ export class Pipeline {
   async run(ctx) {
     let halted = false;
 
+    /**
+     * 内置中间件都是 `ctx.halt('dedup')` 这样拦消息的，但调用方只传了
+     * `{ msg, cfg, commandEntry }`——ctx 上根本没有 halt。于是拦截分支抛
+     * TypeError，被下面的 catch 当成「中间件自己崩了」吞掉并继续 dispatch，
+     * 结果是**去重/白名单/限流/冷却全部形同不存在**，还每条消息白记一次 error。
+     *
+     * 这里把 halt 注入进去，用哨兵异常把调用栈干净地展开。
+     */
+    const scope = Object.assign(ctx, {
+      halt: () => {
+        halted = true;
+        throw HALT;
+      },
+    });
+
     const dispatch = async (idx) => {
       const item = this.items[idx];
       if (!item) return;
@@ -79,9 +97,11 @@ export class Pipeline {
         await dispatch(idx + 1);
       };
       try {
-        await item.fn(ctx, next);
+        await item.fn(scope, next);
         if (!called) halted = true;
       } catch (e) {
+        // 主动拦截：正常流程，不打日志、不算错误
+        if (e === HALT) return;
         runtime.bump('errors');
         log.error(`中间件 ${item.name} 出错，跳过该中间件继续:`, e.message);
         // 中间件自己崩了不该把消息吞掉，继续往下走

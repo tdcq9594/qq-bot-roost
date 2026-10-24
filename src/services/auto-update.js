@@ -20,8 +20,11 @@ export class AutoUpdateService extends BaseService {
   constructor({ globalCfg }) {
     super('autoUpdate', '检查更新');
     this.cfg = globalCfg?.update ?? {};
-    // 6 小时查一次，GitHub 也不至于被烦
-    this.intervalMs = (this.cfg.intervalHours ?? 6) * 3600_000;
+    // 6 小时查一次，GitHub 也不至于被烦。
+    // 必须钳制：0/负数会让 setInterval 退化成 1ms 轮询，
+    // 超过 596 小时又会溢出 2^31 变成 1ms——两种都会狂打 GitHub。
+    const hours = Number(this.cfg.intervalHours ?? 6);
+    this.intervalMs = Math.min(Math.max(Number.isFinite(hours) && hours > 0 ? hours : 6, 0.25), 168) * 3600_000;
     /** 最近一次检查结果，面板用 */
     this.last = null;
     this.checkedAt = 0;

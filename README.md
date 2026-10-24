@@ -8,7 +8,7 @@
 
 <img src="https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white" alt="Node.js 22+">
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
-<img src="https://img.shields.io/badge/tests-412%20passed-brightgreen" alt="测试 412 项">
+<img src="https://img.shields.io/badge/tests-415%20passed-brightgreen" alt="测试 415 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
 <img src="https://img.shields.io/badge/version-0.6.0-blueviolet" alt="版本 0.6.0">
 <img src="https://img.shields.io/badge/license-Non--Commercial-red" alt="禁止商用">
@@ -428,6 +428,7 @@ openid 完全不同。共享 `roles.json` 等于所有权限记录全部对不�
 | [权限模型](docs/权限模型.md) | 作用域 × 等级、号段分配、授权规则 |
 | [官方接口限制](docs/官方接口限制.md) | 官方限制清单、免@粘性原理、实现要点对照 |
 | [常见问题](docs/常见问题.md) | 收不到消息、发不出去、面板打不开、数据在哪 |
+| [真机联调](docs/真机联调.md) | 用小号（OneBot v11）在真群里跟机器人对话，测 intents / 被动回复 / msg_seq |
 | [对标 ElainaBot](docs/对标ElainaBot.md) | 与主流 Python 框架的逐项对比、差距与取舍 |
 | [事件与接口清单](docs/事件与接口清单.md) | 官方 43 个事件、72 个接口的覆盖审计 |
 | [架构说明](docs/架构说明.md) | 进程模型、数据隔离、事件流、插件加载、面板多机器人实现 |
@@ -439,8 +440,8 @@ openid 完全不同。共享 `roles.json` 等于所有权限记录全部对不�
 ## 开发
 
 ```bash
-npm test              # 框架自检 267 项
-npm run test:e2e      # 端到端 145 项（起服务打全部接口）
+npm test              # 框架自检 268 项
+npm run test:e2e      # 端到端 147 项（起服务打全部接口）
 npm run test:all      # 两个都跑
 node src/main.js --mock          # 不连 QQ，命令行发假消息调插件
 node src/main.js --mock --serve  # 只开面板，调界面
@@ -458,6 +459,19 @@ npm run test:plugin -- my-plugin --list     # 列出这个插件注册了哪些�
 `test:plugin` 不需要连 QQ、不需要凭证、不开面板：它用 `src/plugin/testkit.js`
 造一个假 ctx 和假 msg，把命令跑一遍看回复。想写断言就在自己的测试里
 `import { runCommand } from './src/plugin/testkit.js'`。
+
+**真机联调**：mock 测不出 intents、被动回复 5 分钟窗口、`msg_seq` 这些只有真网关才有的东西。
+用一个 QQ 小号（走 SnowLuma / NapCat 这类 OneBot v11 实现）在真群里 @ 机器人，就能测：
+
+```bash
+npm run live -- --init      # 生成 config/live-test.json（已 gitignore）
+npm run live -- --check     # 探活：小号是谁、群在不在、机器人 uin 是几号
+npm run live                # 四条场景：不@ / @help / 未知命令 / 连发两条
+npm run live -- --chat      # 交互对话：你打字，它当小号发出去
+npm run live -- --cmd help  # 单发一条命令（不带斜杠，脚本补前缀）
+```
+
+详见 [真机联调](docs/真机联调.md)。
 
 mock 模式下：直接输入文本 = 模拟一条群 @ 消息；`!as <openid>` 切换发送者；
 `!addbot <群openid> <邀请人openid>` 模拟入群。
@@ -555,7 +569,7 @@ mock 模式下：直接输入文本 = 模拟一条群 @ 消息；`!as <openid>` 
 
 自愿捐赠可以接受，但**不能**把任何付费行为设成使用前提。
 
-你可以自由使用、修改、分发、商用，保留版权声明即可。
+一句话：**自己用、改了再免费分享都可以；任何形式的收费和商业使用都不行。**
 
 ---
 

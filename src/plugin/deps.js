@@ -198,6 +198,21 @@ export async function ensurePluginDeps({ dir, manifest = {}, log = null, enabled
     } else {
       log?.info(`安装 Python 依赖（${rel(reqFile)}），首次会慢一点…`);
 
+      /**
+       * requirements.txt 里能写 `--index-url`、`-e git+...`、直接写 URL——
+       * 等于让插件作者把 pip 指到任意源、拉任意代码。这里只接受「包名 + 版本约束」。
+       */
+      const badLine = requirements
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .find((l) => l && !l.startsWith('#') && /^(-e|--index-url|--extra-index-url|--find-links|--trusted-host|[a-z]+:\/\/|git\+)/i.test(l));
+      if (badLine) {
+        throw new Error(
+          `requirements.txt 里有不安全的行，已拒绝安装：${badLine}\n` +
+            '只允许「包名 + 版本约束」（如 requests>=2.31），不接受 -e / --index-url / 直接 URL。',
+        );
+      }
+
       if (!venvOk) {
         log?.info('创建隔离环境 .venv');
         const made = await run(result.python, ['-m', 'venv', venvDir], { cwd: dir });
@@ -253,7 +268,13 @@ export async function ensurePluginDeps({ dir, manifest = {}, log = null, enabled
           throw new Error('这个插件需要 npm 安装依赖，但系统里找不到 npm（通常随 Node.js 一起安装）');
         }
         log?.info(`安装 Node 依赖（${deps.length} 个），首次会慢一点…`);
-        const r = await run(rt.npm, ['install', '--omit=dev', '--no-audit', '--no-fund'], { cwd: dir });
+        // --ignore-scripts：依赖的 postinstall 就是任意代码执行入口，
+        // 装依赖不该顺带跑别人的安装脚本
+        const r = await run(
+          rt.npm,
+          ['install', '--omit=dev', '--no-audit', '--no-fund', '--ignore-scripts'],
+          { cwd: dir },
+        );
         if (!r.ok) {
           throw new Error(
             `安装 Node 依赖失败：${r.reason || (r.err || r.out).slice(-600)}\n` +

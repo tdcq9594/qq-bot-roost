@@ -15,7 +15,7 @@
  */
 import http from 'node:http';
 import { createLogger } from './logger.js';
-import { verifyRequest } from './sign.js';
+import { verifyRequest, verifyEventSignature } from './sign.js';
 
 const log = createLogger('webhook');
 
@@ -26,10 +26,17 @@ export class WebhookServer {
   /**
    * @param {{host?:string, port?:number, path?:string}} opts
    */
-  constructor({ host = '0.0.0.0', port = 15208, path = '/webhook' } = {}) {
+  constructor({ host = '0.0.0.0', port = 15208, path = '/webhook', verifySignature = true } = {}) {
     this.host = host;
     this.port = port;
     this.path = path.startsWith('/') ? path : `/${path}`;
+    /**
+     * 是否校验事件的 Ed25519 签名。
+     *
+     * 默认开。关掉只应出现在「验签总是失败、但又急着收消息」的排查场景，
+     * 关掉之后任何知道回调地址 + appId 的人都能伪造事件。
+     */
+    this.verifySignature = verifySignature !== false;
     /** @type {Map<string, {secret:string, onEvent:Function, onError?:Function}>} */
     this.bots = new Map();
     this.server = null;
@@ -177,10 +184,30 @@ export class WebhookServer {
       return this.#json(res, 200, signed);
     }
 
+    /**
+     * 普通事件必须验签。
+     *
+     * 以前只有 op=13 回签、事件分支直接分发：知道回调 URL 和 appId
+     * （日志、面板、证书透明度记录里都能拿到）就能伪造任意事件，
+     * 包括冒充 owner 的 openid 去触发管理命令。
+     */
+    if (this.verifySignature) {
+      const r = verifyEventSignature(
+        bot.secret,
+        req.headers['x-signature-timestamp'],
+        raw,
+        req.headers['x-signature-ed25519'],
+      );
+      if (!r.ok) {
+        this.counters.rejected += 1;
+        log.warn(`[${appId}] 事件验签失败（${r.reason}），已拒绝`);
+        return this.#json(res, 401, { error: 'invalid signature' });
+      }
+    }
+
     this.counters.received += 1;
     const eventName = String(payload?.t ?? '');
     const d = payload?.d ?? {};
-
     // 交互事件（按钮点击）必须回 op=12 ACK，否则客户端一直转圈
     const isInteraction = eventName === 'INTERACTION_CREATE';
 
@@ -192,7 +219,14 @@ export class WebhookServer {
     // 异步分发，不阻塞响应
     queueMicrotask(() => {
       try {
-        bot.onEvent?.(eventName, d, payload);
+        // onEvent 是 async 的，同步 try 接不住它的 rejection，得自己挂 catch
+        const r = bot.onEvent?.(eventName, d, payload);
+        if (r && typeof r.catch === 'function') {
+          r.catch((e) => {
+            log.error(`[${appId}] 事件处理失败 (${eventName}): ${e?.stack || e?.message || e}`);
+            bot.onError?.(e);
+          });
+        }
       } catch (e) {
         log.error(`[${appId}] 事件分发失败 (${eventName}): ${e.message}`);
         bot.onError?.(e);

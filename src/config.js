@@ -3,6 +3,9 @@ import path from 'node:path';
 import readline from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 import { ROOT, DIRS, PATHS, botPaths, ensureDirs, listBotIds, rel } from './paths.js';
+import { createLogger } from './logger.js';
+
+const log = createLogger('config');
 
 // 兼容旧的导入方式
 export { ROOT, PATHS, DIRS };
@@ -256,7 +259,17 @@ async function readJson(file) {
     return JSON.parse(await fs.readFile(file, 'utf8'));
   } catch (e) {
     if (e.code === 'ENOENT') return null;
-    throw new Error(`${rel(file)} 解析失败: ${e.message}`);
+    /**
+     * 解析失败不再直接抛出去让进程退出。
+     * 以前 bot.json 里漏个逗号 → process.exit(1) → 面板起不来，
+     * 用户连「用面板改回来」的机会都没有。现在留一份备份、大声报错，
+     * 然后按「文件不存在」处理，面板照常起来。
+     */
+    const bak = `${file}.corrupt-${Date.now()}`;
+    await fs.rename(file, bak).catch(() => {});
+    log.error(`${rel(file)} 解析失败: ${e.message}`);
+    log.error(`原文件已备份为 ${rel(bak)}，本次按默认值启动，请到面板重新填写`);
+    return null;
   }
 }
 
@@ -320,17 +333,20 @@ export async function loadGlobalConfig() {
 }
 
 export async function saveGlobalConfig(cfg) {
-  await writeJson(PATHS.globalConfig, {
-    logLevel: cfg.logLevel,
-    cooldownHint: cfg.cooldownHint,
-    webui: cfg.webui,
-    logs: cfg.logs,
-    // 白名单漏了这两项会把用户配好的 webhook / 下载源从文件里抹掉：
-    // 面板保存任意全局设置都会走到这里，重启后配置就悄悄回默认了。
-    webhook: cfg.webhook,
-    network: cfg.network,
-    plugins: cfg.plugins,
-  });
+  /**
+   * 用排除法，不再用白名单。
+   *
+   * 白名单已经漏过两次（webhook / network），这次又漏了
+   * services / cleanup / restart / update——面板保存一次日志级别，
+   * 就会把用户配好的「每天 04:00 重启」从文件里抹掉，重启后静默失效。
+   * 除下划线开头的内部字段外，一律原样写回。
+   */
+  const out = {};
+  for (const [k, v] of Object.entries(cfg ?? {})) {
+    if (k.startsWith('_')) continue;
+    out[k] = v;
+  }
+  await writeJson(PATHS.globalConfig, out);
 }
 
 /* ------------------------------------------------------------------ */

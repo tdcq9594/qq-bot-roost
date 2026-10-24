@@ -162,9 +162,15 @@ export class StatsStore {
       }
       return rows.length;
     } catch (e) {
-      if (!this.warned) {
-        this.warned = true;
-        log.warn(`统计写入失败（后续不再重复提醒）: ${e.message}`);
+      /**
+       * 失败就把这批放回缓冲，下一轮再试。
+       * 以前是先把 buf 清空再进 try：一次写失败直接丢一批（最多 200 条），
+       * 而且只 warn 一次，统计就这么静默少了一块。
+       */
+      this.buf = rows.concat(this.buf);
+      this.failedFlushes = (this.failedFlushes ?? 0) + 1;
+      if (this.failedFlushes <= 3) {
+        log.warn(`统计写入失败（第 ${this.failedFlushes} 次，数据已放回缓冲）: ${e.message}`);
       }
       return 0;
     }

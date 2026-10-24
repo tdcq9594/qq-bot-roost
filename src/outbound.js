@@ -83,6 +83,18 @@ class QuotaLedger {
     return d[day][chatKey];
   }
 
+  /**
+   * 退还额度。发送失败时用——「先扣后发」不退还的话，一次网络抖动就白扣一条。
+   */
+  async refund(chatKey, n = 1) {
+    const d = await this.#load();
+    const day = dateKey();
+    if (!d[day]?.[chatKey]) return 0;
+    d[day][chatKey] = Math.max(0, d[day][chatKey] - n);
+    this.#scheduleSave();
+    return d[day][chatKey];
+  }
+
   async snapshot() {
     const d = await this.#load();
     return { ...(d[dateKey()] ?? {}) };
@@ -223,6 +235,8 @@ export class Outbound {
         if (r?.pending) this.stats.audit += 1;
         return { ...r, degraded };
       } catch (e) {
+        // 主动消息是「先扣后发」，发失败要把额度退回去
+        if (active) await this.quota.refund(chatKey).catch(() => {});
         // 被动回复被服务端判定过期（本地时钟差或排队等太久），再降级试一次
         const canRetry =
           wantPassive && !active && this.downgrade && this.#looksExpired(e);
@@ -333,6 +347,29 @@ export class Outbound {
 
   async flush() {
     await this.quota.flush();
+
+    /**
+     * 等排队中的发送发完再退出。
+     *
+     * 以前只刷额度账本、完全不看 `this.queues`：重启/更新/关机时，
+     * 用户看到命令执行了，回复却永远没发出去，额度还照扣。
+     * 最多等 5 秒，超时就明确说丢了几条。
+     */
+    const chains = [...this.queues.values()].map((q) => q.chain);
+    if (chains.length) {
+      let timedOut = false;
+      const timeout = new Promise((resolve) => {
+        const t = setTimeout(() => {
+          timedOut = true;
+          resolve();
+        }, 5000);
+        t.unref?.();
+      });
+      await Promise.race([Promise.allSettled(chains), timeout]);
+      if (timedOut) {
+        log.warn(`退出前还有 ${this.queues.size} 个会话的发送任务没排完，已放弃等待`);
+      }
+    }
   }
 }
 

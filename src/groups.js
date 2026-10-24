@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createLogger } from './logger.js';
+import { writeJsonAtomic, readJsonSafe } from './fsutil.js';
 
 const log = createLogger('groups');
 
@@ -33,11 +34,8 @@ export class GroupStore {
 
   async #load() {
     if (this.data) return this.data;
-    try {
-      this.data = JSON.parse(await fs.readFile(this.file, 'utf8'));
-    } catch {
-      this.data = {};
-    }
+    // 解析失败先留档，别让随后的写回把原文件覆盖成空表
+    this.data = (await readJsonSafe(this.file, (m) => log.error(m))) ?? {};
     return this.data;
   }
 
@@ -55,8 +53,11 @@ export class GroupStore {
     }
     if (!this.dirty) return;
     this.dirty = false;
-    await fs.mkdir(path.dirname(this.file), { recursive: true });
-    await fs.writeFile(this.file, JSON.stringify(this.data, null, 2), 'utf8');
+    // 原子写：群档案每条消息都会触发，写窗口非常频繁，半截文件概率不低
+    await writeJsonAtomic(this.file, this.data).catch((e) => {
+      log.error(`群档案写盘失败：${e.message}`);
+      this.dirty = true;
+    });
   }
 
   async all() {

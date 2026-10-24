@@ -402,7 +402,13 @@ const RUN = Date.now().toString(36);
   check('新 AppID 可以登记实例', r1.ok === true);
 
   const r2 = await claimInstance({ appId: A });
-  check('同一个进程重复登记不算冲突', r2.ok === true);
+  /**
+   * 同进程重复登记**必须**算冲突。
+   * 以前这条断言的是「不算冲突」——那正是 4902 互踢的来源：
+   * 两份配置填了同一个 AppID，两边都认领成功，各自连网关。
+   */
+  check('同进程重复登记同一 AppID 算冲突', r2.ok === false);
+  check('同进程冲突能拿到自己的 pid', r2.conflict?.pid === process.pid);
 
   // 起个真进程冒充「另一个正在跑的实例」
   const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{},10000)'], { stdio: 'ignore' });

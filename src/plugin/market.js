@@ -30,8 +30,32 @@ export const DEFAULT_INDEX_URL =
  *
  * 有缓存这一层很关键——不然网络一抖，用户连"我装过哪些插件"都看不到。
  */
+/**
+ * 市场地址必须是 https（本机调试除外）。
+ *
+ * 面板的 `?source=` 参数直接交给服务端 fetch，以前不限制 scheme 和 host：
+ * `?source=http://127.0.0.1:9/x` 就能让服务端去打内网，
+ * 云环境的 169.254.169.254 元数据接口同理。这里统一挡在入口。
+ */
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
+
+function assertSafeIndexUrl(raw) {
+  let u;
+  try {
+    u = new URL(String(raw));
+  } catch {
+    throw new Error(`插件市场地址不是合法 URL：${raw}`);
+  }
+  const host = u.hostname.replace(/^\[|\]$/g, '');
+  if (u.protocol === 'https:') return u;
+  // 只给本机开 http 的口子：本地调试、自建测试服务都用得上
+  if (u.protocol === 'http:' && LOOPBACK_HOSTS.has(host)) return u;
+  throw new Error(`插件市场地址必须用 https（本机调试除外）：${u.protocol}//${host}`);
+}
+
 export async function fetchIndex(url = DEFAULT_INDEX_URL) {
   const key = String(url || DEFAULT_INDEX_URL);
+  assertSafeIndexUrl(key);
   const running = indexInFlight.get(key);
   if (running) return running;
 
@@ -308,7 +332,12 @@ export async function updatePlugins({ tmp, index, pluginsDir, ids, localVersions
       continue;
     }
 
-    const backup = path.join(tmp, `bak-${entry.id}`);
+    /**
+     * 备份放在插件目录旁边，**不能**放 os.tmpdir()。
+     * Windows 上项目在 D:、TEMP 在 C: 时，fs.rename 跨盘会抛 EXDEV，
+     * 结果是市场更新全部失败——而且失败还被 catch 吞成一句 warn。
+     */
+    const backup = path.join(pluginsDir, `.bak-${entry.id}`);
     try {
       const src = await resolvePluginDir(tmp, entry);
       const hadOld = await fs.stat(dest).catch(() => null);
@@ -323,6 +352,7 @@ export async function updatePlugins({ tmp, index, pluginsDir, ids, localVersions
         throw new Error(`复制失败，已还原：${e.message}`);
       }
 
+      await fs.rm(backup, { recursive: true, force: true }).catch(() => {});
       result.updated.push({ id: entry.id, from: cur, to: entry.version });
       log.info(`插件 ${entry.id} 已更新 ${cur} → ${entry.version}`);
     } catch (e) {

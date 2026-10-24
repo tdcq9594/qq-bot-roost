@@ -32,8 +32,14 @@ export class TokenManager {
     return this.pending;
   }
 
-  /** 强制刷新（收到 401 时调用） */
-  async refresh() {
+  /**
+   * 强制刷新（收到 401 时调用）。
+   *
+   * 传 staleToken：并发多个 401 时只有第一个真的去换，后面的发现
+   * token 已经被换掉就直接用新的——否则一阵抖动会变成 token 接口风暴。
+   */
+  async refresh(staleToken = null) {
+    if (staleToken && this.token && this.token !== staleToken) return this.get();
     this.token = '';
     this.expiresAt = 0;
     return this.get();

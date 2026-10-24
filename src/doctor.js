@@ -145,8 +145,8 @@ export async function runDoctor({ cfg, globalCfg, rt, mock = false }) {
         'stats',
         'warn',
         '统计不可用',
-        '当前 Node 没有内置 SQLite（需要 22.5+），统计页会是空的，其它功能不受影响。',
-        '升级 Node 到 22.5 以上。',
+        '当前 Node 没有可用的内置 SQLite（需要 22.13+），统计页会是空的，其它功能不受影响。',
+        '升级 Node 到 22.13 以上（22.13 起 node:sqlite 不再需要 --experimental-sqlite）。',
       );
   }
 

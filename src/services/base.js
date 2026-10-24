@@ -19,6 +19,8 @@ export class BaseService {
     this.detail = '';
     this.timer = null;
     this.intervalMs = 60000;
+    /** 防重入：上一轮 tick 还没结束就不开下一轮 */
+    this.busy = false;
   }
 
   /** 子类实现：一次执行体 */
@@ -40,6 +42,15 @@ export class BaseService {
   }
 
   async #run() {
+    /**
+     * 上一轮还没跑完就直接跳过。
+     *
+     * tick 里可能有慢操作（比如装插件依赖要几秒），比 intervalMs 还长。
+     * 不拦的话 setInterval 会一轮接一轮地叠上来，同一件事被反复触发——
+     * 插件目录「每 2 秒发现一次新插件、反复重装依赖」就是这么来的。
+     */
+    if (this.busy) return;
+    this.busy = true;
     try {
       await this.tick();
       this.state = 'running';
@@ -47,6 +58,8 @@ export class BaseService {
       this.state = 'error';
       this.detail = e.message;
       log.warn(`服务 ${this.name} 执行出错: ${e.message}`);
+    } finally {
+      this.busy = false;
     }
   }
 }

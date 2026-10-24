@@ -186,9 +186,16 @@ export class PluginWatchService extends BaseService {
     const removed = [...this.seen.keys()].filter((id) => !sigs.has(id));
 
     if (added.length || removed.length) {
-      await this.#rescanAll({ added, removed });
+      /**
+       * 先记账，再干活。
+       *
+       * rescan 里可能要装插件依赖（npm install），耗时远超一个 tick 周期。
+       * 如果等它跑完才更新 seen，下一轮还会把这个目录当成「新插件」，
+       * 于是又 rescan、又装依赖——无限循环，依赖永远装不完。
+       */
       for (const id of removed) this.seen.delete(id);
       for (const id of added) this.seen.set(id, sigs.get(id));
+      await this.#rescanAll({ added, removed });
     }
 
     // 文件内容变了：等文件「安静」下来才重载（编辑器可能还在写）

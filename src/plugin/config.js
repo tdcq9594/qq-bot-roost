@@ -174,7 +174,12 @@ export class PluginConfig {
       raw = JSON.parse(await fs.readFile(this.file, 'utf8'));
     } catch (e) {
       if (e.code !== 'ENOENT') {
-        this.log?.warn(`插件配置 ${rel(this.file)} 解析失败，已按默认值重建: ${e.message}`);
+        // 手改漏个逗号就整份配置回默认值、原文件被覆盖——先留一份再说
+        const bak = `${this.file}.corrupt-${Date.now()}`;
+        await fs.rename(this.file, bak).catch(() => {});
+        this.log?.warn(
+          `插件配置 ${rel(this.file)} 解析失败（${e.message}），原文件已备份为 ${rel(bak)}，本次用默认值`,
+        );
       }
       existed = false;
       raw = {};

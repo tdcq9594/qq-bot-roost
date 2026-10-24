@@ -74,8 +74,13 @@ function confirmDialog({ title = '确认', message = '', okText = '确定', dang
       if (e.target === mask) done(false);
     };
     const onKey = (e) => {
-      if (e.key === 'Escape') done(false);
-      else if (e.key === 'Enter') done(true);
+      if (e.key === 'Escape') return done(false);
+      /**
+       * 默认焦点在「取消」上（删除类操作的安全默认）。
+       * 以前 Enter 无条件走 done(true)：焦点明明在取消，回车却执行了删除。
+       * 只有焦点真的在确认按钮上才认 Enter。
+       */
+      if (e.key === 'Enter') done(document.activeElement === btnOk);
     };
 
     btnOk.addEventListener('click', onOk);
@@ -218,6 +223,8 @@ async function selectBot(id) {
   localStorage.setItem('qqbot_bot', id);
   closeBotMenu();
   updateBotTrigger();
+  // SSE 在连接建立时就绑死了机器人，切换后必须重建，否则状态还是旧的
+  connectStream();
   // 所有页签的数据都跟机器人走，重拉一遍
   await pollStatus();
   // 插件注册的页面也跟着机器人走：不同机器人启用的插件不一样
@@ -525,6 +532,8 @@ window.addEventListener('hashchange', () => {
 /* ---------------- 概览 ---------------- */
 
 function renderStatus(s) {
+  // 迟到的别的机器人的状态包，直接丢掉
+  if (s && s.botId && CURRENT_BOT && s.botId !== CURRENT_BOT) return;
   const pill = $('#connPill');
   // 以机器人实例状态为准：mock 模式下没有网关连接，但机器人是「在线」的
   const state = s.state || (s.connected ? 'online' : 'offline');
@@ -829,7 +838,9 @@ function fillForm(c) {
 
   f.webuiHost.value = c.webui?.host || '127.0.0.1';
   f.webuiPort.value = c.webui?.port ?? 15207;
-  f.webuiAccessKey.value = c.webui?.accessKey || '';
+  // 密钥不回显（后端只返回 accessKeySet）：留空 = 不修改
+  f.webuiAccessKey.value = '';
+  f.webuiAccessKey.placeholder = c.webui?.accessKeySet ? '已设置（留空则保持不变）' : '未设置';
   f.logLevel.value = c.logLevel || 'info';
 
   f.groupInvited.checked = Boolean(c.groupManage?.invited);
@@ -1185,9 +1196,14 @@ async function loadPluginPages() {
     frame.className = 'plugin-page';
     frame.title = p.label;
     /**
-     * allow-same-origin 是为了让页面能调 /api/ 拿数据；
-     * allow-scripts 让它能跑自己的脚本。插件本来就是可信代码
-     * （内建插件跑在主进程），这里隔离的是**样式**，不是权限。
+     * allow-same-origin 是为了让页面能带密钥调 /api/ 拿数据；
+     * allow-scripts 让它能跑自己的脚本。
+     *
+     * 必须说清楚：**这两个一起开等于没有隔离**。同源意味着插件页面
+     * 能读 parent.document、localStorage，能以面板身份调任何接口。
+     * 这里只挡住了样式互相污染，不挡权限。
+     * 所以「插件注册远端 HTML」要当成引入第三方代码来对待，
+     * 只装自己信得过的插件。
      */
     frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms');
     /**
@@ -1588,7 +1604,7 @@ async function loadPlugins() {
       btn.addEventListener('click', () => updateFromMarket(btn.dataset.updateOne, btn));
     });
   } catch (e) {
-    wrap.innerHTML = `<div class="empty">加载失败: ${e.message}</div>`;
+    wrap.innerHTML = `<div class="empty">加载失败: ${escapeHtml(e.message)}</div>`;
   }
 }
 
@@ -1603,7 +1619,7 @@ async function loadEvents() {
   try {
     d = await api('/api/events');
   } catch (e) {
-    sum.innerHTML = `<div class="empty">加载失败: ${e.message}</div>`;
+    sum.innerHTML = `<div class="empty">加载失败: ${escapeHtml(e.message)}</div>`;
     return;
   }
 
@@ -2292,8 +2308,16 @@ function renderOwners() {
     wrap.innerHTML = '<span class="hint">还没有主人。机器人被拉进群后会自动把邀请人设为主人，也可以手动添加。</span>';
     return;
   }
+  /**
+   * openid 是外部输入（手输 / 导入别人的配置），必须转义。
+   * 以前直接拼进 innerHTML：填 `<img src=x onerror=...>` 就能在面板里执行，
+   * 而面板能调所有 /api。
+   */
   wrap.innerHTML = owners
-    .map((o) => `<span class="chip" data-id="${o}">${shortId(o)}<button class="chip-x" title="移除">×</button></span>`)
+    .map(
+      (o) =>
+        `<span class="chip" data-id="${escapeHtml(o)}">${escapeHtml(shortId(o))}<button class="chip-x" title="移除">×</button></span>`,
+    )
     .join('');
   wrap.querySelectorAll('.chip-x').forEach((btn) => {
     btn.addEventListener('click', () => removeOwner(btn.closest('.chip').dataset.id));
@@ -2308,6 +2332,11 @@ async function addOwner() {
   const input = $('#ownerInput');
   const v = input.value.trim();
   if (!v) return;
+  // openid 是十六进制串；挡掉明显的乱填和带尖括号的输入
+  if (!/^[0-9A-Fa-f]{16,64}$/.test(v)) {
+    alert('openid 应该是一串十六进制字符（16–64 位），可以在「权限 → 最近说过话的人」里点一下自动填入');
+    return;
+  }
   if (owners.includes(v)) { input.value = ''; return; }
   owners.push(v);
   await saveOwners();
@@ -2334,14 +2363,14 @@ async function loadGroups() {
   try {
     renderGroups(await api('/api/groups'));
   } catch (e) {
-    body.innerHTML = `<tr><td colspan="6" class="empty">加载失败: ${e.message}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="6" class="empty">加载失败: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 
 function renderGroups(list) {
   const body = $('#groupBody');
   if (!list.length) {
-    body.innerHTML = '<tr><td colspan="7" class="empty">还没有群。把机器人拉进群后这里会自动出现。</td></tr>';
+    body.innerHTML = '<tr><td colspan="6" class="empty">还没有群。把机器人拉进群后这里会自动出现。</td></tr>';
     return;
   }
   body.innerHTML = list
@@ -2409,7 +2438,7 @@ async function addGroupManually() {
   }
 }
 
-$('#btnAddGroup')?.addEventListener('click', addGroupManually);
+$('#btnAddGroupManual')?.addEventListener('click', addGroupManually);
 $('#groupInput')?.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); addGroupManually(); }
 });
@@ -2519,7 +2548,7 @@ async function loadRoles() {
       });
     });
   } catch (e) {
-    body.innerHTML = `<tr><td colspan="4" class="empty">加载失败: ${e.message}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="4" class="empty">加载失败: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 
@@ -2642,7 +2671,11 @@ function renderLogs() {
 
 function appendLog(e) {
   logBuf.push(e);
-  if (logBuf.length > 600) logBuf.shift();
+  if (logBuf.length > 600) {
+    logBuf.shift();
+    // 缓冲区裁剪的同时要把 DOM 也裁掉，否则只 appendChild 不删，节点无限累积
+    if (logView.firstElementChild && logView.children.length > 600) logView.firstElementChild.remove();
+  }
   if (!logMatches(e)) return;
   const el = logLine(e);
   const atBottom = logView.scrollTop + logView.clientHeight >= logView.scrollHeight - 40;
@@ -2673,12 +2706,23 @@ async function initLogs() {
 
 /* ---------------- SSE ---------------- */
 
+let stream = null;
+
 function connectStream() {
   // 调试用：地址带 ?nosse 就不建 SSE。
   // 无头浏览器截图时 SSE 长连接会让页面一直处于加载态，截不到渲染结果。
   if (location.search.includes('nosse')) return;
-  const qs = ACCESS_KEY ? `?key=${encodeURIComponent(ACCESS_KEY)}` : '';
-  const es = new EventSource(`/api/stream${qs}`);
+  /**
+   * 必须带 bot 参数。
+   * 服务端在连接建立时用 pickRuntime() 绑定机器人，不带就是 runtimes[0]；
+   * 切到机器人 B 后，5 秒一次的 pollStatus 显示 B，2 秒一次的 SSE 又用 A 覆盖回来。
+   */
+  const sp = new URLSearchParams();
+  if (ACCESS_KEY) sp.set('key', ACCESS_KEY);
+  if (CURRENT_BOT) sp.set('bot', CURRENT_BOT);
+  stream?.close?.();
+  const es = new EventSource(`/api/stream?${sp}`);
+  stream = es;
   es.addEventListener('status', (ev) => {
     try { renderStatus(JSON.parse(ev.data)); } catch {}
   });

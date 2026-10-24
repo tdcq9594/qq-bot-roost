@@ -20,6 +20,11 @@ import { createLogger } from '../logger.js';
 
 const log = createLogger('restart');
 
+/** 本地日期 YYYY-MM-DD（`toISOString()` 是 UTC，跨时区会多触发一次） */
+function localDay(d = new Date()) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 export class RestartService extends BaseService {
   /**
    * @param {object} p
@@ -32,8 +37,15 @@ export class RestartService extends BaseService {
     this.onRestart = onRestart;
     this.intervalMs = 60_000; // 每分钟看一次该不该重启
     this.lastAt = Date.now();
-    /** 当天已经重启过的日期，避免同一分钟内重复触发 */
-    this.lastDay = '';
+    /**
+     * 当天已经重启过的日期，避免同一分钟内重复触发。
+     *
+     * **这个值必须能跨进程延续**：只放内存的话，重启后的新进程 lastDay 又是空的，
+     * 而此刻 `now >= target` 依然成立（比如 04:00:30）→ 立刻再重启一次 →
+     * 每分钟一次，永远起不来。`#spawnSelf` 会带 `ROOST_RESTARTED=1`，
+     * 新进程看到它就把今天记成「已重启」。
+     */
+    this.lastDay = process.env.ROOST_RESTARTED === '1' ? localDay() : '';
   }
 
   async tick() {
@@ -57,7 +69,7 @@ export class RestartService extends BaseService {
         this.detail = `时间格式不对：${this.cfg.at}（应为 HH:MM）`;
         return;
       }
-      const day = now.toISOString().slice(0, 10);
+      const day = localDay(now);
       const target = new Date(now);
       target.setHours(hh, mm, 0, 0);
 

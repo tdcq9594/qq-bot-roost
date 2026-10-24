@@ -34,7 +34,7 @@ const skip = (name, reason = '') => {
 
 let server = null;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const { signCallback } = await import('../src/sign.js');
+const { signCallback, signEventBody } = await import('../src/sign.js');
 
 async function api(p, opts = {}) {
   const res = await fetch(`${BASE}${p}`, {
@@ -352,12 +352,24 @@ async function testWebhook() {
     const port = await wh.start();
     ok('webhook: 启动监听', wh.running === true, `端口 ${port}`);
 
-    const post = (body, headers = {}) =>
-      fetch(`http://127.0.0.1:${port}/webhook`, {
+    const WH_SECRET = 'g8b4Y2X2tleXRLGB741zxwvvwxz147BG';
+
+    /**
+     * 平台推事件时一定带签名，所以这里默认就签。
+     * 以前 e2e 发的是裸事件——正因为服务端根本没验签，才一直是绿的。
+     */
+    const post = (body, headers = {}, { signed = true } = {}) => {
+      const raw = typeof body === 'string' ? body : JSON.stringify(body);
+      const ts = String(Math.floor(Date.now() / 1000));
+      const sigHeaders = signed
+        ? { 'X-Signature-Timestamp': ts, 'X-Signature-Ed25519': signEventBody(WH_SECRET, ts, raw) }
+        : {};
+      return fetch(`http://127.0.0.1:${port}/webhook`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...headers },
-        body: typeof body === 'string' ? body : JSON.stringify(body),
+        headers: { 'Content-Type': 'application/json', ...sigHeaders, ...headers },
+        body: raw,
       });
+    };
 
     // 1) op=13 签名校验（验证请求同样要带 appid）
     const r1 = await post(
@@ -391,12 +403,41 @@ async function testWebhook() {
     ok('webhook: 交互事件回 op:12 ACK', j5.op === 12 && typeof j5.code === 'number');
 
     // 6) query 参数也能带 appid
+    const body6 = JSON.stringify({ t: 'C2C_MESSAGE_CREATE', d: { id: 'm2' } });
+    const ts6 = String(Math.floor(Date.now() / 1000));
     const r6 = await fetch(`http://127.0.0.1:${port}/webhook?appid=app1`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ t: 'C2C_MESSAGE_CREATE', d: { id: 'm2' } }),
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Signature-Timestamp': ts6,
+        'X-Signature-Ed25519': signEventBody(WH_SECRET, ts6, body6),
+      },
+      body: body6,
     });
     ok('webhook: query 参数识别 appid', r6.status === 200);
+
+    // 6b) 不签名的事件必须被拒（伪造事件的入口）
+    const r6b = await post(
+      { t: 'GROUP_AT_MESSAGE_CREATE', d: { id: 'm3' } },
+      { 'X-Bot-Appid': 'app1' },
+      { signed: false },
+    );
+    ok('webhook: 未签名事件返回 401', r6b.status === 401);
+
+    // 6c) 签名对不上也要拒
+    const body6c = JSON.stringify({ t: 'GROUP_AT_MESSAGE_CREATE', d: { id: 'm4' } });
+    const ts6c = String(Math.floor(Date.now() / 1000));
+    const r6c = await fetch(`http://127.0.0.1:${port}/webhook`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Bot-Appid': 'app1',
+        'X-Signature-Timestamp': ts6c,
+        'X-Signature-Ed25519': 'a'.repeat(128),
+      },
+      body: body6c,
+    });
+    ok('webhook: 签名不匹配返回 401', r6c.status === 401);
 
     // 7) 非法 JSON / 错误路径 / 错误方法
     const r7 = await post('not-json', { 'X-Bot-Appid': 'app1' });

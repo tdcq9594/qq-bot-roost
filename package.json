@@ -23,7 +23,7 @@
     "zero-dependency"
   ],
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13"
   },
   "scripts": {
     "start": "node src/main.js",
@@ -31,9 +31,10 @@
     "check": "node src/main.js --check",
     "test": "node test/selftest.mjs",
     "test:e2e": "node test/e2e.mjs",
-    "test:all": "node test/selftest.mjs && node test/e2e.mjs",
+    "test:all": "node test/selftest.mjs && node test/e2e.mjs && node test/live-driver.mjs",
     "create": "node scripts/create-plugin.mjs",
     "test:plugin": "node scripts/test-plugin.mjs",
+    "live": "node scripts/live-test.mjs",
     "market:index": "node scripts/build-market-index.mjs"
   },
   "author": {

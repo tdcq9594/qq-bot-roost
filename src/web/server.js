@@ -1,6 +1,7 @@
 import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { ROOT } from '../config.js';
 import { DIRS, botPaths, listBotIds, rel } from '../paths.js';
 import { createLogger, recentLogs, onLog, getLevel, setLevel } from '../logger.js';
@@ -56,12 +57,24 @@ function json(res, code, data) {
   res.end(body);
 }
 
+/** 请求体解析失败时带上状态码，让上层能回 413/400 而不是一律 500 */
+class BodyError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.status = status;
+  }
+}
+
 async function readBody(req, limit = 1024 * 256) {
   const chunks = [];
   let size = 0;
   for await (const c of req) {
     size += c.length;
-    if (size > limit) throw new Error('请求体过大');
+    if (size > limit) {
+      // 超限就断开，别让对端继续往一个已经废掉的请求里灌数据
+      req.destroy?.();
+      throw new BodyError(`请求体过大（上限 ${Math.round(limit / 1024)} KB）`, 413);
+    }
     chunks.push(c);
   }
   if (!chunks.length) return {};
@@ -69,7 +82,7 @@ async function readBody(req, limit = 1024 * 256) {
   try {
     return JSON.parse(text);
   } catch {
-    throw new Error('请求体不是合法 JSON');
+    throw new BodyError('请求体不是合法 JSON', 400);
   }
 }
 
@@ -154,6 +167,29 @@ ${BASE_CSS}
 };
 
 /**
+ * id 会被拼进文件路径，这里挡掉分隔符和 `..`。
+ *
+ * 不限制大小写和点，是为了兼容手工建的目录名；但 `..` 和路径分隔符一律拒绝。
+ */
+function isSafeId(s) {
+  const v = String(s ?? '');
+  if (!v || v.length > 64) return false;
+  if (v.includes('..') || /[\\/]/.test(v)) return false;
+  return /^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(v);
+}
+
+/**
+ * 常量时间比较，避免用响应时间猜密钥。
+ * 长度不同直接 false——长度本身不是秘密。
+ */
+function safeEqual(a, b) {
+  const x = Buffer.from(String(a ?? ''), 'utf8');
+  const y = Buffer.from(String(b ?? ''), 'utf8');
+  if (x.length !== y.length) return false;
+  return crypto.timingSafeEqual(x, y);
+}
+
+/**
  * 可视化面板。
  *
  * 默认只监听 127.0.0.1，不对外暴露。
@@ -184,6 +220,8 @@ export async function startWebServer({
 
   // res -> 这个连接正在看哪个机器人，状态推送时按各自的目标过滤
   const sseClients = new Map();
+  /** 同时最多多少个 SSE 连接（一个页面一个） */
+  const MAX_SSE = 32;
 
   /**
    * 按 ?bot=<id> 选机器人，没传就用第一个。
@@ -273,7 +311,18 @@ export async function startWebServer({
   // 日志实时推送：日志是全局的，所有连接都收到同一份
   const offLog = onLog((entry) => {
     const data = `event: log\ndata: ${JSON.stringify(entry)}\n\n`;
-    for (const res of sseClients.keys()) {
+    for (const [res] of sseClients) {
+      /**
+       * 背压：write 返回 false 说明对端消费不过来（页面卡住、网络差）。
+       * 继续往里塞只会让内存涨，直接断开让它重连。
+       */
+      if (res.writableLength > 1024 * 1024) {
+        sseClients.delete(res);
+        try {
+          res.destroy();
+        } catch {}
+        continue;
+      }
       try {
         res.write(data);
       } catch {}
@@ -300,7 +349,39 @@ export async function startWebServer({
       req.headers['x-token'] ||
       url.searchParams.get('key') ||
       url.searchParams.get('token');
-    return given === accessKey;
+    return safeEqual(given, accessKey);
+  };
+
+  /**
+   * 写操作必须是 `application/json`，而且是**精确匹配**。
+   *
+   * 以前用 `ct.includes('application/json')`：跨站页面发
+   * `Content-Type: text/plain;application/json` 就能绕过——
+   * MIME 本质仍是 text/plain，浏览器不预检，服务端却以为它是 JSON。
+   */
+  const isJsonRequest = (req) => {
+    const ct = String(req.headers['content-type'] || '');
+    return ct.split(';')[0].trim().toLowerCase() === 'application/json';
+  };
+
+  /**
+   * 同源校验：带了 Origin / Referer 就必须是本站。
+   *
+   * 端口不固定（会自动顺延），所以只比 host 部分。
+   */
+  const isSameOrigin = (req) => {
+    const host = String(req.headers['host'] || '');
+    for (const h of ['origin', 'referer']) {
+      const v = req.headers[h];
+      if (!v) continue;
+      try {
+        const o = new URL(String(v));
+        if (o.host !== host) return false;
+      } catch {
+        return false; // 畸形 Origin 一律当跨站
+      }
+    }
+    return true;
   };
 
   /**
@@ -334,23 +415,15 @@ export async function startWebServer({
     }
   };
 
-  const server = http.createServer(async (req, res) => {
-    const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-    const pathname = decodeURIComponent(url.pathname);
-
-    try {
-      // ---------------- API ----------------
-      if (pathname.startsWith('/api/')) {
-        if (!authorized(req, url)) return json(res, 401, { error: '访问密钥无效' });
-
-        // 选中要操作的机器人，并用同名变量遮住外层的聚合对象，
-        // 这样下面所有 handler 的写法都不用变
-        const rt = pickRuntime(url);
-
   /* ---------------- 插件更新检查 ---------------- */
 
-  // 更新检查结果按机器人缓存。插件**代码**是全局共享的，但启用状态 per-bot，
-  // 所以每个机器人看到的「可更新」可能不同，缓存也跟着分。
+  /**
+   * 更新检查结果按机器人缓存。插件**代码**是全局共享的，但启用状态 per-bot，
+   * 所以每个机器人看到的「可更新」可能不同，缓存也跟着分。
+   *
+   * 注意这些必须放在 startWebServer 作用域：以前它们写在请求处理器里，
+   * 每个 /api/* 请求都会新建一个 Map 和一个 1 小时的 interval，永不回收。
+   */
   const updateCache = new Map(); // botId -> { at, updates, error }
   const UPDATE_CACHE_MS = 5 * 60 * 1000;
 
@@ -394,9 +467,50 @@ export async function startWebServer({
     for (const r of runtimes) checkUpdates(r).catch(() => {});
   }, 60 * 60 * 1000);
   updateTimer.unref?.();
+
   setTimeout(() => {
     for (const r of runtimes) checkUpdates(r).catch(() => {});
   }, 60000).unref?.();
+
+  const server = http.createServer(async (req, res) => {
+    /**
+     * URL 解析必须在 try 里面。
+     *
+     * 以前这两行在 try 外面：`GET /%` 会让 decodeURIComponent 抛 URIError，
+     * `Host: [` 会让 new URL 抛 ERR_INVALID_URL。都在 async 回调里 → 未捕获
+     * rejection → Node 22+ 直接退出进程。一张网页的 <img src=".../%E0%A4%A">
+     * 就能把面板和所有机器人一起打掉。
+     */
+    let url;
+    let pathname;
+    try {
+      url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+      pathname = decodeURIComponent(url.pathname);
+    } catch {
+      return json(res, 400, { error: '请求地址不合法' });
+    }
+
+    try {
+      // ---------------- API ----------------
+      if (pathname.startsWith('/api/')) {
+        if (!authorized(req, url)) return json(res, 401, { error: '访问密钥无效' });
+
+        /**
+         * CSRF / 同源校验必须在**路由之前**。
+         *
+         * 以前它写在 /api/bots 那几个路由后面，于是「新建机器人」「删除机器人」
+         * 完全不受保护——跨站页面一个 text/plain 表单就能把它们打出去。
+         */
+        if (req.method !== 'GET' && req.method !== 'HEAD' && !isJsonRequest(req)) {
+          return json(res, 415, { error: '写操作需要 Content-Type: application/json' });
+        }
+        if (!isSameOrigin(req)) {
+          return json(res, 403, { error: '跨站请求被拒绝' });
+        }
+
+        // 选中要操作的机器人，并用同名变量遮住外层的聚合对象，
+        // 这样下面所有 handler 的写法都不用变
+        const rt = pickRuntime(url);
 
   /* ---------------- 机器人管理（不依赖当前选中项） ---------------- */
 
@@ -449,6 +563,10 @@ export async function startWebServer({
           const body = await readBody(req);
           const id = String(body.id ?? '').trim();
           if (!id) return json(res, 400, { error: '缺少 id' });
+          // 和新建用同一个规则：id 会被拼进路径，还跟着递归删除，不能放行 `..`
+          if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(id)) {
+            return json(res, 400, { error: 'id 格式不合法' });
+          }
           if (runtimes.length <= 1 && runtimes.some((r) => r.id === id)) {
             return json(res, 400, { error: '这是最后一个机器人，删掉就没得跑了' });
           }
@@ -468,15 +586,6 @@ export async function startWebServer({
         const api = rt.api;
         const tokens = rt.tokens;
         const getGateway = () => rt.gateway;
-
-        // CSRF 防护：写操作必须带 application/json。
-        // 跨站的简单表单请求设不了这个 Content-Type，会被浏览器拦在预检阶段。
-        if (req.method !== 'GET' && req.method !== 'HEAD') {
-          const ct = String(req.headers['content-type'] || '');
-          if (!ct.includes('application/json')) {
-            return json(res, 415, { error: '写操作需要 Content-Type: application/json' });
-          }
-        }
 
         /* ---------------- 上下线 ---------------- */
 
@@ -511,7 +620,12 @@ export async function startWebServer({
             // webui 和 logLevel 是**全局**设置（config/bot.json），所有机器人共用，
             // 不在这台机器人的 cfg 里。不返回的话面板永远显示默认值，
             // 用户改完也看不出当前是什么。
-            webui: globalCfg.webui ?? {},
+            // 访问密钥不回显（和 appSecret 一个待遇），只告诉面板「设过没」
+            webui: {
+              ...(globalCfg.webui ?? {}),
+              accessKey: '',
+              accessKeySet: Boolean(globalCfg.webui?.accessKey),
+            },
             logLevel: globalCfg.logLevel ?? 'info',
             appSecret: cfg.appSecret ? '********' : '',
             appSecretSet: Boolean(cfg.appSecret),
@@ -573,7 +687,11 @@ export async function startWebServer({
             // webui 是全局设置，不能写进机器人 cfg：
             // 写进去 saveBotConfig 也不保存它（白名单式保存），
             // 结果是面板提示「已保存」但什么都没变。
-            globalCfg.webui = { ...globalCfg.webui, ...body.webui };
+            const patch = { ...body.webui };
+            // 面板不回显密钥，所以空值代表「不修改」，不是「清空」
+            if (!patch.accessKey) delete patch.accessKey;
+            delete patch.accessKeySet;
+            globalCfg.webui = { ...globalCfg.webui, ...patch };
             await saveGlobalConfig?.(globalCfg).catch(() => {});
             configureMirror(globalCfg);
           }
@@ -839,7 +957,8 @@ export async function startWebServer({
         // 拿某个插件的配置 schema、当前值、存档
         const pm = pathname.match(/^\/api\/plugins\/([^/]+)\/panel$/);
         if (pm && req.method === 'GET') {
-          const p = await plugins.panelOf(decodeURIComponent(pm[1]));
+          if (!isSafeId(pm[1])) return json(res, 400, { error: '插件 id 不合法' });
+          const p = await plugins.panelOf(pm[1]);
           if (!p) return json(res, 404, { error: '插件没加载' });
           return json(res, 200, p);
         }
@@ -847,9 +966,10 @@ export async function startWebServer({
         // 改插件配置
         const pc = pathname.match(/^\/api\/plugins\/([^/]+)\/config$/);
         if (pc && req.method === 'PUT') {
+          if (!isSafeId(pc[1])) return json(res, 400, { error: '插件 id 不合法' });
           const body = await readBody(req);
           try {
-            const next = await plugins.setConfig(decodeURIComponent(pc[1]), body ?? {});
+            const next = await plugins.setConfig(pc[1], body ?? {});
             return json(res, 200, { ok: true, config: next });
           } catch (e) {
             return json(res, 400, { error: e.message });
@@ -859,7 +979,8 @@ export async function startWebServer({
         // 改 / 删一条插件存档
         const pd = pathname.match(/^\/api\/plugins\/([^/]+)\/data$/);
         if (pd && req.method === 'POST') {
-          const id = decodeURIComponent(pd[1]);
+          if (!isSafeId(pd[1])) return json(res, 400, { error: '插件 id 不合法' });
+          const id = pd[1];
           const body = await readBody(req);
           const key = String(body.key ?? '').trim();
           if (!key) return json(res, 400, { error: '缺少 key' });
@@ -880,7 +1001,15 @@ export async function startWebServer({
         const m = pathname.match(/^\/api\/plugins\/([^/]+)\/(enable|disable|reload|remove)$/);
         if (m && req.method === 'POST') {
           const [, rawId, action] = m;
-          const id = decodeURIComponent(rawId);
+          /**
+           * 这里**不能**再 decodeURIComponent 一次。
+           *
+           * pathname 在入口已经解过码，再解一次就把 `%252F` 变成 `/`：
+           * `POST /api/plugins/..%252F..%252Fx/reload` → id = `../../x`。
+           * 而 enable/disable/reload 以前不做任何校验，load() 里直接拼路径 import。
+           */
+          const id = rawId;
+          if (!isSafeId(id)) return json(res, 400, { error: `插件 id 不合法：${id}` });
 
           /* ---------------- 卸载插件 ---------------- */
           if (action === 'remove') {
@@ -1145,6 +1274,14 @@ export async function startWebServer({
             'Cache-Control': 'no-cache',
             Connection: 'keep-alive',
           });
+          /**
+           * 连接数上限。SSE 是长连接，每个连接占一个 fd + 一份缓冲；
+           * 面板被脚本反复刷新时不设限就是稳定泄漏。
+           */
+          if (sseClients.size >= MAX_SSE) {
+            res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' });
+            return res.end('SSE 连接数已满，请关闭多余的页面后重试');
+          }
           res.write(`event: status\ndata: ${JSON.stringify(statusPayload(rt))}\n\n`);
           sseClients.set(res, rt.id);
           const ping = setInterval(() => {
@@ -1316,8 +1453,12 @@ export async function startWebServer({
       res.end(content);
     } catch (e) {
       log.error('面板请求出错:', e.message);
-      if (!res.headersSent) json(res, 500, { error: e.message });
-      else res.end();
+      if (!res.headersSent) {
+        // BodyError 自带状态码（413 超限 / 400 非法 JSON），别一律回 500
+        json(res, e.status || 500, { error: e.message });
+      } else {
+        res.end();
+      }
     }
   });
 

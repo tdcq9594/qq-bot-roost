@@ -644,18 +644,20 @@ export class PluginManager {
       /* 不是外部插件，继续看内建 */
     }
 
-    // 内建插件：读模块导出。只 import，不调 setup，所以不会注册任何命令
+    /**
+     * 内建插件：**不 import**。
+     *
+     * 以前为了读 name/version 会 import 一次模块——但 ESM 的顶层代码
+     * 是立刻执行的：定时器、网络请求、写文件全都会跑起来。
+     * 用户点「禁用」本来是想止损，结果插件照样在后台活动。
+     * 拿不到版本号就显示空，比偷偷执行代码强。
+     */
     for (const f of ['index.js', 'index.mjs', 'main.js']) {
       const p = path.join(dir, f);
-      try {
-        await fs.access(p);
-        // 加查询串避免和已加载的模块实例撞缓存
-        const mod = await import(`${pathToFileURL(p).href}?peek=${id}`);
-        this.#cacheMeta(id, mod.default ?? {}, 'internal', 'node');
-        return;
-      } catch {
-        /* 换下一个入口文件名 */
-      }
+      const exists = await fs.access(p).then(() => true, () => false);
+      if (!exists) continue;
+      this.#cacheMeta(id, { id, name: id, version: '' }, 'internal', 'node');
+      return;
     }
   }
 
@@ -747,13 +749,13 @@ export class PluginManager {
     const out = {};
     let dirs = [];
     try {
-      dirs = await fs.readdir(this.pluginsDir);
+      dirs = await fs.readdir(this.dir);
     } catch {
       dirs = [];
     }
 
     for (const name of dirs) {
-      const dir = path.join(this.pluginsDir, name);
+      const dir = path.join(this.dir, name);
       const stat = await fs.stat(dir).catch(() => null);
       if (!stat?.isDirectory()) continue;
       const v = await readPluginVersion(dir);

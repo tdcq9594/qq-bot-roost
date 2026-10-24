@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { PATHS } from './paths.js';
 import { createLogger } from './logger.js';
+import { writeJsonAtomic, readJsonSafe } from './fsutil.js';
 import { NO_PERM as LEVELS_NO_PERM, describeLevel, PLUGIN_START } from './levels.js';
 
 const log = createLogger('roles');
@@ -60,7 +61,9 @@ const LEVEL_ALIAS = {
 export function parseLevel(input) {
   if (input === undefined || input === null || input === '') return null;
   const s = String(input).trim().toLowerCase();
-  if (s in LEVEL_ALIAS) return LEVEL_ALIAS[s];
+  // 用 hasOwn 而不是 in：'constructor' / 'toString' 会走原型链，
+  // 返回一个函数并被写进 roles.json
+  if (Object.hasOwn(LEVEL_ALIAS, s)) return LEVEL_ALIAS[s];
   const n = Number(s);
   if (!Number.isInteger(n) || n < 0 || n > MAX_ASSIGNABLE) return null;
   return n;
@@ -125,11 +128,11 @@ export class RoleStore {
 
   async #load() {
     if (this.data) return this.data;
-    try {
-      this.data = JSON.parse(await fs.readFile(this.file, 'utf8'));
-    } catch {
-      this.data = {};
-    }
+    /**
+     * 解析失败不能当成「空数据」静默继续——后面的迁移会把默认值写回去，
+     * 直接覆盖掉用户原来的权限表。坏文件先留一份再说。
+     */
+    this.data = (await readJsonSafe(this.file, (m) => log.error(m))) ?? {};
 
     // 一次性迁移：把旧的 100/80/60/40 转成 0/1/2/3
     // 关键：只迁移 feature: 之外的作用域——插件号段是后来才有的，
@@ -169,8 +172,11 @@ export class RoleStore {
     }
     if (!this.dirty) return;
     this.dirty = false;
-    await fs.mkdir(path.dirname(this.file), { recursive: true });
-    await fs.writeFile(this.file, JSON.stringify(this.data, null, 2), 'utf8');
+    // 原子写：写到一半被杀，下次启动至少还能读到上一次的完整版本
+    await writeJsonAtomic(this.file, this.data).catch((e) => {
+      log.error(`权限表写盘失败：${e.message}`);
+      this.dirty = true; // 留着下次重试
+    });
   }
 
   async all() {

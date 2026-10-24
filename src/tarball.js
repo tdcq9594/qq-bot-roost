@@ -143,10 +143,19 @@ export async function fetchAndExtract(url, destDir, opts = {}) {
   if (!res) throw new Error(`下载失败：${lastErr?.message ?? '未知错误'}`);
 
   const gz = Buffer.from(await res.arrayBuffer());
+  /**
+   * 解压必须带上限。
+   * 一个几十 KB 的 gzip 炸弹能解出几十 GB，直接把进程内存打爆。
+   * 插件仓库正常也就几 MB，64MB 足够宽松。
+   */
+  const MAX_UNZIPPED = 64 * 1024 * 1024;
   let tar;
   try {
-    tar = zlib.gunzipSync(gz);
-  } catch {
+    tar = zlib.gunzipSync(gz, { maxOutputLength: MAX_UNZIPPED });
+  } catch (e) {
+    if (String(e.message).includes('maxOutputLength')) {
+      throw new Error(`解压后超过 ${MAX_UNZIPPED / 1048576}MB 上限，已中止（可能是 gzip 炸弹）`);
+    }
     throw new Error('下载到的不是合法的 gzip 文件');
   }
 

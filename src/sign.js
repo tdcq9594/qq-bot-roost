@@ -63,3 +63,68 @@ export function verifyRequest(secret, body) {
     signature: signCallback(secret, String(eventTs), String(plainToken)),
   };
 }
+
+/**
+ * 给一段事件体签名（自测 / 本地模拟平台推送时用）。
+ *
+ * @param {string} secret AppSecret
+ * @param {string|number} timestamp 秒级时间戳
+ * @param {string} rawBody 原始请求体字符串
+ * @returns {string} 十六进制签名
+ */
+export function signEventBody(secret, timestamp, rawBody) {
+  const key = crypto.createPrivateKey({
+    key: Buffer.concat([PKCS8_ED25519_PREFIX, seedFromSecret(secret)]),
+    format: 'der',
+    type: 'pkcs8',
+  });
+  return crypto.sign(null, Buffer.from(`${timestamp}${rawBody}`, 'utf8'), key).toString('hex');
+}
+
+/**
+ * 校验平台推来的事件签名。
+ *
+ * 平台对每个事件都带 `X-Signature-Ed25519` 和 `X-Signature-Timestamp`，
+ * 签名内容同样是 `${timestamp}${rawBody}`，密钥就是 AppSecret 派生的那把。
+ * 以前只验 op=13、不验普通事件——知道回调地址和 appId 的人可以伪造任意事件，
+ * 包括冒充群主 openid 触发管理命令。
+ *
+ * @param {string} secret      AppSecret
+ * @param {string} timestamp   请求头里的时间戳（秒）
+ * @param {string} rawBody     原始请求体（**不要**用 JSON.stringify 重新序列化）
+ * @param {string} signatureHex 请求头里的十六进制签名
+ * @param {number} [toleranceSec] 时间戳容忍窗口，默认 300 秒
+ * @returns {{ok:boolean, reason?:string}}
+ */
+export function verifyEventSignature(secret, timestamp, rawBody, signatureHex, toleranceSec = 300) {
+  if (!signatureHex || !timestamp) return { ok: false, reason: '缺少签名头' };
+
+  // 防重放：时间戳必须落在窗口内
+  const ts = Number(timestamp);
+  if (!Number.isFinite(ts)) return { ok: false, reason: '时间戳不是数字' };
+  const skew = Math.abs(Date.now() / 1000 - ts);
+  if (skew > toleranceSec) return { ok: false, reason: `时间戳偏差 ${Math.round(skew)} 秒，超出窗口` };
+
+  let sig;
+  try {
+    sig = Buffer.from(String(signatureHex), 'hex');
+  } catch {
+    return { ok: false, reason: '签名不是合法十六进制' };
+  }
+  if (sig.length !== 64) return { ok: false, reason: `签名长度 ${sig.length}，应为 64` };
+
+  try {
+    const priv = crypto.createPrivateKey({
+      key: Buffer.concat([PKCS8_ED25519_PREFIX, seedFromSecret(secret)]),
+      format: 'der',
+      type: 'pkcs8',
+    });
+    const pub = crypto.createPublicKey(priv);
+    const payload = Buffer.from(`${timestamp}${rawBody}`, 'utf8');
+    return crypto.verify(null, payload, pub, sig)
+      ? { ok: true }
+      : { ok: false, reason: '签名不匹配' };
+  } catch (e) {
+    return { ok: false, reason: `验签出错：${e.message}` };
+  }
+}

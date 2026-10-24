@@ -18,6 +18,9 @@ import { DIRS } from './paths.js';
  *   { "102055275": { "pid": 12345, "at": 1730000000000, "mock": false } }
  */
 
+/** 本进程已经认领过的 AppID。文件里记的是自己的 pid，光靠文件挡不住同进程重复认领 */
+const inProcessClaims = new Set();
+
 const FILE = path.join(DIRS.data, 'instances.json');
 
 /** pid 是否还活着。EPERM 说明进程存在但没权限，也算活着 */
@@ -66,6 +69,18 @@ function prune(data) {
  */
 export async function claimInstance({ appId, force = false }) {
   const key = String(appId || 'unknown');
+
+  /**
+   * 同进程内的重复认领要挡住。
+   *
+   * 文件里记的 pid 就是自己，`existing.pid !== process.pid` 永远不成立，
+   * 于是两份配置填了同一个 AppID 时两边都「认领成功」，各自连网关 →
+   * 平台判定冲突互踢（4902），消息随机丢。
+   */
+  if (inProcessClaims.has(key) && !force) {
+    return { ok: false, conflict: { pid: process.pid, at: Date.now() } };
+  }
+
   const data = prune(await readAll());
 
   const existing = data[key];
@@ -73,6 +88,7 @@ export async function claimInstance({ appId, force = false }) {
     return { ok: false, conflict: { pid: existing.pid, at: existing.at } };
   }
 
+  inProcessClaims.add(key);
   data[key] = { pid: process.pid, at: Date.now(), mock: key === 'mock' };
   await writeAll(data);
   return { ok: true };
@@ -82,6 +98,7 @@ export async function claimInstance({ appId, force = false }) {
 export async function releaseInstance(appId) {
   const key = String(appId || 'unknown');
   const data = prune(await readAll());
+  inProcessClaims.delete(key);
   if (data[key]?.pid === process.pid) delete data[key];
   await writeAll(data);
 }
