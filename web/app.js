@@ -425,6 +425,23 @@ function shortId(id) {
   return id.length > 18 ? id.slice(0, 8) + '…' + id.slice(-6) : id;
 }
 
+/**
+ * 「昵称（id）」——可读性优先。
+ *
+ * 以前面板上只有截断的 openid（`577C4A90…90D08`），用户根本认不出
+ * 是哪个群、是哪个人。现在有昵称就放前面，id 缩在括号里；
+ * 没有昵称（没说过话、群名没拉到）就退回原来的截断 id。
+ *
+ * @param {string} name 昵称 / 群名，可为空
+ * @param {string} id openid
+ * @returns {string}
+ */
+function labelWithId(name, id) {
+  const s = shortId(id);
+  const n = String(name ?? '').trim();
+  return n ? `${escapeHtml(n)}（${escapeHtml(s)}）` : escapeHtml(s);
+}
+
 /* ---------------- Tab ---------------- */
 
 /** 找到某个页签的按钮：一级按钮，或分组菜单里的项 */
@@ -609,7 +626,7 @@ function renderStatus(s) {
   } else {
     body.innerHTML = s.chats.map((c) => `
       <tr>
-        <td class="mono" title="${escapeHtml(c.id)}">${escapeHtml(shortId(c.id))}</td>
+        <td title="${escapeHtml(c.id)}">${labelWithId(c.name, c.id)}</td>
         <td>${c.kind === 'group' ? '群聊' : c.kind === 'c2c' ? '私聊' : c.kind}</td>
         <td class="num">${c.count}</td>
         <td>${fmtAgo(c.last)}</td>
@@ -2351,8 +2368,7 @@ function renderOwners() {
       (o) =>
         `<span class="chip" data-id="${escapeHtml(o)}">${escapeHtml(shortId(o))}<button class="chip-x" title="移除">×</button></span>`,
     )
-    .join('');
-  wrap.querySelectorAll('.chip-x').forEach((btn) => {
+    .join('');  wrap.querySelectorAll('.chip-x').forEach((btn) => {
     btn.addEventListener('click', () => removeOwner(btn.closest('.chip').dataset.id));
   });
 }
@@ -2409,9 +2425,9 @@ function renderGroups(list) {
   body.innerHTML = list
     .map((g) => `
       <tr data-id="${escapeHtml(g.groupOpenid)}">
-        <td class="mono" title="${escapeHtml(g.groupOpenid)}">${escapeHtml(shortId(g.groupOpenid))}</td>
-        <td class="mono" title="${escapeHtml(g.inviterOpenid || '')}">${g.inviterOpenid ? escapeHtml(shortId(g.inviterOpenid)) : '-'}</td>
-        <td class="mono" title="${escapeHtml(g.ownerOpenid || '')}">${g.ownerOpenid ? escapeHtml(shortId(g.ownerOpenid)) : '-'}</td>
+        <td title="${escapeHtml(g.groupOpenid)}">${labelWithId(g.groupName, g.groupOpenid)}</td>
+        <td title="${escapeHtml(g.inviterOpenid || '')}">${g.inviterOpenid ? labelWithId(g.inviterName, g.inviterOpenid) : '-'}</td>
+        <td title="${escapeHtml(g.ownerOpenid || '')}">${g.ownerOpenid ? labelWithId(g.ownerName, g.ownerOpenid) : '-'}</td>
         <td><span class="badge ${g.enabled ? 'on' : 'off'}">${g.enabled ? '在用' : '已移出'}</span></td>
         <td>${g.lastActiveAt ? fmtAgo(g.lastActiveAt) : '-'}</td>
         <td class="num">
@@ -2470,8 +2486,7 @@ async function openGroupPlugins(chatId) {
 
   const own = d.own;
   const g = d.global ?? { mode: 'all', list: [] };
-  $('#gplugSub').textContent = `群 ${shortId(chatId)}：只影响这一个群，其它群不受影响。`;
-  $('#gplugGlobalHint').textContent =
+  $('#gplugSub').textContent = `群 ${shortId(chatId)}：只影响这一个群，其它群不受影响。`;  $('#gplugGlobalHint').textContent =
     g.mode === 'all'
       ? '（全局：全部启用）'
       : `（全局：${g.mode === 'exclude' ? '排除' : '仅启用'} ${(g.list ?? []).length} 个）`;
@@ -2648,8 +2663,8 @@ async function loadRoles() {
       .map(
         (r) => `
         <tr>
-          <td class="mono">${escapeHtml(r.scope)}</td>
-          <td class="mono" title="${escapeHtml(r.openid)}">${escapeHtml(shortId(r.openid))}</td>
+          <td title="${escapeHtml(r.scope)}">${escapeHtml(r.groupName ? `${r.groupName}（${shortId(r.scope.split(':').slice(1).join(':'))}）` : scopeText(r.scope))}</td>
+          <td title="${escapeHtml(r.openid)}">${labelWithId(r.name, r.openid)}</td>
           <td>${levelText(r.level)} <span class="hint">${r.level}</span></td>
           <td class="num"><button class="btn small danger" data-scope="${escapeHtml(r.scope)}" data-openid="${escapeHtml(r.openid)}">移除</button></td>
         </tr>`,

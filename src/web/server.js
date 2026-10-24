@@ -295,8 +295,8 @@ export async function startWebServer({
     return rt.plugins.setEnabled(id, enabled);
   };
 
-  const statusPayload = (rt) =>
-    runtime.snapshot({
+  const statusPayload = (rt) => {
+    const snap = runtime.snapshot({
       credentialExpiresIn: Math.max(0, Math.round(((rt?.tokens?.expiresAt ?? 0) - Date.now()) / 1000)),
       plugins: rt ? rt.plugins.list() : [],
       cfg: rt?.cfg ?? {},
@@ -307,6 +307,26 @@ export async function startWebServer({
       // 面板「框架版本」直接显示，不用等用户点「检查更新」才有值
       version: frameworkVersion,
     });
+
+    /**
+     * 给「活跃会话」补上名字。
+     *
+     * perChat 记的是 chatId——群聊是群 openid，私聊是用户 openid。
+     * 面板上只显示截断的 openid，用户认不出是哪个群、哪个人。
+     * 群名从 rt.groupNames 拿（异步拉的缓存），私聊对象从 recentPeople 拿。
+     */
+    if (Array.isArray(snap.chats)) {
+      const people = rt?.listRecentPeople?.(200) ?? [];
+      snap.chats = snap.chats.map((c) => ({
+        ...c,
+        name:
+          c.kind === 'group'
+            ? rt?.groupName?.(c.id) ?? ''
+            : people.find((p) => p.openid === c.id)?.name ?? '',
+      }));
+    }
+    return snap;
+  };
 
   // 日志实时推送：日志是全局的，所有连接都收到同一份
   const offLog = onLog((entry) => {
@@ -1175,7 +1195,27 @@ export async function startWebServer({
         }
 
         if (pathname === '/api/groups' && req.method === 'GET') {
-          return json(res, 200, await groups.list());
+          const list = await groups.list();
+          /**
+           * 补上群名和邀请者/群主的昵称。
+           *
+           * 官方事件里没有群名，是 BotRuntime 在入群/收消息时异步拉的
+           * （`groupNames` 缓存）；用户昵称则来自 `recentPeople`——
+           * 都是「有就用，没有就退回 openid」，不影响原有字段。
+           */
+          const people = rt?.listRecentPeople?.(200) ?? [];
+          const nameOf = (id) => people.find((p) => p.openid === id)?.name || '';
+          const withNames = list.map((g) => ({
+            ...g,
+            groupName: rt?.groupName?.(g.groupOpenid) ?? '',
+            inviterName: nameOf(g.inviterOpenid),
+            ownerName: nameOf(g.ownerOpenid),
+          }));
+          // 没有的群名就现拉一次，下次刷新就有了（不阻塞本次响应）
+          for (const g of list) {
+            if (!g.groupName) rt?.ensureGroupNameCached?.(g.groupOpenid);
+          }
+          return json(res, 200, withNames);
         }
 
         /**
@@ -1283,7 +1323,19 @@ export async function startWebServer({
             }
           }
           rows.sort((a, b) => b.level - a.level || a.scope.localeCompare(b.scope));
-          return json(res, 200, { owners: cfg.owners, rows });
+          /**
+           * 补上昵称和群名。openid 是长串，面板上只显示截断的中间几位，
+           * 用户认不出是谁；有昵称就一起给，没有就退回 openid。
+           */
+          const people = rt?.listRecentPeople?.(200) ?? [];
+          const nameOf = (id) => people.find((p) => p.openid === id)?.name || '';
+          const enriched = rows.map((r) => {
+            const kind = r.scope.split(':')[0];
+            const id = r.scope.split(':').slice(1).join(':');
+            const groupName = kind === 'group' ? rt?.groupName?.(id) ?? '' : '';
+            return { ...r, name: nameOf(r.openid), groupName };
+          });
+          return json(res, 200, { owners: cfg.owners, rows: enriched });
         }
         if (pathname === '/api/roles/set' && req.method === 'POST') {
           const body = await readBody(req);

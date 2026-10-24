@@ -1235,22 +1235,28 @@ async function testPluginWatch() {
   /**
    * 熔断：插件自己往目录里写文件会造成 2 秒一轮的死循环。
    * 30 秒内重载 3 次就暂停 60 秒，不能一直烧 CPU。
+   *
+   * 这里**固定跑 5 轮**，不看「这一轮有没有触发 reload」。
+   * 以前的循环条件是 `calls.reload.length !== last`，一旦某轮因为
+   * 时序没触发重载就立刻退出，可能只累计到 2 次——达不到熔断阈值，
+   * 测试就假失败。在 Node 24 上文件系统时序更快，正好踩中。
+   *
+   * 5 轮足够越过「3 次」的阈值，也多留几轮验证「熔断后不再重载」。
    */
   w.settleMs = 0;
-  let last = -1;
-  let rounds = 0;
-  while (calls.reload.length !== last && rounds < 8) {
-    last = calls.reload.length;
-    await put('alpha', 'index.js', `export default { id:"alpha", loop:${rounds} }`);
-    // 把 mtime 拨到过去：文件系统的 mtime 有时比当前时间晚 1ms，
-    // 那一轮会被判成「还没安静够」进 pending，测试就假失败了
-    await age('alpha');
+  const ROUNDS = 5;
+  for (let i = 0; i < ROUNDS; i++) {
+    await put('alpha', 'index.js', `export default { id:"alpha", loop:${i} }`);
     await w.tick();
-    rounds += 1;
+    // 已经熔断了就停，没必要把 5 轮跑完
+    if (w.tripped.has('alpha')) break;
   }
   const afterTrip = calls.reload.length;
-  check('热重载: 反复重载后触发熔断', w.tripped.has('alpha'), `rounds=${rounds}`);
-  check('热重载: 熔断后不再重载', calls.reload.length === afterTrip && rounds < 8, `reload=${afterTrip}`);
+  check('热重载: 反复重载后触发熔断', w.tripped.has('alpha'), `reload=${afterTrip}`);
+  // 熔断期间再改文件也不该重载
+  await put('alpha', 'index.js', 'export default { id:"alpha", loop:"after-trip" }');
+  await w.tick();
+  check('热重载: 熔断后不再重载', calls.reload.length === afterTrip, `reload=${afterTrip}`);
 
   await w.stop();
   await fs.rm(root, { recursive: true, force: true }).catch(() => {});

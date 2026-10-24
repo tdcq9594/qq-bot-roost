@@ -65,6 +65,18 @@ export class BotRuntime {
      * 重启后清空，重新说句话就又有了。
      */
     this.recentPeople = new Map();
+    /**
+     * 群名缓存：groupOpenid -> { name, at }
+     *
+     * **官方事件里没有群名**（实测 GROUP_AT_MESSAGE_CREATE 的字段只有
+     * author/content/group_id/group_openid/id/message_scene/message_type/timestamp），
+     * 而面板上只显示 `577C4A90…` 这种截断的 openid，用户根本认不出是哪个群。
+     *
+     * 所以在入群 / 首次收到消息时异步拉一次 `getGroupInfo` 补上，
+     * 之后面板直接读缓存。**不落盘**：群名会变，存下来反而是错的；
+     * 拉不到就退回显示 openid，不影响任何功能。
+     */
+    this.groupNames = new Map();
     this.roles = new RoleStore(this.paths.roles);
     this.outbound = null;
     this.session = null;
@@ -316,6 +328,43 @@ export class BotRuntime {
       .slice(0, limit);
   }
 
+  /** 查群名，没有就 undefined（面板自己退回显示 openid） */
+  groupName(groupOpenid) {
+    if (!groupOpenid) return undefined;
+    return this.groupNames.get(groupOpenid)?.name || undefined;
+  }
+
+  /**
+   * 补一个群的名字（给面板调的公开入口，内部走带缓存的那份）。
+   * 不会抛异常，调用方不用 try/catch。
+   */
+  ensureGroupNameCached(groupOpenid) {
+    this.#ensureGroupName(groupOpenid).catch(() => {});
+  }
+
+  /**
+   * 补一个群的名字。
+   *
+   * 带 10 分钟缓存：群名不会总变，但每个群每次启动查一次就够，
+   * 没必要每条消息都打接口（`getGroupInfo` 是公开接口，但也有频控）。
+   *
+   * **永远不抛异常**——它是在消息处理链路里被调的，为了一个显示用的名字
+   * 把消息搞丢是不可能的。
+   */
+  async #ensureGroupName(groupOpenid) {
+    if (!groupOpenid) return;
+    const hit = this.groupNames.get(groupOpenid);
+    if (hit && Date.now() - hit.at < 10 * 60_000) return;
+
+    try {
+      const info = await this.api.getGroupInfo(groupOpenid);
+      const name = String(info?.group_name ?? info?.name ?? '').trim();
+      if (name) this.groupNames.set(groupOpenid, { name, at: Date.now() });
+    } catch {
+      // 拉不到就算了：openid 也能认，只是没那么好认
+    }
+  }
+
   async stop() {
     try {
       this.gateway?.stop();
@@ -356,6 +405,8 @@ export class BotRuntime {
         const gid = d?.group_openid;
         const inviter = d?.op_member_openid || '';
         await groups.onAdded(gid, inviter);
+        // 顺便把群名拉下来，面板上就不用显示一串 openid 了
+        this.#ensureGroupName(gid).catch(() => {});
         if (inviter && gid) {
           const gScope = `group:${gid}`;
           if ((await roles.levelIn(gScope, inviter)) >= NO_PERM) {
