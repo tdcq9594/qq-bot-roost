@@ -56,6 +56,22 @@ jobs:
       - name: 真机驱动自测（假 OneBot 服务端，不需要 QQ）
         run: node test/live-driver.mjs
 
+  # 凭据泄露单独一个 job，而且跑得最早：真泄露了就别等测试跑完。
+  #
+  # 起因是 test/e2e.mjs 里硬编码过真实 AppSecret，仓库公开，等于凭证外泄。
+  # 那种行看起来和「随便一个测试字符串」没区别，review 抓不住。
+  secrets:
+    name: 凭据扫描
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+      - name: 不应有硬编码的 AppSecret / token
+        run: node scripts/check-secrets.mjs
+
   # 换行符单独一个 job：Windows 开发者本地检出是 CRLF，
   # 一不小心就提交进去，而这种问题在 Windows 上跑测试是看不出来的。
   eol:
