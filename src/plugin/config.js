@@ -44,9 +44,17 @@ function isDescriptor(v) {
   return (
     isPlainObject(v) &&
     ('default' in v || 'type' in v) &&
-    // 有 type 时必须是认识的类型，避免把普通对象误判
-    // 'string' 当 'text' 的别名：作者十有八九会写 string，别让他因此踩空
-    (!('type' in v) || ['number', 'text', 'string', 'boolean', 'json', 'select'].includes(v.type))
+    /**
+     * 有 type 时必须是认识的类型，避免把普通对象误判。
+     *
+     * 'string' 当 'text' 的别名：作者十有八九会写 string，别让他因此踩空。
+     *
+     * **这里必须和面板支持的类型保持一致。** 漏一个的后果不是「那个类型不好用」，
+     * 而是整个 descriptor 被当成普通对象——type 退化成 json、label 和 desc 全丢，
+     * 面板上显示成一坨 JSON 文本框。加新类型时记得同步这里。
+     */
+    (!('type' in v) ||
+      ['number', 'text', 'string', 'boolean', 'json', 'select', 'textarea'].includes(v.type))
   );
 }
 
