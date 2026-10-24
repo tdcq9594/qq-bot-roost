@@ -492,13 +492,22 @@ function activateTab(name) {
   if (name === 'roles') { loadRoles(); loadPeople(); }
 }
 
-// 一级按钮和下拉菜单项都走同一套激活逻辑
-$$('.tab[data-tab], .tab-item[data-tab]').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    activateTab(btn.dataset.tab);
-    // 记进地址栏，刷新后还停在这一页，也方便直接分享 /#config
-    history.replaceState(null, '', `#${btn.dataset.tab}`);
-  });
+/**
+ * 一级按钮和下拉菜单项都走同一套激活逻辑。
+ *
+ * 用**事件委托**绑在 nav 上，不是逐个 addEventListener。
+ * 插件页面（`loadPluginPages`）的按钮是运行时动态创建的吗——
+ * 不，动态创建的就是它。页面同步的 `$$('.tab-item')` 那时候还不存在，
+ * 逐个绑的方式永远漏掉它们，表现就是「点了骰子战绩没反应」。
+ *
+ * 委托在祖先元素上，后来加进来的子元素一样能响应。
+ */
+$('nav')?.addEventListener('click', (e) => {
+  const btn = e.target.closest('.tab[data-tab], .tab-item[data-tab]');
+  if (!btn || !btn.isConnected) return;
+  activateTab(btn.dataset.tab);
+  // 记进地址栏，刷新后还停在这一页，也方便直接分享 /#config
+  history.replaceState(null, '', `#${btn.dataset.tab}`);
 });
 
 /* ---------------- 分组下拉 ---------------- */

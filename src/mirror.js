@@ -72,8 +72,29 @@ export const PRESETS = [
 /** 直连失败时按这个顺序试（auto 模式用） */
 const FALLBACK_ORDER = ['ghfast', 'ghproxy', 'gh-proxy', 'kkgithub'];
 
-/** 测速用的固定小文件：框架仓库的 package.json，几百字节 */
-export const PROBE_URL = 'https://raw.githubusercontent.com/tdcq9594/qq-bot-roost/main/package.json';
+/**
+ * 测速用的固定小文件：框架仓库的 package.json，几百字节。
+ *
+ * **必须用 master 分支**。以前写的是 `main`，而这个仓库的默认分支是
+ * `master`——于是每个源都返回 404，测速面板一片红，看着像「所有源都不通」，
+ * 实际是探测地址本身错了。真实用户也会遇到：fork 出去改名分支的话，
+ * 这里要跟着改，或者用下面的 PROBE_FALLBACKS 多试几个。
+ */
+export const PROBE_URL = 'https://raw.githubusercontent.com/tdcq9594/qq-bot-roost/master/package.json';
+
+/**
+ * 主探测地址失败时按顺序换分支再试。
+ *
+ * 上面的 main/master 改来改去总有漏的一天（fork、改默认分支、文档抄错），
+ * 而测速面板的错误信息是「所有源都不通」——用户只会以为是自己网络坏了。
+ * 所以一个地址 404 时就换下一个，都不行才真的报不通。
+ */
+const PROBE_FALLBACKS = [
+  PROBE_URL,
+  PROBE_URL.replace('/master/', '/main/'),
+  'https://raw.githubusercontent.com/tdcq9594/qq-bot-roost/master/README.md',
+  'https://raw.githubusercontent.com/tdcq9594/qq-bot-roost/main/README.md',
+];
 
 /** 当前配置。由 main / 保存配置 / 配置热加载三处调用 configureMirror() 更新 */
 let current = { id: 'auto', custom: '', chyanResId: '', chyanCdk: '' };
@@ -258,26 +279,38 @@ export async function probeMirrors({ timeoutMs = 6000, custom = current.custom }
   const list = PRESETS.filter((p) => p.id !== 'auto');
   return Promise.all(
     list.map(async (p) => {
-      const target = applyMirror(PROBE_URL, p, custom);
       const started = Date.now();
-      try {
-        const res = await fetch(target, {
-          signal: AbortSignal.timeout(timeoutMs),
-          headers: { 'User-Agent': 'qq-bot-roost' },
-        });
-        const ms = Date.now() - started;
-        if (!res.ok) return { id: p.id, name: p.name, ok: false, ms, error: `HTTP ${res.status}` };
-        await res.arrayBuffer(); // 读完再算耗时，否则只测到首字节
-        return { id: p.id, name: p.name, ok: true, ms: Date.now() - started };
-      } catch (e) {
-        return {
-          id: p.id,
-          name: p.name,
-          ok: false,
-          ms: Date.now() - started,
-          error: e?.name === 'TimeoutError' ? '超时' : e.message,
-        };
+      let lastErr = null;
+
+      // 逐个探测地址试：404 说明这个分支不对，换下一个，别直接判「源不通」
+      for (const probe of PROBE_FALLBACKS) {
+        const target = applyMirror(probe, p, custom);
+        try {
+          const res = await fetch(target, {
+            signal: AbortSignal.timeout(timeoutMs),
+            headers: { 'User-Agent': 'qq-bot-roost' },
+          });
+          if (res.ok) {
+            await res.arrayBuffer(); // 读完再算耗时，否则只测到首字节
+            return { id: p.id, name: p.name, ok: true, ms: Date.now() - started };
+          }
+          lastErr = `HTTP ${res.status}`;
+          // 404 是地址问题，值得换分支再试；其它状态码说明源活着，不用试了
+          if (res.status !== 404) break;
+        } catch (e) {
+          lastErr = e?.name === 'TimeoutError' ? '超时' : e.message;
+          // 超时/网络错是源的问题，换分支也没用
+          break;
+        }
       }
+
+      return {
+        id: p.id,
+        name: p.name,
+        ok: false,
+        ms: Date.now() - started,
+        error: lastErr ?? '未知错误',
+      };
     }),
   );
 }
