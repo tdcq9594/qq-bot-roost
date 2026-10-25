@@ -343,10 +343,37 @@ export class BotRuntime {
   }
 
   /**
+   * 批量补群名，最多等 `timeoutMs`。
+   *
+   * 面板要的是「打开就能认出是哪个群」，让用户先看一串 `577C4A90…`
+   * 再自己刷新一次很别扭；但也不能为了几个群名把面板卡住（接口有频控，
+   * 群多了还会串行超时）。所以给一个总超时，到点有多少用多少。
+   *
+   * @param {string[]} ids
+   * @param {{timeoutMs?:number}} [opts]
+   */
+  async fetchGroupNames(ids = [], { timeoutMs = 2500 } = {}) {
+    const todo = [...new Set(ids.filter((id) => id && !this.groupName(id)))];
+    if (!todo.length) return;
+
+    const work = Promise.allSettled(todo.map((id) => this.#ensureGroupName(id)));
+    let timer;
+    const cap = new Promise((r) => {
+      timer = setTimeout(r, timeoutMs);
+      timer.unref?.();
+    });
+    await Promise.race([work, cap]);
+    clearTimeout(timer);
+  }
+
+  /**
    * 补一个群的名字。
    *
    * 带 10 分钟缓存：群名不会总变，但每个群每次启动查一次就够，
    * 没必要每条消息都打接口（`getGroupInfo` 是公开接口，但也有频控）。
+   *
+   * **拉不到也要记一笔空名字**（负缓存）。否则面板每刷新一次就重打一遍
+   * 接口——机器人没权限查、群已解散这类情况会一直失败，变成持续的空转。
    *
    * **永远不抛异常**——它是在消息处理链路里被调的，为了一个显示用的名字
    * 把消息搞丢是不可能的。
@@ -359,9 +386,10 @@ export class BotRuntime {
     try {
       const info = await this.api.getGroupInfo(groupOpenid);
       const name = String(info?.group_name ?? info?.name ?? '').trim();
-      if (name) this.groupNames.set(groupOpenid, { name, at: Date.now() });
+      this.groupNames.set(groupOpenid, { name, at: Date.now() });
     } catch {
       // 拉不到就算了：openid 也能认，只是没那么好认
+      this.groupNames.set(groupOpenid, { name: '', at: Date.now() });
     }
   }
 
@@ -444,6 +472,12 @@ export class BotRuntime {
       globalRuntime.bump('recv');
       globalRuntime.touchChat(msg.chatId, msg.kind);
       if (msg.kind === 'group' && msg.groupId) await groups.touch(msg.groupId);
+      /**
+       * 在这个群第一次说话时顺手把群名拉下来（内部有 10 分钟缓存，
+       * 只有第一次真的会打接口），面板上就不用显示一串 openid 了。
+       * 不 await：这是显示用的信息，不值得让消息多等一次网络往返。
+       */
+      if (msg.kind === 'group' && msg.groupId) this.ensureGroupNameCached(msg.groupId);
 
       if (msg.kind === 'group' && msg.raw?.author?.member_role === 'owner') {
         await groups.setOwner(msg.groupId, msg.userId);

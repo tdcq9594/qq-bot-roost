@@ -1094,12 +1094,21 @@ export async function startWebServer({
           const groups = await (rt.groups?.list?.() ?? Promise.resolve([]));   // list() 按最近活跃排序
 
           if (req.method === 'GET') {
+            /**
+             * 群名要现拉：官方事件里根本没有群名，只有 `rt.groupNames` 缓存里有。
+             * 以前这里读的是 `g.groupName`（群档案里从来没这个字段），
+             * 于是面板永远只显示 `577C4A90…`，用户认不出是哪个群——
+             * 「在哪个群关掉这个插件」这件事就变得没法操作了。
+             */
+            await rt?.fetchGroupNames?.(groups.map((g) => g.groupOpenid));
             return json(res, 200, {
               pluginId: pid,
               global: { mode: spec.mode ?? 'all', list: spec.list ?? [] },
               groups: groups.map((g) => ({
                 chatId: g.groupOpenid,
-                name: g.groupName ?? '',
+                name: rt?.groupName?.(g.groupOpenid) ?? '',
+                note: g.note ?? '',
+                lastActiveAt: g.lastActiveAt ?? 0,
                 enabled: pluginAllowedIn(spec, g.groupOpenid, pid),
               })),
             });
@@ -1296,16 +1305,20 @@ export async function startWebServer({
            */
           const people = rt?.listRecentPeople?.(200) ?? [];
           const nameOf = (id) => people.find((p) => p.openid === id)?.name || '';
+          /**
+           * 缺的群名先现拉一轮，最多等 2.5 秒。
+           *
+           * 以前是「这次不阻塞、下次刷新才有」——结果是打开面板永远先看到
+           * 一串 openid，用户以为功能坏了。现在第一次打开就能看到名字；
+           * 接口慢或没权限时到点就用 openid 兜底，不会把面板卡死。
+           */
+          await rt?.fetchGroupNames?.(list.map((g) => g.groupOpenid));
           const withNames = list.map((g) => ({
             ...g,
             groupName: rt?.groupName?.(g.groupOpenid) ?? '',
             inviterName: nameOf(g.inviterOpenid),
             ownerName: nameOf(g.ownerOpenid),
           }));
-          // 没有的群名就现拉一次，下次刷新就有了（不阻塞本次响应）
-          for (const g of list) {
-            if (!g.groupName) rt?.ensureGroupNameCached?.(g.groupOpenid);
-          }
           return json(res, 200, withNames);
         }
 

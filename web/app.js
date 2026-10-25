@@ -2191,13 +2191,29 @@ async function renderPPGroups() {
   box.innerHTML =
     `<div class="pp-hint">取消勾选 = 这个群不用这个插件；其它群照全局来（全局：${escapeHtml(gText)}）。改完立即生效。</div>` +
     d.groups
-      .map(
-        (x) => `<label class="gplug-item">
+      .map((x) => {
+        /**
+         * 群名优先，没有名字就用备注，再没有才退回 openid 前缀。
+         *
+         * 以前这里固定渲染「名字 + shortId」两行，而名字永远是空的，
+         * 于是每个群都是同一串 `577C4A90…` 出现两次——用户根本分不清
+         * 要在哪个群关掉插件。现在把第二行让给「最近活跃」，
+         * 认不出名字时至少能靠时间对上号。
+         */
+        const title = x.name || x.note || '';
+        const label = title ? escapeHtml(title) : escapeHtml(shortId(x.chatId));
+        const meta = [
+          title ? escapeHtml(shortId(x.chatId)) : '',
+          x.lastActiveAt ? escapeHtml(agoText(x.lastActiveAt)) : '还没说过话',
+        ]
+          .filter(Boolean)
+          .join(' · ');
+        return `<label class="gplug-item">
           <input type="checkbox" data-gid="${escapeHtml(x.chatId)}" ${x.enabled ? 'checked' : ''}>
-          <span class="gp-name">${escapeHtml(x.name || shortId(x.chatId))}</span>
-          <span class="gp-id">${escapeHtml(shortId(x.chatId))}</span>
-        </label>`,
-      )
+          <span class="gp-name">${label}</span>
+          <span class="gp-id">${meta}</span>
+        </label>`;
+      })
       .join('');
 
   box.querySelectorAll('input[data-gid]').forEach((cb) => {
