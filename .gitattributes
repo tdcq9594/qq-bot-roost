@@ -2,9 +2,12 @@
 # 注意：gitattributes 是**后匹配的规则覆盖前面的**，所以具体规则必须写在通用规则之后
 * text=auto eol=lf
 
-# Windows 批处理必须是 CRLF，否则 cmd.exe 解析带括号的多行块会失败（双击没反应）
-*.bat text eol=crlf
-*.cmd text eol=crlf
+# Windows 批处理必须是 CRLF，否则 cmd.exe 解析带括号的多行块会失败（双击没反应）。
+# 用 -text 而不是 eol=crlf：app 内更新下载的是 GitHub archive tarball，
+# 它直接给 git blob 内容、不做 eol 转换；只有把 CRLF 真正存进 blob，
+# 更新后 start.bat 才还是 CRLF（eol=crlf 只在 git checkout 时生效）。
+*.bat -text -eol
+*.cmd -text -eol
 
 # 图片按二进制处理，别做换行转换
 *.png binary

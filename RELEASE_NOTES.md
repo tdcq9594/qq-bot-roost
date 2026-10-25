@@ -1,3 +1,23 @@
+## v0.6.16：修 Windows 双击 start.bat 打不开（更新把 CRLF 写成了 LF）
+
+有用户反馈：从面板更新到 0.6.15 后，双击 `start.bat` 打不开——窗口一闪就退，
+或冒出 `'it' 不是内部或外部命令`、`[错误] Node.js 版本太低` 之类的乱码。
+
+**根因**：不是程序坏了，是 `start.bat` 的换行符被写成了 LF。app 内更新下载的是
+GitHub 的 archive tarball，它直接给 git blob 内容——`.gitattributes` 里的
+`eol=crlf` 只在 git checkout 时生效，对 tarball 无效。于是原本 CRLF 的
+`start.bat` 被覆盖成 LF，cmd.exe 解析带括号的多行块时会把行拆碎当命令执行，
+表现就是双击没反应 / 乱报错。
+
+**修复**：
+
+- `.gitattributes` 把 `*.bat` / `*.cmd` 改成 `-text`，让 CRLF 真正存进 blob，
+  GitHub tarball 里也就是 CRLF 了。
+- `src/tarball.js` 解包时对 `.bat` / `.cmd` 在 Windows 上兜底转 CRLF（幂等）。
+
+**已经装坏的用户**：本版 tarball 里的 `start.bat` 已是 CRLF，更新一次即可恢复；
+急用也可用 `node src/main.js` 启动，或手动把 `start.bat` 另存为 CRLF。
+
 ## v0.6.15：多机器人面板不再串台 + 安全加固 + 发布链路守卫
 
 这一版主要修「多机器人隔离」在可观测性上的漏洞，并补了几处安全与发布链路的硬约束。
