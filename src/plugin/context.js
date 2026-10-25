@@ -254,6 +254,14 @@ export function createContext({ meta, paths, registry, api, cfg, config, configS
     api,
     logger,
     storage: new PluginStorage(paths.pluginData(id)),
+
+    /**
+     * 插件自己的文件目录：data/bots/<机器人>/plugins/<插件id>/
+     *
+     * 存档走 storage（一个 JSON），但图片缓存、生成的图片这类**文件**
+     * 需要一个真实目录。以前插件只能自己猜 cwd，装到别的机器人下就串了。
+     */
+    dataDir: paths.pluginDataDirFor(id),
     /**
      * Markdown 与消息内交互标签的构造工具。
      *   ctx.md.cmdInput('/签到', '签到')  → 点了把 /签到 插进输入框（群聊可用）

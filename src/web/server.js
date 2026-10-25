@@ -25,6 +25,7 @@ import {
 } from '../updater.js';
 // 面板改插件启停时要同步机器人配置里的过滤器，两边不能各说各的
 import { pluginFilterOf, pluginAllowedIn } from '../bot.js';
+import { toggleGroupPlugin } from '../plugin/groupscope.js';
 import { suspendPluginWatch } from '../services/plugin-watch.js';
 import { runDoctor, summarize } from '../doctor.js';
 import {
@@ -1053,8 +1054,20 @@ export async function startWebServer({
           const id = pd[1];
           const body = await readBody(req);
           const key = String(body.key ?? '').trim();
-          if (!key) return json(res, 400, { error: '缺少 key' });
           try {
+            /**
+             * clear 必须放在 key 校验**之前**。
+             *
+             * 「清除全部数据」是整库操作，本来就没有具体 key 可传；
+             * 之前先判 `if (!key) return 400`，导致面板上那个按钮
+             * 永远返回「缺少 key」——点了没反应，看起来像按钮坏了。
+             */
+            if (body.clear) {
+              // 清空这个插件的全部存档（面板「清除全部数据」）
+              const r = await plugins.clearData(id);
+              return json(res, 200, { ok: true, cleared: r.removed });
+            }
+            if (!key) return json(res, 400, { error: '缺少 key' });
             if (body.remove) {
               await plugins.deleteData(id, key);
               return json(res, 200, { ok: true, removed: key });
@@ -1066,6 +1079,44 @@ export async function startWebServer({
           } catch (e) {
             return json(res, 400, { error: e.message });
           }
+        }
+
+        /**
+         * 按「插件」看分群开关。
+         *
+         * 群页面那边是「一个群能开哪些插件」，这里是反过来：
+         * 一个插件在哪些群是关的。两边读写的是同一份 cfg.plugins.groups。
+         */
+        const pgm = pathname.match(/^\/api\/plugins\/([^/]+)\/groups$/);
+        if (pgm && (req.method === 'GET' || req.method === 'PUT')) {
+          const pid = decodeURIComponent(pgm[1]);
+          const spec = rt.cfg.plugins ?? { mode: 'all', list: [] };
+          const groups = await (rt.groups?.list?.() ?? Promise.resolve([]));   // list() 按最近活跃排序
+
+          if (req.method === 'GET') {
+            return json(res, 200, {
+              pluginId: pid,
+              global: { mode: spec.mode ?? 'all', list: spec.list ?? [] },
+              groups: groups.map((g) => ({
+                chatId: g.groupOpenid,
+                name: g.groupName ?? '',
+                enabled: pluginAllowedIn(spec, g.groupOpenid, pid),
+              })),
+            });
+          }
+
+          const body = await readBody(req);
+          const chatId = String(body.chatId ?? '').trim();
+          if (!chatId) return json(res, 400, { error: '缺少 chatId' });
+          const enabled = Boolean(body.enabled);
+          const groupsCfg = toggleGroupPlugin(spec, chatId, pid, enabled);
+          rt.cfg.plugins = { ...spec, groups: groupsCfg };
+          await saveBotConfig(rt.id, rt.cfg);
+          return json(res, 200, {
+            ok: true,
+            chatId,
+            enabled: pluginAllowedIn(rt.cfg.plugins, chatId, pid),
+          });
         }
 
         const m = pathname.match(/^\/api\/plugins\/([^/]+)\/(enable|disable|reload|remove|resetconfig)$/);

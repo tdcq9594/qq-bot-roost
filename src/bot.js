@@ -484,14 +484,32 @@ export class BotRuntime {
 
       if (msg.isCommand && commandEntry) {
         /**
-         * 分群插件开关：这个群没启用这个插件就**静默忽略**。
+         * 分群插件开关：这个群没启用这个插件就不执行。
          *
-         * 不回复「本群未启用」是有意的：机器人在多个群里，一条被禁用的
-         * 命令如果在群里回一句提示，等于把这个开关变成了噪音源。
-         * 从群成员视角看，这个功能就是不存在。
+         * 回复与否**看人**：
+         *   - 普通成员一个字都不回——机器人在多个群里，被禁用的命令如果
+         *     在群里回一句提示，等于把这个开关变成了噪音源，从他们视角
+         *     这个功能就该不存在。
+         *   - 管理员/主人必须回一句——否则「本群把这个插件关了」和
+         *     「机器人坏了」在他眼里完全一样，只能去翻配置文件才知道原因。
+         *     这是「找不到在哪开关插件」的一半来源：开关生效得太安静。
          */
         if (!pluginAllowedIn(cfg.plugins, msg.chatId, commandEntry.pluginId)) {
           globalRuntime.bump('ignored');
+          try {
+            const lv = await roles.effective(scopeOf(msg), msg.userId, { owners: cfg.owners });
+            if (lv <= LEVEL.admin) {
+              const P = cfg.commandPrefix || '/';
+              await msg
+                .reply(
+                  `本群已关闭插件「${commandEntry.pluginId}」。\n` +
+                    `恢复：${P}群插件 开 ${commandEntry.pluginId}`,
+                )
+                .catch(() => {});
+            }
+          } catch {
+            /* 权限查不出来就当普通成员处理 */
+          }
           return;
         }
         const scope = scopeOf(msg);

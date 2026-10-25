@@ -15,7 +15,8 @@ import {
 import { DIRS, PATHS, botPaths, listBotIds, ensureDirs, rel } from './paths.js';
 import { createLogger, setLevel, getLevel, attachLogFile, flushLogs } from './logger.js';
 import { configureMirror } from './mirror.js';
-import { BotRuntime } from './bot.js';
+import { BotRuntime, pluginAllowedIn } from './bot.js';
+import { toggleGroupPlugin, resetGroupPlugins, describeGroupScope } from './plugin/groupscope.js';
 import { runtime, sanitizePayload } from './runtime.js';
 import { LEVEL, NO_PERM, levelName, parseLevel, parseScope, scopeOf } from './roles.js';
 import { openBrowser } from './browser.js';
@@ -109,6 +110,7 @@ function registerCoreCommands(rt) {
     enable: '管理',
     disable: '管理',
     reload: '管理',
+    群插件: '管理',
     help: '其它',
     menu: '其它',
     claim: '其它',
@@ -606,6 +608,61 @@ function registerCoreCommands(rt) {
     await msg.reply(`已禁用 ${id}`);
   });
 
+  /**
+   * 分群插件开关。
+   *
+   * 和面板「群组 → 插件」「插件 → 分群开关」改的是同一份 cfg.plugins.groups，
+   * 三个入口共用 plugin/groupscope.js 的翻译逻辑。
+   *
+   * 只影响分发时的判断，不动加载——插件在进程里是全局加载的，
+   * 按群卸载等于每个群一套运行时，没必要。
+   */
+  core('群插件', { desc: '看/改这个群能用哪些插件（群管理）', admin: true }, async (msg) => {
+    if (msg.kind !== 'group') return msg.reply('这个指令只能在群里用。');
+
+    const chatId = msg.groupId;
+    const spec = cfg.plugins ?? { mode: 'all', list: [] };
+    const list = [...plugins.loaded.values()]
+      .filter((p) => p.meta?.id && p.meta.id !== '__core')
+      .sort((a, b) => a.meta.id.localeCompare(b.meta.id));
+
+    const [act, ...rest] = msg.args;
+    const pid = (rest[0] ?? '').trim();
+
+    if (!act) {
+      const lines = [`本群插件开关（${describeGroupScope(spec, chatId)}）：`];
+      for (const p of list) {
+        const on = pluginAllowedIn(spec, chatId, p.meta.id);
+        lines.push(`${on ? '●' : '○'} ${p.meta.id} ${p.meta.name ?? ''}`);
+      }
+      lines.push('', `关掉：${P}群插件 关 <id>`, `打开：${P}群插件 开 <id>`, `恢复跟随全局：${P}群插件 重置`);
+      return msg.reply(lines.join('\n'));
+    }
+
+    if (act === '重置') {
+      cfg.plugins = { ...spec, groups: resetGroupPlugins(spec, chatId) };
+      save();
+      return msg.reply('已恢复为跟随全局。');
+    }
+
+    const want =
+      act === '关' || act === '关闭' || act === 'off' || act === '0'
+        ? false
+        : act === '开' || act === '打开' || act === 'on' || act === '1'
+          ? true
+          : null;
+    if (want === null) {
+      return msg.reply(`用法：${P}群插件 关 <id> / ${P}群插件 开 <id> / ${P}群插件 重置`);
+    }
+    if (!pid) return msg.reply(`要给插件 id，先发 ${P}群插件 看列表。`);
+    if (!list.some((p) => p.meta.id === pid)) return msg.reply(`没有这个插件：${pid}`);
+
+    cfg.plugins = { ...spec, groups: toggleGroupPlugin(spec, chatId, pid, want) };
+    save();
+    const scope = describeGroupScope(cfg.plugins, chatId);
+    return msg.reply(`${want ? '已在本群启用' : '已在本群关闭'} ${pid}（${scope}）`);
+  });
+
   core('reload', { desc: '重载插件（需全局管理员）', admin: true, globalAdmin: true }, async (msg) => {
     const id = msg.args[0];
     if (id) {
@@ -1019,6 +1076,16 @@ async function main() {
           const hot = ['commandPrefix', 'owners', 'whitelist', 'rateLimit', 'dedupWindowSec', 'groupManage', 'messageLog'];
           for (const k of hot) {
             if (nextBot[k] !== undefined) rt.cfg[k] = nextBot[k];
+          }
+          /**
+           * plugins 单独处理：它是对象，而且分群开关（groups）会随面板/指令频繁改。
+           * 之前漏了它，导致「改了配置、提示已热加载、行为却没变」——
+           * 面板上关掉的插件在群里照样能用，反过来也一样。
+           * 用 Object.assign 保留外层对象引用，别处拿着 cfg.plugins 的不会看到旧值。
+           */
+          if (nextBot.plugins) {
+            if (!rt.cfg.plugins) rt.cfg.plugins = nextBot.plugins;
+            else Object.assign(rt.cfg.plugins, nextBot.plugins);
           }
           rt.log.info('配置已热加载');
         }

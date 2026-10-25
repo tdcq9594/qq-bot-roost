@@ -2154,8 +2154,68 @@ function switchPPTab(name) {
   $('#ppConfig').hidden = name !== 'config';
   $('#ppData').hidden = name !== 'data';
   $('#ppDash').hidden = name !== 'dash';
+  $('#ppGroups').hidden = name !== 'groups';
   $('#ppSave').hidden = name !== 'config';
   $('#ppReset').hidden = name !== 'config';
+  if (name === 'groups') renderPPGroups();
+}
+
+/**
+ * 「分群开关」标签：这个插件在哪些群是关的。
+ *
+ * 和群页面那个「插件」弹窗读写同一份配置（cfg.plugins.groups），
+ * 只是视角反过来——那边是「一个群能开哪些」，这边是「一个插件在哪些群关」。
+ */
+async function renderPPGroups() {
+  const box = $('#ppGroups');
+  if (!box) return;
+  box.innerHTML = '<div class="empty">读取中…</div>';
+
+  let d;
+  try {
+    d = await api(`/api/plugins/${encodeURIComponent(PP.id)}/groups`);
+  } catch (e) {
+    box.innerHTML = `<div class="empty">读取失败: ${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  if (!d.groups?.length) {
+    box.innerHTML = '<div class="empty">还没有群。把机器人拉进群后这里会自动出现。</div>';
+    return;
+  }
+
+  const g = d.global ?? { mode: 'all', list: [] };
+  const gText =
+    g.mode === 'all'
+      ? '全部启用'
+      : `${g.mode === 'exclude' ? '排除' : '仅启用'} ${(g.list ?? []).length} 个`;
+  box.innerHTML =
+    `<div class="pp-hint">取消勾选 = 这个群不用这个插件；其它群照全局来（全局：${escapeHtml(gText)}）。改完立即生效。</div>` +
+    d.groups
+      .map(
+        (x) => `<label class="gplug-item">
+          <input type="checkbox" data-gid="${escapeHtml(x.chatId)}" ${x.enabled ? 'checked' : ''}>
+          <span class="gp-name">${escapeHtml(x.name || shortId(x.chatId))}</span>
+          <span class="gp-id">${escapeHtml(shortId(x.chatId))}</span>
+        </label>`,
+      )
+      .join('');
+
+  box.querySelectorAll('input[data-gid]').forEach((cb) => {
+    cb.addEventListener('change', async () => {
+      cb.disabled = true;
+      try {
+        await api(`/api/plugins/${encodeURIComponent(PP.id)}/groups`, {
+          method: 'PUT',
+          body: JSON.stringify({ chatId: cb.dataset.gid, enabled: cb.checked }),
+        });
+      } catch (e) {
+        cb.checked = !cb.checked;
+        await confirmDialog({ title: '改不了', message: e.message, okText: '知道了' });
+      } finally {
+        cb.disabled = false;
+      }
+    });
+  });
 }
 
 /**
@@ -2330,7 +2390,9 @@ function renderPPData() {
   }
 
   box.innerHTML =
-    `<div class="pp-hint">共 ${keys.length} 条。改完点保存立即生效，插件不用重载。</div>` +
+    `<div class="pp-hint">共 ${keys.length} 条。改完点保存立即生效，插件不用重载。
+      <button class="btn small danger" id="ppClearAll" style="margin-left:8px">清除全部数据</button>
+    </div>` +
     keys
       .map(
         (k) => `
@@ -2347,6 +2409,45 @@ function renderPPData() {
 
   $$('[data-save]').forEach((b) => b.addEventListener('click', () => savePPData(b.dataset.save, b)));
   $$('[data-del]').forEach((b) => b.addEventListener('click', () => deletePPData(b.dataset.del, b)));
+  $('#ppClearAll')?.addEventListener('click', (e) => clearPPData(e.currentTarget));
+}
+
+/**
+ * 清空这个插件的全部存档。
+ *
+ * 只删数据，不动配置、不动插件本身。删了没法恢复，
+ * 所以弹窗里把「多少条」写清楚，还要手打确认。
+ */
+async function clearPPData(btn) {
+  const n = (PP.dataKeys ?? []).length;
+  if (!n) return;
+  const ok = await confirmDialog({
+    title: '清除全部数据',
+    message:
+      `要把「${PP.name || PP.id}」的 ${n} 条存档全部删掉吗？\n\n` +
+      '插件配置不受影响，但玩家数据、运行记录这些会一起没了，删了没法恢复。',
+    okText: '全部删除',
+    danger: true,
+  });
+  if (!ok) return;
+  btn.disabled = true;
+  try {
+    const r = await api(`/api/plugins/${encodeURIComponent(PP.id)}/data`, {
+      method: 'POST',
+      body: JSON.stringify({ clear: true }),
+    });
+    PP.data = {};
+    PP.dataKeys = [];
+    renderPPData();
+    await confirmDialog({
+      title: '已清除',
+      message: `删掉了 ${r.cleared ?? n} 条存档。`,
+      okText: '知道了',
+    });
+  } catch (e) {
+    await confirmDialog({ title: '清除失败', message: e.message, okText: '知道了' });
+    btn.disabled = false;
+  }
 }
 
 async function savePPConfig() {

@@ -835,6 +835,23 @@ export class PluginManager {
     return { key, value };
   }
 
+  /**
+   * 清空某个插件的全部存档（面板用）。
+   *
+   * 只删存档，不动配置、不动插件文件——相当于「这个插件从没用过」。
+   * 面板上要二次确认，删了没法恢复。
+   */
+  async clearData(id) {
+    const st = this.loaded.get(id)?.ctx?.storage;
+    if (!st) throw new Error('插件没加载，改不了数据');
+    const all = await st.all();
+    const keys = Object.keys(all);
+    for (const k of keys) await st.delete(k);
+    await st.flush();
+    log.warn(`插件 ${id} 的存档已清空（${keys.length} 条）`);
+    return { removed: keys.length };
+  }
+
   /** 删一条插件存档（面板用） */
   async deleteData(id, key) {
     const st = this.loaded.get(id)?.ctx?.storage;

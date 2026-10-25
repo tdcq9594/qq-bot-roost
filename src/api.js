@@ -175,10 +175,39 @@ export class QQApi {
     return r;
   }
 
-  /** 从本地文件读取并上传（自动转 base64） */
+  /**
+   * 从本地文件读取并上传（自动转 base64）。
+   *
+   * 带缓存：同一个文件（路径 + 大小 + 修改时间都一样）在 TTL 内不重复上传。
+   * 图片缓存类插件（本地存几百张图，用户点一次发一张）没有这层的话，
+   * 每发一次都要把整张图 base64 传一遍，慢且费额度。
+   */
   async uploadLocalFile(scene, target, filePath, fileType = FILE_TYPE.IMAGE) {
+    let cacheKey = null;
+    try {
+      const st = await fs.stat(filePath);
+      cacheKey = `${scene}:${enc(target)}:${fileType}:file:${filePath}:${st.size}:${Math.floor(st.mtimeMs)}`;
+      const hit = this.mediaCache.get(cacheKey);
+      if (hit && Date.now() - hit.at < MEDIA_TTL) return hit.value;
+      if (hit) this.mediaCache.delete(cacheKey);
+    } catch {
+      /* stat 失败就按无缓存走，readFile 会抛真正的错误 */
+    }
+
     const buf = await fs.readFile(filePath);
-    return this.uploadMedia(scene, target, { fileType, fileData: buf.toString('base64') });
+    const up = await this.uploadMedia(scene, target, {
+      fileType,
+      fileData: buf.toString('base64'),
+      reuse: false,
+    });
+    if (cacheKey && up?.file_info) {
+      this.mediaCache.set(cacheKey, { value: up, at: Date.now() });
+      if (this.mediaCache.size > 200) {
+        const oldest = this.mediaCache.keys().next().value;
+        if (oldest) this.mediaCache.delete(oldest);
+      }
+    }
+    return up;
   }
 
   /** 上传后再以 msg_type=7 发出（被动回复） */

@@ -43,11 +43,24 @@ async function readAll() {
   }
 }
 
+/**
+ * 写实例表（哪个进程占着哪个机器人）。
+ *
+ * 这只是一本「谁在用」的账，**写不进去不该拦住启动**：
+ * 文件被占用、被安全软件拦、上次被强杀留下锁死的 .tmp——
+ * 这些都不影响机器人本身能不能上线。
+ * 所以失败只记日志，顺手把残留的临时文件清掉。
+ */
 async function writeAll(data) {
   await fs.mkdir(path.dirname(FILE), { recursive: true });
   const tmp = `${FILE}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(data, null, 2) + '\n', 'utf8');
-  await fs.rename(tmp, FILE);
+  try {
+    await fs.writeFile(tmp, JSON.stringify(data, null, 2) + '\n', 'utf8');
+    await fs.rename(tmp, FILE);
+  } catch (e) {
+    console.warn(`[instance] 实例表写入失败（不影响运行）: ${e.message}`);
+    await fs.unlink(tmp).catch(() => {});
+  }
 }
 
 /** 清掉已经不存在的进程留下的记录 */

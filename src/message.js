@@ -20,10 +20,22 @@ export function isMessageEvent(name) {
 const MENTION_RE = /<@!?([0-9A-Za-z]+)>/g;
 const MENTION_TEST = /<@!?[0-9A-Za-z]+>/;
 
-/** 去掉正文里的 @xxx，保留其余内容 */
+/**
+ * 去掉正文里的 @xxx，保留其余内容。
+ *
+ * 两种形态都要处理：
+ *   1. 官方文档说的 `<@openid>` / `<@!openid>` —— 正则剥掉
+ *   2. **实测中遇到的 `@昵称 ` 纯文本前缀** —— 有些客户端/协议端把 @ 发成
+ *      一段普通文字（内容里就是 `@天道酬勤 /kun 菜单`），不剥的话
+ *      这条消息永远不以命令前缀开头，`/kun 签到` 根本进不了命令分发。
+ *
+ * 第 2 种只剥**开头**那一个，且要求后面跟着空白——避免把正文里的
+ * `@某人` 误伤（`你好 @张三` 不动）。
+ */
 function stripMention(content) {
   return String(content ?? '')
     .replace(MENTION_RE, ' ')
+    .replace(/^@[^\s@]+\s+/, '')
     .replace(/\s+/g, ' ')
     .trim();
 }

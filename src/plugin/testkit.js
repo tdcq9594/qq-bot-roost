@@ -13,6 +13,9 @@
  * 真跑一遍完整内核太重，也没必要——这里要的是「这段逻辑对不对」。
  */
 
+import os from 'node:os';
+import path from 'node:path';
+
 /** 假的存储：全放内存，跑完就没了 */
 function memoryStorage() {
   const map = new Map();
@@ -66,7 +69,7 @@ function fakeLogger(quiet) {
  * 造一个够用的 ctx。
  * @param {object} [opts]
  */
-export function makeCtx({ id = 'test', config = {}, quiet = true } = {}) {
+export function makeCtx({ id = 'test', config = {}, quiet = true, dataDir = null } = {}) {
   const commands = new Map();
   const menus = [];
   const listeners = new Map();
@@ -80,6 +83,8 @@ export function makeCtx({ id = 'test', config = {}, quiet = true } = {}) {
     config: { ...config },
     state: {},
     storage: memoryStorage(),
+    // 插件要落文件（图片缓存之类）时用；不传就给个临时目录
+    dataDir: dataDir ?? path.join(os.tmpdir(), `roost-plugin-${id}-${process.pid}`),
     logger: fakeLogger(quiet),
     md: {
       cmdInput: (cmd, text) => `<qqbot-cmd-input cmd="${cmd}" show="${text}" />`,
