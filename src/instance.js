@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { DIRS } from './paths.js';
 
 /**
@@ -23,15 +24,48 @@ const inProcessClaims = new Set();
 
 const FILE = path.join(DIRS.data, 'instances.json');
 
-/** pid 是否还活着。EPERM 说明进程存在但没权限，也算活着 */
+/**
+ * 这个 pid 现在是不是一个 node 进程。
+ *
+ * 光看「pid 存不存在」不够：Windows 会把回收的 PID 复用给别的程序。
+ * 踩过的坑——被强杀的机器人留下 pid=15008 的记录，后来 15008 被
+ * SearchProtocolHost.exe 占用，于是 isAlive 误判「机器人还在跑」，
+ * 启动被拒且删不掉（看起来是活的）。所以再确认一次进程名。
+ *
+ * 查不出来时（tasklist/ps 异常）保守返回 true，避免误删真实实例导致双开。
+ */
+function pidLooksLikeNode(pid) {
+  try {
+    if (process.platform === 'win32') {
+      const out = execFileSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], {
+        encoding: 'utf8',
+        timeout: 3000,
+        windowsHide: true,
+      });
+      const m = out.match(/^"([^"]+)"/);
+      // 进程已消失时 tasklist 不给 CSV 行，m 为 null → 当作不在了
+      return m ? /(^|\\)node(\.exe)?$/i.test(m[1]) : false;
+    }
+    const comm = execFileSync('ps', ['-p', String(pid), '-o', 'comm='], {
+      encoding: 'utf8',
+      timeout: 3000,
+    }).trim();
+    return comm ? /node/i.test(comm) : false;
+  } catch {
+    return true;
+  }
+}
+
+/** pid 是否还活着（且确实是 node 进程）。EPERM 说明进程存在但没权限，也算活着 */
 function isAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
-    return true;
   } catch (e) {
     return e.code === 'EPERM';
   }
+  // PID 存在，但可能已被系统复用给别的程序；确认它是 node 才算活
+  return pidLooksLikeNode(pid);
 }
 
 async function readAll() {
