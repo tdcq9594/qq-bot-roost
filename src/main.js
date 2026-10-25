@@ -54,7 +54,7 @@ const SERVE = args.has('--serve');
 
 if (args.has('--help') || args.has('-h')) {
   console.log(`
-QQ 机器人内核
+qq-bot-roost（栖 Roost）· QQ 机器人框架
 
 用法:
   node src/main.js              连接 QQ，正常跑（会自动打开面板）
@@ -120,7 +120,7 @@ function registerCoreCommands(rt) {
     registry.addCommand(
       '__core',
       name,
-      { plugin: '内核', section: CORE_SECTION[name] ?? '其它', ...meta },
+      { plugin: '框架', section: CORE_SECTION[name] ?? '其它', ...meta },
       handler,
     );
 
@@ -212,7 +212,7 @@ function registerCoreCommands(rt) {
       // 3) 内核分组名（基础 / 管理 / 其它）
       const secs = coreSections();
       const hit = secs.get(raw);
-      if (hit) return msg.replyMenu(`内核 · ${raw}`, [{ title: raw, items: hit }]);
+      if (hit) return msg.replyMenu(`框架 · ${raw}`, [{ title: raw, items: hit }]);
 
       const names = [...secs.keys(), '插件', ...pluginMenus.map((x) => x.id)];
       return msg.reply(`没有「${raw}」这个分类或插件。\n可用：${names.join('、')}`);
@@ -394,7 +394,7 @@ function registerCoreCommands(rt) {
   // 把 /admin 的子命令也写进菜单，保证「所有指令都能在菜单里查到」
   // 归到「管理」组：单独开一组会让 /help 主菜单多出一个「权限子命令」入口，
   // 而它本来就是管理的一部分
-  registry.addMenuSection('__core', { name: '内核' }, '管理', [
+  registry.addMenuSection('__core', { name: '框架' }, '管理', [
     { cmd: 'admin me', desc: '查看自己在各作用域的权限', admin: true },
     { cmd: 'admin list [作用域]', desc: '列出某作用域的管理员', admin: true },
     { cmd: 'admin set <openid> <等级> [作用域]', desc: '设置权限，只能授予数字更大的等级', admin: true },
@@ -462,7 +462,7 @@ function registerCoreCommands(rt) {
       const lines = [
         '等级空间（数字越小权限越高）',
         '  0 主人 / 1 管理员 / 2 群管 / 3 助手',
-        '  4-9 内核预留',
+        '  4-9 框架预留',
         '  10+ 插件区，每个插件 10 个号位',
       ];
       if (rows.length) {

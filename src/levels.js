@@ -61,7 +61,7 @@ export function describeLevel(level) {
   if (level === 2) return '群管';
   if (level === 3) return '助手';
   if (level === NO_PERM) return '普通成员';
-  if (level >= 4 && level <= 9) return `内核预留 ${level}`;
+  if (level >= 4 && level <= 9) return `框架预留 ${level}`;
   if (level >= PLUGIN_START && level < 1000) return `插件等级 ${level}`;
   return `${level} 级`;
 }

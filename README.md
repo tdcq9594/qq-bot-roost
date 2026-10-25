@@ -10,7 +10,7 @@
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
 <img src="https://img.shields.io/badge/tests-533%20passed-brightgreen" alt="测试 533 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
-<img src="https://img.shields.io/badge/version-0.6.11-blueviolet" alt="版本 0.6.11">
+<img src="https://img.shields.io/badge/version-0.6.12-blueviolet" alt="版本 0.6.12">
 <img src="https://img.shields.io/badge/license-Non--Commercial-red" alt="禁止商用">
 
 [快速开始](#3-分钟跑起来) ｜ [写插件](docs/插件开发规范.md) ｜ [外部插件协议](docs/插件协议.md) ｜ [配置参考](docs/配置参考.md) ｜ [常见问题](docs/常见问题.md) ｜ [贡献](CONTRIBUTING.md)
@@ -98,6 +98,8 @@
 - **有脚手架和测试命令**：`npm run create` 生成骨架，`npm run test:plugin` 直接跑命令看回复，
   不连 QQ 不开面板；外部插件还有单文件 SDK（Python / Node）
 - **存盘即生效**：改完插件代码 2 秒内自动热重载，不用重启也不用点重载；新增/删除插件目录同样自动识别
+- **按群开关插件**：同一个插件可以只在部分群生效（不配的群跟着全局走），
+  面板「群组 → 插件」、面板「插件 → 分群开关」、群里 `/群插件` 三个入口改的是同一份配置
 - **插件能加自己的面板页**：`ctx.registerPage()` 注册一段 HTML，标签栏就多一页，样式和面板互不影响
 - **元数据能表达兼容性**：`frameworkVersion` 声明需要的框架版本，不满足时**在加载前拦住**并说清原因，而不是跑起来才报「xxx 不是函数」
 
@@ -284,6 +286,7 @@ node src/main.js --mock --serve
 | `/plugins` | 插件列表与运行状态 |
 | `/admin` | 权限总览；`me` / `list` / `set` / `del` / `whois` / `scopes` / `levels` |
 | `/enable` `/disable` `/reload [id]` | 插件管理（需全局管理员） |
+| `/群插件` | 看 / 改**这个群**能用哪些插件（群管理；面板「群组 → 插件」也能改） |
 | `/whoami` | 查自己的 openid / 群 openid |
 | `/claim <认领码>` | 认领主人身份（`owners` 为空时可用） |
 | `/ping` | 连通性测试 |
