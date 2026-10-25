@@ -2208,6 +2208,7 @@ async function testModulesLoad() {
     '../src/runtime.js',
     '../src/semver.js',
     '../src/mirror.js',
+    '../src/gitee.js',
     '../src/storage/db.js',
     '../src/storage/schema.js',
     '../src/storage/index.js',
