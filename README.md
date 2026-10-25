@@ -8,9 +8,9 @@
 
 <img src="https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white" alt="Node.js 22+">
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
-<img src="https://img.shields.io/badge/tests-513%20passed-brightgreen" alt="测试 513 项">
+<img src="https://img.shields.io/badge/tests-533%20passed-brightgreen" alt="测试 533 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
-<img src="https://img.shields.io/badge/version-0.6.10-blueviolet" alt="版本 0.6.10">
+<img src="https://img.shields.io/badge/version-0.6.11-blueviolet" alt="版本 0.6.11">
 <img src="https://img.shields.io/badge/license-Non--Commercial-red" alt="禁止商用">
 
 [快速开始](#3-分钟跑起来) ｜ [写插件](docs/插件开发规范.md) ｜ [外部插件协议](docs/插件协议.md) ｜ [配置参考](docs/配置参考.md) ｜ [常见问题](docs/常见问题.md) ｜ [贡献](CONTRIBUTING.md)
