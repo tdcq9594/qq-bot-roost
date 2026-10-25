@@ -730,10 +730,10 @@ async function testNav() {
   ok('导航: 插件页面有独立容器', html.includes('id="pluginPageItems"'));
   ok('导航: 分组按钮带 aria-expanded', /aria-haspopup="true"/.test(html));
 
-  // 原来的 8 个页签都还在，只是挪进了菜单里
-  const tabs = ['overview', 'stats', 'config', 'plugins', 'events', 'groups', 'roles', 'logs'];
+  // 原来的 8 个页签都还在，只是挪进了菜单里；新增「关于」页
+  const tabs = ['overview', 'stats', 'config', 'plugins', 'events', 'groups', 'roles', 'logs', 'about'];
   const missing = tabs.filter((t) => !html.includes(`data-tab="${t}"`));
-  ok('导航: 8 个页面一个没少', missing.length === 0, missing.join(','));
+  ok('导航: 9 个页面一个没少', missing.length === 0, missing.join(','));
 }
 
 /* ---------------- 主流程 ---------------- */
