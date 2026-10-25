@@ -69,6 +69,22 @@ export function parseTar(buf) {
  * 但用 `tar czf` 自己打的包第一条往往是 `./`，拿 entries[0] 去算前缀会得到 `.`，
  * 结果所有路径都剥不掉。所以先去掉 `./` 前缀，再看所有条目的公共顶层段。
  */
+/**
+ * Windows 批处理必须是 CRLF。
+ *
+ * `.gitattributes` 里的 eol 规则只在 git checkout 时生效；本框架的 app 内更新
+ * 下载的是 GitHub archive tarball（直接给 blob 内容）。如果原样写入，start.bat
+ * 就可能变成 LF——cmd.exe 解析带括号的多行块会失败，双击没反应/乱执行。
+ * 这里在 Windows 上对 .bat / .cmd 兜底转 CRLF（幂等，已是 CRLF 不会重复加）。
+ */
+function batchCrlf(name, buf) {
+  if (process.platform !== 'win32') return buf;
+  if (!/\.(bat|cmd)$/i.test(name)) return buf;
+  if (buf.includes(0)) return buf; // 二进制原样
+  const s = buf.toString('utf8').replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
+  return Buffer.from(s, 'utf8');
+}
+
 export async function extractEntries(entries, destDir) {
   const cleaned = entries
     .map((e) => ({ ...e, name: e.name.replace(/^\.\//, '') }))
@@ -97,7 +113,7 @@ export async function extractEntries(entries, destDir) {
       await fs.mkdir(dest, { recursive: true });
     } else {
       await fs.mkdir(path.dirname(dest), { recursive: true });
-      await fs.writeFile(dest, e.content);
+      await fs.writeFile(dest, batchCrlf(e.name, e.content));
       count += 1;
     }
   }
