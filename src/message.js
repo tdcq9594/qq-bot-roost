@@ -397,7 +397,18 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
     });
   };
 
-  /** 发富媒体：上传后以 msg_type=7 发送。图片是独立消息，先把攒的文本发掉 */  const replyMedia = async (fileType, source, { local = false } = {}) => {
+  /**
+   * 发富媒体：上传后以 msg_type=7 发送。
+   *
+   * 富媒体在官方接口里只能是独立消息（msg_type=7），但这条消息自带
+   * `content` 文本字段：传了 `text` 就和图走**同一条**，不用先发一句话
+   * 再发一张图（那是两条消息，群里看着是两截）。不传 text 时保持老
+   * 行为——content 给一个空格（官方不接受空 content）。
+   *
+   * 发送前会先把攒着的文本 flush 掉，免得「缓冲中的回复」被这条
+   * 富媒体消息挤成顺序错乱的两条。
+   */
+  const replyMedia = async (fileType, source, { local = false, text = '' } = {}) => {
     if (!source) return null;
     await msg.flushReplies();
     try {
@@ -410,13 +421,21 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
         : await api.uploadMedia(scene, target, { fileType, url: source });
       if (!up?.file_info) throw new Error('未返回 file_info');
 
-      return await send({ msgType: 7, content: ' ', media: { file_info: up.file_info } }, true);
+      const content = text ? String(text) : ' ';
+      return await send({ msgType: 7, content, media: { file_info: up.file_info } }, true);
     } catch (e) {
       log.error(`发送富媒体(type=${fileType}) 失败:`, e.message);
       return null;
     }
   };
 
+  /**
+   * 发图片。`opts.text` 会作为这条富媒体消息的正文，和图同一条发出：
+   *
+   *   await msg.replyImage(file, { local: true, text: '横图 2290×1200' });
+   *
+   * 不传 text 就只发图（老行为）。
+   */
   msg.replyImage = (src, opts) => replyMedia(FILE_TYPE.IMAGE, src, opts);
   msg.replyVideo = (src, opts) => replyMedia(FILE_TYPE.VIDEO, src, opts);
   msg.replyVoice = (src, opts) => replyMedia(FILE_TYPE.VOICE, src, opts);

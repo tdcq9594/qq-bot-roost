@@ -249,9 +249,11 @@ export function makeMsg({
       replies.push(card?.markdown?.content ?? '[card]');
       return { id: 'x' };
     },
-    async replyImage(src) {
+    async replyImage(src, opts = {}) {
       msg.replied = true;
-      replies.push(`[image] ${src}`);
+      // opts.text 走的是 msg_type=7 的 content（图文同一条消息）。
+      // 记在同一条回复里，测试才能断言「没分两条发」。
+      replies.push(opts?.text ? `[image] ${src} :: ${opts.text}` : `[image] ${src}`);
       return { id: 'x' };
     },
     async replyVideo(src) {

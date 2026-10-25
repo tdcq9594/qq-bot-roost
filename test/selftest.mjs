@@ -1847,6 +1847,7 @@ async function testMediaAndTemplate() {
   const { buildMessage } = await import('../src/message.js');
   const sent = [];
   const fakeApi = {
+    uploadMedia: async () => ({ file_info: 'fi1' }),
     sendGroup: async (target, body) => {
       sent.push({ target, body });
       return { id: 'x' };
@@ -1888,6 +1889,30 @@ async function testMediaAndTemplate() {
     '模板: markdown 与 ark 同时给时只发 markdown',
     sent.length === 1 && !!sent[0].body.markdown && sent[0].body.ark === undefined,
     JSON.stringify(Object.keys(sent[0]?.body ?? {})),
+  );
+
+  /**
+   * 富媒体消息的文本：replyImage 传了 text，文字和图就是同一条
+   * （msg_type=7 的 content），不是先发一句话再发一张图。
+   */
+  sent.length = 0;
+  await msg.replyImage('https://x/1.png', { text: '横图 2290×1200' });
+  check(
+    '富媒体: text 和图走同一条消息',
+    sent.length === 1 &&
+      sent[0].body.msgType === 7 &&
+      sent[0].body.content === '横图 2290×1200' &&
+      !!sent[0].body.media,
+    JSON.stringify(Object.keys(sent[0]?.body ?? {})),
+  );
+
+  // 不传 text 保持老行为：content 给占位空格（官方不接受空 content）
+  sent.length = 0;
+  await msg.replyImage('https://x/1.png');
+  check(
+    '富媒体: 不传 text 时 content 是占位空格',
+    sent.length === 1 && sent[0].body.msgType === 7 && sent[0].body.content === ' ',
+    JSON.stringify(sent[0]?.body?.content ?? null),
   );
 }
 
