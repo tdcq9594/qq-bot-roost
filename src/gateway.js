@@ -1,5 +1,5 @@
 import { createLogger } from './logger.js';
-import { runtime } from './runtime.js';
+import { BotMetrics } from './runtime.js';
 
 const log = createLogger('gateway');
 
@@ -43,12 +43,14 @@ const FATAL_CLOSE_CODES = new Set(Object.keys(CLOSE_HINTS).map(Number));
  *   5. 断线后若 session 未失效，发 op6 Resume 补发漏掉的事件
  */
 export class Gateway {
-  constructor({ api, tokens, intents, onDispatch, shard = [0, 1] }) {
+  constructor({ api, tokens, intents, onDispatch, shard = [0, 1], metrics = null }) {
     this.api = api;
     this.tokens = tokens;
     this.intents = intents;
     this.shard = shard;
     this.onDispatch = onDispatch;
+    // 连接态写进该机器人自己的指标；没传就建个空的兜底，避免 LHS 赋值报错
+    this.metrics = metrics ?? new BotMetrics();
 
     this.ws = null;
     this.sessionId = '';
@@ -162,7 +164,7 @@ export class Gateway {
       const gw = await this.api.getGateway();
       url = gw?.url;
       if (!url) throw new Error('网关接口未返回 url');
-      runtime.gatewayUrl = url;
+      this.metrics.gatewayUrl = url;
       log.info(`网关地址: ${url}`);
     } catch (e) {
       this.connecting = false;
@@ -228,9 +230,9 @@ export class Gateway {
       this.ready = false;
       this.connecting = false;
       if (this.ws === ws) this.ws = null;
-      runtime.connected = false;
+      this.metrics.connected = false;
       if (this.stopped) return;
-      runtime.reconnectCount += 1;
+      this.metrics.reconnectCount += 1;
       if (ev.code === 4902) {
         // resume 被拒（会话已被别的连接用掉），清掉本地会话，下次走全新鉴权
         this.sessionId = '';
@@ -266,7 +268,7 @@ export class Gateway {
 
     this.connecting = false;
     this.ready = false;
-    runtime.connected = false;
+    this.metrics.connected = false;
     this.#clearTimers();
     try {
       ws.close();
@@ -324,7 +326,7 @@ export class Gateway {
         if (typeof p.s === 'number') {
           if (!lifecycle && this.lastSeq !== null && p.s <= this.lastSeq) {
             log.debug(`跳过重复事件 t=${t} s=${p.s}（已处理到 ${this.lastSeq}）`);
-            runtime.bump('dedup');
+            this.metrics.bump('dedup');
             break;
           }
           this.lastSeq = p.s;
@@ -334,16 +336,16 @@ export class Gateway {
           this.attempt = 0;
           this.ready = true;
           const name = p.d?.user?.username ?? '未知';
-          runtime.connected = true;
-          runtime.botName = name;
-          runtime.botId = p.d?.user?.id ?? '';
-          runtime.sessionId = this.sessionId;
+          this.metrics.connected = true;
+          this.metrics.botName = name;
+          this.metrics.platformId = p.d?.user?.id ?? '';
+          this.metrics.sessionId = this.sessionId;
           log.info(`已就绪，机器人: ${name}`);
           this.readyResolve?.(this);
         } else if (t === 'RESUMED') {
           this.ready = true;
           this.attempt = 0;
-          runtime.connected = true;
+          this.metrics.connected = true;
           log.info('会话已恢复');
           this.readyResolve?.(this);
         } else {
@@ -404,7 +406,7 @@ export class Gateway {
         return;
       }
       this.#send({ op: OP.HEARTBEAT, d: this.lastSeq });
-      runtime.lastHeartbeatAt = Date.now();
+      this.metrics.lastHeartbeatAt = Date.now();
     }, interval);
   }
 
@@ -427,7 +429,9 @@ export class Gateway {
       return;
     }
     // 指数退避，上限 30s
-    const delay = Math.min(1000 * 2 ** this.attempt++, 30000);
+    // 加 jitter：多机器人/多实例同时断线时避免锁步重连一起打满网关
+    const base = Math.min(1000 * 2 ** this.attempt++, 30000);
+    const delay = Math.round(base * (0.5 + Math.random() * 0.5));
     log.info(`${(delay / 1000).toFixed(0)}s 后重连（第 ${this.attempt} 次）`);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;

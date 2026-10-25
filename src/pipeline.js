@@ -1,5 +1,4 @@
 import { createLogger } from './logger.js';
-import { runtime } from './runtime.js';
 
 const log = createLogger('pipeline');
 
@@ -20,7 +19,9 @@ const HALT = Symbol('roost.halt');
  */
 
 export class Pipeline {
-  constructor() {
+  constructor({ metrics = null } = {}) {
+    /** 该机器人自己的指标，中间件出错计数写这里 */
+    this.metrics = metrics;
     /** @type {{name:string, fn:Function, pluginId:string|null}[]} */
     this.items = [];
   }
@@ -102,7 +103,7 @@ export class Pipeline {
       } catch (e) {
         // 主动拦截：正常流程，不打日志、不算错误
         if (e === HALT) return;
-        runtime.bump('errors');
+        this.metrics?.bump('errors');
         log.error(`中间件 ${item.name} 出错，跳过该中间件继续:`, e.message);
         // 中间件自己崩了不该把消息吞掉，继续往下走
         if (!called) await dispatch(idx + 1);
@@ -123,7 +124,7 @@ export class Pipeline {
 /* ------------------------------------------------------------------ */
 
 /** 去重：同一条消息可能因断线重连被重复投递 */
-export function dedupMiddleware(cfg) {
+export function dedupMiddleware(cfg, { metrics = null } = {}) {
   const seen = new Map();
 
   return async (ctx, next) => {
@@ -134,7 +135,7 @@ export function dedupMiddleware(cfg) {
     const now = Date.now();
     const hit = seen.get(msg.id);
     if (hit && now - hit < win) {
-      runtime.bump('dedup');
+      metrics?.bump('dedup');
       ctx.halt('dedup');
       return;
     }
@@ -151,7 +152,7 @@ export function dedupMiddleware(cfg) {
 }
 
 /** 白名单：只响应名单内的群 / 用户 */
-export function whitelistMiddleware(cfg) {
+export function whitelistMiddleware(cfg, { metrics = null } = {}) {
   return async (ctx, next) => {
     const wl = cfg.whitelist ?? {};
     if (!wl.enabled) return next();
@@ -160,7 +161,7 @@ export function whitelistMiddleware(cfg) {
     const okGroup = msg.kind === 'group' && (wl.groups ?? []).includes(msg.groupId);
     const okUser = (wl.users ?? []).includes(msg.userId);
     if (!okGroup && !okUser) {
-      runtime.bump('rejected');
+      metrics?.bump('rejected');
       log.debug(`白名单拦截: kind=${msg.kind} group=${msg.groupId} user=${msg.userId}`);
       ctx.halt('whitelist');
       return;
@@ -174,7 +175,7 @@ export function whitelistMiddleware(cfg) {
  * 只对「@机器人」「带前缀」或「处在免@窗口内」的消息生效——
  * 普通闲聊先交给插件判断，不该因为群友聊天把额度耗光。
  */
-export function ratelimitMiddleware(cfg, { isSticky = () => false } = {}) {
+export function ratelimitMiddleware(cfg, { isSticky = () => false, metrics = null } = {}) {
   const rate = new Map();
 
   return async (ctx, next) => {
@@ -200,7 +201,7 @@ export function ratelimitMiddleware(cfg, { isSticky = () => false } = {}) {
     }
 
     if (rec.count > limit) {
-      runtime.bump('limited');
+      metrics?.bump('limited');
       // 只在刚好越界时提醒一次，避免刷屏
       if (rec.count === limit + 1) {
         msg.reply(`本会话每分钟最多 ${limit} 条，请稍后再试。`).catch(() => {});
@@ -249,11 +250,11 @@ export function cooldownMiddleware() {
 }
 
 /** 按配置组装默认管道 */
-export function createDefaultPipeline(cfg, { isSticky } = {}) {
-  const p = new Pipeline();
-  p.use('dedup', dedupMiddleware(cfg));
-  p.use('whitelist', whitelistMiddleware(cfg));
-  p.use('ratelimit', ratelimitMiddleware(cfg, { isSticky }));
+export function createDefaultPipeline(cfg, { isSticky, metrics = null } = {}) {
+  const p = new Pipeline({ metrics });
+  p.use('dedup', dedupMiddleware(cfg, { metrics }));
+  p.use('whitelist', whitelistMiddleware(cfg, { metrics }));
+  p.use('ratelimit', ratelimitMiddleware(cfg, { isSticky, metrics }));
   p.use('cooldown', cooldownMiddleware());
   return p;
 }

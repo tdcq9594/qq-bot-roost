@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { rel } from '../paths.js';
+import { buildPluginEnv } from './env.js';
 
 /**
  * 插件依赖自动安装 + 运行时探测。
@@ -32,7 +33,8 @@ function run(cmd, args, { cwd, timeout = INSTALL_TIMEOUT, env } = {}) {
     const child = spawn(cmd, args, {
       cwd,
       windowsHide: true,
-      env: { ...process.env, ...env },
+      // 净化：只放行必需变量 + 代理/镜像源，绝不透传 QQ_* / ROOST_*
+      env: buildPluginEnv(env),
       shell: process.platform === 'win32' && /\.(cmd|bat)$/i.test(cmd),
     });
 

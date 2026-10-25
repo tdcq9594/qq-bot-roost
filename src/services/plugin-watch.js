@@ -24,24 +24,12 @@ import path from 'node:path';
 import { BaseService } from './base.js';
 import { createLogger } from '../logger.js';
 import { DIRS } from '../paths.js';
+import { WATCH_SKIP } from '../skipdirs.js';
 
 const log = createLogger('plugin-watch');
 
-/** 这些目录里的变化一律忽略 */
-const SKIP_DIRS = new Set([
-  'node_modules',
-  '__pycache__',
-  '.git',
-  '.venv',
-  'venv',
-  'env',
-  'dist',
-  'build',
-  'data',
-  '.idea',
-  '.vscode',
-  '.cache',
-]);
+/** 这些目录里的变化一律忽略（见 ./skipdirs.js 的 WATCH_SKIP） */
+const SKIP_DIRS = WATCH_SKIP;
 
 /** 这些后缀的变化一律忽略 */
 const SKIP_EXT = new Set(['.pyc', '.pyo', '.log', '.db', '.sqlite', '.sqlite3', '.tmp', '.swp', '.lock']);

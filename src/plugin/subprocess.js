@@ -4,46 +4,12 @@ import path from 'node:path';
 import { createLogger } from '../logger.js';
 import { PROTOCOL_VERSION, DEFAULTS, serializeMessage, parseLine } from './protocol.js';
 import { scopeOf, LEVEL, NO_PERM } from '../roles.js';
+import { inheritedEnv } from './env.js';
 
 /**
- * 传给插件子进程的环境变量白名单。
- *
- * 只放行「跑起来必需」的那些：PATH 之类决定能不能找到解释器，
- * 语言运行时的 home / 编码。密钥、面板访问口令、webhook 配置一概不给。
+ * 传给插件子进程的环境变量白名单，见 ./env.js —— 与依赖安装共用同一份，
+ * 避免两处漂移。密钥、面板访问口令、webhook 配置一概不给。
  */
-const ENV_ALLOW = [
-  'PATH',
-  'Path',
-  'PATHEXT',
-  'SystemRoot',
-  'SystemDrive',
-  'windir',
-  'COMSPEC',
-  'TEMP',
-  'TMP',
-  'TMPDIR',
-  'HOME',
-  'USERPROFILE',
-  'APPDATA',
-  'LOCALAPPDATA',
-  'LANG',
-  'LC_ALL',
-  'PYTHONPATH',
-  'PYTHONHOME',
-  'VIRTUAL_ENV',
-  'GOPATH',
-  'GOROOT',
-  'GOCACHE',
-  'NODE_PATH',
-];
-
-function inheritedEnv() {
-  const out = {};
-  for (const k of ENV_ALLOW) {
-    if (process.env[k] !== undefined) out[k] = process.env[k];
-  }
-  return out;
-}
 
 /**
  * 外部插件宿主：把一个任意语言写的子进程，包装成和内置插件一样的命令源。

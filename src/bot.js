@@ -11,7 +11,7 @@ import { SessionManager } from './session.js';
 import { createDefaultPipeline } from './pipeline.js';
 import { buildMessage, isMessageEvent } from './message.js';
 import { EVENTS, isKnownEvent } from './events.js';
-import { runtime as globalRuntime } from './runtime.js';
+import { BotMetrics } from './runtime.js';
 import { claimInstance, releaseInstance } from './instance.js';
 import { botPaths, DIRS, rel } from './paths.js';
 import { StatsStore } from './storage/index.js';
@@ -44,6 +44,8 @@ export class BotRuntime {
     this.webhook = webhook;
     this.id = cfg.id;
     this.name = cfg.name || cfg.id;
+    /** 该机器人独占的运行时指标（连接态 + 计数），多机器人互不干扰 */
+    this.metrics = new BotMetrics(this.id);
     this.paths = botPaths(this.id);
     this.log = createLogger(`bot:${this.id}`);
 
@@ -104,8 +106,8 @@ export class BotRuntime {
       plugins: this.plugins ? this.plugins.list() : [],
       uptimeMs: this.startedAt ? Date.now() - this.startedAt : 0,
       error: this.lastError,
-      botName: this.mock ? `${this.name}（mock）` : globalRuntime.botName,
-      counters: { ...globalRuntime.counters },
+      botName: this.mock ? `${this.name}（mock）` : this.metrics.botName,
+      counters: { ...this.metrics.counters },
     };
   }
 
@@ -129,7 +131,7 @@ export class BotRuntime {
       this.api = this.makeMockApi ? this.makeMockApi(this) : null;
     } else {
       this.tokens = new TokenManager(cfg);
-      this.api = new QQApi({ tokenManager: this.tokens, baseUrl: cfg.baseUrl });
+      this.api = new QQApi({ tokenManager: this.tokens, baseUrl: cfg.baseUrl, metrics: this.metrics });
     }
 
     this.outbound = new Outbound({
@@ -150,6 +152,7 @@ export class BotRuntime {
 
     this.pipeline = createDefaultPipeline(cfg, {
       isSticky: (chatId) => this.session.isSticky(chatId),
+      metrics: this.metrics,
     });
 
     /**
@@ -261,6 +264,7 @@ export class BotRuntime {
       api: this.api,
       tokens: this.tokens,
       intents: cfg.intents,
+      metrics: this.metrics,
       onDispatch: (event, d, p) => this.dispatch(event, d, p),
     });
 
@@ -419,9 +423,9 @@ export class BotRuntime {
   async dispatch(eventName, d) {
     const { cfg, registry, roles, groups, session, pipeline, outbound } = this;
 
-    globalRuntime.lastEventAt = Date.now();
-    globalRuntime.messageEvent = eventName;
-    globalRuntime.bumpEvent(eventName);
+    this.metrics.lastEventAt = Date.now();
+    this.metrics.messageEvent = eventName;
+    this.metrics.bumpEvent(eventName);
 
     /* ---- 非消息事件 ---- */
     if (!isMessageEvent(eventName)) {
@@ -459,7 +463,7 @@ export class BotRuntime {
             bot: this,
           });
         } catch (e) {
-          globalRuntime.bump('errors');
+          this.metrics.bump('errors');
           this.log.error(`监听器 ${l.pluginId} 处理 ${eventName} 出错:`, e.stack || e.message);
         }
       }
@@ -469,8 +473,8 @@ export class BotRuntime {
     /* ---- 消息事件 ---- */
     const msg = buildMessage(eventName, d, { api: this.api, cfg, outbound, session });
     try {
-      globalRuntime.bump('recv');
-      globalRuntime.touchChat(msg.chatId, msg.kind);
+      this.metrics.bump('recv');
+      this.metrics.touchChat(msg.chatId, msg.kind);
       if (msg.kind === 'group' && msg.groupId) await groups.touch(msg.groupId);
       /**
        * 在这个群第一次说话时顺手把群名拉下来（内部有 10 分钟缓存，
@@ -529,7 +533,7 @@ export class BotRuntime {
          *     这是「找不到在哪开关插件」的一半来源：开关生效得太安静。
          */
         if (!pluginAllowedIn(cfg.plugins, msg.chatId, commandEntry.pluginId)) {
-          globalRuntime.bump('ignored');
+          this.metrics.bump('ignored');
           try {
             const lv = await roles.effective(scopeOf(msg), msg.userId, { owners: cfg.owners });
             if (lv <= LEVEL.admin) {
@@ -570,7 +574,7 @@ export class BotRuntime {
         if (msg.args.length < required) {
           return msg.reply(`参数不够\n用法: ${commandEntry.usage}`).catch(() => {});
         }
-        globalRuntime.bump('commands');
+        this.metrics.bump('commands');
         /**
          * 标上「现在是哪个插件在回」，合并回复时要用它加标题。
          *
@@ -582,7 +586,7 @@ export class BotRuntime {
         try {
           await commandEntry.handler(msg, { args: msg.args, raw: msg.content, bot: this });
         } catch (e) {
-          globalRuntime.bump('errors');
+          this.metrics.bump('errors');
           if (e?.code === 'offline' || e?.code === 'expired' || e?.code === 'quota') {
             this.log.warn(`命令 ${commandEntry.name} 回复失败: ${e.message}`);
             return;
@@ -621,12 +625,12 @@ export class BotRuntime {
             const ret = await l.handler(msg);
             if (ret === true || msg.replied) handled = true;
           } catch (e) {
-            globalRuntime.bump('errors');
+            this.metrics.bump('errors');
             this.log.error(`监听器 ${l.pluginId} 处理 ${evt} 出错:`, e.stack || e.message);
           }
         }
       }
-      if (!handled) globalRuntime.bump('ignored');
+      if (!handled) this.metrics.bump('ignored');
     } finally {
       // 本次处理里所有插件攒下的回复，合并成一条发出去
       await msg.flushReplies?.();

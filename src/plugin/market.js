@@ -50,9 +50,13 @@ function assertSafeIndexUrl(raw) {
   }
   const host = u.hostname.replace(/^\[|\]$/g, '');
   if (u.protocol === 'https:') return u;
-  // 只给本机开 http 的口子：本地调试、自建测试服务都用得上
-  if (u.protocol === 'http:' && LOOPBACK_HOSTS.has(host)) return u;
-  throw new Error(`插件市场地址必须用 https（本机调试除外）：${u.protocol}//${host}`);
+  // 本机 http 只作为「显式开发开关」放行：默认关闭，避免面板可达时被拿来做内网探测。
+  if (u.protocol === 'http:' && LOOPBACK_HOSTS.has(host) && process.env.ROOST_ALLOW_LOCAL_INDEX === '1') {
+    return u;
+  }
+  const hint =
+    u.protocol === 'http:' && LOOPBACK_HOSTS.has(host) ? '（本机调试请设 ROOST_ALLOW_LOCAL_INDEX=1）' : '';
+  throw new Error(`插件市场地址必须用 https${hint}：${u.protocol}//${host}`);
 }
 
 export async function fetchIndex(url = DEFAULT_INDEX_URL) {

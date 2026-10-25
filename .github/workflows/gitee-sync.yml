@@ -1,0 +1,44 @@
+name: Gitee 镜像同步
+
+# GitHub 是主源，Gitee 是官方下载源之一：auto 模式在 GitHub 不可达时会切到 Gitee。
+# 镜像滞后会让用户「以为已最新」而漏更、或装到旧版——所以每次打 tag 自动推 + 校验。
+#
+# 前置：在仓库 Settings → Secrets and variables → Actions 里配置 GITEE_TOKEN
+#       （Gitee 私人令牌，需要 projects 写权限）。没配就明确报错，不静默跳过。
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 推送到 Gitee
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          if [ -z "$GITEE_TOKEN" ]; then
+            echo "::error::未配置 secrets.GITEE_TOKEN，无法同步 Gitee 镜像"
+            exit 1
+          fi
+          git remote add gitee "https://tdcq9594:${GITEE_TOKEN}@gitee.com/tdcq9594/qq-bot-roost.git"
+          git push gitee "HEAD:master" --force
+          git push gitee --tags --force
+
+      - name: 校验 Gitee 分支已跟上本次提交
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          for i in $(seq 1 10); do
+            SHA=$(curl -fsSL "https://gitee.com/api/v5/repos/tdcq9594/qq-bot-roost/branches/master?access_token=${GITEE_TOKEN}" \
+              | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s).commit.sha)}catch{console.log('')}})") || true
+            if [ "$SHA" = "${GITHUB_SHA}" ]; then echo "✓ Gitee 已同步到 ${GITHUB_SHA:0:8}"; exit 0; fi
+            echo "等待 Gitee 同步…（当前 ${SHA:0:8}，期望 ${GITHUB_SHA:0:8}）"; sleep 6
+          done
+          echo "::error::Gitee 分支未跟上 ${GITHUB_SHA}，镜像可能滞后"; exit 1

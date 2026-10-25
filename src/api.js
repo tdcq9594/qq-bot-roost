@@ -1,6 +1,5 @@
 import fs from 'node:fs/promises';
 import { createLogger } from './logger.js';
-import { runtime } from './runtime.js';
 /** 路径里的 id 一律编码：openid / 群号是外部数据，含 / 会拼出别的路径 */
 const enc = (v) => encodeURIComponent(String(v ?? ''));
 
@@ -22,9 +21,11 @@ const MEDIA_TTL = 2 * 86400_000;
  * 鉴权头固定为 "QQBot {access_token}"。
  */
 export class QQApi {
-  constructor({ tokenManager, baseUrl }) {
+  constructor({ tokenManager, baseUrl, metrics = null }) {
     this.tokens = tokenManager;
     this.baseUrl = baseUrl;
+    // 每个机器人一份指标；mock 等场景可能没有，用可选链兜底
+    this.metrics = metrics;
     // msg_id -> 已用的 msg_seq。被动回复同一消息时必须递增，否则会失败
     this.seqMap = new Map();
     // 群管内邀开关，由 BotRuntime 按配置同步；默认关
@@ -59,7 +60,7 @@ export class QQApi {
         body: body === undefined ? undefined : JSON.stringify(body),
       });
     } catch (e) {
-      runtime.bump('errors');
+      this.metrics?.bump('errors');
       const reason = e?.name === 'TimeoutError' ? '请求超时（15s）' : e.message;
       throw new Error(`网络错误 ${method} ${path}: ${reason}`);
     }
@@ -77,7 +78,7 @@ export class QQApi {
     }
 
     if (res.status === 429) {
-      runtime.bump('errors');
+      this.metrics?.bump('errors');
       const wait = Number(res.headers.get('retry-after')) || 0;
       const err = new Error(
         `被平台限流（429）${wait ? `，官方建议 ${wait} 秒后再试` : ''}。主动消息有每日额度，被动回复不受限`,
@@ -96,7 +97,7 @@ export class QQApi {
     }
 
     if (!res.ok) {
-      runtime.bump('errors');
+      this.metrics?.bump('errors');
       const msg = data?.message || data?.msg || text.slice(0, 300);
       const err = new Error(`HTTP ${res.status} ${method} ${path}: ${msg}`);
       err.status = res.status;
@@ -126,13 +127,13 @@ export class QQApi {
    */
   async sendGroup(groupOpenid, opts = {}) {
     const r = await this.#request('POST', `/v2/groups/${enc(groupOpenid)}/messages`, this.#payload(opts));
-    runtime.bump('sent');
+    this.metrics?.bump('sent');
     return r;
   }
 
   async sendC2C(openid, opts = {}) {
     const r = await this.#request('POST', `/v2/users/${enc(openid)}/messages`, this.#payload(opts));
-    runtime.bump('sent');
+    this.metrics?.bump('sent');
     return r;
   }
 

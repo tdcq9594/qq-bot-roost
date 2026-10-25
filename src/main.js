@@ -260,7 +260,7 @@ function registerCoreCommands(rt) {
     }
     if (entries.length) groups.push({ title: '分类', items: entries });
 
-    const bot = runtime.botName || '菜单';
+    const bot = rt.metrics.botName || '菜单';
     await msg.replyMenu(bot, groups);
   });
 
@@ -324,8 +324,8 @@ function registerCoreCommands(rt) {
     const uptime = `${d ? d + '天' : ''}${h ? h + '小时' : ''}${m}分${up < 60 ? up + '秒' : ''}`;
 
     const lines = [
-      `连接: ${runtime.connected ? '在线' : '离线'}`,
-      `机器人: ${runtime.botName || '-'}`,
+      `连接: ${rt.metrics.connected ? '在线' : '离线'}`,
+      `机器人: ${rt.metrics.botName || '-'}`,
       `运行: ${uptime}`,
     ];
 
@@ -334,7 +334,7 @@ function registerCoreCommands(rt) {
       lines.push(`凭证: 剩余 ${Math.floor(left / 60)} 分（自动续期）`);
     }
 
-    lines.push(`消息: 收 ${runtime.counters.recv} / 发 ${runtime.counters.sent} / 命令 ${runtime.counters.commands}`);
+    lines.push(`消息: 收 ${rt.metrics.counters.recv} / 发 ${rt.metrics.counters.sent} / 命令 ${rt.metrics.counters.commands}`);
     lines.push(`插件: ${running}/${list.length} 运行中`);
 
     // 官方接口的额度与窗口状态，出问题时能一眼看出是哪里卡住
@@ -361,14 +361,14 @@ function registerCoreCommands(rt) {
 
   /** 详细统计 */
   core('stats', { desc: '消息与事件统计' }, async (msg) => {
-    const c = runtime.counters;
+    const c = rt.metrics.counters;
     const lines = [
       '消息统计',
       `  收到 ${c.recv}   发出 ${c.sent}   命令 ${c.commands}   错误 ${c.errors}`,
       `  去重 ${c.dedup}   限流 ${c.limited}   白名单 ${c.rejected}   无人回应 ${c.ignored}`,
     ];
 
-    const chats = [...runtime.perChat.values()].sort((a, b) => b.count - a.count).slice(0, 5);
+    const chats = [...rt.metrics.perChat.values()].sort((a, b) => b.count - a.count).slice(0, 5);
     if (chats.length) {
       lines.push('\n活跃会话');
       for (const x of chats) {
@@ -380,7 +380,7 @@ function registerCoreCommands(rt) {
     const cs = roles.cacheStats();
     lines.push(`\n权限缓存\n  命中 ${cs.hits} / 未命中 ${cs.misses} · 命中率 ${cs.hitRate}% · 条目 ${cs.size}`);
 
-    const events = [...runtime.eventCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
+    const events = [...rt.metrics.eventCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
     if (events.length) {
       lines.push('\n事件');
       for (const [name, n] of events) lines.push(`  ${name}  ${n}`);
@@ -681,10 +681,10 @@ function registerCoreCommands(rt) {
 /* Mock 模式：没有凭证也能开发插件                                       */
 /* ------------------------------------------------------------------ */
 
-function createMockApi(botName) {
+function createMockApi(botName, metrics = null) {
   let mockGroupInvited = false;
   const echo = (scene) => async (target, body) => {
-    runtime.bump('sent');
+    metrics?.bump('sent');
     // markdown 消息单独打印正文，否则一堆 JSON 没法看
     const text = body?.markdown
       ? `[markdown]\n${body.markdown.content}`
@@ -941,8 +941,26 @@ async function main() {
   process.on('unhandledRejection', (e) => {
     log.error(`未捕获的异步异常（已忽略，进程继续）：${e?.stack || e?.message || e}`);
   });
+  /**
+   * 未捕获异常：不再一律吞掉。
+   *
+   * uncaughtException 之后进程处于未定义状态，继续跑可能带着被毒化的
+   * 事件循环/句柄静默拖垮所有机器人。这里记日志 + 计数：
+   * 60 秒内超过 5 次就判定「带病空转」，退出交给重启/守护自愈；
+   * 偶发单次（如一个畸形回调）仍继续，避免一有风吹草动就重启。
+   */
+  let crashCount = 0;
+  let crashWindowStart = Date.now();
   process.on('uncaughtException', (e) => {
-    log.error(`未捕获的异常（已忽略，进程继续）：${e?.stack || e?.message || e}`);
+    log.error(`未捕获的异常：${e?.stack || e?.message || e}`);
+    if (Date.now() - crashWindowStart > 60000) {
+      crashCount = 0;
+      crashWindowStart = Date.now();
+    }
+    if (++crashCount > 5) {
+      log.error('60 秒内未捕获异常超过 5 次，判定状态不可信，退出交由重启自愈');
+      process.exit(1);
+    }
   });
 
   if (globalCfg.logs?.enabled !== false) {
@@ -1041,7 +1059,7 @@ async function main() {
       mock: MOCK,
       webhook: webhookServer,
       registerCore: (r) => registerCoreCommands(r),
-      makeMockApi: (r) => createMockApi(r.name),
+      makeMockApi: (r) => createMockApi(r.name, r.metrics),
     });
     await rt.init();
     runtimes.push(rt);
@@ -1099,10 +1117,21 @@ async function main() {
   });
 
   const shutdown = async ({ restarting = false } = {}) => {
-    if (shutdown.called) return;
+    if (shutdown.called) {
+      // 二次信号 = 关停卡住了，直接强退，别让人只能 kill -9
+      log.error('关停进行中又收到退出信号，强制退出');
+      process.exit(1);
+    }
     shutdown.called = true;
     log.info('正在退出...');
-    await services.stop().catch(() => {});
+    // 兜底超时：任一步 hang 都不会让进程永久卡在退出中
+    const hard = setTimeout(() => {
+      log.error('关停超时（10 秒），强制退出');
+      process.exit(1);
+    }, 10000);
+    hard.unref?.();
+    try {
+      await services.stop().catch(() => {});
     web?.close();
     await webhookServer?.stop().catch(() => {});
     for (const rt of runtimes) await rt.stop().catch(() => {});
@@ -1122,6 +1151,9 @@ async function main() {
       } catch (e) {
         log.error(`拉起新进程失败：${e.message}，请手动重启`);
       }
+    }
+    } finally {
+      clearTimeout(hard);
     }
     process.exit(0);
   };
@@ -1181,7 +1213,7 @@ async function main() {
          */
         webhook: webhookServer,
         registerCore: (r) => registerCoreCommands(r),
-        makeMockApi: (r) => createMockApi(r.name),
+        makeMockApi: (r) => createMockApi(r.name, r.metrics),
       });
       await rt.init();
       runtimes.push(rt);

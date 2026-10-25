@@ -6,7 +6,6 @@ import crypto from 'node:crypto';
 import { ROOT } from '../config.js';
 import { DIRS, botPaths, listBotIds, rel } from '../paths.js';
 import { createLogger, recentLogs, onLog, getLevel, setLevel } from '../logger.js';
-import { runtime } from '../runtime.js';
 import { EVENT_NAMES, INTENT_META, describeIntents, groupEvents } from '../events.js';
 import {
   fetchIndex,
@@ -242,6 +241,23 @@ export async function startWebServer({
   const port = Number(wc.port) || 15207;
   const accessKey = wc.accessKey || wc.token || '';
 
+  /**
+   * 硬阻断：监听非 loopback 却没设 accessKey。
+   *
+   * 以前只在 doctor 里软告警。`authorized()` 在 accessKey 为空时无条件放行，
+   * 于是 `webui.host=0.0.0.0` 且忘设 key 的面板在全部网卡零认证开放——
+   * 远程可建/删机器人、改配置、装任意插件（插件代码在子进程执行 = RCE）。
+   * 这种误配不该靠人记得去看 doctor，直接在启动期拒绝。
+   */
+  const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '']);
+  if (!LOOPBACK_HOSTS.has(String(host)) && !accessKey) {
+    throw new Error(
+      `面板监听 ${host} 但未设置 webui.accessKey。\n` +
+        `这样任何人访问该端口都能无认证接管面板（含安装插件=执行任意代码）。\n` +
+        `请在 config/bot.json 里设置 webui.accessKey，或把 webui.host 改回 127.0.0.1。`,
+    );
+  }
+
   // res -> 这个连接正在看哪个机器人，状态推送时按各自的目标过滤
   const sseClients = new Map();
   /** 同时最多多少个 SSE 连接（一个页面一个） */
@@ -320,17 +336,22 @@ export async function startWebServer({
   };
 
   const statusPayload = (rt) => {
-    const snap = runtime.snapshot({
-      credentialExpiresIn: Math.max(0, Math.round(((rt?.tokens?.expiresAt ?? 0) - Date.now()) / 1000)),
-      plugins: rt ? rt.plugins.list() : [],
-      cfg: rt?.cfg ?? {},
-      botId: rt?.id ?? null,
-      botName: rt?.name ?? null,
-      // 上下线按钮要看机器人自己的状态：idle / starting / online / offline / error / stopped
-      state: rt?.state ?? 'offline',
-      // 面板「框架版本」直接显示，不用等用户点「检查更新」才有值
-      version: versionNow(),
-    });
+    // 每个机器人读自己的指标，多 bot 下不再串台
+    const m = rt?.metrics;
+    const snap = m
+      ? m.snapshot({
+          credentialExpiresIn: Math.max(0, Math.round(((rt?.tokens?.expiresAt ?? 0) - Date.now()) / 1000)),
+          plugins: rt ? rt.plugins.list() : [],
+          cfg: rt?.cfg ?? {},
+          botName: rt?.name ?? null,
+          // 上下线按钮要看机器人自己的状态：idle / starting / online / offline / error / stopped
+          state: rt?.state ?? 'offline',
+          // 面板「框架版本」直接显示，不用等用户点「检查更新」才有值
+          version: versionNow(),
+          startedAt: rt?.startedAt ?? 0,
+          uptimeMs: rt?.startedAt ? Date.now() - rt.startedAt : 0,
+        })
+      : {};
 
     /**
      * 给「活跃会话」补上名字。
@@ -385,15 +406,36 @@ export async function startWebServer({
   }, 2000);
   statusTimer.unref?.();
 
+  /**
+   * 鉴权失败计数：per-IP 滑动窗口。
+   * timingSafeEqual 只防时序侧信道，挡不住「弱 key 被顺序猜」。
+   * 正确 key 不受影响（成功后清零），误伤面很小。
+   */
+  const authFails = new Map(); // ip -> { count, start }
+  const AUTH_WINDOW = 60_000;
+  const AUTH_MAX_FAILS = 20;
   const authorized = (req, url) => {
     if (!accessKey) return true;
+    const ip = req.socket?.remoteAddress || 'unknown';
+    const now = Date.now();
+    const rec = authFails.get(ip);
+    if (rec && now - rec.start < AUTH_WINDOW && rec.count >= AUTH_MAX_FAILS) return false;
     // 兼容旧的 X-Token / ?token= 写法
     const given =
       req.headers['x-access-key'] ||
       req.headers['x-token'] ||
       url.searchParams.get('key') ||
       url.searchParams.get('token');
-    return safeEqual(given, accessKey);
+    const ok = safeEqual(given, accessKey);
+    if (ok) {
+      authFails.delete(ip);
+    } else {
+      const cur = rec && now - rec.start < AUTH_WINDOW ? rec : { count: 0, start: now };
+      cur.count += 1;
+      authFails.set(ip, cur);
+      if (authFails.size > 5000) authFails.clear(); // 防内存膨胀
+    }
+    return ok;
   };
 
   /**
@@ -1550,8 +1592,8 @@ export async function startWebServer({
                 message: it.message ?? null,
                 doc: it.doc !== false,
                 subscribed: enabled.includes(it.intent),
-                count: runtime.eventCounts.get(it.name) ?? 0,
-                lastAt: runtime.eventLastAt.get(it.name) ?? 0,
+                count: rt.metrics.eventCounts.get(it.name) ?? 0,
+                lastAt: rt.metrics.eventLastAt.get(it.name) ?? 0,
               })),
             });
           }
@@ -1560,7 +1602,7 @@ export async function startWebServer({
             enabled,
             intentsMeta: INTENT_META,
             total: EVENT_NAMES.length,
-            received: EVENT_NAMES.filter((n) => (runtime.eventCounts.get(n) ?? 0) > 0).length,
+            received: EVENT_NAMES.filter((n) => (rt.metrics.eventCounts.get(n) ?? 0) > 0).length,
             groups,
           });
         }

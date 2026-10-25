@@ -20,9 +20,13 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { HASH_SKIP } from './skipdirs.js';
 
-/** 不参与哈希的东西：依赖目录、缓存、VCS 元数据（每台机器都不一样） */
-const SKIP_DIRS = new Set(['node_modules', '.venv', 'venv', '__pycache__', '.git', '.idea', '.vscode']);
+/**
+ * 不参与哈希的东西见 ./skipdirs.js（HASH_SKIP）。
+ * **改它会改变已发布插件的 sha256，必须同步重建 index.json。**
+ */
+const SKIP_DIRS = HASH_SKIP;
 const SKIP_FILES = new Set(['.deps.json', '.DS_Store', 'Thumbs.db']);
 
 /**
