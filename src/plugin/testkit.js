@@ -38,6 +38,14 @@ function memoryStorage() {
     async clear() {
       map.clear();
     },
+    /** 和真实存储一致的原子读改写；fn 返回 null/undefined 表示放弃写入 */
+    async update(k, fn, fallback = undefined) {
+      const cur = map.has(k) ? map.get(k) : fallback;
+      const next = await fn(cur);
+      if (next === null || next === undefined) return cur;
+      map.set(k, next);
+      return next;
+    },
     __map: map,
   };
 }
@@ -171,6 +179,8 @@ export function makeMsg({
   kind = 'group',
   mentioned = false,
   sticky = false,
+  mentions = null,
+  raw = null,
 } = {}) {
   const replies = [];
   /** markdown 消息单独记一份，好断言「走的是富文本还是纯文本」 */
@@ -196,6 +206,8 @@ export function makeMsg({
     // 和 message.js 保持一致：@ 了、是命令、或还在免 @ 窗口里，都算「在跟我说话」
     addressed: mentioned || isCommand || sticky,
     sticky,
+    mentions: mentions ?? [],
+    raw: raw ?? (kind === 'group' ? { author: { member_role: 'member' } } : {}),
     receivedAt: Date.now(),
     replied: false,
     replies,
@@ -289,6 +301,9 @@ export async function runCommand(plugin, command, opts = {}) {
     userId: opts.userId,
     groupId: opts.groupId,
     kind: opts.kind,
+    mentioned: opts.mentioned,
+    mentions: opts.mentions,
+    raw: opts.raw,
   });
 
   await handler(msg, { args: msg.args, raw: msg.content });
