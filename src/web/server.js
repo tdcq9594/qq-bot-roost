@@ -932,8 +932,7 @@ export async function startWebServer({
             ...(globalCfg.network ?? {}),
             mirror: id,
             mirrorCustom: String(body?.mirrorCustom ?? '').trim(),
-            mirrorChyanResId: String(body?.mirrorChyanResId ?? '').trim(),
-            mirrorChyanCdk: String(body?.mirrorChyanCdk ?? '').trim(),
+            giteeToken: String(body?.giteeToken ?? '').trim(),
           };
           // 立刻生效：模块里缓存的那份要同步，不然要等重启
           configureMirror(globalCfg);

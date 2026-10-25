@@ -1,3 +1,61 @@
+## v0.6.14：下载源只剩两个——GitHub 官方和作者维护的 Gitee 镜像
+
+国内直连 GitHub 经常超时，所以框架一直带「下载源切换」。但回头看，之前那批
+公共代理（ghfast / ghproxy / gh-proxy / kkgithub）和 MirrorChyan 实际用下来
+要么限速、要么挂掉、要么悄悄改内容——用户装了反而更难排查。这版把它们全部
+移除，换成**作者自己维护的 Gitee 镜像**，可控、可验证、国内直连快。
+
+镜像仓库（与 GitHub 内容逐字节相同，已实测对账）：
+
+- 框架：https://gitee.com/tdcq9594/qq-bot-roost
+- 插件：https://gitee.com/tdcq9594/qq-bot-roost-plugins
+
+### Gitee 是怎么接的
+
+调研结论（同类项目做法 + 实测）：
+
+- **`repository/archive/{ref}.zip|tar.gz` 不能用**。这个地址现在返回的是
+  「下载仓库」网页，真实文件要浏览器里 JS 调 `check_archive` 拿签名令牌
+  （`{"code":401,"msg":"验证信息过期"}`）。Paddle、Wegent 等项目和大量教程
+  还在用这个老地址，实际已拿不到文件。
+- **Gitee Releases 资产**能用，但要人工往 Gitee 上传发行附件，不适合自动同步
+  的镜像仓库（OpenHUTB、nonebot_plugin_sky 是这么做的，它们自己发版）。
+- 最后走 **git trees API 列清单 + raw 逐个拉文件**（`src/gitee.js`）：一次
+  API 调用拿全量清单，文件内容走 raw。公开端点不需要 key，纯 fetch 不依赖 git。
+  框架整包 86 个文件约 10 秒，单个插件目录 2~8 个文件。
+
+三处入口都接上了：框架自更新（版本检查读 Gitee 上的 package.json，下载走
+trees）、插件市场安装（只拉索引里那个插件目录，少拉一半文件）、市场批量同步。
+`auto` 模式 GitHub 失败会自动切 Gitee，检查和下载都一样。
+
+### 私人令牌（选填）
+
+Gitee API 匿名配额约 60 次/小时且全局共享。面板下载源选 Gitee 后可填私人
+令牌（`network.giteeToken`），只加在 API 调用上，raw 下载不需要；不填就走
+匿名，公开仓库两种都能用。
+
+### 实测中发现并修掉的问题
+
+- gitee 的 raw CDN 在突发流量下会返 **HTTP 451**（连拉 86 个文件时稳定复现，
+  单独请求同一个文件又是 200）。下载器加了退避重试（451/429/5xx/网络错重试
+  3 次，404 不重试），并发从 6 降到 4。
+- 真机对账：从 Gitee 拉的框架 86 个文件与本地 git 对象**逐字节一致**（含中文
+  路径）；插件目录 hashDir 结果与市场索引里的 sha256 **一致**——供应链校验
+  在 Gitee 源上成立。
+
+### 破坏性变更
+
+- `network.mirror` 的 `ghfast` / `ghproxy` / `gh-proxy` / `kkgithub` 取值
+  不再存在，旧配置会退回 `auto`（有兜底，不会启动失败）。
+- `mirrorChyanResId` / `mirrorChyanCdk` 配置项移除（MirrorChyan 一起移除）。
+
+### 测试
+
+单测 380 / e2e 153 / 真机驱动 18 → 合计 **551**。
+（e2e 另有 1 项按环境跳过：本机没填 AppSecret 时跳过掩码断言。）
+
+---
+
 ## v0.6.13：富媒体消息能带文本了（replyImage 的 text 选项）
 
 一个小功能，解一个真痛点：图片和说明文字以前只能分两条消息发——

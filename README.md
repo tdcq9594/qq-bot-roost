@@ -8,9 +8,9 @@
 
 <img src="https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white" alt="Node.js 22+">
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
-<img src="https://img.shields.io/badge/tests-535%20passed-brightgreen" alt="测试 535 项">
+<img src="https://img.shields.io/badge/tests-551%20passed-brightgreen" alt="测试 551 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
-<img src="https://img.shields.io/badge/version-0.6.13-blueviolet" alt="版本 0.6.13">
+<img src="https://img.shields.io/badge/version-0.6.14-blueviolet" alt="版本 0.6.14">
 <img src="https://img.shields.io/badge/license-Non--Commercial-red" alt="禁止商用">
 
 [快速开始](#3-分钟跑起来) ｜ [写插件](docs/插件开发规范.md) ｜ [外部插件协议](docs/插件协议.md) ｜ [配置参考](docs/配置参考.md) ｜ [常见问题](docs/常见问题.md) ｜ [贡献](CONTRIBUTING.md)
@@ -88,8 +88,9 @@
 
 - **插件不在本仓库**：全部放在 [qq-bot-roost-plugins](https://github.com/tdcq9594/qq-bot-roost-plugins)，
   面板「插件 → 市场」一键安装，**有新版会自动提示、一键更新**
-- **下载源可换**：国内直连 GitHub 经常超时，面板里能选直连 / 公共镜像 / 自建前缀，
-  **带一键测速**；`auto` 模式直连失败会自动切镜像，插件安装和框架更新都吃这个设置
+- **下载源可换**：国内直连 GitHub 经常超时，面板里能选 GitHub 官方 / Gitee 镜像
+  （作者维护，内容逐字节相同）/ 自建前缀，**带一键测速**；`auto` 模式直连失败会
+  自动切 Gitee，插件安装和框架更新都吃这个设置
 - **任意语言**：内建插件跑在主进程（JS），外部插件跑在独立子进程（Python / Go / 任何语言），崩溃只影响自己
 - **同会话串行、跨会话并行**：插件不用自己加锁
 - **独立配置、独立日志、独立存档**，卸载自动清理定时器和中间件

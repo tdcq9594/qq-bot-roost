@@ -646,12 +646,12 @@ async function testMirror() {
 
   const put = await api('/api/mirror', {
     method: 'PUT',
-    body: JSON.stringify({ mirror: 'ghfast' }),
+    body: JSON.stringify({ mirror: 'gitee' }),
   });
-  ok('下载源: 可以切换', put.status === 200 && put.data?.current?.id === 'ghfast', put.data?.error || '');
+  ok('下载源: 可以切换', put.status === 200 && put.data?.current?.id === 'gitee', put.data?.error || '');
 
   const after = await api('/api/mirror');
-  ok('下载源: 切换后立即生效', after.data?.current?.id === 'ghfast', after.data?.current?.id);
+  ok('下载源: 切换后立即生效', after.data?.current?.id === 'gitee', after.data?.current?.id);
 
   const bad = await api('/api/mirror', {
     method: 'PUT',
@@ -659,13 +659,18 @@ async function testMirror() {
   });
   ok('下载源: 非法值被拒', bad.status === 400, `status=${bad.status}`);
 
+  // 旧版本存在的源 id 现在也要被拒（已移除，不能悄悄落配置里）
+  const old = await api('/api/mirror', {
+    method: 'PUT',
+    body: JSON.stringify({ mirror: 'ghfast' }),
+  });
+  ok('下载源: 已移除的源被拒', old.status === 400, `status=${old.status}`);
+
   await api('/api/mirror', {
     method: 'PUT',
     body: JSON.stringify({
       mirror: orig.id || 'auto',
       mirrorCustom: orig.custom || '',
-      mirrorChyanResId: orig.chyanResId || '',
-      mirrorChyanCdk: orig.chyanCdk || '',
     }),
   });
   const back = await api('/api/mirror');

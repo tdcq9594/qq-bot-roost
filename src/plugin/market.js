@@ -8,7 +8,8 @@ import { DIRS } from '../paths.js';
 import { hashDir } from '../hashdir.js';
 // re-export 不会在本模块内绑定名字，内部还要用就必须单独 import
 import { compareVersion } from '../semver.js';
-import { fetchViaMirror } from '../mirror.js';
+import { fetchViaMirror, currentMirror } from '../mirror.js';
+import { fetchGiteeTree } from '../gitee.js';
 
 const log = createLogger('market');
 
@@ -228,6 +229,57 @@ export async function verifyPluginDir(entry, dir) {
   }
 }
 
+/**
+ * 把插件仓库的内容拉到临时目录。市场和框架更新共用一套下载源逻辑。
+ *
+ * 两条路：
+ *   · GitHub（默认）：tarball 直链，走 fetchViaMirror（auto 模式下会自动换源）
+ *   · Gitee：没有可用的 archive 直链，走 git trees 列清单 + raw 逐个拉
+ *
+ * auto 模式下 GitHub 失败会自动切 Gitee——面板选 auto 时的承诺行为。
+ *
+ * @param {object} o
+ * @param {string} o.repo     `owner/name`
+ * @param {string} o.branch   分支
+ * @param {string} o.destDir  临时目录
+ * @param {string[]} [o.only] 只拉这些路径前缀（装单个插件用，少拉一半文件）
+ * @param {string|null} [o.expectSha256] 整包 sha256（仅 tarball 路径能验）
+ * @param {number} [o.timeoutMs]
+ * @param {(msg:string)=>void} [o.onRetry]
+ */
+async function downloadRepoContents({
+  repo,
+  branch,
+  destDir,
+  only = null,
+  expectSha256 = null,
+  timeoutMs = 120000,
+  onRetry,
+}) {
+  const id = currentMirror().id;
+  const token = currentMirror().giteeToken;
+
+  if (id === 'gitee') {
+    return fetchGiteeTree({ repo, ref: branch, destDir, only, timeoutMs, token });
+  }
+
+  try {
+    return await fetchAndExtract(branchTarballUrl(repo, branch), destDir, {
+      expectSha256,
+      timeoutMs,
+      onRetry,
+      // 下载源可在面板切换，国内直连 GitHub 经常断
+      fetcher: (u, init) => fetchViaMirror(u, init),
+    });
+  } catch (e) {
+    if (id !== 'auto') throw e;
+    log.warn(`GitHub 下载失败（${e.message}），改用 Gitee 镜像`);
+    // 清掉可能写了一半的残留，再整树重拉
+    await fs.rm(destDir, { recursive: true, force: true }).catch(() => {});
+    return fetchGiteeTree({ repo, ref: branch, destDir, only, timeoutMs, token });
+  }
+}
+
 export async function installPlugin({ entry, pluginsDir, repo, branch = 'main', exists, sha256 = null }) {
   const id = String(entry?.id ?? '').trim();
   if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(id)) throw new Error(`插件 id 不合法：${id}`);
@@ -238,14 +290,17 @@ export async function installPlugin({ entry, pluginsDir, repo, branch = 'main', 
 
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'roost-plugin-'));
   try {
-    log.info(`开始下载插件 ${id}（来自 ${repo}）`);
-    await fetchAndExtract(branchTarballUrl(repo, branch), tmp, {
+    log.info(`开始下载插件 ${id}（来自 ${repo}@${branch}）`);
+    await downloadRepoContents({
+      repo,
+      branch,
+      destDir: tmp,
+      // 只拉这个插件的目录：Gitee 源下一次能少拉一半文件
+      only: [`${entry.path}/`],
       // 索引里带了校验值就验；没带会在 tarball 那边 warn 一句
       expectSha256: sha256,
       timeoutMs: 120000,
       onRetry: (m) => log.warn(m),
-      // 同上：下载源可在面板切换，国内直连 GitHub 经常断
-      fetcher: (u, init) => fetchViaMirror(u, init),
     });
 
     const src = path.join(tmp, entry.path);
@@ -353,7 +408,10 @@ export async function syncRepo({ repo, branch = 'main', indexUrl } = {}) {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'roost-repo-'));
   try {
     log.info(`正在下载插件仓库 ${repo}@${branch}…`);
-    await fetchAndExtract(branchTarballUrl(repo, branch), tmp, {
+    await downloadRepoContents({
+      repo,
+      branch,
+      destDir: tmp,
       // 索引里带了校验值就验；没带会在 tarball 那边 warn 一句
       expectSha256: index?.archive?.sha256 ?? index?.sha256 ?? null,
       timeoutMs: 180000,

@@ -6,19 +6,22 @@
  * 都会失败。这里提供「可自由切换的下载源」，参考了 BetterGI / MAA 这类国产工具
  * 的通行做法：**不猜哪个源快，让用户选，并提供一键测速**。
  *
- * 三种改写方式：
- *   none     直连，不改
- *   prefix   在前面加前缀，`https://ghfast.top/` + 原地址
- *            （ghfast / ghproxy / gh-proxy 都是这个套路）
- *   host     换域名，`github.com` → `kkgithub.com`
+ * 两个真实来源，加一个逃生舱：
  *
- * `auto` 不是第四种改写，是策略：先直连，失败按顺序试镜像，
+ *   github   GitHub 官方（直连）
+ *   gitee    作者维护的 Gitee 镜像仓库，内容与 GitHub 逐字节相同
+ *   custom   自建代理前缀（你自己搭的 gh 代理，填在下面）
+ *
+ * `auto` 不是来源，是策略：先直连 GitHub，失败按顺序试 Gitee，
  * 记住这次成功的那个，10 分钟内优先用它——避免每次都要多等一次超时。
  *
- * 关于 MirrorChyan（BGI / MAA / M9A 都在用的 CDN）：
- * 它需要项目方先注册资源 ID，且下载包格式由上传方决定，和我们的 tar.gz 更新链
- * 不一定兼容。所以这里**只用它做版本检查**（快、稳、不限速），
- * 下载仍走镜像 tarball。没填 res_id 就完全不启用。
+ * **为什么只留这两个来源**：以前还带过 ghfast / ghproxy / gh-proxy / kkgithub
+ * 一串公共代理和 MirrorChyan。实际用下来要么限速、要么挂掉、要么悄悄改内容，
+ * 用户装了反而更难排查。作者自己的 Gitee 镜像是可控的，删到只剩它。
+ *
+ * 关于 archive 直链：Gitee 没有等价物（`/repository/archive/` 返回的是网页），
+ * 所以 Gitee 源下的「整包下载」不走镜像改写，由调用方改走 git trees + raw
+ * 逐文件拉（见 src/gitee.js）。这里的 `gitee` 映射只处理 raw 文件地址。
  */
 import { createLogger } from './logger.js';
 
@@ -28,49 +31,22 @@ const log = createLogger('mirror');
 export const PRESETS = [
   {
     id: 'auto',
-    name: '自动（直连优先，失败切镜像）',
+    name: '自动（直连优先，失败切 Gitee）',
     kind: 'auto',
-    note: '推荐。直连能用就用直连，连不上自动换镜像',
+    note: '推荐。GitHub 能用就用，连不上自动换 Gitee 镜像',
   },
-  { id: 'github', name: 'GitHub 直连', kind: 'none', note: '不走任何代理，最干净' },
+  { id: 'github', name: 'GitHub 官方', kind: 'none', note: '直连 github.com，最干净' },
   {
-    id: 'ghfast',
-    name: 'ghfast.top',
-    kind: 'prefix',
-    base: 'https://ghfast.top/',
-    note: '公共 gh 代理，支持 release 与 raw',
+    id: 'gitee',
+    name: 'Gitee 镜像（作者维护）',
+    kind: 'gitee',
+    note: 'gitee.com/tdcq9594 下的同名镜像仓库，国内直连快',
   },
-  {
-    id: 'ghproxy',
-    name: 'ghproxy.net',
-    kind: 'prefix',
-    base: 'https://ghproxy.net/',
-    note: '公共 gh 代理，老牌但偶尔限速',
-  },
-  {
-    id: 'gh-proxy',
-    name: 'gh-proxy.com',
-    kind: 'prefix',
-    base: 'https://gh-proxy.com/',
-    note: '公共 gh 代理，备用',
-  },
-  {
-    id: 'kkgithub',
-    name: 'kkgithub.com',
-    kind: 'host',
-    map: {
-      'github.com': 'kkgithub.com',
-      'raw.githubusercontent.com': 'raw.kkgithub.com',
-      'api.github.com': 'api.kkgithub.com',
-      'objects.githubusercontent.com': 'objects.kkgithub.com',
-    },
-    note: '整站镜像，换域名不换路径',
-  },
-  { id: 'custom', name: '自定义前缀', kind: 'custom', note: '自建代理，填在下面' },
+  { id: 'custom', name: '自定义前缀', kind: 'custom', note: '自建 gh 代理，填在下面' },
 ];
 
 /** 直连失败时按这个顺序试（auto 模式用） */
-const FALLBACK_ORDER = ['ghfast', 'ghproxy', 'gh-proxy', 'kkgithub'];
+const FALLBACK_ORDER = ['gitee'];
 
 /**
  * 测速用的固定小文件：框架仓库的 package.json，几百字节。
@@ -97,7 +73,7 @@ const PROBE_FALLBACKS = [
 ];
 
 /** 当前配置。由 main / 保存配置 / 配置热加载三处调用 configureMirror() 更新 */
-let current = { id: 'auto', custom: '', chyanResId: '', chyanCdk: '' };
+let current = { id: 'auto', custom: '', giteeToken: '' };
 
 /** auto 模式记住上次成功的源：{ id, at } */
 let autoPick = null;
@@ -113,8 +89,8 @@ export function configureMirror(globalCfg) {
   current = {
     id: PRESETS.some((p) => p.id === id) ? id : 'auto',
     custom: String(n.mirrorCustom ?? '').trim(),
-    chyanResId: String(n.mirrorChyanResId ?? '').trim(),
-    chyanCdk: String(n.mirrorChyanCdk ?? '').trim(),
+    // Gitee 私人令牌：选填。公开仓库匿名也能用，填了只是把 API 配额提上去
+    giteeToken: String(n.giteeToken ?? '').trim(),
   };
   // 换了源就把「自动记住的那个」清掉，否则会继续用旧的
   autoPick = null;
@@ -130,13 +106,37 @@ export function presetOf(id) {
   return PRESETS.find((p) => p.id === id) ?? null;
 }
 
-/** 只改写 GitHub 相关域名，别的地址原样返回（比如自建图床、MirrorChyan） */
+/** 只改写 GitHub 相关域名，别的地址原样返回（比如自建图床、Gitee 自身） */
 function isGitHubUrl(url) {
   try {
     const h = new URL(url).hostname;
     return /(^|\.)github\.com$/.test(h) || /(^|\.)githubusercontent\.com$/.test(h);
   } catch {
     return false;
+  }
+}
+
+/**
+ * GitHub raw 地址 → Gitee raw 地址。
+ *
+ *   raw.githubusercontent.com/{repo}/{ref}/{path}
+ *     → gitee.com/{repo}/raw/{ref}/{path}
+ *
+ * 只认 raw。github.com 的 archive / releases / api 地址在 Gitee 没有对应物，
+ * 原样返回，由调用方走 src/gitee.js 的 trees 下载。
+ */
+function toGiteeRaw(url) {
+  try {
+    const u = new URL(url);
+    if (u.hostname !== 'raw.githubusercontent.com') return url;
+    // /{repo}/{ref}/{path...}，repo 固定两段
+    const seg = u.pathname.replace(/^\//, '').split('/');
+    if (seg.length < 4) return url;
+    const [owner, name, ref, ...rest] = seg;
+    if (!owner || !name || !ref || !rest.length) return url;
+    return `https://gitee.com/${owner}/${name}/raw/${ref}/${rest.join('/')}`;
+  } catch {
+    return url;
   }
 }
 
@@ -150,6 +150,10 @@ export function applyMirror(url, preset, custom = current.custom) {
   if (!url || !preset || preset.kind === 'none' || preset.kind === 'auto') return url;
   if (!isGitHubUrl(url)) return url;
 
+  if (preset.kind === 'gitee') {
+    return toGiteeRaw(url);
+  }
+
   if (preset.kind === 'prefix' || preset.kind === 'custom') {
     const base = preset.kind === 'custom' ? custom : preset.base;
     if (!base) return url;
@@ -162,17 +166,6 @@ export function applyMirror(url, preset, custom = current.custom) {
     return b + url;
   }
 
-  if (preset.kind === 'host') {
-    try {
-      const u = new URL(url);
-      const to = preset.map[u.hostname];
-      if (!to) return url;
-      u.hostname = to;
-      return u.toString();
-    } catch {
-      return url;
-    }
-  }
   return url;
 }
 
@@ -313,44 +306,4 @@ export async function probeMirrors({ timeoutMs = 6000, custom = current.custom }
       };
     }),
   );
-}
-
-/* ---------------- MirrorChyan（可选，只做版本检查） ---------------- */
-
-/**
- * 用 MirrorChyan 查最新版本。
- *
- * 为什么只用它检查、不用它下载：它分发的是**项目方上传的包**，
- * 格式由上传方决定，和我们「拉仓库 tar.gz」的更新链不一定兼容。
- * 拿它当 CDN 查版本（快、稳、不限速）是安全的；拿它当下载源则有兼容风险。
- *
- * 没配 res_id 时返回 null，调用方走 GitHub。
- */
-export async function checkViaMirrorChyan(currentVersion) {
-  const { chyanResId, chyanCdk } = current;
-  if (!chyanResId) return null;
-
-  const q = new URLSearchParams({
-    current_version: String(currentVersion ?? ''),
-    user_agent: 'qq-bot-roost',
-  });
-  if (chyanCdk) q.set('cdk', chyanCdk);
-
-  const url = `https://mirrorchyan.com/api/resources/${encodeURIComponent(chyanResId)}/latest?${q}`;
-  try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    const data = await res.json().catch(() => null);
-    if (!data || data.code !== 0) {
-      return { ok: false, error: data?.msg || `MirrorChyan 返回 HTTP ${res.status}` };
-    }
-    return {
-      ok: true,
-      version: String(data.data?.version_name ?? '').replace(/^v/i, ''),
-      releaseNote: data.data?.release_note ?? '',
-      // 有 CDK 且是新版才会给 url；格式不保证是 tar.gz，所以只做参考
-      url: data.data?.url ?? '',
-    };
-  } catch (e) {
-    return { ok: false, error: e?.name === 'TimeoutError' ? '超时' : e.message };
-  }
 }

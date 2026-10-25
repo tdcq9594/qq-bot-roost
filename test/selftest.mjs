@@ -1938,29 +1938,23 @@ async function testMirror() {
   check('镜像: 直连不改地址', applyMirror(tar, presetOf('github')) === tar);
   check('镜像: 直连只有一个候选', mirrorCandidates(tar).length === 1);
 
-  // 前缀型
-  configureMirror({ network: { mirror: 'ghfast' } });
+  // Gitee：raw 换域名；archive 没有对应物，原样返回（调用方走 trees 下载）
+  configureMirror({ network: { mirror: 'gitee' } });
   check(
-    '镜像: 前缀型拼在原始地址前面',
-    applyMirror(tar, presetOf('ghfast')) === `https://ghfast.top/${tar}`,
+    '镜像: Gitee raw 地址映射',
+    applyMirror(raw, presetOf('gitee')) === 'https://gitee.com/a/b/raw/main/index.json',
   );
-  check('镜像: raw 地址同样能加前缀', mirrorCandidates(raw)[0].startsWith('https://ghfast.top/'));
-
-  // 域名替换型
-  configureMirror({ network: { mirror: 'kkgithub' } });
+  check('镜像: Gitee 不映射 archive 地址', applyMirror(tar, presetOf('gitee')) === tar);
+  const giteeCand = mirrorCandidates(raw);
   check(
-    '镜像: 域名替换型换 host 保留路径',
-    applyMirror(tar, presetOf('kkgithub')) ===
-      'https://kkgithub.com/a/b/archive/refs/heads/main.tar.gz',
-  );
-  check(
-    '镜像: raw 域名也跟着换',
-    applyMirror(raw, presetOf('kkgithub')) === 'https://raw.kkgithub.com/a/b/main/index.json',
+    '镜像: Gitee 候选只有一个且是 gitee',
+    giteeCand.length === 1 && giteeCand[0] === 'https://gitee.com/a/b/raw/main/index.json',
+    giteeCand.join(' , '),
   );
 
-  // 非 GitHub 地址一律不碰（自建图床、MirrorChyan 等）
+  // 非 GitHub 地址一律不碰（自建图床、Gitee 自身等）
   const other = 'https://example.com/x.tar.gz';
-  check('镜像: 非 GitHub 地址原样返回', applyMirror(other, presetOf('ghfast')) === other);
+  check('镜像: 非 GitHub 地址原样返回', applyMirror(other, presetOf('gitee')) === other);
   check('镜像: 非 GitHub 地址不参与兜底', mirrorCandidates(other).length === 1);
 
   // 自定义前缀：没填就退回直连，不能把请求发到空地址
@@ -1972,17 +1966,25 @@ async function testMirror() {
     mirrorCandidates(tar)[0] === 'https://gh.example.com/https://github.com/a/b/archive/refs/heads/main.tar.gz',
   );
 
-  // auto：直连排第一，后面跟一串镜像
+  // auto：直连排第一，后面只跟 Gitee
   configureMirror({ network: { mirror: 'auto' } });
-  const auto = mirrorCandidates(tar);
-  check('镜像: auto 直连优先', auto[0] === tar);
-  check('镜像: auto 带多个备用源', auto.length >= 4, `${auto.length} 个候选`);
+  const auto = mirrorCandidates(raw);
+  check('镜像: auto 直连优先', auto[0] === raw);
+  check(
+    '镜像: auto 带 Gitee 备用',
+    auto.length === 2 && auto[1] === 'https://gitee.com/a/b/raw/main/index.json',
+    `${auto.length} 个候选`,
+  );
 
-  // 配置写歪了要能兜住
+  // 配置写歪了要能兜住；旧版本移除的源 id 也要兜住
   configureMirror({ network: { mirror: '不存在的源' } });
   check('镜像: 未知源退回 auto', currentMirror().id === 'auto');
+  configureMirror({ network: { mirror: 'ghfast' } });
+  check('镜像: 已移除的源退回 auto', currentMirror().id === 'auto');
 
-  // 兜底 fetch：第一个源抛错，第二个能成功
+  // 兜底 fetch：第一个源抛错，第二个能成功。
+  // 用 raw 地址测——archive 地址在 Gitee 没有对应物（只有直连一个候选），
+  // 它的兜底在调用方那一层（下载失败改走 trees，见 src/gitee.js）
   const realFetch = globalThis.fetch;
   const tried = [];
   globalThis.fetch = async (u) => {
@@ -1992,9 +1994,10 @@ async function testMirror() {
   };
   try {
     configureMirror({ network: { mirror: 'auto' } });
-    const res = await fetchViaMirror(tar);
+    check('镜像: archive 地址只有直连候选', mirrorCandidates(tar).length === 1, `${mirrorCandidates(tar).length} 个`);
+    const res = await fetchViaMirror(raw);
     check('镜像: 直连失败会自动换源', res.ok && tried.length === 2, `试了 ${tried.length} 次`);
-    check('镜像: 换的是镜像地址', tried[1].startsWith('https://'), tried[1].slice(0, 30));
+    check('镜像: 换的是 Gitee 地址', tried[1].startsWith('https://gitee.com/'), tried[1].slice(0, 40));
 
     // 4xx 不该无脑换源（地址错了换源也没用）
     tried.length = 0;
@@ -2002,7 +2005,7 @@ async function testMirror() {
       tried.push(u);
       return new Response('nope', { status: 404 });
     };
-    const r404 = await fetchViaMirror(tar);
+    const r404 = await fetchViaMirror(raw);
     check('镜像: 404 直接返回不重试', r404.status === 404 && tried.length === 1);
   } finally {
     globalThis.fetch = realFetch;
@@ -2011,6 +2014,176 @@ async function testMirror() {
 }
 
 await testMirror();
+
+/* ---------- Gitee 下载源 ---------- */
+
+async function testGitee() {
+  const { fetchGiteeTree, detectGiteeRef, giteeRawUrl } = await import('../src/gitee.js');
+  const fs = await import('node:fs/promises');
+  const os = await import('node:os');
+  const path = await import('node:path');
+
+  check(
+    'Gitee: raw 地址拼接',
+    giteeRawUrl('a/b', 'master', 'src/x.js') === 'https://gitee.com/a/b/raw/master/src/x.js',
+  );
+  check(
+    'Gitee: raw 地址转义中文路径',
+    giteeRawUrl('a/b', 'master', 'docs/中文.md') === 'https://gitee.com/a/b/raw/master/docs/%E4%B8%AD%E6%96%87.md',
+  );
+
+  const realFetch = globalThis.fetch;
+  const dest = await fs.mkdtemp(path.join(os.tmpdir(), 'roost-gitee-'));
+  try {
+    // 假 Gitee：trees 列清单 + raw 给内容
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('/git/trees/')) {
+        return new Response(
+          JSON.stringify({
+            truncated: false,
+            tree: [
+              { path: 'package.json', mode: '100644', type: 'blob', sha: 'a1' },
+              { path: 'src', mode: '040000', type: 'tree', sha: 't1' },
+              { path: 'src/main.js', mode: '100644', type: 'blob', sha: 'a2' },
+              { path: 'docs/readme.txt', mode: '100644', type: 'blob', sha: 'a3' },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      if (u.endsWith('/raw/master/src/main.js')) return new Response('main();', { status: 200 });
+      if (u.endsWith('/raw/master/package.json')) return new Response('{}', { status: 200 });
+      return new Response('nope', { status: 404 });
+    };
+
+    const r = await fetchGiteeTree({
+      repo: 'a/b',
+      ref: 'master',
+      destDir: dest,
+      only: ['src/', 'package.json'],
+    });
+    check('Gitee: 按前缀过滤拉取', r.files === 2, `拉了 ${r.files} 个`);
+    const main = await fs.readFile(path.join(dest, 'src/main.js'), 'utf8');
+    check('Gitee: 文件内容落盘', main === 'main();', main);
+    const hasDocs = await fs.access(path.join(dest, 'docs/readme.txt')).then(() => true, () => false);
+    check('Gitee: 范围外文件不拉', !hasDocs);
+
+    // 清单接口挂了要明确报错，不能静默成功
+    globalThis.fetch = async () => {
+      throw new Error('模拟网络中断');
+    };
+    let err = '';
+    try {
+      await fetchGiteeTree({ repo: 'a/b', ref: 'master', destDir: dest });
+    } catch (e) {
+      err = e.message;
+    }
+    check('Gitee: 清单失败时报错清楚', /文件清单失败/.test(err), err);
+
+    // 有文件拉失败时整体算失败（不能装一半）
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('/git/trees/')) {
+        return new Response(
+          JSON.stringify({
+            tree: [
+              { path: 'a.txt', type: 'blob' },
+              { path: 'b.txt', type: 'blob' },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return u.endsWith('a.txt') ? new Response('A', { status: 200 }) : new Response('x', { status: 500 });
+    };
+    let err2 = '';
+    try {
+      await fetchGiteeTree({ repo: 'a/b', ref: 'master', destDir: dest });
+    } catch (e) {
+      err2 = e.message;
+    }
+    check('Gitee: 有文件失败时整体报错', /1 个失败/.test(err2), err2);
+
+    // 分支探测：master 优先，404 退 main，都没有则报错
+    globalThis.fetch = async (url) =>
+      String(url).includes('/raw/main/')
+        ? new Response('{}', { status: 200 })
+        : new Response('x', { status: 404 });
+    check('Gitee: 分支探测退回 main', (await detectGiteeRef('a/b')) === 'main');
+    globalThis.fetch = async (url) =>
+      String(url).includes('/raw/master/')
+        ? new Response('{}', { status: 200 })
+        : new Response('x', { status: 404 });
+    check('Gitee: 分支探测认 master', (await detectGiteeRef('a/b')) === 'master');
+    globalThis.fetch = async () => new Response('x', { status: 404 });
+    let err3 = '';
+    try {
+      await detectGiteeRef('a/b');
+    } catch (e) {
+      err3 = e.message;
+    }
+    check('Gitee: 两个分支都没有时报错', /master\/main/.test(err3), err3);
+
+    // 令牌：只加在 API 调用上，raw 不带
+    let apiUrl = '';
+    let rawUrl = '';
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('/git/trees/')) {
+        apiUrl = u;
+        return new Response(JSON.stringify({ tree: [{ path: 'a.txt', type: 'blob' }] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      rawUrl = u;
+      return new Response('A', { status: 200 });
+    };
+    await fetchGiteeTree({ repo: 'a/b', ref: 'master', destDir: dest, token: 'tok123' });
+    check('Gitee: 令牌加在 API 调用上', apiUrl.includes('access_token=tok123'), apiUrl.slice(0, 120));
+    check('Gitee: raw 下载不带令牌', !rawUrl.includes('access_token'), rawUrl.slice(0, 120));
+  } finally {
+    globalThis.fetch = realFetch;
+    await fs.rm(dest, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+await testGitee();
+
+/* ---------- 更新器：Gitee 源查版本 ---------- */
+
+async function testUpdaterGitee() {
+  const mirror = await import('../src/mirror.js');
+  const upd = await import('../src/updater.js');
+  const realFetch = globalThis.fetch;
+  try {
+    mirror.configureMirror({ network: { mirror: 'gitee' } });
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.startsWith('https://gitee.com/')) {
+        return new Response(JSON.stringify({ version: '9.9.9' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      // 选了 Gitee 就不该再去打 GitHub
+      return new Response('should not be called', { status: 500 });
+    };
+    const r = await upd.checkUpdate();
+    check(
+      '更新: Gitee 源查版本',
+      r.ok === true && r.latest === '9.9.9' && r.hasUpdate === true && r.source === 'gitee',
+      JSON.stringify({ ok: r.ok, latest: r.latest, source: r.source }),
+    );
+    check('更新: Gitee 源记住分支', typeof r.giteeRef === 'string' && r.giteeRef.length > 0, r.giteeRef);
+  } finally {
+    globalThis.fetch = realFetch;
+    mirror.configureMirror({});
+  }
+}
+
+await testUpdaterGitee();
 
 /* ---------- 模块可导入性（防止改了导出忘了改引用） ---------- */
 

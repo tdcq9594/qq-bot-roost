@@ -18,7 +18,8 @@ import { compareVersion } from './semver.js';
 import path from 'node:path';
 import { createLogger } from './logger.js';
 import { fetchAndExtract } from './tarball.js';
-import { fetchViaMirror, checkViaMirrorChyan } from './mirror.js';
+import { fetchViaMirror, currentMirror } from './mirror.js';
+import { fetchGiteeTree, detectGiteeRef, giteeRawUrl } from './gitee.js';
 import { ROOT } from './config.js';
 
 const log = createLogger('update');
@@ -31,6 +32,12 @@ const CODE_ENTRIES = ['src', 'web', 'test', 'docs', 'package.json', 'README.md',
 
 /** 绝对不能删的目录，双保险 */
 const PROTECTED = new Set(['config', 'data', 'logs', 'plugins', 'node_modules', '.git']);
+
+/**
+ * Gitee 源下拉取的文件范围：只拉会被更新覆盖的代码条目。
+ * 目录带 `/` 结尾，文件写全名——src/gitee.js 的前缀过滤按这个规则匹配。
+ */
+const GITEE_ONLY = ['src/', 'web/', 'test/', 'docs/', 'package.json', 'README.md', 'LICENSE', 'start.bat'];
 
 /**
  * 比较语义化版本。
@@ -90,7 +97,7 @@ async function updatedButNotRestarted() {
 /**
  * 查最新版本，并顺带说明「是不是已经更新了但还没重启」。
  *
- * 包一层而不是往 checkUpdate 里塞：里面有好几个返回分支（MirrorChyan /
+ * 包一层而不是往 checkUpdate 里塞：里面有好几个返回分支（Gitee /
  * 主站 302 / API 兜底 / 404 / 失败），每个都手写一遍 needsRestart 迟早漏一个。
  */
 export async function checkUpdate() {
@@ -102,21 +109,8 @@ export async function checkUpdate() {
 async function checkUpdateCore() {
   const cur = await currentVersion();
 
-  /**
-   * 先问 MirrorChyan（配了 res_id 才启用）。
-   *
-   * 这是 BGI / MAA / M9A 那一套的做法：CDN 覆盖国内外、不限速、不消耗
-   * GitHub 配额，用来**查版本**最省事。下载仍然走镜像 tarball——
-   * 它分发的包格式由上传方决定，不一定是我们能解的 tar.gz。
-   */
-  const chyan = await checkViaMirrorChyan(cur);
-  if (chyan && !chyan.ok) log.warn(`MirrorChyan 检查失败，改问 GitHub：${chyan.error}`);
-  if (chyan?.ok && chyan.version) {
-    return buildResult(cur, `v${chyan.version}`, {
-      source: 'mirrorchyan',
-      releaseNote: chyan.releaseNote,
-    });
-  }
+  // 明确选了 Gitee 就别浪费时间去问 GitHub
+  if (currentMirror().id === 'gitee') return checkViaGitee(cur);
 
   let res = null;
   let lastErr = null;
@@ -138,6 +132,17 @@ async function checkUpdateCore() {
   }
 
   if (!res) {
+    /**
+     * 连不上主站：auto 模式下还有一次机会——问 Gitee 镜像。
+     * 用户选 auto 时的承诺就是「直连优先，失败切 Gitee」，检查也一样。
+     */
+    if (currentMirror().id === 'auto') {
+      try {
+        return await checkViaGitee(cur);
+      } catch (e) {
+        log.warn(`Gitee 检查也失败：${e.message}`);
+      }
+    }
     // 连不上主站：还有一次机会——问 API（走的是另一套域名和 CDN）
     try {
       return buildResult(cur, await fetchLatestTagViaApi(), { source: 'github-api' });
@@ -197,6 +202,33 @@ async function fetchLatestTagViaApi() {
   return tag;
 }
 
+/**
+ * 问 Gitee 镜像要最新版本。
+ *
+ * Gitee 没有 GitHub 那个「releases/latest 302 跳转」的技巧，也不假设作者
+ * 在 Gitee 侧发过 Release。最稳的做法是**直接读默认分支上的 package.json**：
+ * 本项目的发版流程是「提交即打 tag、master 永远是最新发布版」，两者一致。
+ * 读取走 raw 端点，不消耗 Gitee API 配额。
+ *
+ * 返回里带 `giteeRef`（实际读到的分支），下载时按同一个分支拉整树。
+ */
+async function checkViaGitee(cur) {
+  const ref = await detectGiteeRef(REPO);
+  const res = await fetch(giteeRawUrl(REPO, ref, 'package.json'), {
+    headers: { 'User-Agent': 'qq-bot-roost-updater' },
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!res.ok) throw new Error(`Gitee 返回 HTTP ${res.status}`);
+  const pkg = await res.json().catch(() => null);
+  const latest = String(pkg?.version ?? '').trim();
+  if (!/^\d+\.\d+\.\d+/.test(latest)) throw new Error('Gitee 上的 package.json 读不到版本号');
+  return buildResult(cur, `v${latest}`, {
+    source: 'gitee',
+    htmlUrl: `https://gitee.com/${REPO}`,
+    giteeRef: ref,
+  });
+}
+
 /** 把 tag 组装成面板要的结构 */
 function buildResult(cur, tag, extra = {}) {
   const latest = String(tag).replace(/^v/, '');
@@ -216,20 +248,57 @@ function buildResult(cur, tag, extra = {}) {
 /* ---------------- 下载与解包 ---------------- */
 
 /**
- * 下载 tarball 并解包到临时目录。
- * 解析逻辑统一放在 src/tarball.js，插件市场和框架更新共用一份，
- * 免得两处 tar 解析以后跑偏。
+ * 下载并解包到临时目录。
+ *
+ * 两条路：
+ *   · GitHub（默认）：tarball 直链，解析逻辑在 src/tarball.js，
+ *     插件市场和框架更新共用一份，免得两处 tar 解析以后跑偏
+ *   · Gitee：没有可用的 archive 直链（Gitee 的 /repository/archive/
+ *     返回的是网页），改走 git trees 列清单 + raw 逐个拉（src/gitee.js）
+ *
+ * auto 模式下 GitHub 失败会自动切 Gitee——用户选 auto 时这就是承诺。
+ *
+ * @param {string} tmpDir
+ * @param {object} rel checkUpdate 的返回值（带 tarball / giteeRef）
  */
-async function downloadTo(tmpDir, tarballUrl, sha256 = null) {
-  await fetchAndExtract(tarballUrl, tmpDir, {
-    // 版本信息里带了 sha256 就校验（发布说明里没写就是 null，只 warn）
-    expectSha256: sha256,
-    timeoutMs: 120000,
-    retries: 1,
-    onRetry: (m) => log.warn(m),
-    // 走下载源：面板里选了镜像或 auto，这里就自动用上
-    fetcher: (u, init) => fetchViaMirror(u, init),
-  });
+async function downloadTo(tmpDir, rel) {
+  const id = currentMirror().id;
+  const token = currentMirror().giteeToken;
+
+  if (id === 'gitee') {
+    await fetchGiteeTree({
+      repo: REPO,
+      ref: rel.giteeRef ?? (await detectGiteeRef(REPO)),
+      destDir: tmpDir,
+      only: GITEE_ONLY,
+      token,
+    });
+    return tmpDir;
+  }
+
+  try {
+    await fetchAndExtract(rel.tarball, tmpDir, {
+      // 版本信息里带了 sha256 就校验（发布说明里没写就是 null，只 warn）
+      expectSha256: rel.sha256 ?? null,
+      timeoutMs: 120000,
+      retries: 1,
+      onRetry: (m) => log.warn(m),
+      // 走下载源：面板里选了镜像或 auto，这里就自动用上
+      fetcher: (u, init) => fetchViaMirror(u, init),
+    });
+  } catch (e) {
+    if (id !== 'auto') throw e;
+    log.warn(`GitHub 下载失败（${e.message}），改用 Gitee 镜像`);
+    // 清掉可能写了一半的残留，再整树重拉
+    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+    await fetchGiteeTree({
+      repo: REPO,
+      ref: await detectGiteeRef(REPO),
+      destDir: tmpDir,
+      only: GITEE_ONLY,
+      token,
+    });
+  }
   return tmpDir;
 }
 
@@ -365,7 +434,7 @@ async function applyUpdateOnce(info) {
   await fs.mkdir(workDir, { recursive: true });
 
   try {
-    await downloadTo(workDir, rel.tarball, rel.sha256 ?? null);
+    await downloadTo(workDir, rel);
 
     // 校验：新版本里必须有 src/main.js，否则不是我们要的包
     const mainJs = path.join(workDir, 'src', 'main.js');

@@ -1787,18 +1787,26 @@ async function loadMirrorBar() {
   }
 }
 
-/** 选了「自定义前缀」才显示输入框 */
+/** 选了「自定义前缀」才显示前缀框，选了「Gitee」才显示令牌框 */
 function syncMirrorCustom() {
   const sel = $('#mirrorSelect');
   const inp = $('#mirrorCustom');
-  if (!sel || !inp) return;
-  inp.hidden = sel.value !== 'custom';
-  if (!inp.hidden && !inp.value) inp.value = MIRRORS?.current?.custom ?? '';
+  const tok = $('#mirrorGiteeToken');
+  if (!sel) return;
+  if (inp) {
+    inp.hidden = sel.value !== 'custom';
+    if (!inp.hidden && !inp.value) inp.value = MIRRORS?.current?.custom ?? '';
+  }
+  if (tok) {
+    tok.hidden = sel.value !== 'gitee';
+    if (!tok.hidden && !tok.value) tok.value = MIRRORS?.current?.giteeToken ?? '';
+  }
 }
 
 async function saveMirror() {
   const sel = $('#mirrorSelect');
   const inp = $('#mirrorCustom');
+  const tok = $('#mirrorGiteeToken');
   const tip = $('#mirrorTip');
   if (!sel) return;
 
@@ -1808,9 +1816,7 @@ async function saveMirror() {
       body: JSON.stringify({
         mirror: sel.value,
         mirrorCustom: inp?.value ?? '',
-        // 这两项在插件市场页不展示，原样带回去，别把用户填的清空
-        mirrorChyanResId: MIRRORS?.current?.chyanResId ?? '',
-        mirrorChyanCdk: MIRRORS?.current?.chyanCdk ?? '',
+        giteeToken: tok?.value ?? '',
       }),
     });
     MIRRORS = { ...(MIRRORS ?? {}), current: r.current };
@@ -2124,6 +2130,7 @@ $('#mirrorSelect')?.addEventListener('change', () => {
   saveMirror();
 });
 $('#mirrorCustom')?.addEventListener('change', saveMirror);
+$('#mirrorGiteeToken')?.addEventListener('change', saveMirror);
 $('#btnLoadMarket')?.addEventListener('click', () => {
   const box = $('#marketBox');
   if (box.hidden) loadMarket();

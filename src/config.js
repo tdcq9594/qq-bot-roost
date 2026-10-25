@@ -52,19 +52,19 @@ const GLOBAL_DEFAULTS = {
    * 下载源。国内直连 GitHub 经常超时，插件市场和框架更新都会失败。
    * 这里让用户自己选，面板上有「测速」按钮，按自己网络实际情况挑。
    *
-   *   mirror      auto（直连优先，失败切镜像）/ github / ghfast / ghproxy
-   *               / gh-proxy / kkgithub / custom
+   *   mirror      auto（直连优先，失败切 Gitee）/ github / gitee / custom
    *   mirrorCustom  选 custom 时的前缀，如 https://my-proxy.example/
-   *   mirrorChyanResId / mirrorChyanCdk
-   *               MirrorChyan（BGI / MAA 用的 CDN）的资源 ID 与 CDK。
-   *               填了才启用，且**只用来查版本**——它分发的是项目方上传的包，
-   *               格式不一定是我们的 tar.gz。
+   *   giteeToken    Gitee 私人令牌（选填）。公开仓库匿名也能拉，填了只是把
+   *                 API 配额提上去；只加在 Gitee API 调用上，raw 不需要
+   *
+   * 只有两个真实来源：GitHub 官方和作者维护的 Gitee 镜像（内容与 GitHub
+   * 逐字节相同）。以前那批公共 gh 代理和 MirrorChyan 已移除——实测要么
+   * 限速要么挂掉，留着只会让排查更困难。
    */
   network: {
     mirror: 'auto',
     mirrorCustom: '',
-    mirrorChyanResId: '',
-    mirrorChyanCdk: '',
+    giteeToken: '',
   },
 
   /**
