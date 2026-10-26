@@ -11,6 +11,11 @@ name: Gitee 镜像同步
 # 「没自动推」，是「镜像滞后」。校验那步才是安全网，缺令牌只影响「自动」，
 # 不影响「发现滞后」。
 #
+# 校验比的是**内容指纹**（顶层 tree 条目 path→sha），不是 commit SHA。
+# 原因：github.com 的 git 传输经常不通，这时会用 GitHub API 提交，
+# 同内容会得到不同 commit SHA —— 那种情况镜像其实已经最新，只比 SHA 会假红。
+# 任何嵌套改动都会让顶层 tree 的 sha 变化，所以指纹等价于全量内容比对。
+#
 # 要启用自动推送：仓库 Settings → Secrets and variables → Actions 里加
 # GITEE_TOKEN（Gitee 私人令牌，需要 projects 写权限）。
 
@@ -46,11 +51,29 @@ jobs:
           # 公开仓可以匿名查；有令牌就带上，省得将来转私有后失效
           QS=""
           if [ -n "$GITEE_TOKEN" ]; then QS="?access_token=${GITEE_TOKEN}"; fi
+          API="https://gitee.com/api/v5/repos/tdcq9594/qq-bot-roost"
+
+          # 本地顶层条目（path → sha）。任何嵌套改动都会让顶层 tree 的 sha 变，
+          # 所以这份清单就是「内容指纹」。
+          EXPECTED=$(git ls-tree HEAD | awk '{print $4" "$3}' | sort)
+
           for i in $(seq 1 10); do
-            SHA=$(curl -fsSL "https://gitee.com/api/v5/repos/tdcq9594/qq-bot-roost/branches/master${QS}" \
+            HEAD_SHA=$(curl -fsSL "${API}/branches/master${QS}" \
               | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s).commit.sha)}catch{console.log('')}})") || true
-            if [ "$SHA" = "${GITHUB_SHA}" ]; then echo "✓ Gitee 已同步到 ${GITHUB_SHA:0:8}"; exit 0; fi
-            echo "等待 Gitee 同步…（当前 ${SHA:0:8}，期望 ${GITHUB_SHA:0:8}）"; sleep 6
+
+            if [ "$HEAD_SHA" = "${GITHUB_SHA}" ]; then
+              echo "✓ Gitee 已同步到 ${GITHUB_SHA:0:8}"; exit 0
+            fi
+
+            if [ -n "$HEAD_SHA" ]; then
+              ACTUAL=$(curl -fsSL "${API}/git/trees/${HEAD_SHA}${QS}" \
+                | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s).tree.map(e=>e.path+' '+e.sha).sort().join('\n'))}catch{console.log('')}})") || true
+              if [ -n "$ACTUAL" ] && [ "$ACTUAL" = "$EXPECTED" ]; then
+                echo "✓ Gitee 内容已一致（commit 不同：${HEAD_SHA:0:8} vs ${GITHUB_SHA:0:8}）"; exit 0
+              fi
+            fi
+
+            echo "等待 Gitee 同步…（当前 ${HEAD_SHA:0:8}，期望 ${GITHUB_SHA:0:8}）"; sleep 6
           done
           echo "::error::Gitee 分支未跟上 ${GITHUB_SHA}，镜像滞后——手动 push 一下 Gitee，或配置 secrets.GITEE_TOKEN 让它自动推"
           exit 1
