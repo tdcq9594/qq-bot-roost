@@ -445,6 +445,13 @@ openid 完全不同。共享 `roles.json` 等于所有权限记录全部对不�
 | [DSH 接入指南](docs/DSH接入.md) | 装进 DeepSeek Harness，用 AI 管机器人：安装、配置、验证、排查 |
 | [同类项目调研](docs/GitHub同类项目调研.md) | 与 AstrBot / NoneBot2 / Koishi / ZeroBot 的对比 |
 
+### 相关仓库
+
+| 仓库 | 说明 |
+|------|------|
+| [qq-bot-roost-plugins](https://github.com/tdcq9594/qq-bot-roost-plugins) | 插件市场源，面板「插件 → 市场」从这里装 |
+| [dsh-roost](https://github.com/tdcq9594/dsh-roost) | DSH 插件：让 AI 通过本框架住进 QQ（走官方接口，不 hook 客户端） |
+
 ---
 
 ## 开发

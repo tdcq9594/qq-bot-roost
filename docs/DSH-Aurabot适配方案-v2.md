@@ -4,6 +4,10 @@
 > 取代 [v1 方案](./DSH-Aurabot适配方案.md)（那份写在核对官方文档之前，
 > 「哪些做不了」的清单是错的）。
 >
+> **插件已独立成仓**：[tdcq9594/dsh-roost](https://github.com/tdcq9594/dsh-roost)
+> （DSH 插件不放在本仓库——主仓库只放框架）。本文第四节的「两个通道」
+> 是那个仓库的前置依赖。
+>
 > 参考对象：[accomplish07zrh-eng/dsh-aurabot-qq](https://github.com/accomplish07zrh-eng/dsh-aurabot-qq) 0.2.0
 
 ---
