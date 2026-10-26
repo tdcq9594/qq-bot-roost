@@ -1891,6 +1891,37 @@ export async function startWebServer({
   server.on('error', (e) => log.error('面板出错:', e.message));
 
   const shownHost = host === '0.0.0.0' ? '127.0.0.1' : host;
+
+  /**
+   * 把实际端口写进「端口租约」，让 dsh-roost 知道面板到底在哪。
+   *
+   * 为什么要这个：面板端口被占会自动顺延（上面 listenWithFallback），
+   * 但 `config/bot.json` 里还是用户写的那个——dsh-roost 按配置去连就连不上。
+   * 配置是**意愿**，这里是**现实**，两个都得留着。
+   *
+   * 写 `<root>/data/ports.json`，dsh-roost 读同一个文件。
+   */
+  try {
+    const { mkdirSync, writeFileSync, renameSync, readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const leaseFile = join(ROOT, 'data', 'ports.json');
+    let lease = {};
+    try {
+      lease = JSON.parse(readFileSync(leaseFile, 'utf8')) || {};
+    } catch {}
+    lease.roost = { want: port, actual: actualPort, pid: process.pid, at: new Date().toISOString() };
+    mkdirSync(join(ROOT, 'data'), { recursive: true });
+    // 原子写：先写 .tmp 再 rename，免得 dsh-roost 读到半截 JSON
+    writeFileSync(`${leaseFile}.tmp`, JSON.stringify(lease, null, 2), 'utf8');
+    renameSync(`${leaseFile}.tmp`, leaseFile);
+    if (actualPort !== port) {
+      log.warn(`面板实际在 ${actualPort}（配置写的是 ${port}，那个被占了）。已写入 data/ports.json`);
+    }
+  } catch (e) {
+    // 写不进去不影响面板运行
+    log.warn(`端口租约写不进去：${e.message}`);
+  }
+
   const url = `http://${shownHost}:${actualPort}/${
     accessKey ? '?key=' + encodeURIComponent(accessKey) : ''
   }`;
