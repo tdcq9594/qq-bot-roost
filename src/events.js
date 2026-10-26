@@ -1,13 +1,19 @@
 /**
  * QQ 官方接口的完整事件表。
  *
- * 来源：官方文档「事件订阅与通知」+「WSS 消息体」。
- * 这里把 42 个事件全部登记下来，目的是：
+ * 来源：官方文档「事件订阅与通知」+ `autogen/event/`（逐事件参考页）。
+ * 这里把官方事件全部登记下来，目的是：
  *   1. 内核能识别每一个事件，不靠「未知事件」兜底
  *   2. 插件能查到有哪些事件可监听、属于哪个 intent、需要什么权限
  *   3. 面板能显示订阅覆盖率和各事件的接收计数
  *
  * 新增事件时只改这个文件，message.js / dispatcher / 面板都会跟着走。
+ *
+ * 2026-10-26 对照官方文档修正：
+ *   - 补 GROUP_MEMBER_EVENT（1<<24）订阅位。官方 2026-08 新增，之前整位缺失，
+ *     导致 GROUP_MEMBER_ADD / GROUP_MEMBER_REMOVE / GROUP_JOIN_REQUEST 订阅不到
+ *   - 补上述 3 个群成员事件 + SUBSCRIBE_MESSAGE_STATUS
+ *   - GROUP_MESSAGE_CREATE 不再标 `doc: false`：官方明确列了它，是「全量模式」
  */
 
 /** intents 位定义 */
@@ -17,6 +23,12 @@ export const INTENTS = {
   GUILD_MESSAGES: 1 << 9,
   GUILD_MESSAGE_REACTIONS: 1 << 10,
   DIRECT_MESSAGE: 1 << 12,
+  /**
+   * 群成员事件（1<<24）。官方 2026-08 新增的独立订阅位：
+   * GROUP_MEMBER_ADD / GROUP_MEMBER_REMOVE / GROUP_JOIN_REQUEST 都挂在这里，
+   * 不在 GROUP_AND_C2C_EVENT 下。以前漏了这一位，导致群成员事件根本订阅不到。
+   */
+  GROUP_MEMBER_EVENT: 1 << 24,
   GROUP_AND_C2C_EVENT: 1 << 25,
   INTERACTION: 1 << 26,
   MESSAGE_AUDIT: 1 << 27,
@@ -32,6 +44,7 @@ export const INTENT_META = {
   GUILD_MESSAGES: { name: '频道全量消息', bit: 9, need: '需申请，仅私域' },
   GUILD_MESSAGE_REACTIONS: { name: '表情表态', bit: 10, need: '需申请' },
   DIRECT_MESSAGE: { name: '频道私信', bit: 12, need: '需申请' },
+  GROUP_MEMBER_EVENT: { name: '群成员变动', bit: 24, need: '需开通群聊能力' },
   GROUP_AND_C2C_EVENT: { name: '群聊与私聊', bit: 25, need: '需开通群聊能力' },
   INTERACTION: { name: '互动事件', bit: 26, need: '需申请' },
   MESSAGE_AUDIT: { name: '消息审核', bit: 27, need: '需申请' },
@@ -97,9 +110,8 @@ export const EVENTS = {
   GROUP_MESSAGE_CREATE: {
     intent: 'GROUP_AND_C2C_EVENT',
     group: '群聊',
-    desc: '群里 @机器人 发的消息（平台实际下发的事件名，文档未列出）',
+    desc: '群消息·全量模式（机器人开启「接收所有消息」后，群里每条消息都推，不限 @）',
     message: 'group',
-    doc: false,
   },
   C2C_MESSAGE_CREATE: {
     intent: 'GROUP_AND_C2C_EVENT',
@@ -115,6 +127,22 @@ export const EVENTS = {
   FRIEND_DEL: { intent: 'GROUP_AND_C2C_EVENT', group: '私聊', desc: '用户删除机器人' },
   C2C_MSG_REJECT: { intent: 'GROUP_AND_C2C_EVENT', group: '私聊', desc: '用户关闭主动消息推送' },
   C2C_MSG_RECEIVE: { intent: 'GROUP_AND_C2C_EVENT', group: '私聊', desc: '用户开启主动消息推送' },
+
+  /* ---------------- 群成员变动（intent 1<<24，2026-08 新增） ---------------- */
+  GROUP_MEMBER_ADD: { intent: 'GROUP_MEMBER_EVENT', group: '成员', desc: '群成员加入' },
+  GROUP_MEMBER_REMOVE: { intent: 'GROUP_MEMBER_EVENT', group: '成员', desc: '群成员退出或被移出' },
+  GROUP_JOIN_REQUEST: {
+    intent: 'GROUP_MEMBER_EVENT',
+    group: '成员',
+    desc: '用户申请加群（仅机器人是群管理员时能收到）',
+  },
+
+  /* ---------------- 订阅消息 ---------------- */
+  SUBSCRIBE_MESSAGE_STATUS: {
+    intent: 'GROUP_AND_C2C_EVENT',
+    group: '互动',
+    desc: '用户对订阅消息模板的授权状态变更',
+  },
 
   /* ---------------- 互动 ---------------- */
   INTERACTION_CREATE: { intent: 'INTERACTION', group: '互动', desc: '按钮等互动组件被点击' },

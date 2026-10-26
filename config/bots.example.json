@@ -29,7 +29,8 @@
 
   "outbound": {
     "perSec": 4,
-    "dailyActive": 20,
+    "dailyActive": 1000,
+    "activePerMinute": 20,
     "downgradeToActive": true
   },
 

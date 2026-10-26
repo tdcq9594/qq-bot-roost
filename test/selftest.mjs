@@ -2822,6 +2822,186 @@ async function testUpdaterRestartHint() {
 
 await testUpdaterRestartHint();
 
+/* ---------- 17. 官方接口覆盖度（一个都不能少） ---------- */
+{
+  const { OFFICIAL_ENDPOINTS, checkCoverage } = await import('../src/endpoints.js');
+  const { QQApi } = await import('../src/api.js');
+
+  const cov = checkCoverage(QQApi);
+  check(
+    '官方接口全覆盖',
+    cov.missing.length === 0,
+    cov.missing.length
+      ? `缺 ${cov.missing.length} 个：` +
+          cov.missing.map((m) => `${m.method} ${m.path}${m.api ? ` → ${m.api}` : '（无方法）'}`).join(', ')
+      : `共 ${cov.total} 个`,
+  );
+  check(
+    '接口清单里没有「官方有但我们没方法」的条目',
+    OFFICIAL_ENDPOINTS.every((e) => typeof e.api === 'string' && e.api.length > 0),
+    OFFICIAL_ENDPOINTS.filter((e) => !e.api).map((e) => `${e.method} ${e.path}`).join(','),
+  );
+
+  // 同一个 method+path 只能登记一次，重复说明清单维护出错了
+  const seen = new Set();
+  const dup = [];
+  for (const e of OFFICIAL_ENDPOINTS) {
+    const k = `${e.method} ${e.path}`;
+    if (seen.has(k)) dup.push(k);
+    seen.add(k);
+  }
+  check('接口清单无重复项', dup.length === 0, dup.join(','));
+
+  // 每个 api 方法名必须在 QQApi 上真实存在
+  const badName = OFFICIAL_ENDPOINTS.filter((e) => typeof QQApi.prototype[e.api] !== 'function');
+  check('接口清单的方法名都真实存在', badName.length === 0, badName.map((e) => e.api).join(','));
+}
+
+/* ---------- 18. 事件表：官方新增的订阅位与事件 ---------- */
+{
+  const { EVENTS, INTENTS, INTENT_META, isKnownEvent } = await import('../src/events.js');
+
+  check(
+    '群成员订阅位 1<<24 已登记',
+    INTENTS.GROUP_MEMBER_EVENT === 1 << 24 && INTENT_META.GROUP_MEMBER_EVENT?.bit === 24,
+  );
+
+  const need = ['GROUP_MEMBER_ADD', 'GROUP_MEMBER_REMOVE', 'GROUP_JOIN_REQUEST', 'SUBSCRIBE_MESSAGE_STATUS'];
+  const lack = need.filter((n) => !isKnownEvent(n));
+  check('官方新增事件已登记', lack.length === 0, lack.join(','));
+
+  check(
+    '群成员事件挂在 GROUP_MEMBER_EVENT 上',
+    EVENTS.GROUP_MEMBER_ADD?.intent === 'GROUP_MEMBER_EVENT' &&
+      EVENTS.GROUP_MEMBER_REMOVE?.intent === 'GROUP_MEMBER_EVENT' &&
+      EVENTS.GROUP_JOIN_REQUEST?.intent === 'GROUP_MEMBER_EVENT',
+  );
+  check(
+    'GROUP_MESSAGE_CREATE 不再被标成「文档未列出」',
+    EVENTS.GROUP_MESSAGE_CREATE?.doc !== false,
+  );
+}
+
+/* ---------- 19. 发送报文：引用 / event_id / markdown 互斥 ---------- */
+{
+  const { buildSendPayload } = await import('../src/api.js');
+
+  const p1 = buildSendPayload(
+    { content: 'hi', msgId: 'm1', messageReference: { message_id: 'REFIDX_x==' } },
+    () => 1,
+  );
+  check(
+    '报文: 引用回复带 message_reference',
+    p1.message_reference?.message_id === 'REFIDX_x==' && p1.msg_seq === 1,
+  );
+
+  const p2 = buildSendPayload({ content: '应被清空', markdown: { content: '**md**' } }, () => 1);
+  check('报文: markdown 时 content 必须为空', p2.msg_type === 2 && p2.content === '');
+
+  const p3 = buildSendPayload({ content: 'x', eventId: 'evt-1' }, () => 1);
+  check('报文: event_id 被动回复', p3.event_id === 'evt-1' && p3.msg_id === undefined);
+}
+
+/* ---------- 20. 事件载荷解析：附件 / 引用索引 / 消息元素 ---------- */
+{
+  const { parseAttachments, parseMessageScene, parseElements, buildMessage } =
+    await import('../src/message.js');
+
+  const atts = parseAttachments([
+    { content_type: 'image/png', url: 'https://x/a.png', width: 100, height: 50, size: 1234 },
+    { content_type: 'voice', url: 'https://x/v.amr', voice_wav_url: 'https://x/v.wav', asr_refer_text: '你好' },
+    { content_type: 'file', url: 'https://x/f.zip', filename: 'f.zip' },
+    { foo: 1 },
+  ]);
+  check('附件: 图片识别', atts[0]?.type === 'image' && atts[0].width === 100);
+  check(
+    '附件: 语音带官方 ASR 与转好的 WAV',
+    atts[1]?.type === 'voice' && atts[1].asrText === '你好' && atts[1].wavUrl.endsWith('.wav'),
+  );
+  check('附件: 文件识别', atts[2]?.type === 'file' && atts[2].filename === 'f.zip');
+  check('附件: 缺 content_type 归为 other', atts[3]?.type === 'other');
+
+  const scene = parseMessageScene({
+    message_scene: { source: 'default', ext: ['msg_idx=REFIDX_a==', 'ref_msg_idx=TMP_b', 'auth_token=t'] },
+  });
+  check('引用索引: msg_idx', scene.msgIdx === 'REFIDX_a==');
+  check('引用索引: ref_msg_idx', scene.refMsgIdx === 'TMP_b');
+
+  const els = parseElements([
+    { message_type: 102, content: '=== 消息 1 ===\nhi', msg_elements: [{ message_type: 0, content: '嵌套' }] },
+    { message_type: 103, content: '被引用的原文' },
+  ]);
+  check('消息元素: 102 是聊天记录（合并转发）', els[0]?.type === 'chatRecord');
+  check('消息元素: 递归子元素', els[0]?.children?.[0]?.content === '嵌套');
+  check('消息元素: 103 是引用', els[1]?.type === 'quote');
+
+  // 端到端：整条事件进 buildMessage，看归一化后的字段
+  const msg = buildMessage(
+    'GROUP_AT_MESSAGE_CREATE',
+    {
+      id: 'm1',
+      content: '看图',
+      group_openid: 'g1',
+      author: { member_openid: 'u1', username: '小明' },
+      timestamp: Date.now(),
+      attachments: [{ content_type: 'image/png', url: 'https://x/a.png' }],
+      message_scene: { source: 'default', ext: ['msg_idx=REFIDX_1=='] },
+    },
+    { api: makeApi(), cfg, session: null },
+  );
+  check('Message: images 已归一化', msg.images.length === 1 && msg.images[0].url.endsWith('a.png'));
+  check('Message: msgIdx 可直接用于引用回复', msg.msgIdx === 'REFIDX_1==');
+}
+
+/* ---------- 21. 同一条消息最多被动回复 5 次 ---------- */
+{
+  const api = makeApi();
+  const cfgCap = { ...cfg, outbound: { ...cfg.outbound, dailyActive: 100, downgradeToActive: true } };
+  const ob = new Outbound({ api, cfg: cfgCap, isOnline: () => true });
+  const k = `group:__t21_cap_${RUN}__`;
+
+  let degraded = 0;
+  for (let i = 0; i < 7; i++) {
+    const r = await ob.send({
+      kind: 'group',
+      target: 'g1',
+      chatKey: k,
+      payload: { content: `x${i}`, msgId: 'same-msg' },
+      receivedAt: Date.now(),
+    });
+    if (r?.degraded) degraded += 1;
+  }
+  const passiveCalls = api.calls.filter((c) => c.body.msgId === 'same-msg').length;
+  check('同一消息最多 5 次被动回复', passiveCalls === 5, `实际 ${passiveCalls} 次`);
+  check('超过 5 次后降级为主动消息', degraded === 2, `降级 ${degraded} 次`);
+  await ob.flush();
+}
+
+/* ---------- 22. 主动消息分钟级限流（官方 20/qpm） ---------- */
+{
+  const api = makeApi();
+  const cfgMin = {
+    ...cfg,
+    outbound: { ...cfg.outbound, dailyActive: 1000, activePerMinute: 3 },
+  };
+  const ob = new Outbound({ api, cfg: cfgMin, isOnline: () => true });
+  const k = `group:__t22_min_${RUN}__`;
+
+  let sent = 0;
+  let code = '';
+  for (let i = 0; i < 5; i++) {
+    try {
+      await ob.send({ kind: 'group', target: 'g1', chatKey: k, payload: { content: `a${i}` } });
+      sent += 1;
+    } catch (e) {
+      code = e instanceof SendError ? e.code : 'unknown';
+      break;
+    }
+  }
+  check('主动消息分钟限流生效', code === 'quota' && sent === 3, `发出 ${sent} 条后拦下（${code}）`);
+  await ob.flush();
+}
+
 /* ---------- 汇总 ---------- */
 await cleanQuotaLedger();
 

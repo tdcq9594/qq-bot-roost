@@ -175,7 +175,13 @@ const BOT_DEFAULTS = {
 
   outbound: {
     perSec: 4,
-    dailyActive: 20,
+    /**
+     * 主动消息额度，按官方文档（2026-10 版）：
+     * 单关系维度 20/qpm，每群 1 天最多接收 1000 条。
+     * 这里以前写 20（把频道的口径套到群聊），少算 50 倍。
+     */
+    dailyActive: 1000,
+    activePerMinute: 20,
     downgradeToActive: true,
   },
 

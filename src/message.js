@@ -76,6 +76,137 @@ function detectMention(d) {
 }
 
 /**
+ * 附件归一化。
+ *
+ * 官方事件里的 `attachments[]` 是图片 / 语音 / 视频 / 文件**唯一**的载体——
+ * `content` 里只有文字。以前完全没解析，等于图片和语音全丢。
+ *
+ * 语音特别值钱，官方直接给了两样东西，不用自己造：
+ *   - `asr_refer_text`  语音的 ASR 参考结果（不用自己跑识别）
+ *   - `voice_wav_url`   SILK 转好的 WAV 地址（不用自己转码）
+ *
+ * @param {any[]} list 事件里的 attachments 数组
+ * @returns {Array<object>}
+ */
+export function parseAttachments(list) {
+  const out = [];
+  for (const a of Array.isArray(list) ? list : []) {
+    if (!a || typeof a !== 'object') continue;
+    const ct = String(a.content_type ?? '');
+    const type = ct === 'voice'
+      ? 'voice'
+      : ct.startsWith('image/')
+        ? 'image'
+        : ct.startsWith('video/')
+          ? 'video'
+          : ct === 'file'
+            ? 'file'
+            : 'other';
+    out.push({
+      type,
+      url: String(a.url ?? ''),
+      filename: String(a.filename ?? ''),
+      size: Number(a.size) || 0,
+      width: Number(a.width) || 0,
+      height: Number(a.height) || 0,
+      contentType: ct,
+      /** 语音专用：SILK 转好的 WAV 地址，可直接喂给 ASR */
+      wavUrl: String(a.voice_wav_url ?? ''),
+      /** 语音专用：官方给的 ASR 参考结果 */
+      asrText: String(a.asr_refer_text ?? ''),
+      raw: a,
+    });
+  }
+  return out;
+}
+
+/**
+ * `message_scene` 归一化。
+ *
+ * `ext` 是 `["msg_idx=REFIDX_x", "ref_msg_idx=TMP_x", "auth_token=x"]` 这种
+ * key=value 字符串数组。其中：
+ *   - `msg_idx`      **本条消息**的引用索引 → 回复时塞进 `message_reference.message_id`
+ *   - `ref_msg_idx`  本条消息**引用了谁** → 想顺着引用链往上找时用
+ *
+ * 以前这两个值全丢了，所以「引用回复」根本做不了。
+ */
+export function parseMessageScene(d) {
+  const ext = d?.message_scene?.ext;
+  const map = {};
+  for (const item of Array.isArray(ext) ? ext : []) {
+    const s = String(item ?? '');
+    const i = s.indexOf('=');
+    if (i > 0) map[s.slice(0, i)] = s.slice(i + 1);
+  }
+  return {
+    source: String(d?.message_scene?.source ?? ''),
+    msgIdx: map.msg_idx ?? '',
+    refMsgIdx: map.ref_msg_idx ?? '',
+    authToken: map.auth_token ?? '',
+  };
+}
+
+/** ARK 卡片（B 站分享、小程序、位置卡…）结构化 */
+function parseArk(a) {
+  if (!a || typeof a !== 'object') return null;
+  const f = a.fields && typeof a.fields === 'object' ? a.fields : {};
+  return {
+    type: String(a.ark_type ?? ''),
+    name: String(a.ark_name ?? ''),
+    prompt: String(a.prompt ?? ''),
+    title: String(f.title ?? ''),
+    desc: String(f.desc ?? ''),
+    url: String(f.jump_url ?? ''),
+    fields: f,
+    raw: a,
+  };
+}
+
+/**
+ * `msg_elements` 归一化（递归）。
+ *
+ * message_type：0 普通文本 / 3 结构化卡片 / 101 并行消息 /
+ *               **102 聊天记录（合并转发）** / **103 引用消息**
+ *
+ * 102 就是「合并转发」——以前我们说官方没有合并转发，其实是官方推了、
+ * 我们没解析。103 是引用，`content` 里是那段被引用的原文。
+ */
+export function parseElements(list, depth = 0) {
+  const out = [];
+  if (depth > 3) return out; // 官方嵌套不会很深，防畸形数据把栈打穿
+  for (const el of Array.isArray(list) ? list : []) {
+    if (!el || typeof el !== 'object') continue;
+    const mt = Number(el.message_type);
+    const type =
+      mt === 0 ? 'text'
+        : mt === 3 ? 'ark'
+          : mt === 101 ? 'parallel'
+            : mt === 102 ? 'chatRecord'
+              : mt === 103 ? 'quote'
+                : 'other';
+    const author = el.author && typeof el.author === 'object' ? el.author : null;
+    out.push({
+      type,
+      messageType: mt,
+      msgIdx: String(el.msg_idx ?? ''),
+      author: author
+        ? {
+          id: String(author.member_openid ?? author.user_openid ?? author.id ?? ''),
+          name: String(author.username ?? ''),
+          isBot: Boolean(author.bot),
+        }
+        : null,
+      content: String(el.content ?? ''),
+      attachments: parseAttachments(el.attachments),
+      ark: parseArk(el.ark_data),
+      children: parseElements(el.msg_elements, depth + 1),
+      raw: el,
+    });
+  }
+  return out;
+}
+
+/**
  * 把官方事件体统一成好用的 Message 对象，插件只跟它打交道。
  */
 export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
@@ -107,6 +238,15 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
   // 没 @ 也不算命令，但可能处在免@窗口内 —— 此时同样算「在跟机器人说话」
   const sticky = Boolean(session?.isSticky(chatId));
   const addressed = mentioned || isCommand || sticky;
+
+  /**
+   * 官方事件里以前被整个丢掉的载荷。
+   * 不解析的话，图片 / 语音 / 卡片 / 引用 / 合并转发在插件眼里只剩一段文字。
+   */
+  const attachments = parseAttachments(d?.attachments);
+  const scene = parseMessageScene(d);
+  const ark = parseArk(d?.ark_data);
+  const elements = parseElements(d?.msg_elements);
 
   const msg = {
     id: d.id ?? '',
@@ -180,6 +320,30 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
       }
       return out;
     })(),
+
+    /* ---------------- 官方载荷（2026-10-26 补齐） ---------------- */
+
+    /** 附件全量：图片 / 语音 / 视频 / 文件 */
+    attachments,
+    /** 只取图片，插件最常用（喂视觉模型） */
+    images: attachments.filter((a) => a.type === 'image'),
+    /** 只取语音；`asrText` 是官方 ASR 结果，`wavUrl` 是转好的 WAV */
+    voices: attachments.filter((a) => a.type === 'voice'),
+    /** 其余附件（视频 / 文件 / 未知） */
+    files: attachments.filter((a) => a.type === 'video' || a.type === 'file' || a.type === 'other'),
+    /** { source, msgIdx, refMsgIdx, authToken } */
+    scene,
+    /** 本条消息的引用索引 → 回复时当 message_reference 用 */
+    msgIdx: scene.msgIdx,
+    /** 本条消息引用了谁 */
+    refMsgIdx: scene.refMsgIdx,
+    /** 卡片消息（B 站分享 / 小程序 / 位置卡…），没有就是 null */
+    ark,
+    /** 消息元素：102 聊天记录（合并转发）、103 引用、101 并行 */
+    elements,
+    /** 这条消息本身如果是「引用某条」，这里是被引用的原文（拿不到就是空串） */
+    quoted: elements.find((e) => e.type === 'quote')?.content ?? '',
+
     sticky,
     addressed,
     isCommand,
@@ -255,6 +419,24 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
   msg.replyNow = (text, opts = {}) => {
     if (text === undefined || text === null || text === '') return Promise.resolve(null);
     return send({ content: String(text), ...opts }, true);
+  };
+
+  /**
+   * 引用回复：以「引用某条消息」的样式发出去（官方 `message_reference`）。
+   *
+   * 跟 `reply()` 不是一回事：
+   *   - `reply()` 是**被动回复**，靠 msg_id，5 分钟内、同一条最多 5 次
+   *   - 这个是**引用**，靠 `REFIDX`，视觉上带"回复某某"的引用块
+   *
+   * 默认引用当前这条消息（用它的 `msg_idx`）。想引用别的传 `refIdx`。
+   * 拿不到引用索引时自动退化成普通回复，不会因为缺字段发不出去。
+   */
+  msg.replyQuote = (text, opts = {}) => {
+    if (text === undefined || text === null || text === '') return Promise.resolve(null);
+    const { refIdx, ...rest } = opts;
+    const ref = String(refIdx || msg.msgIdx || '');
+    if (!ref) return msg.replyNow(text, rest);
+    return send({ content: String(text), messageReference: { message_id: ref }, ...rest }, true);
   };
 
   /**

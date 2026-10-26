@@ -10,6 +10,68 @@ const log = createLogger('api');
 export const FILE_TYPE = { IMAGE: 1, VIDEO: 2, VOICE: 3, FILE: 4 };
 
 /**
+ * 官方硬限制：同一条消息最多被动回复 5 次（`msg_seq` 取 1–5）。
+ * 第 6 次服务端返回 40034128「被动回复时间或次数超限」。
+ */
+const PASSIVE_MAX_SEQ = 5;
+
+/**
+ * 构造发送报文。抽成纯函数是为了能单测——`#payload` 是私有方法，测试摸不到。
+ *
+ * @param {object} opts 驼峰字段：content / msgType / msgId / msgSeq / eventId /
+ *                      markdown / keyboard / media / ark / messageReference
+ * @param {(msgId:string)=>number} nextSeq 取下一个 msg_seq
+ * @returns {object} 官方要的 snake_case 报文
+ */
+export function buildSendPayload(opts = {}, nextSeq = () => 1) {
+  const {
+    content,
+    msgType = 0,
+    msgId,
+    msgSeq,
+    eventId,
+    markdown,
+    keyboard,
+    media,
+    ark,
+    messageReference,
+  } = opts;
+
+  const payload = { msg_type: msgType, content: content ?? '' };
+  if (msgId) {
+    payload.msg_id = msgId;
+    payload.msg_seq = msgSeq ?? nextSeq(msgId);
+  }
+  /**
+   * 被动回复的另一种方式：拿事件 ID 回。
+   * 官方只允许这三种事件用 event_id 回复：
+   * INTERACTION_CREATE / GROUP_ADD_ROBOT / GROUP_MSG_RECEIVE。
+   * 与 msg_id 二选一。
+   */
+  if (eventId) payload.event_id = eventId;
+  if (markdown) {
+    // 官方：填了 markdown 后 content 必须为空，否则 40034008 / 304061
+    payload.content = '';
+    payload.markdown = markdown;
+    payload.msg_type = 2;
+  }
+  if (keyboard) payload.keyboard = keyboard;
+  if (media) payload.media = media;
+  if (ark) {
+    payload.ark = ark;
+    payload.msg_type = 3;
+  }
+  /**
+   * 引用回复。官方是独立字段，不是 msg_id 那套被动回复：
+   *   message_id 取 `REFIDX_xxx`——别人发的消息从事件的
+   *   `message_scene.ext` 里 `msg_idx` 取；机器人自己发的从发消息响应的
+   *   `ext_info.ref_idx` 取。
+   */
+  if (messageReference) payload.message_reference = messageReference;
+  return payload;
+}
+
+/**
  * 素材 file_info 的缓存时长。
  * 官方说有效期 3 天，这里按 2 天算——过期前就换新的，
  * 免得刚好卡在边界上收到「file_info 已失效」。
@@ -123,7 +185,7 @@ export class QQApi {
   /**
    * 发送群消息
    * @param {string} groupOpenid
-   * @param {object} opts content / msgType / msgId / markdown / keyboard / media / ark
+   * @param {object} opts content / msgType / msgId / eventId / markdown / keyboard / media / ark / messageReference
    */
   async sendGroup(groupOpenid, opts = {}) {
     const r = await this.#request('POST', `/v2/groups/${enc(groupOpenid)}/messages`, this.#payload(opts));
@@ -212,7 +274,7 @@ export class QQApi {
   }
 
   /** 上传后再以 msg_type=7 发出（被动回复） */
-  async sendMedia(scene, target, { fileType, url, fileData, msgId }) {
+  async sendMedia(scene, target, { fileType, url, fileData, msgId, messageReference }) {
     const up = await this.uploadMedia(scene, target, { fileType, url, fileData });
     if (!up?.file_info) throw new Error('上传成功但未返回 file_info');
     const opts = {
@@ -220,6 +282,7 @@ export class QQApi {
       content: ' ',
       media: { file_info: up.file_info },
       msgId,
+      messageReference,
     };
     return scene === 'group' ? this.sendGroup(target, opts) : this.sendC2C(target, opts);
   }
@@ -676,29 +739,223 @@ export class QQApi {
     return this.#request('PUT', '/v2/menu', { menu: { items } });
   }
 
-  /* ---------------- 内部 ---------------- */
+  /* ---------------- 指令面板（2026-08 新增，6 个接口） ---------------- */
 
-  #payload({ content, msgType = 0, msgId, markdown, keyboard, media, ark }) {
-    const payload = { msg_type: msgType, content: content ?? '' };
-    if (msgId) {
-      payload.msg_id = msgId;
-      payload.msg_seq = this.#nextSeq(msgId);
-    }
-    if (markdown) {
-      payload.markdown = markdown;
-      payload.msg_type = 2;
-    }
-    if (keyboard) payload.keyboard = keyboard;
-    if (media) payload.media = media;
-    if (ark) {
-      payload.ark = ark;
-      payload.msg_type = 3;
-    }
-    return payload;
+  /**
+   * 查询指令面板列表。
+   * GET /v2/panels，30 QPM。`scope` 必填。
+   *
+   * @param {object} p
+   * @param {'c2c'|'group'|'channel'|'dm'} p.scope 生效场景
+   * @param {string} [p.cursor] 首页不传，后续传上次的 next_cursor
+   * @param {number} [p.limit]  默认 20，最大 50
+   */
+  listPanels({ scope, cursor, limit } = {}) {
+    if (!scope) throw new Error('listPanels 需要 scope（c2c/group/channel/dm）');
+    const q = new URLSearchParams({ scope: String(scope) });
+    if (cursor) q.set('cursor', String(cursor));
+    if (limit) q.set('limit', String(limit));
+    return this.#request('GET', `/v2/panels?${q.toString()}`);
   }
 
+  /**
+   * 创建指令面板。POST /v2/panels，10 QPM，**一个机器人最多 20 个面板**。
+   *
+   * 面板 = 用户在聊天框旁边看到的「指令/链接」快捷入口，最多 20 个元素。
+   * 这是官方给的、OneBot 完全没有的能力。
+   *
+   * @param {object} p
+   * @param {'c2c'|'group'|'channel'|'dm'} p.scope
+   * @param {'all'|'specific'} [p.targetType] channel/dm 只能 all
+   * @param {string[]} [p.userOpenids]  c2c + specific 时有效，最多 20 个
+   * @param {string[]} [p.groupOpenids] group + specific 时有效，最多 20 个
+   * @param {object} p.panel { items:[{name,desc,type,only_admin,link}], remark, version }
+   * @returns {Promise<{panel_id:string}>}
+   */
+  createPanel({ scope, targetType, userOpenids, groupOpenids, panel } = {}) {
+    if (!scope) throw new Error('createPanel 需要 scope');
+    if (!panel) throw new Error('createPanel 需要 panel');
+    if (Array.isArray(panel.items) && panel.items.length > 20) {
+      throw new Error('一个指令面板最多 20 个元素');
+    }
+    const body = { scope, panel };
+    if (targetType) body.target_type = targetType;
+    if (userOpenids?.length) body.user_openids = userOpenids;
+    if (groupOpenids?.length) body.group_openids = groupOpenids;
+    return this.#request('POST', '/v2/panels', body);
+  }
+
+  /** 查询指令面板详情。GET /v2/panels/{panel_id} */
+  getPanel(panelId) {
+    return this.#request('GET', `/v2/panels/${enc(panelId)}`);
+  }
+
+  /**
+   * 修改指令面板。PUT /v2/panels/{panel_id}，覆盖式。
+   * @param {string} panelId
+   * @param {object} panel 同 createPanel 的 panel
+   */
+  updatePanel(panelId, panel) {
+    if (!panel) throw new Error('updatePanel 需要 panel');
+    return this.#request('PUT', `/v2/panels/${enc(panelId)}`, { panel });
+  }
+
+  /** 删除指令面板。DELETE /v2/panels/{panel_id} */
+  deletePanel(panelId) {
+    return this.#request('DELETE', `/v2/panels/${enc(panelId)}`);
+  }
+
+  /**
+   * 修改面板关联对象（增删生效的用户/群）。
+   * PUT /v2/panels/{panel_id}/target，60 QPM。
+   * 只能对 `target_type=specific` 的面板用，全局面板会返回 40030021。
+   *
+   * @param {string} panelId
+   * @param {'add'|'del'} op
+   * @param {{userOpenids?:string[], groupOpenids?:string[]}} targets 各最多 20 个
+   */
+  updatePanelTarget(panelId, { op, userOpenids, groupOpenids } = {}) {
+    if (op !== 'add' && op !== 'del') throw new Error('op 只能是 add 或 del');
+    const body = { op };
+    if (userOpenids?.length) body.user_openids = userOpenids;
+    if (groupOpenids?.length) body.group_openids = groupOpenids;
+    return this.#request('PUT', `/v2/panels/${enc(panelId)}/target`, body);
+  }
+
+  /* ---------------- 分片上传（大文件，4 个接口收敛成 2 个方法） ---------------- */
+
+  /**
+   * 富媒体预上传，拿 upload_id 和各分片的预签名 URL。
+   * `POST /v2/{groups,users}/{id}/upload_prepare`，10 QPS。
+   *
+   * 软限制：图片 20MB / 视频 30MB / 语音 20MB / 文件 200MB；超软限降级为文件，超 200MB 直接报错。
+   *
+   * @param {'group'|'c2c'} scene
+   * @param {string} target 群 openid 或用户 openid
+   * @param {object} p
+   * @param {number} p.fileType 1图 2视频 3语音 4文件
+   * @param {number|string} p.fileSize 字节数
+   * @param {string} p.fileName
+   * @param {string} p.md5    整个文件
+   * @param {string} p.sha1   整个文件
+   * @param {string} p.md5_10m 前 10002432 字节（约 10MB）的 MD5
+   */
+  uploadPrepare(scene, target, { fileType = FILE_TYPE.FILE, fileSize, fileName, md5, sha1, md5_10m } = {}) {
+    const base = scene === 'group' ? `/v2/groups/${enc(target)}` : `/v2/users/${enc(target)}`;
+    return this.#request('POST', `${base}/upload_prepare`, {
+      file_type: fileType,
+      file_size: String(fileSize ?? ''),
+      file_name: String(fileName ?? ''),
+      md5: String(md5 ?? ''),
+      sha1: String(sha1 ?? ''),
+      md5_10m: String(md5_10m ?? ''),
+    });
+  }
+
+  /**
+   * 通知服务端某个分片已上传完成（每片 PUT 成功后都要调）。
+   * `POST /v2/{groups,users}/{id}/upload_part_finish`，10 QPS。
+   *
+   * 全部分片完成后，拿 `upload_id` 调一次 `uploadMedia` 完成合并。
+   *
+   * @param {'group'|'c2c'} scene
+   * @param {string} target
+   * @param {object} p { uploadId, partIndex, blockSize, md5 }
+   */
+  uploadPartFinish(scene, target, { uploadId, partIndex, blockSize, md5 } = {}) {
+    const base = scene === 'group' ? `/v2/groups/${enc(target)}` : `/v2/users/${enc(target)}`;
+    return this.#request('POST', `${base}/upload_part_finish`, {
+      upload_id: String(uploadId ?? ''),
+      part_index: Number(partIndex) || 0,
+      block_size: String(blockSize ?? ''),
+      md5: String(md5 ?? ''),
+    });
+  }
+
+  /* ---------------- 生成分享链接 ---------------- */
+
+  /**
+   * 生成机器人分享链接，用来邀请用户加机器人。
+   * `POST /v2/generate_url_link`，50 QPS。
+   *
+   * @param {string} [callbackData] 用户通过该链接添加机器人时会透传回来，最长 32 字符
+   * @returns {Promise<{data?:{url:string}}>}
+   */
+  generateUrlLink(callbackData) {
+    const body = {};
+    if (callbackData !== undefined && callbackData !== null && callbackData !== '') {
+      const s = String(callbackData);
+      if (s.length > 32) throw new Error('callback_data 最长 32 字符');
+      body.callback_data = s;
+    }
+    return this.#request('POST', '/v2/generate_url_link', body);
+  }
+
+  /* ---------------- 频道（guild）管理 ---------------- */
+
+  /**
+   * 机器人加入的频道列表。`GET /users/@me/guilds`
+   * 这是「机器人所在群列表」在频道侧的对应物（群侧官方确实没有）。
+   */
+  getMyGuilds() {
+    return this.#request('GET', '/users/@me/guilds');
+  }
+
+  /** 频道详情。`GET /guilds/{guild_id}` */
+  getGuild(guildId) {
+    return this.#request('GET', `/guilds/${enc(guildId)}`);
+  }
+
+  /** 子频道列表。`GET /guilds/{guild_id}/channels` */
+  getGuildChannels(guildId) {
+    return this.#request('GET', `/guilds/${enc(guildId)}/channels`);
+  }
+
+  /**
+   * 创建子频道。`POST /guilds/{guild_id}/channels`，50 QPS，需管理员。
+   * body 原样透传，不在这里做字段裁剪——官方字段以后可能加。
+   * @param {string} guildId
+   * @param {object} body { name, type, sub_type, position, parent_id, private_type, private_user_ids, speak_permission, application_id }
+   */
+  createGuildChannel(guildId, body = {}) {
+    return this.#request('POST', `/guilds/${enc(guildId)}/channels`, body);
+  }
+
+  /** 子频道详情。`GET /channels/{channel_id}` */
+  getChannel(channelId) {
+    return this.#request('GET', `/channels/${enc(channelId)}`);
+  }
+
+  /**
+   * 修改子频道。`PATCH /channels/{channel_id}`
+   * body 原样透传（name / position / parent_id / private_type / private_user_ids / speak_permission）。
+   */
+  updateChannel(channelId, body = {}) {
+    return this.#request('PATCH', `/channels/${enc(channelId)}`, body);
+  }
+
+  /** 删除子频道。`DELETE /channels/{channel_id}` */
+  deleteChannel(channelId) {
+    return this.#request('DELETE', `/channels/${enc(channelId)}`);
+  }
+
+  /* ---------------- 内部 ---------------- */
+
+  #payload(opts) {
+    return buildSendPayload(opts, (id) => this.#nextSeq(id));
+  }
+
+  /**
+   * 被动回复序号。官方硬限制：**同一条消息最多回复 5 次**（msg_seq 取 1–5），
+   * 第 6 次返回 40034128。这里兜一道，正常流程由 outbound.js 先拦。
+   */
   #nextSeq(msgId) {
     const cur = this.seqMap.get(msgId) ?? 0;
+    if (cur >= PASSIVE_MAX_SEQ) {
+      throw new Error(
+        `同一条消息最多回复 ${PASSIVE_MAX_SEQ} 次（QQ 官方限制），这条已经回了 ${cur} 次`,
+      );
+    }
     const next = cur + 1;
     this.seqMap.set(msgId, next);
     if (this.seqMap.size > 2000) {

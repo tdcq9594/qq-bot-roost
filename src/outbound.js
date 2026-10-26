@@ -11,10 +11,11 @@ const log = createLogger('outbound');
  * QQ 官方接口的硬限制都在这里统一处理，插件和内核都不用关心：
  *
  *   1. 被动回复只有 5 分钟有效期，超时必失败 → 快过期时降级为主动消息
- *   2. 同一会话每秒最多 5 条 → 本地令牌队列，超出的排队等
- *   3. 主动消息每日额度很少且要审核 → 本地记账，用完直接拒绝并说明原因
- *   4. 必须 WebSocket 在线才能发 → 离线时直接拒绝，不浪费一次网络请求
- *   5. 主动消息返回 304023 表示「已进入审核」 → 这不是失败，不能当错误处理
+ *   2. 同一条消息最多被动回复 5 次（msg_seq 1–5）→ 用满后同样降级
+ *   3. 同一会话每秒最多 5 条 → 本地令牌队列，超出的排队等
+ *   4. 主动消息有两个维度：单关系 20/分钟 + 每群 1000/天 → 本地记账，用完直接拒绝
+ *   5. 必须 WebSocket 在线才能发 → 离线时直接拒绝，不浪费一次网络请求
+ *   6. 主动消息返回 304023 表示「已进入审核」 → 这不是失败，不能当错误处理
  *
  * 插件只管调 msg.reply()，剩下的交给这里。
  */
@@ -22,6 +23,12 @@ const log = createLogger('outbound');
 /** 官方给的有效期是 5 分钟，留 15 秒给网络和服务端时钟差 */
 const PASSIVE_WINDOW_MS = 5 * 60 * 1000;
 const PASSIVE_SAFE_MS = PASSIVE_WINDOW_MS - 15_000;
+
+/**
+ * 官方硬限制：同一条消息最多回复 5 次（`msg_seq` 取 1–5）。
+ * 第 6 次服务端会返回 40034128「被动回复时间或次数超限」。
+ */
+const PASSIVE_MAX_REPLIES = 5;
 
 /** 主动消息进入审核的返回码，属于正常结果 */
 const CODE_AUDIT = 304023;
@@ -168,9 +175,23 @@ export class Outbound {
     const o = cfg.outbound ?? {};
     // 官方是 5 条/秒，默认压到 4 条，给其他来源留一点余量
     this.perSec = Math.max(1, o.perSec ?? 4);
-    // 主动消息每日每会话额度。官方对频道是 20，群聊按同量保守估计，可配
-    this.dailyActive = Math.max(0, o.dailyActive ?? 20);
+    /**
+     * 主动消息额度。官方文档（`autogen/api/.../messages.post`）写的是两个维度：
+     *
+     *   - 单关系（接收方）：20/qpm，且**每个群 1 天最多接收 1000 条**
+     *   - Bot（发送方）：认证 60/qpm，未认证 30/qpm
+     *
+     * 这里以前按「20 条/天」记账（把频道的口径套到了群聊），少算了 50 倍，
+     * 主动推送被白白拦掉。现在按官方数值：1000/天 + 20/分钟。
+     */
+    this.dailyActive = Math.max(0, o.dailyActive ?? 1000);
+    this.activePerMin = Math.max(0, o.activePerMinute ?? 20);
     this.downgrade = o.downgradeToActive !== false;
+
+    /** msgId -> 已用被动回复次数。官方：同一条消息最多 5 次 */
+    this.passiveCount = new Map();
+    /** chatKey -> 最近 60 秒的主动发送时间戳 */
+    this.activeLog = new Map();
 
     // 额度账本按机器人分开，不同机器人的额度互不影响
     this.quota = new QuotaLedger(quotaFile ?? path.join(DIRS.data, 'quota.json'));
@@ -242,13 +263,51 @@ export class Outbound {
     // 2) 排队 + 限速 + 额度扣减 + 实际发送
     //    额度的「查」和「扣」都放在队列里，避免两个并发推送同时通过检查后超额
     return this.#enqueue(chatKey, async () => {
+      // 2a) 被动回复次数上限：官方「每个消息最多回复 5 次」
+      //     同一条消息被多个插件连着回、或用户一句话触发多轮时很容易撞上，
+      //     本地先拦，省得服务端返回 40034128 再兜底
+      let passiveNow = wantPassive && !active;
+      if (passiveNow) {
+        const used = this.passiveCount.get(body.msgId) ?? 0;
+        if (used >= PASSIVE_MAX_REPLIES) {
+          if (!this.downgrade) {
+            this.stats.expired += 1;
+            throw new SendError(
+              `同一条消息最多回复 ${PASSIVE_MAX_REPLIES} 次（QQ 官方限制），这条已经回满了。\n` +
+                `等用户再说一句，就能继续用被动回复。`,
+              'expired',
+            );
+          }
+          delete body.msgId;
+          delete body.msgSeq;
+          passiveNow = false;
+          active = true;
+          degraded = true;
+          this.stats.degraded += 1;
+          log.warn(
+            `同一条消息已回复 ${used} 次，达到官方上限，降级为主动消息 · ${chatKey}`,
+          );
+        } else {
+          this.passiveCount.set(body.msgId, used + 1);
+          this.#prunePassiveCount();
+        }
+      }
+
+      // 2b) 主动消息额度：日额度 + 分钟额度，两个都要过
       if (active) {
         const used = await this.quota.used(chatKey);
         if (used >= this.dailyActive) {
           this.stats.quotaBlocked += 1;
           throw new SendError(
-            `今天这个会话的主动消息额度已用完（${this.dailyActive} 条/天），QQ 不再允许主动推送。\n` +
+            `这个会话今天的主动消息额度已用完（${this.dailyActive} 条/天），QQ 不再允许主动推送。\n` +
               `等用户 @ 一次机器人，就能继续用被动回复。`,
+            'quota',
+          );
+        }
+        if (!this.#allowActiveThisMinute(chatKey)) {
+          this.stats.quotaBlocked += 1;
+          throw new SendError(
+            `这个会话的主动消息发得太密（官方限制 ${this.activePerMin} 条/分钟），稍后再试。`,
             'quota',
           );
         }
@@ -262,6 +321,11 @@ export class Outbound {
         if (r?.pending) this.stats.audit += 1;
         return { ...r, degraded };
       } catch (e) {
+        // 被动回复没发出去，把这次占用的次数退回去，不然 5 次额度会白白烧掉
+        if (passiveNow) {
+          const n = this.passiveCount.get(body.msgId) ?? 0;
+          if (n > 0) this.passiveCount.set(body.msgId, n - 1);
+        }
         // 主动消息是「先扣后发」，发失败要把额度退回去
         if (active) await this.quota.refund(chatKey).catch(() => {});
         // 被动回复被服务端判定过期（本地时钟差或排队等太久），再降级试一次
@@ -270,10 +334,10 @@ export class Outbound {
         if (!canRetry) throw e;
 
         const used = await this.quota.used(chatKey);
-        if (used >= this.dailyActive) {
+        if (used >= this.dailyActive || !this.#allowActiveThisMinute(chatKey)) {
           this.stats.expired += 1;
           throw new SendError(
-            'QQ 判定这条被动回复已过期，且今天的主动消息额度已用完，无法补救',
+            'QQ 判定这条被动回复已过期，且主动消息额度不够补救',
             'expired',
           );
         }
@@ -322,6 +386,36 @@ export class Outbound {
       text.includes('超时') ||
       text.includes('40034')
     );
+  }
+
+  /**
+   * 主动消息分钟级限流。官方单关系维度是 20/qpm，
+   * 日额度够但一分钟内猛发照样会被服务端 40034100 拦下，本地先挡。
+   * @returns {boolean} 这一分钟还允许发吗（允许时顺便占一个坑）
+   */
+  #allowActiveThisMinute(chatKey) {
+    if (this.activePerMin <= 0) return true;
+    const now = Date.now();
+    const list = (this.activeLog.get(chatKey) ?? []).filter((t) => now - t < 60_000);
+    if (list.length >= this.activePerMin) {
+      this.activeLog.set(chatKey, list);
+      return false;
+    }
+    list.push(now);
+    this.activeLog.set(chatKey, list);
+    // 会话数很多时别让这张表无限长
+    if (this.activeLog.size > 500) {
+      const oldest = this.activeLog.keys().next().value;
+      if (oldest !== undefined) this.activeLog.delete(oldest);
+    }
+    return true;
+  }
+
+  /** 被动次数表不能无限长，超了丢最旧的（和 api.js 的 seqMap 一个套路） */
+  #prunePassiveCount() {
+    if (this.passiveCount.size <= 2000) return;
+    const oldest = this.passiveCount.keys().next().value;
+    if (oldest !== undefined) this.passiveCount.delete(oldest);
   }
 
   /**
@@ -374,6 +468,7 @@ export class Outbound {
       ...this.stats,
       perSec: this.perSec,
       dailyActive: this.dailyActive,
+      activePerMinute: this.activePerMin,
       activeUsedToday: total,
       activeByChat: used,
     };

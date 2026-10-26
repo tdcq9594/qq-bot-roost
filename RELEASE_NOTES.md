@@ -1,3 +1,75 @@
+## v0.7.0：对齐官方文档（接口补全 + 三处数值纠错）+ 插件 REST 路由
+
+这一版做两件事：**把框架重新对了一遍官方文档**，以及**补上插件缺的那块数据通道**。
+
+### 一、对照官方文档纠错
+
+上一版 `docs/官方接口限制.md` 里有三处数值/结论是错的，来源是照着过时的官方 SDK 仓库
+（`botgo` / `botpy`）推断，而这三个仓库更新滞后。这次逐页读官方文档
+`bot.q.qq.com/wiki/develop/api-v2/autogen/` 重新核了一遍：
+
+| 以前 | 官方实际 |
+|---|---|
+| 主动消息 **20 条/天** | **20 条/分钟** + **每群 1000 条/天**（Bot 维度：认证 60/qpm、未认证 30/qpm） |
+| 群里不 @ 的消息「平台根本不推」 | 有 `GROUP_MESSAGE_CREATE`「群消息·全量模式」，开启「接收所有消息」就会推 |
+| 语音转文字官方无、得本地 ASR | 事件附件里有 `asr_refer_text`（ASR 结果）+ `voice_wav_url`（转好的 WAV） |
+
+**影响**：主动消息额度原来少算了 50 倍，主动推送被白白拦掉。升级后
+`outbound.dailyActive` 默认 1000、新增 `outbound.activePerMinute` 默认 20。
+
+> ⚠️ 如果你在 `config/bots/*.json` 里手写过 `"dailyActive": 20`，它会覆盖新默认值，记得改成 1000。
+
+### 二、官方接口全部补齐（47/47）
+
+新增 **18 个方法**，官方文档 `autogen/api/` 索引里的 47 个 HTTP 接口现在**一个不缺**：
+
+- **指令面板** `/v2/panels`（6 个）：`listPanels` / `createPanel` / `getPanel` / `updatePanel` / `deletePanel` / `updatePanelTarget`
+- **分片上传**（4 个接口 → 2 个方法）：`uploadPrepare` / `uploadPartFinish`
+- **生成分享链接**：`generateUrlLink`
+- **频道管理**（6 个）：`getMyGuilds` / `getGuild` / `getGuildChannels` / `createGuildChannel` / `getChannel` / `updateChannel` / `deleteChannel`
+
+新增 `src/endpoints.js` 作为**官方接口清单**（唯一事实来源），`npm test` 会校验覆盖率——
+以后官方加接口而我们漏了，测试直接红，不再靠人工记。
+
+### 三、事件与消息载荷
+
+- 补 **`GROUP_MEMBER_EVENT`（1<<24）** 订阅位。官方 2026-08 新增的独立位，
+  之前整位缺失，`GROUP_MEMBER_ADD` / `GROUP_MEMBER_REMOVE` / `GROUP_JOIN_REQUEST`
+  根本订阅不到。面板的事件订阅区也补上了这一项。
+- 补 `SUBSCRIBE_MESSAGE_STATUS` 事件；`GROUP_MESSAGE_CREATE` 不再标成「文档未列出」。
+- **解析以前整个丢掉的载荷**：`attachments`（图片/语音/视频/文件）、
+  `message_scene.ext`（引用索引）、`ark_data`（卡片）、`msg_elements`
+  （**102 = 聊天记录，即合并转发；103 = 引用**）。
+- Message 新增 `attachments` / `images` / `voices` / `files` / `msgIdx` / `refMsgIdx` /
+  `quoted` / `ark` / `elements`，以及 `msg.replyQuote()`（引用回复）。
+- 被动回复加**同一条消息最多 5 次**的上限（官方硬限制），用满自动降级为主动消息。
+
+### 四、插件 REST 路由 `ctx.registerRoute`
+
+`ctx.registerPage()` 只解决「页面能画出来」，服务端不会在每个请求回调插件，
+所以插件自带的管理页拿不到自己的数据——KV 存档既没事务也没查询能力。
+
+现在插件可以注册 REST 接口：
+
+```js
+ctx.registerRoute('GET', '/players', async ({ query }) => {
+  return { items: await repo.list({ q: query.q }) };  // 直接返回对象 = 200 JSON
+});
+```
+
+- 地址是 `/api/plugins/<插件id>/r<你写的路径>`，鉴权/CSRF/同源校验**全部复用面板那套**
+- 插件拿不到裸 req/res，绕不开鉴权
+- 路径参数只支持 `:name`，每插件上限 200 条
+- 插件卸载/重载时自动清空，不留死接口
+
+详见 `docs/插件开发规范.md` §5.12.1。
+
+### 升级提示
+
+- 版本号 0.6.18 → **0.7.0**：新增插件 API 与 18 个官方接口方法，属于功能级更新。
+- 现有插件不用改：`registerRoute` 是新增能力，不注册就是没有。
+- 行为变化只有一处：主动消息额度从 20/天 变成 1000/天 + 20/分钟（更宽松）。
+
 ## v0.6.18：修「已有实例在运行（PID xxx）」的误判（PID 复用）
 
 有用户遇到：明明没开第二个机器人，启动却提示「AppID xxx 已有实例在运行（PID yyy）」，
