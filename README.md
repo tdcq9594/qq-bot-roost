@@ -440,7 +440,7 @@ openid 完全不同。共享 `roles.json` 等于所有权限记录全部对不�
 | [对标 ElainaBot](docs/对标ElainaBot.md) | 与主流 Python 框架的逐项对比、差距与取舍 |
 | [事件与接口清单](docs/事件与接口清单.md) | 官方 47 个事件、47 个接口的覆盖审计（含频道生态缺口） |
 | [官方接口核查](docs/官方接口核查与AI工具化方案.md) | 逐页核对官方文档的结果：哪些接口真没有、官方能力怎么给 AI 用 |
-| [DSH-Aurabot 适配](docs/DSH-Aurabot适配方案.md) | 把 Aurabot 插件的 SnowLuma 换成 Roost：差距分析与三条路线 |
+| [DSH-Aurabot 适配 v2](docs/DSH-Aurabot适配方案-v2.md) | 按 v0.7.2 的真实能力重写的接入方案：通道设计、模块去留、分期 |
 | [架构说明](docs/架构说明.md) | 进程模型、数据隔离、事件流、插件加载、面板多机器人实现 |
 | [DSH 接入指南](docs/DSH接入.md) | 装进 DeepSeek Harness，用 AI 管机器人：安装、配置、验证、排查 |
 | [同类项目调研](docs/GitHub同类项目调研.md) | 与 AstrBot / NoneBot2 / Koishi / ZeroBot 的对比 |
