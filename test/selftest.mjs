@@ -438,20 +438,61 @@ const RUN = Date.now().toString(36);
   check('同进程重复登记同一 AppID 算冲突', r2.ok === false);
   check('同进程冲突能拿到自己的 pid', r2.conflict?.pid === process.pid);
 
-  // 起个真进程冒充「另一个正在跑的实例」
-  const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{},10000)'], { stdio: 'ignore' });
-  await new Promise((r) => setTimeout(r, 400));
+  /**
+   * 起个真进程冒充「另一个正在跑的实例」。
+   *
+   * 以前固定 sleep 400ms 就往下走。在 ubuntu + Node 24 的 runner 上这不够稳：
+   * 子进程可能还没真正起来（或已经退出），于是 isAlive 判成「死了」，
+   * 认领被放行 → 断言失败。CI 从 0.6.17 起就一直红在这里。
+   *
+   * 现在改成**轮询到真活起来**（最多 5 秒），并且：
+   *   - 真活起来了 → 正常断言（这才是要验的逻辑）
+   *   - 环境压根起不来子进程 → skip 并说明原因，不该让 CI 假红
+   *   - 活起来了但没拦住 → FAIL，并把 pid / 子进程 stderr 一起打出来
+   */
+  const child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  let childErr = '';
+  child.stderr?.on('data', (b) => {
+    childErr += String(b);
+  });
+
+  /** 等到 kill(pid, 0) 真的通得过为止 */
+  const waitAlive = async (pid, ms = 5000) => {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
+    return false;
+  };
+
+  const childAlive = child.pid ? await waitAlive(child.pid) : false;
 
   const lock = await readLock();
-  lock[B] = { pid: child.pid, at: Date.now() };
+  lock[B] = { pid: child.pid ?? 999999, at: Date.now() };
   await writeLock(lock);
 
-  const r3 = await claimInstance({ appId: B });
-  check(
-    '同 AppID 已有活实例时拒绝启动',
-    r3.ok === false && r3.conflict?.pid === child.pid,
-    r3.conflict ? `冲突 PID=${r3.conflict.pid}` : '',
-  );
+  if (!childAlive) {
+    skip(
+      '同 AppID 已有活实例时拒绝启动',
+      `环境起不来子进程（pid=${child.pid ?? 'none'} exit=${child.exitCode} ${childErr.trim().slice(0, 60)}）`,
+    );
+  } else {
+    const r3 = await claimInstance({ appId: B });
+    check(
+      '同 AppID 已有活实例时拒绝启动',
+      r3.ok === false && r3.conflict?.pid === child.pid,
+      r3.conflict
+        ? `冲突 PID=${r3.conflict.pid}`
+        : `没拦住：ok=${r3.ok}，子进程 pid=${child.pid} 存活`,
+    );
+  }
 
   const r4 = await claimInstance({ appId: B, force: true });
   check('--force 可以强行登记', r4.ok === true);
