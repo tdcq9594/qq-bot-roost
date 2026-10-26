@@ -1008,6 +1008,34 @@ async function main() {
     botCfgs = [await loadBotConfig(id)];
   }
 
+  /**
+   * 启动时给所有机器人配置拍一份快照。
+   *
+   * `config/bots/` 在 .gitignore 里（含 AppSecret，绝不能进仓库），
+   * 所以一旦被误删就**无处可恢复**——面板删除默认还是 purge，
+   * 连数据日志一起清。每天启动一次就多一份快照，成本几乎为零。
+   * 只保留最近 20 份，不会无限涨。
+   */
+  try {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const destDir = path.join(DIRS.config, 'backups', stamp);
+    await fs.mkdir(destDir, { recursive: true });
+    for (const c of botCfgs) {
+      const src = botPaths(c.id).config;
+      await fs.copyFile(src, path.join(destDir, `${c.id}.json`)).catch(() => {});
+    }
+    // 只留最近 20 个快照
+    const all = (await fs.readdir(path.join(DIRS.config, 'backups'), { withFileTypes: true }))
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name)
+      .sort();
+    for (const old of all.slice(0, Math.max(0, all.length - 20))) {
+      await fs.rm(path.join(DIRS.config, 'backups', old), { recursive: true, force: true }).catch(() => {});
+    }
+  } catch (e) {
+    log.warn(`配置快照失败（不影响启动）：${e.message}`);
+  }
+
   // Webhook 接收服务：全局一个端口，按 AppID 分流给各个机器人。
   // 只有机器人配了 connection.mode=webhook 才需要它，但开着也不占多少资源。
   let webhookServer = null;
@@ -1228,6 +1256,26 @@ async function main() {
 
     /** 面板「删除机器人」 */
     onBotRemove: async (id, { purge }) => {
+      /**
+       * 删之前先把配置备份一份。
+       *
+       * 血泪教训：面板删除默认 `purge: true`，会连配置、数据、日志一起删。
+       * 误点一次，AppSecret 就永久没了——而 `config/bots/` 是 gitignore 的，
+       * 从任何地方都恢复不回来，只能去 QQ 开放平台重新拿。
+       * 所以不管 purge 与否，**配置先落一份到 config/backups/**。
+       */
+      try {
+        const src = botPaths(id).config;
+        await fs.access(src);
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const destDir = path.join(DIRS.config, 'backups');
+        await fs.mkdir(destDir, { recursive: true });
+        const dest = path.join(destDir, `${id}.${stamp}.json`);
+        await fs.copyFile(src, dest);
+        log.info(`已备份机器人配置：${rel(dest)}`);
+      } catch (e) {
+        if (e.code !== 'ENOENT') log.warn(`备份机器人配置失败（继续删除）：${e.message}`);
+      }
       const i = runtimes.findIndex((r) => r.id === id);
       if (i >= 0) {
         await runtimes[i].stop().catch(() => {});

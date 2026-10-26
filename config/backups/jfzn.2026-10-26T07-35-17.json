@@ -1,0 +1,51 @@
+{
+  "name": "Wandering Flight",
+  "enabled": true,
+  "appId": "1905967458",
+  "appSecret": "",
+  "baseUrl": "https://api.bot.qq.com",
+  "intents": 33554432,
+  "commandPrefix": "/",
+  "owners": [],
+  "whitelist": {
+    "enabled": false,
+    "groups": [],
+    "users": []
+  },
+  "rateLimit": {
+    "enabled": true,
+    "perChatPerMinute": 30
+  },
+  "dedupWindowSec": 120,
+  "connection": {
+    "mode": "websocket"
+  },
+  "messageLog": {
+    "enabled": true,
+    "muteKinds": []
+  },
+  "outbound": {
+    "perSec": 4,
+    "dailyActive": 1000,
+    "activePerMinute": 20,
+    "downgradeToActive": true
+  },
+  "session": {
+    "stickySec": 180,
+    "promptTimeoutSec": 120
+  },
+  "stats": {
+    "enabled": true,
+    "retentionDays": 90
+  },
+  "plugins": {
+    "mode": "exclude",
+    "list": [],
+    "autoUpdate": false,
+    "muteUpdateBelow": "",
+    "groups": {}
+  },
+  "groupManage": {
+    "invited": false
+  }
+}
