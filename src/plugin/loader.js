@@ -277,6 +277,20 @@ export class PluginManager {
         ? await this.#loadExternal(id, dir)
         : await this.#loadInternal(id, dir);
     } catch (e) {
+      /**
+       * 「热重载只对入口生效」是个容易踩的坑，报错里点名说清楚。
+       *
+       * 原因：上面只给 `index.js` 加了 `?t=` 绕缓存，它 import 的子模块
+       * （`outbound.js` 之类）还在 Node 的模块缓存里。改了子模块再触发重载，
+       * 拿到的就是「新入口 + 旧子模块」，典型表现是
+       * `does not provide an export named 'xxx'`。
+       *
+       * ESM 没有清缓存的 API，所以只能提示重启——但至少要让人知道为什么。
+       */
+      const msg = String(e?.message ?? '');
+      if (/does not provide an export named/.test(msg)) {
+        e.message += '\n（热重载只重新加载 index.js，子模块仍在缓存里。改了 outbound.js 这类文件请重启 Roost）';
+      }
       this.errors.set(id, e.message);
       this.errorStacks.set(id, e.stack || e.message);
       log.error(`插件 ${id} 加载失败: ${e.stack || e.message}`);
