@@ -706,8 +706,44 @@ export class BotRuntime {
       ? `${msg.userName}(${msg.userId.slice(0, 8)})`
       : msg.userId.slice(0, 8) || '-';
     const where = msg.groupId ? msg.groupId.slice(0, 10) : '-';
-    this.log.info(`收到 ${msg.kind} 会话:${where} 来自:${who} 内容:${text || '(空)'}`);
+    this.log.info(`收到 ${msg.kind} 会话:${where} 来自:${who} 内容:${describeForLog(msg, text)}`);
   }
+}
+
+/**
+ * 日志里怎么显示这条消息。
+ *
+ * 官方接口里**纯图片 / 纯语音消息的 `content` 是空串**，内容全在 `attachments`。
+ * 之前直接打 `text || '(空)'`，日志里就只有「内容:(空)」——
+ * 看不出用户到底发了图还是发了语音，排查时全靠猜。
+ *
+ * 现在按附件类型给出人话：`[图片消息]`、`[语音消息: 转写内容]`、`[视频消息]`…
+ * 文本和附件都有时一起显示（图文消息很常见）。
+ */
+export function describeForLog(msg, text = '') {
+  const parts = [];
+  const said = String(text ?? '').trim();
+  if (said) parts.push(said);
+
+  const atts = Array.isArray(msg?.attachments) ? msg.attachments : [];
+  const count = (type) => atts.filter((a) => a?.type === type).length;
+
+  const imgs = count('image');
+  if (imgs) parts.push(imgs > 1 ? `[图片消息×${imgs}]` : '[图片消息]');
+
+  for (const v of atts.filter((a) => a?.type === 'voice')) {
+    // 官方 ASR 是白给的，有就带上——排查「它到底听没听清」全靠这个
+    parts.push(v?.asrText ? `[语音消息: ${String(v.asrText).trim()}]` : '[语音消息]');
+  }
+
+  const vids = count('video');
+  if (vids) parts.push(vids > 1 ? `[视频消息×${vids}]` : '[视频消息]');
+
+  for (const f of atts.filter((a) => a?.type === 'file')) {
+    parts.push(`[文件消息: ${f?.filename || '未命名'}]`);
+  }
+
+  return parts.join(' ') || '(空)';
 }
 
 /**

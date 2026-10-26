@@ -2369,6 +2369,22 @@ async function testAiChat() {
     return;
   }
 
+  /**
+   * ai-chat 从 v3 起改成了**零指令**：不再有 `/ai` 命令，
+   * 改成监听所有消息、由 AI 自己决定接不接话（还有合并窗口、认领、冷却那一套）。
+   *
+   * 下面这一大段断言全是 v2 的语义——`/ai` 前缀、指令剔除、指令式冷却。
+   * 留着跑只会得到「没注册命令 ai」这种假红，或者更糟：测了一个已经不存在的行为。
+   *
+   * v3 的行为由插件仓库自己的测试覆盖：
+   *   test/ai-chat.mjs（24）、ai-chat-flow.mjs（54）、ai-chat-decide.mjs（47）、
+   *   ai-chat-merge.mjs（16）、ai-chat-vision.mjs（16）
+   *
+   * 这里明确跳过，等按监听器语义重写再启用。
+   */
+  skip('AI 对话', '插件 v3 已改成零指令（监听式），这套断言对应 v2 的命令式接口；行为由插件仓 test/ai-chat*.mjs 覆盖');
+  return;
+
   const realFetch = globalThis.fetch;
   /** 记录每次请求的 body，用来断言上下文有没有带上 */
   const calls = [];
@@ -3194,6 +3210,29 @@ await testUpdaterRestartHint();
     skipBecauseClaimed({ claimedBy: 'kun' }, 'watcher', metas.watcher) === false,
   );
   check('派发: 空列表不炸', orderListeners(undefined, metaOf).length === 0);
+}
+
+/* ---------- 日志：收到的消息怎么显示 ---------- */
+
+{
+  const { describeForLog } = await import('../src/bot.js');
+
+  check('日志: 纯文本照原样', describeForLog({ attachments: [] }, '你好') === '你好');
+  check('日志: 纯图片标成图片消息', describeForLog({ attachments: [{ type: 'image' }] }, '') === '[图片消息]');
+  check(
+    '日志: 多张图带数量',
+    describeForLog({ attachments: [{ type: 'image' }, { type: 'image' }] }, '') === '[图片消息×2]',
+  );
+  check(
+    '日志: 语音带上官方 ASR',
+    describeForLog({ attachments: [{ type: 'voice', asrText: '今天几号' }] }, '') === '[语音消息: 今天几号]',
+  );
+  check('日志: 语音没转写也要标出来', describeForLog({ attachments: [{ type: 'voice' }] }, '') === '[语音消息]');
+  check(
+    '日志: 图文消息两样都显示',
+    describeForLog({ attachments: [{ type: 'image' }] }, '看这个') === '看这个 [图片消息]',
+  );
+  check('日志: 真的空才打 (空)', describeForLog({ attachments: [] }, '') === '(空)');
 }
 
 /* ---------- 汇总 ---------- */

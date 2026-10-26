@@ -32,3 +32,6 @@ Thumbs.db
 node-path.txt
 # 便携版 node 目录。必须锚定到仓库根：写成 node/ 会连 sdk/node/ 一起吃掉
 /node/
+
+# Windows 设备名，误建出来的空文件，git 索引不了
+nul

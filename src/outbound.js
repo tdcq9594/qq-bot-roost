@@ -50,7 +50,11 @@ function briefOf(payload) {
     parts.push(`[markdown] ${String(b.markdown.content).replace(/\s+/g, ' ').trim()}`);
   }
   if (b.ark) parts.push('[ark 卡片]');
-  if (b.media) parts.push(`[媒体 ${b.media.fileType ?? '?'}]`);
+  if (b.media) {
+    // fileType 是数字（1 图 / 2 视频 / 3 语音 / 4 文件），直接打数字没人看得懂
+    const name = { 1: '图片', 2: '视频', 3: '语音', 4: '文件' }[b.media.fileType];
+    parts.push(name ? `[${name}消息]` : '[媒体消息]');
+  }
   if (b.keyboard) parts.push('[按钮键盘]');
   if (b.image) parts.push('[图片]');
   if (b.file_uuid) parts.push('[文件]');
