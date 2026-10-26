@@ -224,7 +224,7 @@ export class PluginStorage {
 /**
  * 插件上下文：插件能用的全部能力都在这里，不暴露内部实现。
  */
-export function createContext({ meta, paths, registry, api, cfg, config, configStore, groups, roles, levels, outbound, session, pipeline, isOwner, pages = null, state = null }) {
+export function createContext({ meta, paths, registry, api, cfg, config, configStore, groups, roles, levels, outbound, session, pipeline, isOwner, pages = null, routes = null, state = null }) {
   const id = meta.id;
   // 日志 tag 带机器人 id，多机器人下同名插件的日志不会串
   const logger = createLogger(`plugin:${paths?.id ?? '-'}:${id}`);
@@ -313,6 +313,37 @@ export function createContext({ meta, paths, registry, api, cfg, config, configS
         return null;
       }
       return pages.register(id, page);
+    },
+
+    /**
+     * 注册一个面板接口（REST），给自己注册的页面取数据用。
+     *
+     *   ctx.registerRoute('GET', '/players', async ({ query, json }) => {
+     *     return json(200, await repo.list({ q: query.q }));
+     *   });
+     *   ctx.registerRoute('PATCH', '/players/:openid', async ({ params, body }) => {
+     *     await repo.update(params.openid, body);
+     *     return { ok: true };            // 直接返回对象 = 200 JSON
+     *   });
+     *
+     * 实际地址是 `/api/plugins/<插件id>/r<你写的路径>`，
+     * 鉴权、CSRF、同源校验全部复用面板那一套，插件拿不到裸 req/res。
+     *
+     * 处理函数拿到的是纯数据，返回三种东西：
+     *   - 普通对象 → 200 + JSON
+     *   - `json(code, data)` 的返回值 → 用你指定的状态码
+     *   - undefined / null → 204 空响应
+     *
+     * 支持的方法：GET / POST / PUT / PATCH / DELETE，路径可含 `:param`。
+     *
+     * @returns {string|null} `METHOD /path`，环境不支持时返回 null
+     */
+    registerRoute(method, pattern, handler) {
+      if (!routes) {
+        logger.warn(`当前环境不支持插件路由，已忽略 ${method} ${pattern}`);
+        return null;
+      }
+      return routes.add(id, method, pattern, handler);
     },
 
     /**

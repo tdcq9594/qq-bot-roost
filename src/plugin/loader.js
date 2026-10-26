@@ -12,6 +12,7 @@ import { readPluginVersion } from './market.js';
 import { ensurePluginDeps } from './deps.js';
 import { satisfies, frameworkVersion } from '../semver.js';
 import { PageRegistry } from './pages.js';
+import { RouteRegistry } from './routes.js';
 
 const log = createLogger('plugins');
 
@@ -46,6 +47,8 @@ export class PluginManager {
     this.loaded = new Map(); // id -> { meta, ctx?, host?, dir, kind, menuMissing }
     /** 插件注册的面板页面（每机器人一份，互不干扰） */
     this.pages = new PageRegistry();
+    /** 插件注册的面板接口（REST），给上面那些页面取数据用 */
+    this.routes = new RouteRegistry();
     /** 磁盘上实际存在的插件目录，含未启用的 */
     this.diskIds = new Set();
     this.state = {}; // id -> enabled
@@ -292,6 +295,7 @@ export class PluginManager {
           this.registry.clearPlugin(id);
           this.pipeline?.removeByPlugin?.(id);
           this.pages?.clearPlugin(id);
+          this.routes?.clearPlugin(id);
         } else {
           // 还没进 loaded：至少把注册表里可能残留的入口摘掉
           this.registry.clearPlugin(id);
@@ -391,6 +395,7 @@ export class PluginManager {
       pipeline: this.pipeline,
       isOwner: this.isOwner,
       pages: this.pages,
+      routes: this.routes,
     });
 
     await meta.setup(ctx);
@@ -565,6 +570,8 @@ export class PluginManager {
     this.pipeline?.removeByPlugin?.(id);
     // 面板页面同样要清，否则标签还在但点开是空白
     this.pages?.clearPlugin(id);
+    // 接口也要清，否则页面还留着但每个请求都 404
+    this.routes?.clearPlugin(id);
     // 关掉它的日志文件句柄，免得句柄泄漏
     detachLogFile(`plugin:${this.paths.id}/${id}`);
     this.loaded.delete(id);

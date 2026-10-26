@@ -153,6 +153,14 @@ export function makeCtx({ id = 'test', config = {}, quiet = true, dataDir = null
       return ctx.config;
     },
     registerPage: () => null,
+    /** 夹具不跑 HTTP，注册即丢弃；插件应当能容忍返回 null */
+    registerRoute: () => null,
+    /** 被动监听：记下来，runListeners 会依次调用 */
+    on(event, handler) {
+      if (!listeners.has(event)) listeners.set(event, []);
+      listeners.get(event).push(handler);
+      return () => {};
+    },
     dispose: () => {},
 
     /* 夹具内部用 */

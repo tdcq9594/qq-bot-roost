@@ -24,6 +24,7 @@ import {
 } from '../updater.js';
 // 面板改插件启停时要同步机器人配置里的过滤器，两边不能各说各的
 import { pluginFilterOf, pluginAllowedIn } from '../bot.js';
+import { runRoute } from '../plugin/routes.js';
 import { toggleGroupPlugin } from '../plugin/groupscope.js';
 import { suspendPluginWatch } from '../services/plugin-watch.js';
 import { runDoctor, summarize } from '../doctor.js';
@@ -1694,6 +1695,46 @@ export async function startWebServer({
             }
           }, 200);
           return;
+        }
+
+        /* ---------------- 插件自定义路由 ---------------- */
+
+        /**
+         * `/api/plugins/<id>/r/<插件自己的路径>`
+         *
+         * 前缀 `/r/` 是刻意选的：上面的 `/api/plugins/:id/panel|config|data`
+         * 已经被占用，换一个前缀就不用去改那些分支。
+         *
+         * 能走到这里，说明已经过了 authorized() + Content-Type + 同源校验，
+         * 插件只拿到整理好的数据，拿不到裸 req/res，绕不开鉴权。
+         */
+        const pr = pathname.match(/^\/api\/plugins\/([^/]+)\/r(\/.*)?$/);
+        if (pr) {
+          if (!isSafeId(pr[1])) return json(res, 400, { error: '插件 id 不合法' });
+          if (!plugins?.routes) return json(res, 501, { error: '当前环境不支持插件路由' });
+
+          const sub = pr[2] || '/';
+          const hit = plugins.routes.match(pr[1], req.method, sub);
+          if (!hit) return json(res, 404, { error: `插件 ${pr[1]} 没有这个接口：${sub}` });
+
+          let body = null;
+          if (req.method !== 'GET' && req.method !== 'HEAD') {
+            body = await readBody(req);
+          }
+          const query = Object.fromEntries(url.searchParams.entries());
+
+          try {
+            const out = await runRoute(hit, { query, body, method: req.method });
+            // 204 表示插件有意不回内容
+            if (out.code === 204) {
+              res.writeHead(204);
+              return res.end();
+            }
+            return json(res, out.code, out.data);
+          } catch (e) {
+            log.error(`插件 ${pr[1]} 路由 ${sub} 出错: ${e.stack || e.message}`);
+            return json(res, 500, { error: e.message });
+          }
         }
 
         return json(res, 404, { error: '接口不存在' });
