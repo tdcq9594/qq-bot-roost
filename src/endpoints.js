@@ -146,3 +146,76 @@ export function endpointsByGroup() {
   }
   return out;
 }
+
+/* ---------------- 风险分级与通用调用白名单 ---------------- */
+
+/**
+ * 默认按 HTTP 方法分级：GET 只读，DELETE 危险，其余算写。
+ * 但这不够——`POST batch_remove_members` 是踢人，比很多 DELETE 还狠。
+ */
+const RISK_OVERRIDE = {
+  // 不可逆 / 影响他人：踢人、黑名单、入群审批策略
+  removeMembers: 'danger',
+  operateGroupBlacklist: 'danger',
+  createJoinStrategy: 'danger',
+  updateJoinStrategy: 'danger',
+  deleteJoinStrategy: 'danger',
+  executeJoinStrategy: 'danger',
+  updateStrategyWhitelist: 'danger',
+  // 禁言可以解除，算写
+  muteMembers: 'write',
+};
+
+/**
+ * 一个接口的风险等级。
+ *   read   — 只读，随便调
+ *   write  — 会改状态但可恢复（发消息、上传、面板、禁言）
+ *   danger — 不可逆或影响他人（踢人、黑名单、审批策略、删除类）
+ *
+ * @param {Endpoint} ep
+ * @returns {'read'|'write'|'danger'}
+ */
+export function riskOf(ep) {
+  if (ep?.api && RISK_OVERRIDE[ep.api]) return RISK_OVERRIDE[ep.api];
+  if (ep?.method === 'GET') return 'read';
+  if (ep?.method === 'DELETE') return 'danger';
+  return 'write';
+}
+
+/**
+ * 允许通过 `/api/qq/call` 调用的方法名。
+ *
+ * 白名单来自这张表本身——**不在表里的一律拒绝**，
+ * 免得以后有人往 QQApi 加了个内部方法，外部就能顺手调。
+ */
+export const CALLABLE_METHODS = new Set(
+  OFFICIAL_ENDPOINTS.map((e) => e.api).filter((v) => typeof v === 'string' && v),
+);
+
+/**
+ * 给 AI / 外部调用方看的能力清单。
+ * 一个方法可能对应多个官方接口（如 `uploadMedia` 覆盖群和单聊两条），合并成一条。
+ */
+export function capabilityList() {
+  const byApi = new Map();
+  for (const ep of OFFICIAL_ENDPOINTS) {
+    if (!ep.api) continue;
+    const cur = byApi.get(ep.api);
+    if (!cur) {
+      byApi.set(ep.api, {
+        api: ep.api,
+        http: [`${ep.method} ${ep.path}`],
+        group: ep.group,
+        risk: riskOf(ep),
+        note: ep.note ?? '',
+      });
+      continue;
+    }
+    cur.http.push(`${ep.method} ${ep.path}`);
+    // 合并时取更严的那一档
+    const order = { read: 0, write: 1, danger: 2 };
+    if (order[riskOf(ep)] > order[cur.risk]) cur.risk = riskOf(ep);
+    if (ep.note) cur.note = cur.note ? `${cur.note}；${ep.note}` : ep.note;
+  }
+  return [...byApi.values()];
+}

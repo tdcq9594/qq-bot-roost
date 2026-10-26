@@ -27,6 +27,8 @@ import { pluginFilterOf, pluginAllowedIn } from '../bot.js';
 import { runRoute } from '../plugin/routes.js';
 import { toggleGroupPlugin } from '../plugin/groupscope.js';
 import { suspendPluginWatch } from '../services/plugin-watch.js';
+import { onMessage as onBusMessage } from '../message-bus.js';
+import { handleQqCall, capabilityPayload } from './qq-call.js';
 import { runDoctor, summarize } from '../doctor.js';
 import {
   PRESETS,
@@ -395,6 +397,34 @@ export async function startWebServer({
     }
   });
 
+  /**
+   * 消息实时推送：`event: message`
+   *
+   * 面板本身不显示聊天内容（那是隐私），但**外部 AI 宿主**需要这一路：
+   * dsh-roost 这类插件订阅它，把群消息喂给模型。
+   *
+   * 推的是规范化后的字段（见 src/message-bus.js），**不含 raw**——
+   * 原始事件体里有 `auth_token`，漏出去等于把会话凭据给了订阅者。
+   */
+  const offMsg = onBusMessage((payload) => {
+    if (!sseClients.size) return;
+    const data = `event: message\ndata: ${JSON.stringify(payload)}\n\n`;
+    for (const [res, botId] of sseClients) {
+      // 客户端可能只盯着某一个机器人，别把别人的消息也塞过去
+      if (botId && payload.botId && botId !== payload.botId) continue;
+      if (res.writableLength > 1024 * 1024) {
+        sseClients.delete(res);
+        try {
+          res.destroy();
+        } catch {}
+        continue;
+      }
+      try {
+        res.write(data);
+      } catch {}
+    }
+  });
+
   const statusTimer = setInterval(() => {
     if (!sseClients.size) return;
     // 每个客户端可能在看不同机器人，各自推各自的
@@ -598,6 +628,61 @@ export async function startWebServer({
         // 选中要操作的机器人，并用同名变量遮住外层的聚合对象，
         // 这样下面所有 handler 的写法都不用变
         const rt = pickRuntime(url);
+
+        /* ---------------- 官方能力通道（给 AI 宿主 / 外部工具用） ---------------- */
+
+        /**
+         * 能力清单：哪些官方接口能调、风险等级、限制。
+         * 静态表，跟当前选中哪个机器人无关。
+         */
+        if (pathname === '/api/qq/capabilities' && req.method === 'GET') {
+          return json(res, 200, capabilityPayload());
+        }
+
+        /**
+         * 通用调用：`POST /api/qq/call { bot?, method, args, confirm? }`
+         *
+         * 白名单和风险分级都在 qq-call.js 里，这里只负责把请求递过去。
+         * 能走到这里说明已经过了 authorized() + CSRF + 同源校验，
+         * 跟面板其他写接口一个待遇。
+         */
+        if (pathname === '/api/qq/call' && req.method === 'POST') {
+          let body;
+          try {
+            body = await readBody(req);
+          } catch (e) {
+            return json(res, 400, { ok: false, error: e.message });
+          }
+          const out = await handleQqCall({ runtimes, body, fallbackRuntime: rt, log });
+          return json(res, out.code, out.body);
+        }
+
+        /**
+         * mock 模式下注入一条群消息，用来在面板里手工试插件 / 验证消息推送。
+         *
+         * **只在 `rt.mock` 时存在**：真实机器人上这条路由直接 404，
+         * 不会变成「谁都能伪造一条群消息」的后门。
+         *
+         * 为什么需要它：`--mock --serve` 时 mock 的 stdin 交互是不启用的
+         * （那条路径只跑面板），所以没有别的方式从外部喂一条消息进来。
+         */
+        if (pathname === '/api/mock/message' && req.method === 'POST') {
+          if (!rt?.mock) return json(res, 404, { error: '只有 mock 模式能用' });
+          const b = await readBody(req);
+          const text = String(b?.text ?? '').trim();
+          if (!text) return json(res, 400, { error: '缺 text' });
+          await rt.dispatch('GROUP_AT_MESSAGE_CREATE', {
+            id: `mock-inject-${Date.now()}`,
+            content: text,
+            group_openid: String(b?.groupId ?? 'mock-group'),
+            author: {
+              member_openid: String(b?.userId ?? 'mock-user'),
+              username: String(b?.userName ?? '测试用户'),
+            },
+            timestamp: String(Date.now()),
+          });
+          return json(res, 200, { ok: true });
+        }
 
   /* ---------------- 机器人管理（不依赖当前选中项） ---------------- */
 
@@ -1798,6 +1883,7 @@ export async function startWebServer({
     );
     clearInterval(statusTimer);
     offLog();
+    offMsg();
     return null;
   }
 
@@ -1817,6 +1903,7 @@ export async function startWebServer({
     close() {
       clearInterval(statusTimer);
       offLog();
+    offMsg();
       for (const c of sseClients.keys()) {
         try {
           c.end();

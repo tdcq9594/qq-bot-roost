@@ -1,3 +1,52 @@
+## v0.8.0：AI 宿主通道（消息下行 + 通用能力上行）
+
+让外部 AI 宿主（DeepSeek Harness 等）能驱动 Roost：它收消息、发消息、调官方接口，
+宿主只管想和说。首个使用者是 [dsh-roost](https://github.com/tdcq9594/dsh-roost)。
+
+### ① 事件下行：`/api/stream` 新增 `event: message`
+
+面板本来只推日志和状态。现在多推一路规范化后的消息：
+
+```jsonc
+{ "botId":"main", "kind":"group", "chatId":"group:xxx", "content":"看图",
+  "msgId":"ROBOT1.0_xxx",        // 被动回复用
+  "msgIdx":"REFIDX_xxx==",        // 引用回复用
+  "quoted":"被引用的原文",
+  "attachments":[{"type":"voice","asrText":"你好","wavUrl":"https://...wav"}],
+  "ark":null, "elements":[], "at":1761456000000 }
+```
+
+- **不含 `raw`**：原始事件体里有 `auth_token`，不外泄
+- 机器人自己发的消息不推
+- 推送在业务处理**之前**——被去重/白名单/限流拦下的消息也会推。
+  拦不拦是框架策略，不该影响宿主看到「群里说了什么」
+
+### ② 能力上行：`POST /api/qq/call`
+
+一个端点覆盖官方全部 47 个接口，不用为每个接口写路由。
+
+```jsonc
+{ "method": "sendGroup", "args": { "__target": "群openid", "content": "你好" } }
+```
+
+三层安全边界：路由在鉴权/CSRF/同源之后 → `method` 必须在白名单里 →
+风险 `danger` 的必须带 `confirm: true`。官方错误码会翻成人话
+（`40034128` → 「被动回复超限（5 分钟窗口，同一条最多 5 次）」）。
+
+### ③ 能力清单：`GET /api/qq/capabilities`
+
+给 AI 看的说明书：哪些方法能调、风险等级、限制。
+**官方新增接口时只需在 `src/endpoints.js` 加一行，宿主侧零改动。**
+
+### 顺带
+
+- `--mock --serve` 下新增 `POST /api/mock/message` 注入一条群消息，
+  方便手工试插件和验证消息推送。**只在 mock 机器人上存在**，真实机器人 404。
+- 文档：[docs/AI宿主接入.md](docs/AI宿主接入.md)
+
+> 为什么是内核而不是插件：SSE 通道和鉴权在核心里，插件 API 拿不到；
+> 而且插件会受「按群开关」过滤，AI 宿主需要看到全部消息。
+
 ## v0.7.2：修 Linux 上「活着的实例被判成死进程」
 
 **症状**：Linux 上同一个 AppID 可能被启动两次——第二份不再被拦，两边连同一个网关，

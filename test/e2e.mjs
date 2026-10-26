@@ -738,6 +738,104 @@ async function testNav() {
 
 /* ---------------- 主流程 ---------------- */
 
+/* ---------------- 官方能力通道（给 AI 宿主用） ---------------- */
+
+async function testQqChannel() {
+  const caps = await api('/api/qq/capabilities');
+  ok('能力通道: 清单可读', caps.status === 200 && Array.isArray(caps.data));
+  ok('能力通道: 每条都带 risk', Array.isArray(caps.data) && caps.data.every((c) => c.risk && c.api));
+  ok('能力通道: 覆盖到 sendGroup', caps.data.some((c) => c.api === 'sendGroup'));
+
+  // 白名单：内部方法名不能调
+  const bad = await api('/api/qq/call', {
+    method: 'POST',
+    body: JSON.stringify({ method: '__request' }),
+  });
+  ok('能力通道: 白名单外被拒', bad.status === 400, `实际 ${bad.status}`);
+
+  // 只读调用
+  const me = await api('/api/qq/call', { method: 'POST', body: JSON.stringify({ method: 'getMe' }) });
+  ok('能力通道: getMe 可调', me.status === 200 && me.data?.ok === true, `实际 ${me.status}`);
+
+  // 危险操作必须确认
+  const danger = await api('/api/qq/call', {
+    method: 'POST',
+    body: JSON.stringify({ method: 'removeMembers', args: { __target: 'g1' } }),
+  });
+  ok('能力通道: 危险操作要 confirm', danger.status === 403 && danger.data?.risk === 'danger');
+
+  // 发消息（mock 下走 echo）
+  const sent = await api('/api/qq/call', {
+    method: 'POST',
+    body: JSON.stringify({ method: 'sendGroup', args: { __target: 'g1', content: 'hi' } }),
+  });
+  ok('能力通道: sendGroup 走通', sent.status === 200 && sent.data?.ok === true, `实际 ${sent.status}`);
+}
+
+async function testMessageBroadcast() {
+  const ctrl = new AbortController();
+  const res = await fetch(`${BASE}/api/stream`, { signal: ctrl.signal }).catch(() => null);
+  if (!res?.ok) {
+    ok('消息广播: SSE 可连接', false);
+    return;
+  }
+
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  const got = [];
+  const pump = (async () => {
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let i;
+        while ((i = buf.indexOf('\n\n')) >= 0) {
+          const raw = buf.slice(0, i);
+          buf = buf.slice(i + 2);
+          if (!raw.includes('event: message')) continue;
+          const data = raw
+            .split('\n')
+            .filter((l) => l.startsWith('data:'))
+            .map((l) => l.slice(5).trim())
+            .join('');
+          try {
+            got.push(JSON.parse(data));
+          } catch {}
+        }
+      }
+    } catch {}
+  })();
+
+  await sleep(300);
+  /**
+   * `--mock --serve` 下 mock 不读 stdin（那条路径只跑面板），
+   * 所以用 mock 专属的注入接口喂一条消息进来。
+   * 这个接口只在 rt.mock 时存在，真实机器人上 404。
+   */
+  await api('/api/bots/main/online', { method: 'POST', body: '{}' });
+  const inj = await api('/api/mock/message', {
+    method: 'POST',
+    body: JSON.stringify({ text: '你好呀', groupId: 'g-broadcast' }),
+  });
+  ok('消息广播: 注入接口可用（仅 mock）', inj.status === 200 && inj.data?.ok === true, `实际 ${inj.status}`);
+  await sleep(1200);
+
+  ok('消息广播: 收到 event: message', got.length >= 1, `收到 ${got.length} 条`);
+  if (got.length) {
+    ok(
+      '消息广播: 带 chatId 与正文',
+      Boolean(got[0].chatId) && got[0].content === '你好呀',
+      JSON.stringify(got[0]).slice(0, 120),
+    );
+    ok('消息广播: 不带 raw（防 auth_token 泄漏）', got[0].raw === undefined);
+  }
+
+  ctrl.abort();
+  await pump;
+}
+
 async function main() {
   console.log('启动服务…');
   const bootLog = await boot();
@@ -759,6 +857,8 @@ async function main() {
   await testNav();
   await testStatsAndPages();
   await testSendAndCred();
+  await testQqChannel();
+  await testMessageBroadcast();
 
   const fail = results.filter((r) => !r.pass);
   console.log(`\n${results.length - fail.length}/${results.length} 通过`);

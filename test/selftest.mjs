@@ -3043,6 +3043,126 @@ await testUpdaterRestartHint();
   await ob.flush();
 }
 
+/* ---------- 23. 官方能力通道（消息总线 / 白名单 / 风险分级 / 参数还原） ---------- */
+{
+  const { serializeMessage } = await import('../src/message-bus.js');
+  const { CALLABLE_METHODS, riskOf, capabilityList, OFFICIAL_ENDPOINTS } = await import('../src/endpoints.js');
+  const { buildCallArgs, handleQqCall } = await import('../src/web/qq-call.js');
+
+  const SECRET = { auth_token: 'SECRET' };
+  const payload = serializeMessage('main', {
+    kind: 'group',
+    chatId: 'group:g1',
+    groupId: 'g1',
+    userId: 'u1',
+    userName: '小明',
+    content: '看图',
+    mentioned: true,
+    addressed: true,
+    isCommand: false,
+    id: 'm1',
+    msgIdx: 'REFIDX_x==',
+    refMsgIdx: 'TMP_y',
+    quoted: '上一句',
+    attachments: [{ type: 'voice', url: 'a.amr', asrText: '你好', wavUrl: 'a.wav', raw: SECRET }],
+    ark: { type: 'bili', title: '视频', raw: SECRET },
+    elements: [{ type: 'chatRecord', content: '记录', raw: SECRET, children: [] }],
+    at: 1,
+    raw: SECRET,
+  });
+
+  check('消息广播: 不含 raw / auth_token', !JSON.stringify(payload).includes('SECRET'));
+  check('消息广播: msgId 就是 id', payload.msgId === 'm1');
+  check('消息广播: 引用索引与原文都在', payload.msgIdx === 'REFIDX_x==' && payload.quoted === '上一句');
+  check(
+    '消息广播: 语音的 ASR 与 WAV 带出去了',
+    payload.attachments[0]?.asrText === '你好' && payload.attachments[0]?.wavUrl === 'a.wav',
+  );
+  check('消息广播: 聊天记录元素保留', payload.elements[0]?.type === 'chatRecord');
+
+  check('白名单: 官方方法可调', CALLABLE_METHODS.has('sendGroup') && CALLABLE_METHODS.has('createPanel'));
+  check(
+    '白名单: 内部方法混不进来',
+    !CALLABLE_METHODS.has('__request') && !CALLABLE_METHODS.has('constructor') && !CALLABLE_METHODS.has('seqMap'),
+  );
+
+  const byApi = (n) => OFFICIAL_ENDPOINTS.find((e) => e.api === n);
+  check('风险: GET 算 read', riskOf(byApi('getMe')) === 'read');
+  check('风险: 发消息算 write', riskOf(byApi('sendGroup')) === 'write');
+  check('风险: 踢人算 danger', riskOf(byApi('removeMembers')) === 'danger');
+  check('风险: 删面板算 danger', riskOf(byApi('deletePanel')) === 'danger');
+  check('风险: 禁言可解除，算 write', riskOf(byApi('muteMembers')) === 'write');
+
+  const caps = capabilityList();
+  check('能力清单: 有内容且每条带 risk', caps.length > 0 && caps.every((c) => c.risk && c.api));
+  check(
+    '能力清单: 同名方法的多条接口合并成一条',
+    caps.filter((c) => c.api === 'uploadMedia').length === 1,
+  );
+
+  check(
+    '参数: target + 对象',
+    JSON.stringify(buildCallArgs({ __target: 'g1', content: 'hi' })) === JSON.stringify(['g1', { content: 'hi' }]),
+  );
+  check(
+    '参数: target + rest + 对象',
+    JSON.stringify(buildCallArgs({ __target: 'g1', __rest: ['m1'], approve: true })) ===
+      JSON.stringify(['g1', 'm1', { approve: true }]),
+  );
+  check(
+    '参数: 只有对象（如 createPanel）',
+    JSON.stringify(buildCallArgs({ scope: 'group', panel: {} })) ===
+      JSON.stringify([{ scope: 'group', panel: {} }]),
+  );
+  check('参数: 空的就空', buildCallArgs({}).length === 0);
+
+  // ---- handleQqCall 的闸门 ----
+  const fake = {
+    id: 't',
+    api: {
+      getMe: async () => ({ username: 'x' }),
+      sendGroup: async (target, body) => ({ id: 'm', target, body }),
+      removeMembers: async () => ({ ok: 1 }),
+    },
+  };
+  const call = (body) => handleQqCall({ runtimes: [fake], body, fallbackRuntime: fake });
+
+  const c1 = await call({ method: 'getMe' });
+  check('调用: 正常返回 result', c1.code === 200 && c1.body.result.username === 'x');
+
+  const c2 = await call({ method: 'sendGroup', args: { __target: 'g1', content: 'hi' } });
+  check('调用: 位置参数还原正确', c2.body.result?.target === 'g1' && c2.body.result?.body.content === 'hi');
+
+  const c3 = await call({ method: 'notARealMethod' });
+  check('调用: 不在白名单直接拒', c3.code === 400 && /白名单/.test(c3.body.error));
+
+  const c4 = await call({ method: 'removeMembers', args: { __target: 'g1' } });
+  check('调用: danger 没 confirm 拒绝', c4.code === 403 && c4.body.risk === 'danger');
+
+  const c5 = await call({ method: 'removeMembers', args: { __target: 'g1' }, confirm: true });
+  check('调用: danger 带 confirm 放行', c5.code === 200);
+
+  const boom = {
+    id: 'b',
+    api: {
+      sendGroup: async () => {
+        const e = new Error('bad request');
+        e.code = 40034128;
+        throw e;
+      },
+    },
+  };
+  const c6 = await handleQqCall({
+    runtimes: [boom],
+    body: { method: 'sendGroup', args: { __target: 'g' } },
+    fallbackRuntime: boom,
+  });
+  check('调用: 官方错误码翻成人话', c6.code === 502 && /5 次/.test(c6.body.error) && c6.body.code === 40034128);
+
+  const c7 = await handleQqCall({ runtimes: [], body: { method: 'getMe' }, fallbackRuntime: null });
+  check('调用: 没有可用机器人时报 503', c7.code === 503);
+}
+
 /* ---------- 汇总 ---------- */
 await cleanQuotaLedger();
 

@@ -37,7 +37,7 @@ export class BotRuntime {
    * @param {(runtime:BotRuntime)=>void} [p.registerCore] 注册内核命令的回调
    * @param {()=>object} [p.makeMockApi] mock 模式下造 API 的函数
    */
-  constructor({ cfg, globalCfg, mock = false, webhook = null, registerCore = null, makeMockApi = null }) {
+  constructor({ cfg, globalCfg, mock = false, webhook = null, registerCore = null, makeMockApi = null, onMessage = null }) {
     this.cfg = cfg;
     this.globalCfg = globalCfg;
     this.mock = mock;
@@ -51,6 +51,11 @@ export class BotRuntime {
 
     this.registerCore = registerCore;
     this.makeMockApi = makeMockApi;
+    /**
+     * 收到消息时的外部回调（面板 SSE、AI 宿主订阅）。
+     * 传的是**规范化后的 Message**，不是原始事件体——原始体里有 auth_token。
+     */
+    this.onMessage = onMessage;
 
     this.claim = { code: '' };
     this.tokens = null;
@@ -472,6 +477,19 @@ export class BotRuntime {
 
     /* ---- 消息事件 ---- */
     const msg = buildMessage(eventName, d, { api: this.api, cfg, outbound, session });
+    /**
+     * 先播出去，再做业务处理。
+     *
+     * 放在 pipeline 之前是有意的：外部订阅者（AI 宿主）关心的是「群里说了什么」，
+     * 不管这条消息有没有被去重/白名单/限流拦下——拦下是**本框架的**处理策略，
+     * 不该影响订阅者看到的事实。
+     * 回调抛错必须吞掉：订阅者是外挂代码，不能让它把收消息搞崩。
+     */
+    try {
+      this.onMessage?.(msg);
+    } catch (e) {
+      this.log.warn(`消息广播失败: ${e.message}`);
+    }
     try {
       this.metrics.bump('recv');
       this.metrics.touchChat(msg.chatId, msg.kind);

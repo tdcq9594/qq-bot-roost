@@ -24,6 +24,7 @@ import { WebhookServer } from './webhook.js';
 import { startWebServer } from './web/server.js';
 import { Services } from './services/index.js';
 import { recoverInterruptedUpdate } from './updater.js';
+import { emitMessage } from './message-bus.js';
 
 /* ------------------------------------------------------------------ */
 /* 开箱即用：先把运行环境检查清楚，别让人对着莫名其妙的报错猜              */
@@ -1060,6 +1061,8 @@ async function main() {
       webhook: webhookServer,
       registerCore: (r) => registerCoreCommands(r),
       makeMockApi: (r) => createMockApi(r.name, r.metrics),
+      // 广播给面板 SSE / 外部订阅者（AI 宿主靠这个收消息）
+      onMessage: (msg) => emitMessage(cfg.id, msg),
     });
     await rt.init();
     runtimes.push(rt);
@@ -1214,6 +1217,7 @@ async function main() {
         webhook: webhookServer,
         registerCore: (r) => registerCoreCommands(r),
         makeMockApi: (r) => createMockApi(r.name, r.metrics),
+        onMessage: (msg) => emitMessage(id, msg),
       });
       await rt.init();
       runtimes.push(rt);

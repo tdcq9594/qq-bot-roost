@@ -443,6 +443,7 @@ openid 完全不同。共享 `roles.json` 等于所有权限记录全部对不�
 | [DSH-Aurabot 适配 v2](docs/DSH-Aurabot适配方案-v2.md) | 按 v0.7.2 的真实能力重写的接入方案：通道设计、模块去留、分期 |
 | [架构说明](docs/架构说明.md) | 进程模型、数据隔离、事件流、插件加载、面板多机器人实现 |
 | [DSH 接入指南](docs/DSH接入.md) | 装进 DeepSeek Harness，用 AI 管机器人：安装、配置、验证、排查 |
+| [AI 宿主接入](docs/AI宿主接入.md) | 外部 AI 驱动 Roost：SSE 消息下行、通用能力上行、能力清单 |
 | [同类项目调研](docs/GitHub同类项目调研.md) | 与 AstrBot / NoneBot2 / Koishi / ZeroBot 的对比 |
 
 ### 相关仓库
