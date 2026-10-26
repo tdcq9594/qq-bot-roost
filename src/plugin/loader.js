@@ -435,6 +435,13 @@ export class PluginManager {
       repo: raw.repo ?? '',
       supportPlatforms: Array.isArray(raw.supportPlatforms) ? raw.supportPlatforms : [],
       frameworkVersion: raw.frameworkVersion ?? raw.requires?.framework ?? '',
+      /**
+       * 监听器优先级：高的先跑。见 bot.js 里的排序说明。
+       * 外部插件在 plugin.json 里写 `"priority": -100` 就能排到最后。
+       */
+      priority: Number.isFinite(Number(raw.priority)) ? Number(raw.priority) : 0,
+      /** 别人认领过的消息还要不要看（默认不看） */
+      seeClaimed: raw.seeClaimed === true,
     };
 
     this.#assertCompatible(id, meta);

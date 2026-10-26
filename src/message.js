@@ -383,6 +383,27 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
 
   /* ---------------- 回复合并 ---------------- */
 
+  /**
+   * 消息认领。
+   *
+   * 有的插件是「关键词触发」的（回声、养鲲、群管），它们处理过一条消息之后，
+   * 别的插件不该再对同一条消息说话——否则群里会看到两个人同时回答。
+   *
+   * 认领之后，**没声明 `seeClaimed` 的插件就收不到这条消息了**。
+   * 顺序由插件的 `priority` 决定（高的先跑），所以「AI 对话」这类
+   * 什么都想接的插件把 priority 调低，让专门的插件先认领。
+   *
+   *   // 插件里
+   *   if (matched) { msg.claim(); ... }
+   *
+   * 也可以直接 `return true`——内核会替你认领。
+   */
+  msg.claimedBy = '';
+  msg.claim = () => {
+    if (!msg.claimedBy) msg.claimedBy = msg.pluginId || 'unknown';
+    return true;
+  };
+
   // 一次消息处理中可能有多个插件都要回复（命令 + 监听器 + 被动触发），
   // 逐条发出去会刷屏。所以先攒起来，处理完统一发一条。
   const replyBuf = [];

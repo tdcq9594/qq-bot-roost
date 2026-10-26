@@ -4,6 +4,7 @@ import { QQApi } from './api.js';
 import { Gateway } from './gateway.js';
 import { Registry } from './plugin/context.js';
 import { PluginManager } from './plugin/loader.js';
+import { orderListeners, skipBecauseClaimed } from './plugin/dispatch.js';
 import { GroupStore } from './groups.js';
 import { RoleStore, LEVEL, NO_PERM, levelName, parseLevel, parseScope, scopeOf } from './roles.js';
 import { Outbound } from './outbound.js';
@@ -627,20 +628,41 @@ export class BotRuntime {
 
       let handled = false;
       for (const evt of ['message', eventName]) {
-        for (const l of registry.listeners.get(evt) ?? []) {
+        /**
+         * 按插件优先级排序：**高的先跑**，同优先级保持注册顺序。
+         *
+         * 为什么需要：`msg.claim()` 是「这条我接了，别人别管」，
+         * 而谁先跑决定了谁能认领。专门干某件事的插件（关键词、群管）
+         * 应该先跑；像「AI 对话」这种什么都想接的，priority 调低排最后，
+         * 别人认领了它就不吭声。
+         */
+        const ordered = orderListeners(registry.listeners.get(evt), (id) => this.plugins?.loaded?.get(id)?.meta);
+
+        for (const l of ordered) {
           // 分群开关对被动触发同样生效，否则「禁用了还在回关键词」
           if (!pluginAllowedIn(cfg.plugins, msg.chatId, l.pluginId)) continue;
+
+          /**
+           * 这条已经被别的插件认领了。
+           *
+           * 默认跳过——避免「两个插件同时回答一句」。
+           * 确实需要看的插件可以在 meta 里声明 `seeClaimed: true`，
+           * 它照样能收到，并且能通过 `msg.claimedBy` 知道是谁接的。
+           */
+          if (skipBecauseClaimed(msg, l.pluginId, this.plugins?.loaded?.get(l.pluginId)?.meta)) continue;
+
           /**
            * 标上当前插件，让 msg.reply 知道这句是谁说的。
            *
-           * **不是排他分发**：所有 listener 都会被调用，各自往 replyBuf 里攒，
-           * 最后合并成一条发出。多个插件都回时，flushReplies 会按插件分组
-           * 并加上【插件名】标题，群里才分得清哪句是哪个功能说的。
+           * 没被认领时**不是排他分发**：所有 listener 都会被调用，
+           * 各自往 replyBuf 里攒，最后合并成一条发出，按插件分组加标题。
            */
           msg.pluginId = l.pluginId ?? '';
           msg.pluginName = this.plugins?.loaded?.get(l.pluginId)?.meta?.name ?? l.pluginId ?? '';
           try {
             const ret = await l.handler(msg);
+            // 返回 true 等于认领：这条我处理了，后面的别管
+            if (ret === true) msg.claim();
             if (ret === true || msg.replied) handled = true;
           } catch (e) {
             this.metrics.bump('errors');

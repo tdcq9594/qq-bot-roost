@@ -3163,6 +3163,39 @@ await testUpdaterRestartHint();
   check('调用: 没有可用机器人时报 503', c7.code === 503);
 }
 
+/* ---------- 24. 监听器派发：优先级与认领 ---------- */
+{
+  const { orderListeners, skipBecauseClaimed } = await import('../src/plugin/dispatch.js');
+
+  const L = (id) => ({ pluginId: id });
+  const metas = {
+    ai: { priority: -100 },
+    kun: { priority: 0 },
+    admin: { priority: 10 },
+    watcher: { seeClaimed: true },
+  };
+  const metaOf = (id) => metas[id];
+
+  const ordered = orderListeners([L('ai'), L('kun'), L('admin')], metaOf);
+  check(
+    '派发: 优先级高的先跑',
+    ordered.map((l) => l.pluginId).join() === 'admin,kun,ai',
+    ordered.map((l) => l.pluginId).join(),
+  );
+
+  const same = orderListeners([L('a'), L('b'), L('c')], () => undefined);
+  check('派发: 同优先级保持注册顺序', same.map((l) => l.pluginId).join() === 'a,b,c');
+
+  check('派发: 没被认领时谁都跑', skipBecauseClaimed({ claimedBy: '' }, 'ai', metas.ai) === false);
+  check('派发: 被别人认领就跳过', skipBecauseClaimed({ claimedBy: 'kun' }, 'ai', metas.ai) === true);
+  check('派发: 自己认领的不挡自己', skipBecauseClaimed({ claimedBy: 'ai' }, 'ai', metas.ai) === false);
+  check(
+    '派发: 声明 seeClaimed 的照样收到',
+    skipBecauseClaimed({ claimedBy: 'kun' }, 'watcher', metas.watcher) === false,
+  );
+  check('派发: 空列表不炸', orderListeners(undefined, metaOf).length === 0);
+}
+
 /* ---------- 汇总 ---------- */
 await cleanQuotaLedger();
 
