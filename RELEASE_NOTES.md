@@ -1,3 +1,25 @@
+## v0.7.2：修 Linux 上「活着的实例被判成死进程」
+
+**症状**：Linux 上同一个 AppID 可能被启动两次——第二份不再被拦，两边连同一个网关，
+平台判定冲突互相踢（4902），消息时有时无。Windows 上不复现。
+
+**根因**：`isAlive()` 在 POSIX 上用 `ps -p <pid> -o comm=` 判断「这个 pid 还是不是 node」。
+在 GitHub 的 ubuntu runner 上这条会返回**空字符串**（进程明明活着），
+于是 `pidLooksLikeNode` 返回 false → 活实例被 `prune()` 当成僵尸记录清掉 →
+认领放行。这条断言从 v0.6.17 起就一直让 CI 红着，只是没人当回事。
+
+**修复**：Linux 改成直接读 `/proc/<pid>/comm`。内核给的，不 fork、不受 `ps` 实现差异影响，
+也更快。macOS 仍走 `ps`，Windows 仍走 `tasklist`。
+
+**顺带修的 CI**
+
+- `同 AppID 已有活实例时拒绝启动`：原来固定 `sleep 400ms` 就往下走，慢 runner 上不稳。
+  改成轮询到 `kill(pid,0)` 真通得过（最多 5 秒）；环境起不来子进程就 skip 并打印
+  pid / exit / stderr，逻辑真没拦住才 FAIL 并带证据。
+- `Gitee 镜像同步`：原来没配 `secrets.GITEE_TOKEN` 就直接报错，于是每个 tag 都红一条。
+  改成没令牌时**只校验不推送**（Gitee 公开仓可匿名查分支 SHA）——真正的风险是
+  「镜像滞后」，校验那步才是安全网，缺令牌只影响「自动」。校验不过照样红。
+
 ## v0.7.1：文档纠错 + 补上 registerRoute 与消息载荷的说明
 
 v0.7.0 的代码是对的，但**文档还留着一批旧口径**，这次一并改掉。只动文档和版本号，代码零改动。

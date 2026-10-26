@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { DIRS } from './paths.js';
@@ -45,6 +46,20 @@ function pidLooksLikeNode(pid) {
       const m = out.match(/^"([^"]+)"/);
       // 进程已消失时 tasklist 不给 CSV 行，m 为 null → 当作不在了
       return m ? /(^|\\)node(\.exe)?$/i.test(m[1]) : false;
+    }
+    /**
+     * Linux 直接读 `/proc/<pid>/comm`，不 fork `ps`。
+     *
+     * 以前这里统一用 `ps -p <pid> -o comm=`，在 GitHub 的 ubuntu runner 上
+     * 会返回空字符串（进程明明活着），于是**活实例被判成死进程**：
+     * 认领被放行 → 同一个 AppID 双开 → 4902 互踢。
+     * CI 从 0.6.17 起一直红在这条断言上，真机上也会踩到同样的坑。
+     *
+     * `/proc` 是内核直接给的，不用 fork、不受 ps 实现差异影响，也更快。
+     */
+    if (process.platform === 'linux') {
+      const comm = readFileSync(`/proc/${pid}/comm`, 'utf8').trim();
+      return comm ? /node/i.test(comm) : false;
     }
     const comm = execFileSync('ps', ['-p', String(pid), '-o', 'comm='], {
       encoding: 'utf8',
