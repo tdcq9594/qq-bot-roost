@@ -6,74 +6,36 @@
 移植自腾讯官方的 [dsh-qqbot](https://github.com/tencent-connect/dsh-qqbot)，
 但架构不同——那个是 DSH 的插件、靠 DSH 的 agent loop 调模型；
 我们是独立框架，直接打 OpenAI 兼容的 `/chat/completions`。
-**不绑定任何一家**：DeepSeek、Kimi、通义、本地 Ollama 都只要改 `baseUrl`。
+**不绑定任何一家**：模型在 DSH 里配，插件只负责收发。
 
 ---
 
 ## 快速开始
 
-### 1. 拿一个 API Key
+### 1. 装 dsh-roost
 
-以 DeepSeek 为例：去 [platform.deepseek.com](https://platform.deepseek.com)
-注册、充值、创建 API Key（`sk-` 开头）。
+这个插件**不直连模型**——它只做「QQ ↔ DSH」的桥。
+模型、Key、参数全在 DSH 那边配，插件一概不碰。
 
-### 2. 填进面板
+装 [dsh-roost](https://github.com/tdcq9594/dsh-roost)，
+默认地址 `http://127.0.0.1:17321`，一般不用改。
 
-面板「插件 → AI 对话 → 设置」，只填两项就够：
-
-| 字段 | 填什么 |
-|---|---|
-| `apiKey` | 你的 Key |
-| `baseUrl` | `https://api.deepseek.com`（默认就是，不用改） |
-
-不想手输地址和模型名，点面板顶部的**快速填入**——DeepSeek / Kimi / 通义 /
-智谱 / 硅基流动 / 火山方舟 / 本地 Ollama 都是一键填好。
-只填表不保存，填完检查一下再点保存。
-
-保存后**不用重启**——配置是每轮对话现读的。
-
-### 3. 填错了想重来
-
-面板底部有「**恢复默认**」——把所有配置项恢复成插件声明的默认值。
-
-注意它**会连 API 密钥一起清空**（所以要重新填），换来的是彻底干净：
-插件升级后遗留的旧键也会被清掉，不只是把已知项写回默认值。
-
-### 4. 在群里试
+### 2. 在群里试
 
 ```
-@机器人 /ai 你好
+@机器人 你好
 ```
 
----
+有回复就通了。没反应看下面「排查」。
 
-## 用哪些模型
+### 3. 想让它在群里自己接话
 
-改 `model` 字段，或者直接发 `/模型` 命令（只影响当前会话）：
+面板「插件 → AI 对话 → 设置」→「什么时候接话」选「AI 自己判断」。
+需要先在开放平台打开「**接收所有消息**」，否则只有 @ 它的消息能进来。
 
-| 服务商 | baseUrl | model 举例 |
-|---|---|---|
-| DeepSeek | `https://api.deepseek.com` | `deepseek-flash`（便宜、日常）、`deepseek-v4-pro`（更强、贵几倍） |
-| 月之暗面 | `https://api.moonshot.cn/v1` | `moonshot-v1-8k` |
-| 阿里通义 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` |
-| 本地 Ollama | `http://127.0.0.1:11434/v1` | `qwen2.5:7b` |
-
-只要对方兼容 OpenAI 的 `/chat/completions` 就能用。
-
-### DeepSeek 的两个坑
-
-**模型名换过。** 现在是 `deepseek-flash` 和 `deepseek-v4-pro`。
-以前的 `deepseek-chat` / `deepseek-reasoner` 文档里已经没有了，别再用。
-
-**思考模式默认是开的**，而且强度默认 `high`。也就是说不做处理的话，
-群里问一句「在吗」它也要先想半天——慢，而且思考过程按输出 token 计费，贵。
-所以插件默认显式关掉（`thinking: {type: disabled}`），需要更准的答案再去面板打开。
-
-还有一点：**思考模式下 `temperature` 不生效**（传了不报错，但会被忽略）。
-所以「发散程度」这项只在关掉思考时有用。
-`baseUrl` 末尾的 `/` 会自动去掉，不用纠结。
-
----
+> **4.0.0 删掉了什么**：以前这里要填 `API 密钥` / `接口地址` / `模型`，
+> 还要选适配器（openai / webhook / dsh）。那些都删了——
+> 同样的能力 DSH 本来就有，留两份只会两边配置打架。
 
 ## 指令
 
@@ -131,9 +93,7 @@
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `apiKey` | 空 | 必填，留空时只提示怎么配 |
-| `baseUrl` | `https://api.deepseek.com` | 接口地址，OpenAI 兼容即可 |
-| `model` | `deepseek-flash` | 默认模型 |
+| `dshUrl` | `http://127.0.0.1:17321` | dsh-roost 的地址，一般不用改 |
 | `thinking` | `false` | 思考模式。开了更准但慢好几倍、更贵 |
 | `reasoningEffort` | `high` | 思考强度，只在思考模式开启时有意义 |
 | `markdown` | `true` | 用 QQ 的 markdown 消息类型发回复 |
@@ -214,7 +174,7 @@
 | 现象 | 原因 | 怎么办 |
 |---|---|---|
 | 群里 @ 了没反应 | 这个群的分群插件白名单里没有 ai-chat | 面板「群组 → 插件」把它勾上 |
-| 提示「还没配 API Key」 | `apiKey` 空 | 面板里填上 |
+| 提示「还没连上 DSH」 | `dshUrl` 空或 dsh-roost 没启动 | 装/启动 dsh-roost，或填对地址 |
 | 提示「API Key 不对」 | Key 错了或没权限 | 重新复制一遍，注意别带空格 |
 | 提示「余额不足」 | 账户没钱了 | 去服务商充值 |
 | 提示「请求太频繁」 | 撞上限流 | 等几秒 |
