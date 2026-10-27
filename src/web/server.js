@@ -31,6 +31,7 @@ import { onMessage as onBusMessage } from '../message-bus.js';
 import { handleQqCall, capabilityPayload } from './qq-call.js';
 import { runDoctor, summarize } from '../doctor.js';
 import { createBindTask, pollBindResult } from '../qq/qrlogin.js';
+import { toSvg as qrToSvg } from '../qq/qrsvg.js';
 import {
   PRESETS,
   PROBE_URL,
@@ -722,7 +723,12 @@ export async function startWebServer({
           try {
             const t = await createBindTask();
             qrTasks.set(t.taskId, { bindKey: t.bindKey, at: Date.now() });
-            return json(res, 200, { taskId: t.taskId, qrUrl: t.qrUrl });
+            // qrSvg 给不装 QR 库的调用方（比如 dsh-roost 面板）直接用
+            let qrSvg = '';
+            try {
+              qrSvg = qrToSvg(t.qrUrl);
+            } catch {}
+            return json(res, 200, { taskId: t.taskId, qrUrl: t.qrUrl, qrSvg });
           } catch (e) {
             return json(res, 502, { error: e.message });
           }
