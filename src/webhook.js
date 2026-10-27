@@ -241,13 +241,19 @@ export class WebhookServer {
        *
        * 以前只做了第 1 层（下面那行注释以为 putInteraction 插件会自己调，
        * 实际上没人调），所以按钮点下去会一直转。
-       * 这里兜底自动回 code 0；插件想回别的码可以自己再调，后调的覆盖。
+       *
+       * **只有 type 11（消息按钮）和 12（快捷菜单）需要回执**，
+       * 其他类型（消息反馈 13、清空会话 14、切模型 16、授权 18/19）官方明确不用回。
+       * 所以这里按 type 收紧——乱回可能被判非法，而且同一 id 只能回一次。
        */
-      try {
-        const r = bot.api?.putInteraction?.(d?.id, 0);
-        if (r && typeof r.catch === 'function') r.catch(() => {});
-      } catch {
-        /* 回执失败不影响主流程 */
+      const t = Number(d?.type ?? d?.data?.type ?? 0);
+      if (t === 11 || t === 12) {
+        try {
+          const r = bot.api?.putInteraction?.(d?.id, 0);
+          if (r && typeof r.catch === 'function') r.catch(() => {});
+        } catch {
+          /* 回执失败不影响主流程 */
+        }
       }
       return this.#json(res, 200, { op: 12, code: 0 });
     }
