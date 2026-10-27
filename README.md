@@ -6,11 +6,11 @@
 
 **填 AppID + AppSecret 就能连上 QQ 官方机器人。零依赖，插件可写任意语言，自带可视化面板。**
 
-<img src="https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white" alt="Node.js 22+">
+<img src="https://img.shields.io/badge/Node.js-22.13%2B-339933?logo=node.js&logoColor=white" alt="Node.js 22.13+">
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
-<img src="https://img.shields.io/badge/tests-551%20passed-brightgreen" alt="测试 551 项">
+<img src="https://img.shields.io/badge/tests-600%2B%20passed-brightgreen" alt="测试 600+ 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
-<img src="https://img.shields.io/badge/version-0.6.14-blueviolet" alt="版本 0.6.14">
+<img src="https://img.shields.io/badge/version-0.8.6-blueviolet" alt="版本 0.8.6">
 <img src="https://img.shields.io/badge/license-Non--Commercial-red" alt="禁止商用">
 
 [快速开始](#3-分钟跑起来) ｜ [写插件](docs/插件开发规范.md) ｜ [外部插件协议](docs/插件协议.md) ｜ [配置参考](docs/配置参考.md) ｜ [常见问题](docs/常见问题.md) ｜ [贡献](CONTRIBUTING.md)
@@ -106,6 +106,10 @@
 - **面板页能读自己的数据**：`ctx.registerRoute()` 注册 REST 接口（`/api/plugins/<id>/r/…`），
   鉴权/CSRF/同源校验全复用面板那套，插件拿不到裸 req/res
 - **元数据能表达兼容性**：`frameworkVersion` 声明需要的框架版本，不满足时**在加载前拦住**并说清原因，而不是跑起来才报「xxx 不是函数」
+- **插件能给 AI 贡献工具（0.8.6+）**：`ctx.registerTool()` 注册一个带 JSON Schema 的工具
+  （名字全局唯一，建议带插件前缀），别的插件用 `ctx.tools()` 拿清单、`ctx.callTool()` 直接调用。
+  于是「AI 能查斗罗玩家数据」这种事，**AI 插件和斗罗插件两边不用互相认识**——都只认这张工具表。
+  工具还能标 `ownerOnly` / `admin` 限权限，`timeoutMs` 限超时，插件卸载时自动注销
 
 **统计**
 
@@ -142,15 +146,19 @@
 
 ## 3 分钟跑起来
 
-### 1. 装 Node.js 22+
+### 1. 装 Node.js 22.13+
 
 ```bash
-node -v      # 需要 >= 22
+node -v      # 需要 >= 22.13
 ```
 
 > 用到了 Node 22 内置的全局 `WebSocket`，所以不用装 `ws`，也不需要 `npm install`。
 
 ### 2. 拿凭证
+
+**扫码最省事（0.8.4+）**：面板 → 「新建机器人」 → 点「**扫码一键创建**」，
+用手机 QQ 扫一下，AppID / AppSecret **自动填好**，不用去网页复制。
+扫码用不了、或已有机器人时，同一处还有「或者手动填」：
 
 1. <https://q.qq.com> → 创建机器人
 2. 「开发设置」里拿到 **AppID** 和 **AppSecret**
@@ -358,6 +366,8 @@ export default {
 | `ctx.storage.get/set/all` | 插件私有存档 |
 | `ctx.config` / `ctx.setConfig()` | 插件配置读写 |
 | `ctx.can` / `ctx.levelOf` / `ctx.scopeOf` | 权限判断 |
+| `ctx.registerTool(工具)` | 注册一个 AI 可调用的工具（跨插件，0.8.6+），返回注销函数 |
+| `ctx.tools()` / `ctx.callTool(名, 参数)` | 列出 / 调用别插件注册的工具 |
 | `msg.reply` / `push` / `replyMarkdown` / `replyImage` / … | 各种发送方式 |
 
 ---
@@ -400,6 +410,7 @@ bot/
 │   ├── gateway.js              WebSocket 网关
 │   ├── webhook.js              Webhook 接收服务（多机器人共用一个端口）
 │   ├── sign.js                 Webhook 回调签名（Ed25519）
+│   ├── qq/                     扫码一键建机器人（qrlogin.js / qrsvg.js）
 │   ├── tarball.js              tar.gz 下载解包（不依赖 git）
 │   ├── updater.js              框架自身检查更新与升级
 │   ├── semver.js               版本比较与范围匹配（框架更新/市场/兼容校验共用）
@@ -412,8 +423,9 @@ bot/
 │   ├── web/server.js           面板服务端（REST + SSE）
 │   └── plugin/                 插件加载、配置、依赖、子进程宿主、面板页面注册
 ├── test/
-│   ├── selftest.mjs            框架自检（322 项）
-│   └── e2e.mjs                 端到端测试（122 项，起真实服务打接口）
+│   ├── selftest.mjs            框架自检（474 项）
+│   ├── e2e.mjs                 端到端测试（147 项，起真实服务打接口）
+│   └── qrlogin.mjs             扫码建机器人（10 项）
 ├── web/                        面板前端（原生 JS/CSS，无构建）
 └── docs/
 ```
@@ -458,9 +470,9 @@ openid 完全不同。共享 `roles.json` 等于所有权限记录全部对不�
 ## 开发
 
 ```bash
-npm test              # 框架自检 345 项
-npm run test:e2e      # 端到端 150 项（起 mock 服务打全部接口，跑在临时目录）
-npm run test:all      # 两个都跑
+npm test              # 自检 484 项（selftest 474 + qrlogin 10）
+npm run test:e2e      # 端到端 147 项（起 mock 服务打全部接口，跑在临时目录）
+npm run test:all      # 全量约 631 项：自检 + 扫码 + e2e（真机驱动要真机，没配就跳过）
 npm run check:secrets # 扫硬编码凭据（CI 也跑这个，提交前建议过一遍）
 node src/main.js --mock          # 不连 QQ，命令行发假消息调插件
 node src/main.js --mock --serve  # 只开面板，调界面
