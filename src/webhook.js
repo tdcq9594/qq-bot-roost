@@ -234,7 +234,21 @@ export class WebhookServer {
     });
 
     if (isInteraction) {
-      // 我们的 putInteraction 是插件主动调的，这里先给 0 兜底
+      /**
+       * 按钮点击要**两层**确认，少一层客户端就一直转圈：
+       *   1. HTTP ACK `{op:12, code:0}` —— 告诉平台「我收到了」
+       *   2. `PUT /interactions/{id}` —— 告诉客户端「这次点击处理完了」
+       *
+       * 以前只做了第 1 层（下面那行注释以为 putInteraction 插件会自己调，
+       * 实际上没人调），所以按钮点下去会一直转。
+       * 这里兜底自动回 code 0；插件想回别的码可以自己再调，后调的覆盖。
+       */
+      try {
+        const r = bot.api?.putInteraction?.(d?.id, 0);
+        if (r && typeof r.catch === 'function') r.catch(() => {});
+      } catch {
+        /* 回执失败不影响主流程 */
+      }
       return this.#json(res, 200, { op: 12, code: 0 });
     }
   }
