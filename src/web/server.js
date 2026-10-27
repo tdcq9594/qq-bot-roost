@@ -30,6 +30,7 @@ import { suspendPluginWatch } from '../services/plugin-watch.js';
 import { onMessage as onBusMessage } from '../message-bus.js';
 import { handleQqCall, capabilityPayload } from './qq-call.js';
 import { runDoctor, summarize } from '../doctor.js';
+import { createBindTask, pollBindResult } from '../qq/qrlogin.js';
 import {
   PRESETS,
   PROBE_URL,
@@ -96,6 +97,9 @@ async function readBody(req, limit = 1024 * 256) {
  *
  * @returns {Promise<number>} 实际监听成功的端口
  */
+/** 扫码建机器人的临时任务表：taskId → { bindKey, at } */
+const qrTasks = new Map();
+
 function listenWithFallback(server, host, startPort, { tries = 20, onBusy } = {}) {
   return new Promise((resolve, reject) => {
     let attempt = 0;
@@ -702,6 +706,41 @@ export async function startWebServer({
             };
           });
           return json(res, 200, { bots: list, current: rt?.id ?? null });
+        }
+
+        /**
+         * 扫码建机器人：两步（建任务 / 轮询）。
+         *
+         * bindKey 是解 AppSecret 的密钥，**只在服务端留着**，
+         * 下发出去等于把密钥给了浏览器，没必要。
+         * 任务 10 分钟后自动清掉，免得 Map 无限涨。
+         */
+        if (pathname === '/api/bots/qr/start' && req.method === 'POST') {
+          for (const [k, v] of qrTasks) {
+            if (Date.now() - v.at > 10 * 60_000) qrTasks.delete(k);
+          }
+          try {
+            const t = await createBindTask();
+            qrTasks.set(t.taskId, { bindKey: t.bindKey, at: Date.now() });
+            return json(res, 200, { taskId: t.taskId, qrUrl: t.qrUrl });
+          } catch (e) {
+            return json(res, 502, { error: e.message });
+          }
+        }
+
+        if (pathname === '/api/bots/qr/poll' && req.method === 'POST') {
+          const body = await readBody(req);
+          const taskId = String(body.taskId ?? '').trim();
+          const rec = qrTasks.get(taskId);
+          if (!rec) return json(res, 400, { error: '这个二维码已经失效了，重新生成一个' });
+          try {
+            const r = await pollBindResult({ taskId, bindKey: rec.bindKey });
+            // 有结论就把任务删掉，别让它一直轮询
+            if (r.status !== 'pending') qrTasks.delete(taskId);
+            return json(res, 200, r);
+          } catch (e) {
+            return json(res, 502, { error: e.message });
+          }
         }
 
         if (pathname === '/api/bots' && req.method === 'POST') {

@@ -747,6 +747,17 @@
 <div class="modal-mask" id="newBotMask" hidden>
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="newBotTitle">
     <h3 class="modal-title" id="newBotTitle">新建机器人</h3>
+
+    <!-- 扫码一键创建：手机 QQ 扫一下，AppID / AppSecret 自动填好 -->
+    <div class="nb-qr-wrap">
+      <button class="btn" id="nbQrStart" type="button">扫码一键创建</button>
+      <i class="nb-qr-hint">不用去 q.qq.com 手动建机器人</i>
+    </div>
+    <div class="nb-qr" id="nbQr" hidden>
+      <div class="nb-qr-code" id="nbQrCode"></div>
+      <div class="nb-qr-tip" id="nbQrTip"></div>
+    </div>
+
     <div class="bot-form">
       <label>
         <span>ID</span>
@@ -796,6 +807,7 @@
   </div>
 </div>
 
+<script src="/vendor/qrcode.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

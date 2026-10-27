@@ -1308,3 +1308,38 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 .gplug-item .gp-ver { margin-left: auto; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
 
 .gplug-empty { padding: 16px; text-align: center; color: var(--muted); font-size: 13px; }
+
+/* 扫码建机器人：手机 QQ 扫一下，AppID / AppSecret 自动填 */
+.nb-qr-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: -4px 0 12px;
+}
+.nb-qr-hint {
+  font-style: normal;
+  font-size: 12px;
+  opacity: 0.6;
+}
+.nb-qr {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+/* 二维码必须白底黑码，深色主题下也一样 */
+.nb-qr-code {
+  background: #fff;
+  padding: 8px;
+  border-radius: 10px;
+  line-height: 0;
+}
+.nb-qr-code svg {
+  display: block;
+}
+.nb-qr-tip {
+  font-size: 12px;
+  opacity: 0.75;
+  text-align: center;
+}

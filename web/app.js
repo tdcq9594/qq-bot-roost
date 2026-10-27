@@ -273,6 +273,94 @@ async function deleteBot(id) {
   if (CURRENT_BOT) await selectBot(CURRENT_BOT);
 }
 
+/* ---------------- 扫码一键创建 ---------------- */
+
+/**
+ * 官方有「绑定」接口，手机 QQ 扫一下就能拿到 AppID / AppSecret，
+ * 不用去 q.qq.com 手动建机器人、再手动复制两个值。
+ *
+ * 二维码内容是官方给的一个 URL，我们本地画成二维码（web/vendor/qrcode.js）。
+ * 密钥（bindKey）留在服务端，前端只拿到 taskId。
+ */
+let qrTaskId = '';
+let qrTimer = null;
+
+function stopQrPoll() {
+  if (qrTimer) {
+    clearInterval(qrTimer);
+    qrTimer = null;
+  }
+}
+
+function resetQr() {
+  stopQrPoll();
+  qrTaskId = '';
+  const box = $('#nbQr');
+  if (box) box.hidden = true;
+  const code = $('#nbQrCode');
+  if (code) code.innerHTML = '';
+  const tip = $('#nbQrTip');
+  if (tip) tip.textContent = '';
+}
+
+function drawQr(url) {
+  const code = $('#nbQrCode');
+  if (!code || typeof qrcode !== 'function') return false;
+  const qr = qrcode(0, 'M'); // 0 = 自动选版本
+  qr.addData(url);
+  qr.make();
+  code.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 6 });
+  return true;
+}
+
+async function startQr() {
+  const btn = $('#nbQrStart');
+  const box = $('#nbQr');
+  const tip = $('#nbQrTip');
+  box.hidden = false;
+  tip.textContent = '正在生成二维码…';
+  btn.disabled = true;
+  try {
+    const r = await api('/api/bots/qr/start', { method: 'POST', body: '{}' });
+    qrTaskId = r.taskId;
+    if (!drawQr(r.qrUrl)) {
+      tip.textContent = '二维码库没加载上，刷新页面再试一次';
+      return;
+    }
+    tip.textContent = '用手机 QQ 扫码，确认后会自动填好 AppID / AppSecret';
+    stopQrPoll();
+    qrTimer = setInterval(pollQr, 2000);
+  } catch (e) {
+    tip.textContent = e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function pollQr() {
+  if (!qrTaskId) return stopQrPoll();
+  const tip = $('#nbQrTip');
+  try {
+    const r = await api('/api/bots/qr/poll', {
+      method: 'POST',
+      body: JSON.stringify({ taskId: qrTaskId }),
+    });
+    if (r.status === 'pending') return;
+    stopQrPoll();
+    if (r.status === 'done') {
+      $('#nbAppId').value = r.appId || '';
+      $('#nbSecret').value = r.appSecret || '';
+      tip.textContent = `✓ 已拿到 AppID ${r.appId}，填个 ID 就能创建`;
+      $('#nbId').focus();
+    } else {
+      tip.textContent = r.message || '二维码失效了，重新生成一个';
+    }
+  } catch (e) {
+    stopQrPoll();
+    if (tip) tip.textContent = e.message;
+  }
+}
+
 /* ---------------- 新建机器人 ---------------- */
 
 function openNewBot() {
@@ -282,11 +370,13 @@ function openNewBot() {
   $('#nbAppId').value = '';
   $('#nbSecret').value = '';
   $('#nbErr').hidden = true;
+  resetQr();
   $('#newBotMask').hidden = false;
   $('#nbId').focus();
 }
 
 function closeNewBot() {
+  resetQr();
   $('#newBotMask').hidden = true;
 }
 
@@ -325,6 +415,8 @@ async function submitNewBot() {
     btn.textContent = '创建并连接';
   }
 }
+
+$('#nbQrStart')?.addEventListener('click', startQr);
 
 $('#botTrigger')?.addEventListener('click', () => {
   if ($('#botMenu').hidden) openBotMenu();
