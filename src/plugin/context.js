@@ -4,9 +4,11 @@ import { createLogger } from '../logger.js';
 import { scopeOf, LEVEL, NO_PERM, levelName } from '../roles.js';
 import { md, renderMenuMd } from '../markdown.js';
 import { normalizeDashboard } from './dashboard.js';
+import { createToolCaller } from './tools.js';
+
 
 /**
- * 全局注册表：所有插件注册的命令和事件监听都放这里。
+ * 全局注册表：所有插件注册的命令、事件监听、AI 工具都放这里。
  * 重载插件时按 pluginId 精确清除，互不影响。
  */
 export class Registry {
@@ -15,6 +17,14 @@ export class Registry {
     this.listeners = new Map(); // eventName -> [{ pluginId, handler }]
     // pluginId -> { id, title, desc, sections: [{ title, items: [{ text, desc, isCommand }] }] }
     this.menus = new Map();
+    /**
+     * AI 可调用工具：name -> entry。
+     *
+     * 为什么按工具名而不是按插件索引：模型只认工具名，调用时也只给名字，
+     * 按名直查是 O(1)；重名必须当场报错，否则模型会调到一个「不知道谁的」
+     * 同名工具，出问题极难排查。
+     */
+    this.tools = new Map();
   }
 
   clearPlugin(id) {
@@ -27,6 +37,9 @@ export class Registry {
       else this.listeners.delete(event);
     }
     this.menus.delete(id);
+    for (const [name, entry] of this.tools) {
+      if (entry.pluginId === id) this.tools.delete(name);
+    }
   }
 
   /** 取（或建）某插件的菜单 */
@@ -103,6 +116,71 @@ export class Registry {
   addListener(pluginId, event, handler) {
     if (!this.listeners.has(event)) this.listeners.set(event, []);
     this.listeners.get(event).push({ pluginId, handler });
+  }
+
+  /**
+   * 注册一个 AI 可调用的工具。
+   *
+   * @param {string} pluginId
+   * @param {object} meta { name, description, parameters, ownerOnly, admin, timeoutMs, hidden }
+   * @param {(args:object, callCtx:object)=>any} handler
+   */
+  addTool(pluginId, meta, handler) {
+    const name = String(meta?.name ?? '').trim();
+    if (!name) throw new Error('工具缺少 name');
+    if (this.tools.has(name)) {
+      const owner = this.tools.get(name).pluginId;
+      throw new Error(
+        owner === pluginId
+          ? `工具 "${name}" 在本插件里重复注册`
+          : `工具 "${name}" 已被插件 ${owner} 注册`,
+      );
+    }
+    this.tools.set(name, {
+      pluginId,
+      pluginName: meta?.pluginName ?? pluginId,
+      name,
+      description: String(meta?.description ?? '').trim(),
+      parameters: meta?.parameters ?? { type: 'object', properties: {} },
+      handler,
+      ownerOnly: Boolean(meta?.ownerOnly),
+      admin: Boolean(meta?.admin),
+      timeoutMs: Number(meta?.timeoutMs) > 0 ? Number(meta.timeoutMs) : 0,
+      hidden: Boolean(meta?.hidden),
+    });
+    return this.tools.get(name);
+  }
+
+  removeTool(pluginId, name) {
+    const e = this.tools.get(name);
+    if (e && e.pluginId === pluginId) this.tools.delete(name);
+  }
+
+  getTool(name) {
+    return this.tools.get(String(name ?? '').trim()) ?? null;
+  }
+
+  /**
+   * 可对外暴露的工具描述（**不含 handler**）。
+   *
+   * 为什么不返回 entry 本体：这些描述会原样交给模型服务商，
+   * 带上函数引用既没法序列化，也等于把内部实现递出去。
+   */
+  listTools({ includeHidden = false } = {}) {
+    const out = [];
+    for (const e of this.tools.values()) {
+      if (e.hidden && !includeHidden) continue;
+      out.push({
+        name: e.name,
+        description: e.description,
+        parameters: e.parameters,
+        pluginId: e.pluginId,
+        pluginName: e.pluginName,
+        ownerOnly: e.ownerOnly,
+        admin: e.admin,
+      });
+    }
+    return out;
   }
 }
 
@@ -235,6 +313,18 @@ export function createContext({ meta, paths, registry, api, cfg, config, configS
 
   // 面板「运行数据」：插件用 ctx.setDashboard() 推的最后一份
   let dashboardCache = null;
+
+  /**
+   * 工具调用器。`can` 依赖 ctx 自己（要按会话算权限等级），所以这里传的是
+   * 延迟求值的闭包——箭头函数体在真正调用时才碰 ctx，那时它早就建好了。
+   */
+  const callTool = createToolCaller({
+    registry,
+    isOwner,
+    can: (m, need) => ctx.can(m, need),
+    scopeOf,
+    log: (m) => logger.debug(m),
+  });
 
   const ctx = {
     id,
@@ -440,6 +530,86 @@ export function createContext({ meta, paths, registry, api, cfg, config, configS
     /** 监听原始事件（GROUP_AT_MESSAGE_CREATE 等），或 'message' 统一入口 */
     on(event, handler) {
       registry.addListener(id, event, handler);
+    },
+
+    /**
+     * 注册一个 **AI 可调用**的工具（跨插件）。
+     *
+     * 命令是给人打的，工具是给模型调的：模型只看到名字、说明和参数 schema，
+     * 自己决定什么时候调。别的插件（尤其 AI 插件）用 `ctx.tools()` 拿到清单、
+     * `ctx.callTool()` 执行，于是「AI 能查斗罗玩家数据」这种事不用 AI 插件
+     * 认识斗罗插件——两边只认这张表。
+     *
+     *   ctx.registerTool({
+     *     name: 'douluo_status',
+     *     description: '查一个斗罗玩家的等级、魂环、金币',
+     *     parameters: {
+     *       type: 'object',
+     *       properties: { uin: { type: 'string', description: '玩家 QQ 号' } },
+     *       required: ['uin'],
+     *     },
+     *     async execute({ uin }, call) {
+     *       const p = await load(uin);
+     *       return `${uin}：${p.level} 级，${p.gold} 金币`;
+     *     },
+     *   });
+     *
+     * `call` 里有 `{ msg, chatId, userId, userName, kind, scope, callTool }`，
+     * 需要按人区分的工具从 `call.userId` 取，别自己去翻全局。
+     *
+     * 名字**全局唯一**（跨插件也不能重）：模型只认名字，重名会调到一个
+     * 「不知道谁的」同名工具，出了问题极难查。
+     *
+     * @param {object} tool
+     * @param {string} tool.name         全局唯一，建议带插件前缀
+     * @param {string} [tool.description] 给模型看的说明，写「做什么」别写「怎么实现」
+     * @param {object} [tool.parameters]  JSON Schema（OpenAI function calling 同款）
+     * @param {boolean} [tool.ownerOnly]  只有机器人主人能调
+     * @param {boolean} [tool.admin]      需要当前会话管理员
+     * @param {number} [tool.timeoutMs]   超时，默认 15s
+     * @param {boolean} [tool.hidden]     不出现在 ctx.tools() 里，只能显式调用
+     * @param {(args:object, call:object)=>any} tool.execute
+     * @returns {() => void} 注销函数（插件卸载时会自动调用，不用手动收）
+     */
+    registerTool(tool) {
+      if (!tool || typeof tool.execute !== 'function') {
+        throw new Error('registerTool 需要 { name, execute }');
+      }
+      registry.addTool(
+        id,
+        { ...tool, pluginName: meta.name ?? id },
+        // 包一层：把 execute 抛出的同步异常也变成 rejection，
+        // 否则 callTool 里的 try/finally 接不住同步 throw
+        (args, call) => Promise.resolve().then(() => tool.execute(args, call)),
+      );
+      const off = () => registry.removeTool(id, tool.name);
+      disposers.push(off);
+      return off;
+    },
+
+    /**
+     * 列出所有插件暴露的 AI 工具（**不含执行函数**，可以直接序列化给模型）。
+     *
+     * 为什么不带 handler：这份清单会原样进请求体发给服务商，
+     * 带上函数引用既没法 JSON 化，也等于把内部实现递出去。
+     *
+     * @param {{includeHidden?:boolean}} [opts]
+     */
+    tools(opts) {
+      return registry.listTools(opts);
+    },
+
+    /**
+     * 执行一个工具。权限、超时、重入在这里统一兜住，调用方只管处理结果。
+     *
+     *   const list = ctx.tools();
+     *   const out = await ctx.callTool('douluo_status', { uin }, { msg });
+     *
+     * 失败一律 **throw**（不是返回空）：调用方多半是 AI 插件，它要把
+     * 「工具报错了」这句话回填给模型，让模型自己圆回来。
+     */
+    callTool(name, args, opts) {
+      return callTool(name, args, opts);
     },
 
     /**

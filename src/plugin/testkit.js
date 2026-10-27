@@ -15,6 +15,8 @@
 
 import os from 'node:os';
 import path from 'node:path';
+import { Registry } from './context.js';
+import { createToolCaller } from './tools.js';
 
 /** 假的存储：全放内存，跑完就没了 */
 function memoryStorage() {
@@ -69,11 +71,32 @@ function fakeLogger(quiet) {
  * 造一个够用的 ctx。
  * @param {object} [opts]
  */
-export function makeCtx({ id = 'test', config = {}, quiet = true, dataDir = null } = {}) {
+export function makeCtx({
+  id = 'test',
+  config = {},
+  quiet = true,
+  dataDir = null,
+  registry = null,
+  isOwner: isOwnerFn = null,
+  can: canFn = null,
+} = {}) {
   const commands = new Map();
   const menus = [];
   const listeners = new Map();
   const scheduled = [];
+  /**
+   * 工具表。不传 registry 就自己造一个；要测「A 插件注册、B 插件调用」
+   * 时给两个 ctx 传**同一个** Registry 即可，和内核里的行为一致。
+   */
+  const toolRegistry = registry ?? new Registry();
+
+  /** 和内核同一份调用语义（权限/超时/重入），避免夹具与线上分叉 */
+  const toolCaller = createToolCaller({
+    registry: toolRegistry,
+    isOwner: (u) => ctx.isOwner(u),
+    can: (m, need) => ctx.can(m, need),
+    scopeOf: (m) => ctx.scopeOf(m),
+  });
 
   const ctx = {
     id,
@@ -131,9 +154,9 @@ export function makeCtx({ id = 'test', config = {}, quiet = true, dataDir = null
       for (const k of Object.keys(map)) out[k] = 10 + (map[k] ?? i++);
       return out;
     },
-    isOwner: () => false,
+    isOwner: isOwnerFn ?? (() => false),
     levelOf: async () => 9999,
-    can: async () => true,
+    can: canFn ?? (async () => true),
     scopeOf: (msg) => (msg?.groupId ? `group:${msg.groupId}` : `user:${msg?.userId ?? ''}`),
     isGroupAdmin: async () => false,
     getGroup: async () => null,
@@ -163,11 +186,31 @@ export function makeCtx({ id = 'test', config = {}, quiet = true, dataDir = null
     },
     dispose: () => {},
 
+    /* ---------------- 跨插件 AI 工具（和内核同一套语义） ---------------- */
+    registerTool(tool) {
+      if (!tool || typeof tool.execute !== 'function') {
+        throw new Error('registerTool 需要 { name, execute }');
+      }
+      toolRegistry.addTool(
+        id,
+        { ...tool, pluginName: ctx.name },
+        (args, call) => Promise.resolve().then(() => tool.execute(args, call)),
+      );
+      return () => toolRegistry.removeTool(id, tool.name);
+    },
+    tools(opts) {
+      return toolRegistry.listTools(opts);
+    },
+    callTool(name, args, opts) {
+      return toolCaller(name, args, opts);
+    },
+
     /* 夹具内部用 */
     __commands: commands,
     __menus: menus,
     __listeners: listeners,
     __scheduled: scheduled,
+    __tools: toolRegistry,
   };
 
   return ctx;

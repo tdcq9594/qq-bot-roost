@@ -275,6 +275,16 @@ export class SubprocessPlugin {
         this.commands = Array.isArray(o.commands) ? o.commands : [];
         this.menus = Array.isArray(o.menus) ? o.menus : [];
         this.levels = Array.isArray(o.levels) ? o.levels : [];
+        /**
+         * 外部插件还不能注册 AI 工具：工具的调用要走一次「核心 → 插件 → 核心」
+         * 的往返，协议里目前只有 msg 这一条请求/响应通道。与其默默忽略、
+         * 让作者以为自己注册成功了，不如当场说清楚。
+         */
+        if (Array.isArray(o.tools) && o.tools.length) {
+          this.log.warn(
+            `插件声明了 ${o.tools.length} 个 AI 工具，但外部插件暂不支持注册工具（需要内核插件，或等协议 v2）`,
+          );
+        }
         // listen 支持 true（= 全部消息）或字符串数组
         if (o.listen === true) this.listen = ['message'];
         else if (Array.isArray(o.listen)) this.listen = o.listen.map(String);

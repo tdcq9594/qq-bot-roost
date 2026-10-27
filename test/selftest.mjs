@@ -3275,6 +3275,246 @@ await testUpdaterRestartHint();
   check('派发: 空列表不炸', orderListeners(undefined, metaOf).length === 0);
 }
 
+/* ---------- 25. 跨插件 AI 工具：注册 / 调用 / 权限 / 超时 ---------- */
+{
+  const { makeCtx } = await import('../src/plugin/testkit.js');
+  const { Registry } = await import('../src/plugin/context.js');
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // 两个插件共用一个 Registry —— 这就是「跨插件」的物理含义
+  const reg = new Registry();
+  const producer = makeCtx({ id: 'douluo', registry: reg });
+  const consumer = makeCtx({ id: 'ai-native', registry: reg });
+  const msg = { chatId: 'g1', groupId: 'g1', userId: 'u1', userName: '小明', kind: 'group' };
+
+  producer.registerTool({
+    name: 'douluo_status',
+    description: '查一个玩家的等级',
+    parameters: { type: 'object', properties: { uin: { type: 'string' } }, required: ['uin'] },
+    async execute({ uin }, call) {
+      return `${uin}：30 级（问的人 ${call.userName} / ${call.scope}）`;
+    },
+  });
+
+  const list = consumer.tools();
+  check('工具: 别的插件能看见', list.length === 1 && list[0].name === 'douluo_status');
+  check(
+    '工具: 清单不带执行函数（要能直接序列化给模型）',
+    list[0].execute === undefined && typeof list[0].parameters === 'object',
+  );
+  check('工具: 清单标明注册方', list[0].pluginId === 'douluo' && list[0].pluginName === 'douluo');
+
+  const out = await consumer.callTool('douluo_status', { uin: '1001' }, { msg });
+  check('工具: 跨插件调用拿得到结果', out === '1001：30 级（问的人 小明 / group:g1）', out);
+
+  // 重名不能悄悄覆盖：模型只认名字，覆盖等于调错工具
+  let dupErr = '';
+  try {
+    consumer.registerTool({ name: 'douluo_status', execute: async () => 'x' });
+  } catch (e) {
+    dupErr = e.message;
+  }
+  check('工具: 跨插件重名直接报错', /已被插件 douluo 注册/.test(dupErr), dupErr);
+
+  // 注销函数 + 卸载清理
+  const off = producer.registerTool({ name: 'tmp_tool', execute: async () => 'x' });
+  check('工具: 注册后立刻可见', consumer.tools().some((t) => t.name === 'tmp_tool'));
+  off();
+  check('工具: 注销函数生效', !consumer.tools().some((t) => t.name === 'tmp_tool'));
+
+  producer.registerTool({ name: 'tmp2', execute: async () => 'x' });
+  reg.clearPlugin('douluo');
+  check(
+    '工具: 插件卸载后工具一起消失（不留幽灵工具）',
+    consumer.tools().length === 0,
+    JSON.stringify(consumer.tools().map((t) => t.name)),
+  );
+
+  // ownerOnly
+  producer.registerTool({ name: 'secret', ownerOnly: true, execute: async () => 'ok' });
+  let ownerErr = '';
+  try {
+    await consumer.callTool('secret', {}, { msg });
+  } catch (e) {
+    ownerErr = e.message;
+  }
+  check('工具: ownerOnly 对普通成员拒绝', /只有机器人主人/.test(ownerErr), ownerErr);
+  const ownerCtx = makeCtx({ id: 'owner-ai', registry: reg, isOwner: () => true });
+  check('工具: ownerOnly 对主人放行', (await ownerCtx.callTool('secret', {}, { msg })) === 'ok');
+
+  // admin
+  producer.registerTool({ name: 'kick', admin: true, execute: async () => 'ok' });
+  const noAdmin = makeCtx({ id: 'x', registry: reg, can: async () => false });
+  let adminErr = '';
+  try {
+    await noAdmin.callTool('kick', {}, { msg });
+  } catch (e) {
+    adminErr = e.message;
+  }
+  check('工具: admin 无权限时拒绝', /需要当前会话的管理员权限/.test(adminErr), adminErr);
+  const yesAdmin = makeCtx({ id: 'y', registry: reg, can: async () => true });
+  check('工具: admin 有权限时放行', (await yesAdmin.callTool('kick', {}, { msg })) === 'ok');
+  let noCtxErr = '';
+  try {
+    await yesAdmin.callTool('kick');
+  } catch (e) {
+    noCtxErr = e.message;
+  }
+  check('工具: admin 工具没给会话上下文就拒绝', /没给会话上下文/.test(noCtxErr), noCtxErr);
+
+  // 超时：卡住的工具不能把整轮回复拖死
+  producer.registerTool({
+    name: 'slow',
+    timeoutMs: 50,
+    execute: async () => {
+      await sleep(3000);
+      return 'late';
+    },
+  });
+  const t0 = Date.now();
+  let toErr = '';
+  try {
+    await consumer.callTool('slow', {});
+  } catch (e) {
+    toErr = e.message;
+  }
+  check('工具: 超时抛错而不是一直等', /超过/.test(toErr) && Date.now() - t0 < 2000, toErr);
+
+  // 并发：同一个工具被两个会话同时调，不能互相挤掉
+  producer.registerTool({
+    name: 'busy',
+    timeoutMs: 1000,
+    execute: async () => {
+      await sleep(20);
+      return 'ok';
+    },
+  });
+  const both = await Promise.all([consumer.callTool('busy'), consumer.callTool('busy')]);
+  check('工具: 同一工具可被并发调用（重入闸不能误杀）', both[0] === 'ok' && both[1] === 'ok', JSON.stringify(both));
+
+  // 递归：工具自己调自己会无限递归，必须拦住
+  producer.registerTool({
+    name: 'rec',
+    execute: async (a, call) => call.callTool('rec', a),
+  });
+  let recErr = '';
+  try {
+    await consumer.callTool('rec', {});
+  } catch (e) {
+    recErr = e.message;
+  }
+  check('工具: 调用链里重复出现会被拦（不会卡死进程）', /重复调用/.test(recErr), recErr);
+
+  // 同步 throw 也要能被调用方接住
+  producer.registerTool({
+    name: 'boom',
+    execute: () => {
+      throw new Error('工具内部炸了');
+    },
+  });
+  let boomErr = '';
+  try {
+    await consumer.callTool('boom', {});
+  } catch (e) {
+    boomErr = e.message;
+  }
+  check('工具: 工具内同步抛错能传回调用方', /工具内部炸了/.test(boomErr), boomErr);
+
+  // hidden 不进清单，但仍可显式调用
+  producer.registerTool({ name: 'inner', hidden: true, execute: async () => 'inner-ok' });
+  check('工具: hidden 不出现在模型清单里', !consumer.tools().some((t) => t.name === 'inner'));
+  check(
+    '工具: hidden 仍可显式调用',
+    (await consumer.callTool('inner', {})) === 'inner-ok',
+  );
+  check(
+    '工具: includeHidden 能取全量',
+    consumer.tools({ includeHidden: true }).some((t) => t.name === 'inner'),
+  );
+}
+
+/* ---------- 26. 跨插件工具：真的从磁盘加载两个插件，卸载即消失 ---------- */
+{
+  const { PluginManager } = await import('../src/plugin/loader.js');
+  const { Registry } = await import('../src/plugin/context.js');
+
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'roost-tools-'));
+  const mk = async (id, body) => {
+    await fs.mkdir(path.join(root, id), { recursive: true });
+    await fs.writeFile(path.join(root, id, 'index.js'), body);
+  };
+  const registry = new Registry();
+  const paths = {
+    id: 'main',
+    pluginConfig: () => path.join(root, '.cfg.json'),
+    pluginLog: () => path.join(root, '.log'),
+    pluginDataDirFor: () => root,
+    pluginData: (name) => path.join(root, 'data', name),
+  };
+  const makePm = () =>
+    new PluginManager({
+      pluginsDir: root,
+      paths,
+      registry,
+      api: {},
+      cfg: { logs: { enabled: false } },
+      goBin: null,
+      groups: {},
+      roles: {},
+      outbound: {},
+      session: {},
+      pipeline: { removeByPlugin() {} },
+      isOwner: () => false,
+    });
+
+  await mk(
+    'game',
+    `export default {
+       id:'game', name:'游戏', frameworkVersion:'>=0.1.0',
+       setup(ctx){
+         ctx.registerTool({
+           name:'game_level',
+           description:'查等级',
+           parameters:{ type:'object', properties:{ uin:{type:'string'} }, required:['uin'] },
+           execute: async ({ uin }) => uin + ' 是 30 级',
+         });
+       },
+     };`,
+  );
+  await mk(
+    'brain',
+    `export default {
+       id:'brain', name:'AI', frameworkVersion:'>=0.1.0',
+       setup(ctx){ ctx.seen = ctx.tools().map(t=>t.name); },
+     };`,
+  );
+
+  const pm = makePm();
+  check('工具: 游戏插件加载成功', (await pm.load('game')) === true, pm.errors.get('game') ?? '');
+  check('工具: AI 插件加载成功', (await pm.load('brain')) === true, pm.errors.get('brain') ?? '');
+  check(
+    '工具: 后加载的插件能看到先加载的插件注册的工具',
+    (pm.loaded.get('brain')?.ctx?.seen ?? []).includes('game_level'),
+    JSON.stringify(pm.loaded.get('brain')?.ctx?.seen ?? null),
+  );
+
+  const brainCtx = pm.loaded.get('brain').ctx;
+  check(
+    '工具: 真 ctx 能调到别的插件注册的工具',
+    (await brainCtx.callTool('game_level', { uin: '1001' })) === '1001 是 30 级',
+  );
+
+  // 卸载/重载 game → 工具必须跟着消失，否则会留下指向已销毁 ctx 的幽灵
+  await pm.unload('game');
+  check(
+    '工具: 卸载插件后工具被清掉',
+    !brainCtx.tools().some((t) => t.name === 'game_level'),
+    JSON.stringify(brainCtx.tools().map((t) => t.name)),
+  );
+
+  await fs.rm(root, { recursive: true, force: true });
+}
+
 /* ---------- 日志：收到的消息怎么显示 ---------- */
 
 {
