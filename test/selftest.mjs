@@ -1933,6 +1933,69 @@ async function testMediaAndTemplate() {
   );
 
   /**
+   * Markdown 是独立消息类型，平台不放行就整条发不出去。所有 ctx.menu() 出来的
+   * 菜单都是 markdown，所以必须降级成纯文本——否则用户点菜单看到的是「什么都没发生」。
+   */
+  {
+    const { mdToPlain, renderMenuMd } = await import('../src/markdown.js');
+
+    // 单元：可点击指令要变回它显示的文字，不能留标签
+    const menu = renderMenuMd('标题', [{ title: '测试', items: [{ text: '/签到', desc: '每日一次' }] }], {
+      kind: 'group',
+    });
+    const plainMenu = mdToPlain(menu);
+    check('降级: 可点击指令变成显示文字', plainMenu.includes('签到') && !plainMenu.includes('qqbot-cmd'), plainMenu);
+    check('降级: 标题井号被去掉', !plainMenu.includes('#') && plainMenu.includes('标题'), plainMenu);
+    check('降级: 描述保留', plainMenu.includes('每日一次'));
+    check('降级: 多行结构没塌成一行', plainMenu.split('\n').length >= 3);
+    check('降级: 空输入不崩', mdToPlain('') === '' && mdToPlain(null) === '');
+    check('降级: 只给 content 对象也认', mdToPlain({ content: '## x' }) === 'x');
+
+    const runs = [];
+    const rejectMarkdown = (status) => async (target, body) => {
+      runs.push({ target, body });
+      if (body.markdown) {
+        const err = new Error(`HTTP ${status} 拒绝了 markdown`);
+        err.status = status;
+        err.body = { code: 40034, message: 'markdown not allowed' };
+        throw err;
+      }
+      return { id: 'plain-ok' };
+    };
+
+    // 400 → 降级重发
+    const api400 = {
+      uploadMedia: async () => ({ file_info: 'fi1' }),
+      sendGroup: rejectMarkdown(400),
+      sendC2C: rejectMarkdown(400),
+    };
+    const m400 = buildMessage(
+      'GROUP_AT_MESSAGE_CREATE',
+      { id: 'mf1', content: '菜单', group_openid: 'g1', author: { member_openid: 'u1' }, timestamp: String(Date.now()) },
+      { api: api400, cfg: { commandPrefix: '/' } },
+    );
+    const r400 = await m400.replyMarkdown({ content: '# 标题\n- **/签到** 每日一次' });
+    check('降级: markdown 被 400 拒后改发纯文本', runs.length === 2 && !!runs[1].body.content, JSON.stringify(runs.map((x) => Object.keys(x.body))));
+    check('降级: 纯文本里没有 markdown 语法', !runs[1].body.content.includes('**') && !runs[1].body.content.startsWith('#'));
+    check('降级: 内容还在（不是发了个空的）', runs[1].body.content.includes('签到') && runs[1].body.content.includes('标题'));
+    check('降级: 不带 keyboard（按钮挂纯文本上会再被拒一次）', runs[1].body.keyboard === undefined);
+    check('降级: 返回了重发的结果', r400?.id === 'plain-ok');
+
+    // 500 / 429 / 离线 → 不降级（可能已送达，重发会变成两条；限流换纯文本也一样被限）
+    for (const st of [500, 429]) {
+      runs.length = 0;
+      const apiX = { uploadMedia: async () => ({ file_info: 'fi1' }), sendGroup: rejectMarkdown(st), sendC2C: rejectMarkdown(st) };
+      const mx = buildMessage(
+        'GROUP_AT_MESSAGE_CREATE',
+        { id: 'mf2', content: 'x', group_openid: 'g1', author: { member_openid: 'u1' }, timestamp: String(Date.now()) },
+        { api: apiX, cfg: { commandPrefix: '/' } },
+      );
+      const rx = await mx.replyMarkdown({ content: '# t' });
+      check(`降级: HTTP ${st} 不重发（避免重复/白烧额度）`, runs.length === 1 && rx === null, `runs=${runs.length}`);
+    }
+  }
+
+  /**
    * 富媒体消息的文本：replyImage 传了 text，文字和图就是同一条
    * （msg_type=7 的 content），不是先发一句话再发一张图。
    */

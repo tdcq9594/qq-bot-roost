@@ -1,7 +1,7 @@
 import { createLogger } from './logger.js';
 import { FILE_TYPE } from './api.js';
 import { messageKindOf, EVENTS } from './events.js';
-import { renderMenuMd } from './markdown.js';
+import { renderMenuMd, mdToPlain } from './markdown.js';
 
 const log = createLogger('message');
 
@@ -543,10 +543,40 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
   /** Markdown 消息（可带按钮 keyboard）。Markdown 是独立消息类型，先把攒的文本发掉 */
   msg.replyMarkdown = async (markdown, keyboard) => {
     await msg.flushReplies();
-    return send({ markdown, keyboard }, true).catch((e) => {
-      log.error('发送 Markdown 失败:', e.message);
-      return null;
-    });
+    try {
+      return await send({ markdown, keyboard }, true);
+    } catch (e) {
+      /**
+       * Markdown 是**独立消息类型**，没有纯文本兜底：平台不放行（没权限、
+       * 内容被判不合规）就整条发不出去。而所有 `ctx.menu()` 出来的菜单都是
+       * markdown——不降级的话，用户点菜单看到的是「什么都没发生」。
+       *
+       * 只在「服务端明确拒了」时降级（4xx）。理由：
+       *   · 5xx / 网络错误 有可能已经送达，重发会变成两条；
+       *   · 429 是限流，换纯文本一样被限，白烧一次；
+       *   · offline / expired / quota 换纯文本也发不出去，expired/quota 还会多扣额度。
+       */
+      const status = Number(e?.status) || 0;
+      const rejected = (status >= 400 && status < 500 && status !== 429) || e?.code === 'api';
+      if (!rejected) {
+        log.error('发送 Markdown 失败:', e.message);
+        return null;
+      }
+      const plain = mdToPlain(markdown);
+      if (!plain) {
+        log.error(`Markdown 被拒（${e.message}），且降不出纯文本`);
+        return null;
+      }
+      /**
+       * 不带 keyboard：按钮挂在纯文本上平台不认，带上会连累整条消息再被拒一次。
+       * 按钮里的指令本来也会出现在正文里（ctx.menu 渲染时带上），信息不丢。
+       */
+      log.warn(`Markdown 被拒（${e.message}），降级为纯文本重发`);
+      return send({ content: plain }, true).catch((e2) => {
+        log.error('降级纯文本也没发出去:', e2.message);
+        return null;
+      });
+    }
   };
 
   /**
