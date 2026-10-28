@@ -26,6 +26,12 @@ logs/
 # 自己写的插件想版本管理，就在 plugins/ 里单独 git init。
 plugins/
 
+# docker compose 的本地环境变量（里面有面板密钥），绝不入库。
+# .env.example 是模板，要入库，所以不能用 .env* 这种通配。
+.env
+.env.local
+.env.*.local
+
 # 通用
 *.log
 *.tmp

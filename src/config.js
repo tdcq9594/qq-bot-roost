@@ -27,6 +27,25 @@ const GLOBAL_DEFAULTS = {
     accessKey: '',
     portTries: 20,
     openBrowser: true,
+    /**
+     * 面板在 Nginx / Caddy 这类反向代理后面时设为 true。
+     *
+     * 开了之后：
+     *   - 客户端 IP 从 `X-Forwarded-For` 取（用于认证失败限速）
+     *   - 真实 Host 从 `X-Forwarded-Host` 取（用于同源校验）
+     *
+     * **默认关，而且关着的时候伪造这两个头毫无作用**——
+     * 不开就是不信任任何转发头，攻击者自己塞的值会被忽略。
+     */
+    trustProxy: false,
+    /**
+     * 反向代理层数。只有一层 Nginx = 1；CDN（Cloudflare 等）+ Nginx = 2。
+     *
+     * 取 `X-Forwarded-For` 时从**右往左**数第 hops 个：右边那些是代理自己加的，
+     * 左边的是客户端可以随便伪造的。取错了要么拿到假 IP（等于没限速），
+     * 要么把所有人当成同一个 IP（攻击者一个人就能把面板锁死）。
+     */
+    trustProxyHops: 1,
   },
 
   logs: {
@@ -322,6 +341,14 @@ export async function loadGlobalConfig() {
     if (Number.isInteger(p) && p > 0 && p < 65536) cfg.webui.port = p;
   }
   if (env.ROOST_WEBUI_KEY) cfg.webui.accessKey = env.ROOST_WEBUI_KEY;
+  // 反代场景常靠环境变量开，省得进容器改配置文件
+  if (env.ROOST_WEBUI_TRUST_PROXY) {
+    cfg.webui.trustProxy = /^(1|true|yes|on)$/i.test(String(env.ROOST_WEBUI_TRUST_PROXY).trim());
+  }
+  if (env.ROOST_WEBUI_TRUST_PROXY_HOPS) {
+    const h = Number(env.ROOST_WEBUI_TRUST_PROXY_HOPS);
+    if (Number.isInteger(h) && h >= 1 && h <= 10) cfg.webui.trustProxyHops = h;
+  }
   if (env.ROOST_LOG_LEVEL) cfg.logLevel = env.ROOST_LOG_LEVEL;
 
   // Webhook：容器里想开回调，两个变量就够

@@ -334,6 +334,65 @@ export async function startWebServer({
     );
   }
 
+  /**
+   * 反向代理设置。
+   *
+   * `trustProxy` 默认关：不开就是不信任任何转发头，客户端自己塞的
+   * `X-Forwarded-For` / `X-Forwarded-Host` 一律当不存在（防伪造）。
+   * 只有用户明确知道自己在反代后面时才打开。
+   */
+  const TRUST_PROXY = wc.trustProxy === true;
+  const PROXY_HOPS = Math.min(Math.max(Number(wc.trustProxyHops) || 1, 1), 10);
+
+  /**
+   * 监听在非 loopback 却没开 trustProxy —— 十有八九是放在 Nginx 后面。
+   * 这种情况下所有请求的来源地址都是代理自己，认证失败限速会退化成
+   * 「全局一个桶」：别人打 20 次错密钥，你自己也进不来，而且日志里全是代理 IP。
+   */
+  if (!LOOPBACK_HOSTS.has(String(host)) && !TRUST_PROXY) {
+    log.warn(
+      `面板监听 ${host} 但未开启 webui.trustProxy。\n` +
+        '  如果前面有 Nginx / Caddy / CDN，请设 webui.trustProxy=true（多层再加 trustProxyHops），\n' +
+        '  否则限速会按代理地址统计：攻击者发 20 次错误密钥就能让所有人 60 秒进不来。',
+    );
+  }
+
+  /**
+   * 取客户端 IP，用于认证失败限速。
+   *
+   * 开了 trustProxy 才看 `X-Forwarded-For`，并且**从右往左**数第 `hops` 个：
+   * 右边是各级代理自己追加的（可信），左边是客户端可以随便伪造的。
+   * 单层反代取最后一个；CDN + Nginx 取倒数第二个，否则拿到的是 CDN 的地址，
+   * 所有人又挤回一个桶里，等于白配。
+   */
+  const clientIp = (req) => {
+    if (TRUST_PROXY) {
+      const xff = String(req.headers['x-forwarded-for'] || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (xff.length) {
+        return xff[Math.max(0, xff.length - PROXY_HOPS)] || xff[xff.length - 1];
+      }
+    }
+    return req.socket?.remoteAddress || 'unknown';
+  };
+
+  /**
+   * 取「浏览器实际访问的 Host」，用于同源校验。
+   *
+   * 不处理这个的话：Nginx 默认 `proxy_set_header Host $proxy_host`，转发给面板的
+   * Host 是 `127.0.0.1:15207`，而浏览器发来的 Origin 是自己的域名 —— 两者永远不等，
+   * 结果面板**所有写操作都 403**（读能用、保存全失败），现象很像权限问题。
+   */
+  const clientHost = (req) => {
+    if (TRUST_PROXY) {
+      const xfh = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim();
+      if (xfh) return xfh;
+    }
+    return String(req.headers['host'] || '');
+  };
+
   // res -> 这个连接正在看哪个机器人，状态推送时按各自的目标过滤
   const sseClients = new Map();
   /** 同时最多多少个 SSE 连接（一个页面一个） */
@@ -603,7 +662,7 @@ export async function startWebServer({
       sessions.delete(sid);
     }
 
-    const ip = req.socket?.remoteAddress || 'unknown';
+    const ip = clientIp(req);
     const now = Date.now();
     const rec = authFails.get(ip);
     if (rec && now - rec.start < AUTH_WINDOW && rec.count >= AUTH_MAX_FAILS) {
@@ -663,7 +722,9 @@ export async function startWebServer({
      */
     if (ptPage && String(req.headers.origin || '') === 'null') return true;
 
-    const host = String(req.headers['host'] || '');
+    // 反代场景下要用 X-Forwarded-Host，不能直接看 req.headers.host：
+    // Nginx 默认把 Host 改写成 $proxy_host，与浏览器的 Origin 永远不等。
+    const host = clientHost(req);
     for (const h of ['origin', 'referer']) {
       const v = req.headers[h];
       if (!v) continue;
@@ -871,6 +932,40 @@ export async function startWebServer({
     }
 
     try {
+      /**
+       * 健康检查端点（**不鉴权**）。
+       *
+       * 为什么必须免鉴权：Docker 的 healthcheck 以前探 `/api/status`，而配了
+       * `accessKey` 之后那个接口恒返 401 —— 容器永久 unhealthy。反过来不配 key
+       * 时，机器人明明掉线了它照样报健康。两个方向都是错的。
+       *
+       * 返回什么：进程活着、且至少有一个机器人是 online 才算 200。
+       * 全掉线就 503，让监控一眼看出「面板在、但机器人没连上」。
+       *
+       * 只给 id / state / 计数，不给 botName（可能是群里的昵称，不该对匿名请求暴露）。
+       *
+       * 注意：Docker 的 healthcheck 只是打标记，**不会**因此重启容器
+       * （重启只由 restart 策略在进程退出时触发），所以不会变成重启循环。
+       */
+      if (pathname === '/healthz') {
+        const bots = runtimes.map((r) => ({ id: r?.id ?? '', state: r?.state ?? 'offline' }));
+        const online = bots.filter((b) => b.state === 'online').length;
+        const ok = bots.length === 0 ? true : online > 0;
+        res.writeHead(ok ? 200 : 503, {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store',
+        });
+        return res.end(
+          JSON.stringify({
+            ok,
+            bots,
+            online,
+            total: bots.length,
+            uptime: Math.round(process.uptime()),
+          }),
+        );
+      }
+
       // ---------------- API ----------------
       if (pathname.startsWith('/api/')) {
         const ptPage = pickPageToken(url);
@@ -2321,7 +2416,27 @@ export async function startWebServer({
 
   /* ---------------- 监听（端口被占用自动顺延） ---------------- */
 
-  const tries = Math.max(1, Number(wc.portTries) || 20);
+  /**
+   * 容器里**禁用端口顺延**。
+   *
+   * docker-compose 把宿主机的 15207 固定映射到容器的 15207。容器内一旦因为
+   * 端口被占而顺延到 15208，宿主那边映射就悬空了 —— 面板不是报错，而是
+   * 静默地访问不到，日志里只有一行「换 15208 试试」，极难对上号。
+   *
+   * 桌面环境顺延是好事（用户不想为端口冲突折腾），容器里则应该**直接失败**，
+   * 让 restart 策略或者人看到明确的错误。
+   */
+  const IN_CONTAINER = process.env.ROOST_STRICT_PORT === '1' || (() => {
+    try {
+      return fsSync.existsSync('/.dockerenv');
+    } catch {
+      return false;
+    }
+  })();
+  const tries = IN_CONTAINER ? 1 : Math.max(1, Number(wc.portTries) || 20);
+  if (IN_CONTAINER && Number(wc.portTries) > 1) {
+    log.info(`容器环境：已禁用端口顺延（固定映射只能对上 ${port}）`);
+  }
   let actualPort;
   try {
     actualPort = await listenWithFallback(server, host, port, {

@@ -15,7 +15,10 @@ services:
     restart: unless-stopped
 
     ports:
-      - "15207:15207"     # 面板
+      # 只绑宿主机回环。公网访问请走 Nginx/Caddy 反向代理（参考 README「公网部署」）。
+      # 直接映射成 "15207:15207" 等于把它暴露在整个网络上——面板能装插件，
+      # 也就是能执行任意代码，不该裸奔。
+      - "127.0.0.1:15207:15207"
       # Webhook 模式才需要，不用就注释掉
       # - "15208:15208"
 
@@ -26,11 +29,30 @@ services:
       - ./plugins:/app/plugins  # 插件代码
 
     environment:
-      # 面板监听地址，容器里必须是 0.0.0.0
+      # 面板监听地址，容器里必须是 0.0.0.0（否则宿主机的端口映射进不来）
       ROOST_WEBUI_HOST: "0.0.0.0"
       ROOST_WEBUI_PORT: "15207"
-      # 面板访问密钥。对外暴露时**务必设置**，否则谁都能改你的配置
-      # ROOST_WEBUI_KEY: "换成你自己的密钥"
+
+      # 访问密钥：**必填**。
+      #
+      # 监听 0.0.0.0 却不设密钥时，框架会在启动期直接抛错退出——这是有意的，
+      # 无密钥的面板等于把「装插件 = 执行任意代码」的开关交给整个网络。
+      #
+      # 这里用 ${VAR:?} 的写法，让 docker compose 在**启动之前**就报
+      # 「必须设置 ROOST_WEBUI_KEY」，而不是等你上去才发现容器起不来、
+      # 或者更糟：自己想个 123456 把它糊过去。
+      #
+      # 做法：在同目录建 .env，写一行
+      #   ROOST_WEBUI_KEY=<足够长的随机串，openssl rand -hex 16>
+      ROOST_WEBUI_KEY: ${ROOST_WEBUI_KEY:?必须在同目录 .env 里设置 ROOST_WEBUI_KEY}
+
+      # 挂在反向代理后面时打开它，按真实客户端 IP 限速。
+      # 不开的话所有请求都算在代理头上——攻击者发 20 次错误密钥，
+      # 你和所有运维一起被锁 60 秒（而且日志里看不到攻击者 IP）。
+      # 单层 Nginx 填 1；CDN + Nginx 填 2。
+      # ROOST_WEBUI_TRUST_PROXY: "true"
+      # ROOST_WEBUI_TRUST_PROXY_HOPS: "1"
+
       ROOST_LOG_LEVEL: "info"
 
       # 不想在配置文件里写 AppSecret 时，用这两个环境变量（优先级更高）
@@ -42,13 +64,20 @@ services:
       # ROOST_WEBHOOK_PORT: "15208"
       # ROOST_WEBHOOK_PUBLIC_URL: "https://bot.example.com"
 
-    # 健康检查：面板 HTTP 起来就算健康
+    # 健康检查：探**免鉴权**的 /healthz，面板活着且至少一个机器人在线才算健康。
+    #
+    # 以前探的是 /api/status，两个方向都错：配了 accessKey 之后它恒返 401 →
+    # 容器永久 unhealthy；不配 key 时机器人早就掉线了，它照样报健康。
+    #
+    # 注意 Docker 的 healthcheck 只打状态标记，不会因此重启容器
+    # （重启只由 restart 策略在进程退出时触发），所以不会变成重启循环。
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:15207/api/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:15207/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 20s
+      # 启动要拉网关、鉴权、加载插件，20 秒太紧，容易第一次就被判失败
+      start_period: 60s
 
     logging:
       driver: json-file
