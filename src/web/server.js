@@ -111,6 +111,57 @@ const CSP_PAGE = [
   "connect-src http: https:",
 ].join('; ');
 
+/**
+ * 插件页的「自动带令牌」补丁 —— 注入到插件页 HTML 最前面。
+ *
+ * **为什么需要（0.8.12 修的回归）**：iframe 地址上带的凭证以前是面板密钥
+ * `?key=`，插件页面自己把它转发给接口。0.8.9 起换成了一次性页面令牌
+ * `?pt=`，但**已有插件的页面还在转发 `key`** —— 于是它们发出的请求一个
+ * 凭证都没带；iframe 又是 opaque origin（`Origin: null`），`isSameOrigin()`
+ * 判跨站 → 403，页面永远停在「加载中…」，控制台只看到 `Failed to load
+ * resource: 403`。dice 的战绩页就是这么挂的。
+ *
+ * 不能指望每个插件作者都回来改这一行（市场里的插件都在外部仓库），
+ * 所以框架替页面把 `pt` 补上。
+ *
+ * **安全边界没变**：
+ * - 只补发给**面板自己**（目标 origin 必须等于文档基准的 origin），
+ *   第三方站点拿不到令牌；
+ * - 能碰哪些路径仍由 `pageTokenAllows()` 决定，拿着令牌也调不了
+ *   /api/config、/api/logs、/api/bots。
+ *
+ * @param {string} pt 本次请求的页面令牌
+ * @returns {string} 一段 `<script>`，无令牌时返回空串
+ */
+export const pageTokenPatch = (pt) => {
+  const token = String(pt ?? '').replace(/[^A-Za-z0-9]/g, '');
+  if (!token) return '';
+  return (
+    '<script>(function(){var PT=' +
+    JSON.stringify(token) +
+    ',BASE=document.baseURI||location.href,SELF="";' +
+    'try{SELF=new URL(BASE).origin}catch(e){}' +
+    // 只给面板自己的地址补令牌：第三方 origin 原样发出，绝不外泄
+    'function add(u){try{var n=new URL(u,BASE);' +
+    'if(SELF&&n.origin!==SELF)return u;' +
+    'if(n.searchParams.get("pt"))return n.href;' +
+    'n.searchParams.set("pt",PT);return n.href}catch(e){return u}}' +
+    'var f=window.fetch;if(f)window.fetch=function(i,o){try{' +
+    'if(typeof i==="string")i=add(i);' +
+    'else if(i instanceof URL)i=new URL(add(i.href));' +
+    'else if(typeof Request!=="undefined"&&i instanceof Request){var h=add(i.url);' +
+    'if(h!==i.url)i=new Request(h,i)}}catch(e){}return f.call(window,i,o)};' +
+    'var X=window.XMLHttpRequest;' +
+    'if(X&&X.prototype&&X.prototype.open){var O=X.prototype.open;' +
+    'X.prototype.open=function(m,u){if(typeof u==="string"){' +
+    'try{arguments[1]=add(u)}catch(e){}}return O.apply(this,arguments)}};' +
+    'var E=window.EventSource;' +
+    'if(E){var W=function(u,c){return new E(add(String(u)),c)};W.prototype=E.prototype;' +
+    'try{W.CONNECTING=E.CONNECTING;W.OPEN=E.OPEN;W.CLOSED=E.CLOSED}catch(e){}' +
+    'window.EventSource=W}})();<\/script>'
+  );
+};
+
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
@@ -1637,9 +1688,15 @@ export async function startWebServer({
            * 所以有 doctype 就插在它后面。
            */
           const style = PAGE_THEME[theme];
+          /**
+           * 自动带令牌的补丁必须比页面自己的脚本**先**执行，所以跟主题样式
+           * 一起插在最前面（doctype 之后 / 没有 doctype 就文档开头）。
+           */
+          const patch = pageTokenPatch(url.searchParams.get('pt') || ptPage?.token || '');
+          const prefix = patch + style;
           const html = /^<!doctype/i.test(p.html.trimStart())
-            ? p.html.replace(/^(\s*<!doctype[^>]*>)/i, `$1${style}`)
-            : style + p.html;
+            ? p.html.replace(/^(\s*<!doctype[^>]*>)/i, `$1${prefix}`)
+            : prefix + p.html;
           return res.end(html);
         }
 

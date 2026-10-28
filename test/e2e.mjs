@@ -615,6 +615,43 @@ async function testStatsAndPages() {
     if (/<!doctype/i.test(text)) {
       ok('页面: doctype 仍在最前面', /^<!doctype/i.test(text.trimStart()), text.slice(0, 40));
     }
+    /**
+     * 插件页令牌：iframe 没有 allow-same-origin，是 opaque origin，
+     * 拿不到 Cookie，只能靠 `?pt=` 证明身份。
+     *
+     * 0.8.9 把凭证从 `?key=` 换成 `?pt=` 之后，已有插件的页面还在转发 key
+     * → 请求一个凭证都不带 → 被 isSameOrigin() 判跨站 403，页面永远
+     * 「加载中…」（dice 战绩页就是这么挂的，0.8.12 修）。
+     */
+    const tok = pages.data[0].token;
+    const pid = pages.data[0].pluginId;
+    if (tok && pid) {
+      const withTok = await fetch(`${BASE}/api/pages/${encodeURIComponent(key)}/html?pt=${tok}`);
+      const patched = await withTok.text();
+      ok(
+        '页面: 注入了自动带令牌的补丁',
+        patched.includes(tok) && patched.includes('searchParams'),
+        patched.includes(tok) ? '缺补丁逻辑' : '缺令牌',
+      );
+
+      // 模拟插件页发出的请求：Origin 恒为 null（opaque origin）
+      const viaPt = await fetch(`${BASE}/api/plugins/${pid}/panel?pt=${tok}`, {
+        headers: { Origin: 'null' },
+      });
+      ok(
+        '插件页: 带 pt 的请求不再被判跨站',
+        ![401, 403].includes(viaPt.status),
+        `status=${viaPt.status}`,
+      );
+
+      // 对照组：不带 pt 就是 dice 战绩页 403 的那个场景，必须仍然被拒
+      const noPt = await fetch(`${BASE}/api/plugins/${pid}/panel`, {
+        headers: { Origin: 'null' },
+      });
+      ok('插件页: 不带 pt 仍被拒绝', noPt.status === 403, `status=${noPt.status}`);
+    } else {
+      skip('插件页令牌: 列表没给 token / pluginId，跳过');
+    }
   } else {
     skip('页面: 当前没有插件注册页面，跳过内容断言');
   }

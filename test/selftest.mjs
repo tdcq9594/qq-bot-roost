@@ -3610,6 +3610,98 @@ async function testRequirementsWhitelist() {
 
 await testRequirementsWhitelist();
 
+/* ---------- 插件页自动带令牌补丁 ---------- */
+
+/**
+ * 0.8.9 把 iframe 的凭证从 `?key=` 换成一次性令牌 `?pt=`，但已有插件的页面
+ * 还在转发 `key` → 请求一个凭证都不带 → iframe 是 opaque origin 被判跨站
+ * → 403，页面永远「加载中…」。dice 战绩页就是这么挂的（0.8.12 修）。
+ *
+ * 这里在 Node 里**真跑一遍注入的脚本**（用 vm + stub 的 window/document），
+ * 验证它确实把 pt 补上了，且没有补给第三方站点。
+ */
+async function testPageTokenPatch() {
+  const vm = await import('node:vm');
+  const { pageTokenPatch } = await import('../src/web/server.js');
+
+  check('插件页补丁：没有令牌时不注入', pageTokenPatch('') === '');
+  check('插件页补丁：非法令牌时不注入', pageTokenPatch(null) === '');
+
+  const TOKEN = 'a'.repeat(64);
+  const patch = pageTokenPatch(TOKEN);
+  check('插件页补丁：有令牌时注入 script', /^<script>[\s\S]*<\/script>$/.test(patch));
+
+  const code = /<script>([\s\S]*)<\/script>/.exec(patch)[1];
+  const BASE = 'http://127.0.0.1:15210/api/pages/dice%3Arank/html?pt=' + TOKEN;
+
+  /** 起一个带 stub 的沙盒，跑完注入脚本后返回它改造过的 window */
+  function runPatch() {
+    const seen = [];
+    const ctx = {
+      URL,
+      Request,
+      document: { baseURI: BASE },
+      location: { href: BASE },
+      console,
+    };
+    ctx.window = {
+      fetch: (i) => (seen.push(['fetch', i]), i),
+      XMLHttpRequest: function () {},
+      EventSource: function (u) {
+        seen.push(['es', u]);
+      },
+    };
+    ctx.window.XMLHttpRequest.prototype = {
+      open: function (m, u) {
+        seen.push(['xhr', u]);
+      },
+    };
+    vm.createContext(ctx);
+    vm.runInContext(code, ctx);
+    return { win: ctx.window, seen };
+  }
+
+  const { win, seen } = runPatch();
+
+  // 1) 相对路径：必须补上 pt，且保留原有参数（bot=main 不能丢）
+  const got = win.fetch('/api/plugins/dice/panel?bot=main');
+  check('插件页补丁：相对路径补上 pt', got.includes('pt=' + TOKEN), got);
+  check('插件页补丁：原有参数不丢', got.includes('bot=main'), got);
+  check('插件页补丁：不会拼出两个 ?', (got.match(/\?/g) || []).length === 1, got);
+
+  // 2) 已经带 pt 的（插件自己转发了）不重复加
+  const twice = win.fetch('/api/plugins/x/panel?pt=' + TOKEN);
+  check(
+    '插件页补丁：已有 pt 不重复添加',
+    (twice.match(/pt=/g) || []).length === 1 && twice.includes('pt=' + TOKEN),
+    twice,
+  );
+
+  // 3) 第三方站点绝不能拿到令牌
+  const evil = win.fetch('https://evil.example.com/x?bot=main');
+  check('插件页补丁：第三方地址不加令牌', evil === 'https://evil.example.com/x?bot=main', evil);
+
+  // 4) XHR 同样被处理
+  seen.length = 0;
+  const x = new win.XMLHttpRequest();
+  x.open('GET', '/api/plugins/dice/r/list');
+  check('插件页补丁：XHR 也补上 pt', String(seen[0]?.[1]).includes('pt=' + TOKEN), String(seen[0]?.[1]));
+
+  // 5) EventSource 同样被处理
+  seen.length = 0;
+  try {
+    new win.EventSource('/api/stream');
+  } catch {
+    /* stub 构造函数不返回值也无所谓，只关心传进去的 url */
+  }
+  check('插件页补丁：EventSource 也补上 pt', String(seen[0]?.[1]).includes('pt=' + TOKEN), String(seen[0]?.[1]));
+
+  // 6) 注入的代码里不该出现未转义的 </script>（会提前截断文档）
+  check('插件页补丁：脚本闭合标签已转义', !/[^\\]<\/script>/.test(code.slice(0, -10)));
+}
+
+await testPageTokenPatch();
+
 /* ---------- 汇总 ---------- */
 await cleanQuotaLedger();
 
