@@ -2178,19 +2178,23 @@ export async function startWebServer({
 
         // SSE
         if (pathname === '/api/stream' && req.method === 'GET') {
-          res.writeHead(200, {
-            'Content-Type': 'text/event-stream; charset=utf-8',
-            'Cache-Control': 'no-cache',
-            Connection: 'keep-alive',
-          });
           /**
-           * 连接数上限。SSE 是长连接，每个连接占一个 fd + 一份缓冲；
+           * 连接数上限必须**先检查再写头**。
+           *
+           * 之前是「先 writeHead(200, SSE 头) 再判满、判满再 writeHead(503)」，
+           * 满载时对同一个 res 写两次头，Node 直接抛 `ERR_HTTP_HEADERS_SENT`，
+           * 请求崩掉、连接也不释放。SSE 是长连接，每个连接占一个 fd + 一份缓冲；
            * 面板被脚本反复刷新时不设限就是稳定泄漏。
            */
           if (sseClients.size >= MAX_SSE) {
             res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' });
             return res.end('SSE 连接数已满，请关闭多余的页面后重试');
           }
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache',
+            Connection: 'keep-alive',
+          });
           res.write(`event: status\ndata: ${JSON.stringify(statusPayload(rt))}\n\n`);
           sseClients.set(res, rt.id);
           const ping = setInterval(() => {

@@ -310,16 +310,28 @@ export async function ensurePluginDeps({ dir, manifest = {}, log = null, enabled
 
       /**
        * requirements.txt 里能写 `--index-url`、`-e git+...`、直接写 URL——
-       * 等于让插件作者把 pip 指到任意源、拉任意代码。这里只接受「包名 + 版本约束」。
+       * 等于让插件作者把 pip 指到任意源、拉任意代码。
+       *
+       * 这里用**白名单**（fail-closed）：只接受「包名 + 版本约束」这一种形态，
+       * 其它一律拒。不能用黑名单——pip 的选项缩写太多（`-i` = `--index-url`、
+       * `-c` = 约束文件、`-r` = 嵌套 requirement、`--no-index`、`--pre`…），
+       * 黑名单列不完，漏一个就是一条供应链后门。
+       *
+       * 合法行只匹配：包名（字母数字 + `-_.`）后面可选地跟版本约束
+       * （`==` / `>=` / `~=` / `<=` / `!=` / `>` / `<` 等，或逗号分隔的多个）。
+       * 环境标记（`; python_version < "3.8"`）一并放行，它不含网络指令。
        */
       const badLine = requirements
         .split(/\r?\n/)
         .map((l) => l.trim())
-        .find((l) => l && !l.startsWith('#') && /^(-e|--index-url|--extra-index-url|--find-links|--trusted-host|[a-z]+:\/\/|git\+)/i.test(l));
+        .find((l) => {
+          if (!l || l.startsWith('#')) return false; // 空行 / 注释放行
+          return !/^[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[A-Za-z0-9._,-]+\])?(?:\s*(?:==|>=|<=|~=|!=|===|>|<)\s*[^\s,]+(?:\s*,\s*[^\s,]+)*)?(?:\s*;\s*[^\n]+)?$/.test(l);
+        });
       if (badLine) {
         throw new Error(
           `requirements.txt 里有不安全的行，已拒绝安装：${badLine}\n` +
-            '只允许「包名 + 版本约束」（如 requests>=2.31），不接受 -e / --index-url / 直接 URL。',
+            '只允许「包名 + 版本约束」（如 requests>=2.31），不接受 -e / --index-url / 直接 URL / pip 选项。',
         );
       }
 

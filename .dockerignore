@@ -3,9 +3,12 @@ node_modules/
 *.log
 
 # 真实配置（含 AppSecret），只提交 .example.json
-config/bot.json
-config/bots/
-!config/bots.example.json
+# 注意：这里不能只排 bot.json / bots/，config/ 下还有 backups/（完整配置备份，
+# 含明文 AppSecret）和 live-test.json（真机测试配置），都会被打进镜像层，
+# docker pull 之后 docker history 就能挖出来。所以把整个 config/ 排除，
+# 只反向保留 *.example.json。
+config/*
+!config/*.example.json
 
 # 运行时数据
 data/
@@ -27,3 +30,6 @@ Thumbs.db
 # 临时文件
 tmp-*
 *.tmp
+.env
+.env.local
+.git
