@@ -3,11 +3,11 @@
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 
-// 面板访问密钥从 URL 取一次，之后存 localStorage，避免刷新丢失
-const params = new URLSearchParams(location.search);
-const urlKey = params.get('key') || params.get('token');
-if (urlKey) localStorage.setItem('qqbot_key', urlKey);
-const ACCESS_KEY = localStorage.getItem('qqbot_key') || '';
+// 面板访问密钥不再由前端保存：服务端在首跳用 ?key= 换成 HttpOnly Cookie，
+// 之后的请求浏览器自动带上。以前存 localStorage，等于任何一处 XSS 都能直接
+// 读走面板全权（拿到 key 就能装插件 = 执行任意代码）。
+// 顺手清掉旧版本残留的那份，否则它会一直躺在浏览器里。
+try { localStorage.removeItem('qqbot_key'); } catch {}
 
 // 当前正在看的机器人。所有 /api 请求都会带上 ?bot=<id>
 let CURRENT_BOT = localStorage.getItem('qqbot_bot') || '';
@@ -24,7 +24,6 @@ async function api(path, opts = {}) {
     ...opts,
     headers: {
       'Content-Type': 'application/json',
-      ...(ACCESS_KEY ? { 'X-Access-Key': ACCESS_KEY } : {}),
       ...(opts.headers || {}),
     },
   });
@@ -454,7 +453,7 @@ function setTheme(t, { persist = true } = {}) {
   // 插件页面的 CSS 变量是跟着主题走的，切了要让它重新加载一次
   $$('.plugin-page').forEach((f) => {
     if (!f.dataset.key || !f.getAttribute('src')) return;
-    const url = pluginPageUrl(f.dataset.key);
+    const url = pluginPageUrl(f.dataset.key, f.dataset.token);
     if (f.getAttribute('src') !== url) f.src = url; // 主题没变就别重载
   });
 }
@@ -592,7 +591,7 @@ function activateTab(name) {
   if (name.startsWith('page:')) {
     const frame = $(`#tab-${CSS.escape(name)} .plugin-page`);
     if (frame?.dataset.key) {
-      const url = pluginPageUrl(frame.dataset.key);
+      const url = pluginPageUrl(frame.dataset.key, frame.dataset.token);
       if (frame.getAttribute('src') !== url) frame.src = url;
     }
   }
@@ -726,9 +725,25 @@ function renderStatus(s) {
   }
 }
 
+/** 上一次看到的进程实例标识，用来判断服务是不是重启过 */
+let lastInstanceId = '';
+
 async function pollStatus() {
   try {
-    renderStatus(await api('/api/status'));
+    const d = await api('/api/status');
+    /**
+     * 进程重启 ⇒ 页面令牌全部重新生成、会话也全失效。
+     * 已打开的插件页 iframe 手里还是旧令牌，接下来每个请求都会被判成跨站（403），
+     * 用户看到的就是「切过去先红一下，等一会儿才好」。
+     *
+     * 这里一发现实例换了就立刻刷新令牌并重载 iframe，不必等兜底轮询。
+     */
+    const iid = String(d?.instanceId || '');
+    if (lastInstanceId && iid && iid !== lastInstanceId) {
+      refreshPageTokens();
+    }
+    lastInstanceId = iid;
+    renderStatus(d);
   } catch (e) {
     $('#connText').textContent = '面板断开';
     $('#connPill').className = 'status-pill offline';
@@ -1333,21 +1348,36 @@ async function loadPluginPages() {
     frame.className = 'plugin-page';
     frame.title = p.label;
     /**
-     * allow-same-origin 是为了让页面能带密钥调 /api/ 拿数据；
-     * allow-scripts 让它能跑自己的脚本。
+     * 只给脚本和表单，**不给 allow-same-origin**。
      *
-     * 必须说清楚：**这两个一起开等于没有隔离**。同源意味着插件页面
-     * 能读 parent.document、localStorage，能以面板身份调任何接口。
-     * 这里只挡住了样式互相污染，不挡权限。
-     * 所以「插件注册远端 HTML」要当成引入第三方代码来对待，
-     * 只装自己信得过的插件。
+     * 以前这两个都开，注释自己都写着「等于没有隔离」——因为确实没有：
+     * 同源意味着插件页能读 parent.document 和 localStorage，而 localStorage
+     * 里存着面板访问密钥。于是「装一个插件」就等于「把面板密码交给插件作者」，
+     * 而且一个纯 HTML 页面就够了，不需要执行任何后端代码。
+     *
+     * 现在去掉 allow-same-origin，插件页变成 opaque origin：读不到父页任何
+     * 东西，调接口只能靠地址上那把只属于这个页面的令牌（?pt=）。代价是它
+     * 不再自动带 Cookie，所以插件页必须用 pt 而不是 key（旧写法仍兼容）。
      */
-    frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms');
+    frame.setAttribute('sandbox', 'allow-scripts allow-forms');
     /**
      * 地址在「点开的时候」才算，不在这里定死：
      * 页面数据是跟着当前机器人的，切了机器人必须重新拼地址才能拿到对的 bot。
      */
     frame.dataset.key = p.key;
+    // 页面令牌：不是面板密钥，只对这一个插件自己的接口有效
+    frame.dataset.token = p.token || '';
+    /**
+     * **直接设上地址（预加载），不再等用户点开。**
+     *
+     * 以前这里是懒加载：注释写「地址在点开的时候才算」，好处是不点就不请求。
+     * 但代价是第一次点插件标签要走完「下载 35KB HTML → 解析几百行内联脚本 →
+     * 拉数据 → 渲染」，主观上就是卡一下，用户容易以为坏了。
+     *
+     * 现在建标签时就开始加载，点过去就是现成的。切换机器人时这个函数会重跑，
+     * 地址里带上了新的 bot 参数，所以也不会串台。
+     */
+    frame.src = pluginPageUrl(p.key, p.token || '');
     sec.appendChild(frame);
     main.appendChild(sec);
   }
@@ -1364,16 +1394,81 @@ async function loadPluginPages() {
   if (activeId.startsWith('page:') && !tabButton(activeId)) activateTab('overview');
 }
 
-/** 插件页面 iframe 的地址：带上密钥、当前机器人和主题 */
-function pluginPageUrl(key) {
+/**
+ * 插件页面 iframe 的地址：带**页面令牌**、当前机器人和主题。
+ *
+ * 这里刻意不带 accessKey —— iframe 是 opaque origin，插件页一行
+ * `location.search` 就能读到地址上的所有参数，带 key 等于把面板密钥
+ * 交给插件作者。令牌只对这一个插件的接口有效（服务端 pageTokenAllows 收口），
+ * 泄露了也换不到面板权限。
+ */
+function pluginPageUrl(key, token) {
   const q = new URLSearchParams();
-  if (ACCESS_KEY) q.set('key', ACCESS_KEY);
+  if (token) q.set('pt', token);
   if (CURRENT_BOT) q.set('bot', CURRENT_BOT);
   // 带上主题，页面里的 CSS 变量就能跟着面板切换，插件作者不用自己适配
   q.set('theme', document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
   const s = q.toString();
   return `/api/pages/${encodeURIComponent(key)}/html${s ? `?${s}` : ''}`;
 }
+
+/**
+ * 跟着进程重启自动换令牌。
+ *
+ * 页面令牌只存在服务端内存里，进程重启就全部重新生成。而面板页如果是在重启
+ * **之前**打开的，iframe 里还挂着旧令牌，插件页的所有请求都会被判成跨站
+ * （403），表现为「数据空白」或者直接 `Failed to fetch` —— 用户完全看不出
+ * 是重启导致的，只会觉得面板坏了。
+ *
+ * 这里定期问一次页面列表：令牌变了就更新 iframe 的地址并重载它。
+ * 只在令牌真的变化时才重载（也就是重启过），平时不会打断用户操作。
+ */
+async function refreshPageTokens() {
+  let list = null;
+  try {
+    list = await api('/api/pages');
+  } catch {
+    return 0;
+  }
+  if (!Array.isArray(list)) return 0;
+
+  let reloaded = 0;
+  for (const p of list) {
+    for (const f of $$('.plugin-page')) {
+      if (f.dataset.key !== p.key) continue;
+      if (f.dataset.token === (p.token || '')) continue;
+      f.dataset.token = p.token || '';
+      // 只重载已经打开过的（没加载过的不去碰，免得白跑一次请求）
+      if (f.getAttribute('src')) {
+        f.src = pluginPageUrl(f.dataset.key, f.dataset.token);
+        reloaded += 1;
+      }
+    }
+  }
+  return reloaded;
+}
+
+// 15 秒足够快，又不会给面板添负担；令牌不变时这里什么都不做
+setInterval(() => {
+  refreshPageTokens();
+}, 15000);
+
+/**
+ * 切回面板时立刻补一次。
+ *
+ * 两个真实场景：
+ *   1. 浏览器会把后台标签页的定时器降频（Chrome 最长到 1 分钟一次），
+ *      所以「去改个配置再切回来」最容易撞上旧令牌
+ *   2. 保存配置会触发 config-watch 热加载，插件被卸载重载 → 页面令牌
+ *      跟着重新生成 → 已打开的 iframe 立刻变无效
+ * 回来这一下立刻修，比等定时器体感好得多。
+ */
+window.addEventListener('focus', () => {
+  refreshPageTokens();
+});
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) refreshPageTokens();
+});
 
 /* ---------------- 统计 ---------------- */
 
@@ -2199,11 +2294,10 @@ $('#btnRescanPlugins')?.addEventListener('click', rescanPlugins);
 $('#btnRefreshStats')?.addEventListener('click', loadStats);
 $('#btnDoctor')?.addEventListener('click', () => loadDoctor({ expand: true }));
 
-// 导出：直接开下载，不用 fetch——浏览器自己会带上 accessKey（拼在地址里）
+// 导出：直接开下载，不用 fetch——会话在 Cookie 里，浏览器自己会带上
 $('#btnExportStats')?.addEventListener('click', () => {
   const days = Number($('#statsDays')?.value) || 7;
   const q = new URLSearchParams({ days: String(days) });
-  if (ACCESS_KEY) q.set('key', ACCESS_KEY);
   if (CURRENT_BOT) q.set('bot', CURRENT_BOT);
   window.location.href = `/api/stats/export?${q}`;
 });
@@ -3214,8 +3308,9 @@ function connectStream() {
    * 服务端在连接建立时用 pickRuntime() 绑定机器人，不带就是 runtimes[0]；
    * 切到机器人 B 后，5 秒一次的 pollStatus 显示 B，2 秒一次的 SSE 又用 A 覆盖回来。
    */
+  // 不再拼 key：SSE 也是普通同源请求，Cookie 会自动带上。
+  // 以前把密钥拼在 EventSource 的地址上，每次重连都往反代 access log 写一次。
   const sp = new URLSearchParams();
-  if (ACCESS_KEY) sp.set('key', ACCESS_KEY);
   if (CURRENT_BOT) sp.set('bot', CURRENT_BOT);
   stream?.close?.();
   const es = new EventSource(`/api/stream?${sp}`);

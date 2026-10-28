@@ -4,16 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>栖 Roost · 控制台</title>
-<script>
-  // 在样式加载前定好主题，避免刷新时闪一下白
-  (function () {
-    try {
-      var t = localStorage.getItem('qqbot_theme');
-      if (!t) t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-      document.documentElement.dataset.theme = t;
-    } catch (e) {}
-  })();
-</script>
+<!-- 主题脚本必须外置：CSP 的 script-src 'self' 会拦掉内联脚本 -->
+<script src="/theme-boot.js"></script>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>

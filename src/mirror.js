@@ -86,9 +86,36 @@ const AUTO_TTL = 10 * 60_000;
 export function configureMirror(globalCfg) {
   const n = globalCfg?.network ?? {};
   const id = String(n.mirror ?? 'auto').trim() || 'auto';
+
+  /**
+   * 自定义下载前缀必须是 https。
+   *
+   * 这个值会被直接拼在 tarball 地址前面（见 applyMirror），而这个项目**更新包
+   * 没有内容校验**（updater.js 的 expectSha256 恒为 null）。也就是说：
+   * 填一个 http 地址，等于让链路上的任何人决定你下一版跑什么代码。
+   *
+   * 不合法就退回默认（不用它），而不是抛错 —— 配置文件写错了不该让整个框架起不来。
+   */
+  let custom = String(n.mirrorCustom ?? '').trim();
+  if (custom) {
+    let u = null;
+    try {
+      u = new URL(custom.includes('://') ? custom : `https://${custom}`);
+    } catch {
+      u = null;
+    }
+    if (!u || u.protocol !== 'https:') {
+      log.warn(
+        `network.mirrorCustom 必须是 https:// 开头，已忽略：${custom}\n` +
+          '  （自定义下载源会决定你下一版跑什么代码，明文 http 等于把它交给链路上的任何人）',
+      );
+      custom = '';
+    }
+  }
+
   current = {
     id: PRESETS.some((p) => p.id === id) ? id : 'auto',
-    custom: String(n.mirrorCustom ?? '').trim(),
+    custom,
     // Gitee 私人令牌：选填。公开仓库匿名也能用，填了只是把 API 配额提上去
     giteeToken: String(n.giteeToken ?? '').trim(),
   };
@@ -160,6 +187,17 @@ export function applyMirror(url, preset, custom = current.custom) {
     // 允许用户只填域名，自动补协议和结尾斜杠
     let b = base.trim();
     if (!/^https?:\/\//i.test(b)) b = `https://${b}`;
+    /**
+     * 自定义前缀必须是 https —— 这里再挡一道。
+     *
+     * configureMirror 已经校验过配置里的值，但 `probeMirrors` 的 custom 是
+     * 面板请求体直接传进来的（「测速」按钮），不经过 configureMirror。
+     * 不合法就**退回原始地址**，不要拼一个 http 前缀上去。
+     */
+    if (preset.kind === 'custom' && !/^https:\/\//i.test(b)) {
+      log.warn(`自定义下载源必须是 https，已忽略：${base}`);
+      return url;
+    }
     if (!b.endsWith('/')) b += '/';
     // 已经是这个前缀了就别套第二次
     if (url.startsWith(b)) return url;

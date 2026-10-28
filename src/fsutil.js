@@ -23,7 +23,20 @@ export async function writeJsonAtomic(file, data) {
   const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
   const text = `${JSON.stringify(data, null, 2)}\n`;
   try {
-    await fs.writeFile(tmp, text, 'utf8');
+    /**
+     * `mode: 0o600` —— 只有属主能读写。
+     *
+     * 这些 JSON 里有 `config/bot.json`、`config/bots/<id>.json`，都带明文
+     * AppSecret；还有权限表、群档案。Linux 默认 umask 022 下新建文件是 644，
+     * 同机其他用户直接 `cat` 就能拿到机器人凭证。
+     *
+     * 注意两点：
+     *   - mode 只在**创建**时生效，而这里的 tmp 每次都是新文件，所以一定吃到
+     *   - rename 会保留临时文件的权限，覆盖掉旧文件原来的 644 —— 也就是说
+     *     用户只要保存过一次配置，老文件的权限就被修正了，不需要单独做迁移
+     *   - Windows 上 mode 被忽略，不影响运行
+     */
+    await fs.writeFile(tmp, text, { encoding: 'utf8', mode: 0o600 });
     await fs.rename(tmp, file);
   } catch (e) {
     await fs.rm(tmp, { force: true }).catch(() => {});

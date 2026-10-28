@@ -43,6 +43,74 @@ import {
 const log = createLogger('webui');
 const WEB_ROOT = path.join(ROOT, 'web');
 
+/**
+ * 进程实例标识。
+ *
+ * 面板用它判断「服务是不是重启过」。重启意味着两件事同时发生：
+ *   - 页面令牌全部重新生成 → 已打开的插件页 iframe 手里拿的全是废牌，
+ *     之后每个请求都会被判成跨站（403）
+ *   - 会话 Cookie 全部失效
+ *
+ * 前端拿到这个值一变化，就可以立刻重载 iframe，而不是干等兜底轮询
+ * （用户会看到一条红色报错闪过，体验很差）。
+ */
+const PROCESS_STARTED_AT = Date.now();
+
+/**
+ * 主面板的 CSP。
+ *
+ * 几个取舍说明一下，免得后来人以为写错了：
+ *   - `script-src 'self'` 是硬要求：主题脚本已外置成 /theme-boot.js，
+ *     面板里不再有内联 <script>。开 'unsafe-inline' 等于放弃脚本防护，
+ *     而面板 localStorage 里存着访问密钥。
+ *   - `style-src` **必须**留 'unsafe-inline'：app.js 里有二十多处
+ *     `style="width:...%"` 这类动态样式，去掉它布局直接散架。
+ *   - `img-src` 带 data: 和 blob:：二维码是 SVG 内联，插件图标可能用 data URI。
+ *   - 不设 HSTS：本地是 http，加了会让浏览器以后强制走 https 打不开。
+ *     反代终止 TLS 时由 Nginx/Caddy 那边加。
+ *   - `frame-src 'self'` 是给插件页面 iframe 用的，与 `frame-ancestors 'none'`
+ *     不冲突：前者管「我能嵌谁」，后者管「谁能嵌我」。
+ */
+const CSP_MAIN = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "font-src 'self' data:",
+  "connect-src 'self'",
+  "frame-src 'self'",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join('; ');
+
+/**
+ * 插件页面的 CSP —— 必须比主面板宽，而且**一条 `'self'` 都不能有**。
+ *
+ * 两个坑，都是实测踩出来的：
+ *
+ * 1. 插件页跑在 `sandbox="allow-scripts allow-forms"` 的 iframe 里（没有
+ *    allow-same-origin），它的源是 **opaque origin**。CSP 里 `'self'` 的语义是
+ *    「文档自己的源」，而 opaque origin 跟谁都不相等 —— 于是 `connect-src 'self'`
+ *    会把插件页**所有** fetch 拦死。现象是页面渲染正常、数据永远加载不出来，
+ *    控制台报 `Failed to fetch`，而服务端一条请求记录都没有。
+ * 2. 所以这里改用协议通配（`http:` / `https:`）而不是源通配。
+ *    敢放宽的前提是隔离靠 sandbox 不靠 CSP：插件页读不到父页的 localStorage /
+ *    Cookie / DOM，调接口必须带 URL 上那把只属于本页面的 `pt` 令牌。
+ *
+ * 也不设 `frame-ancestors`：opaque origin 下它同样认不出「谁在嵌我」，
+ * 反而可能连面板自己都嵌不进去。防外部嵌套由主面板那套 X-Frame-Options 负责。
+ */
+const CSP_PAGE = [
+  "default-src 'none'",
+  "script-src 'unsafe-inline' http: https:",
+  "style-src 'unsafe-inline' http: https:",
+  "img-src data: blob: http: https:",
+  "font-src data: http: https:",
+  "connect-src http: https:",
+].join('; ');
+
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
@@ -378,6 +446,11 @@ export async function startWebServer({
             : people.find((p) => p.openid === c.id)?.name ?? '',
       }));
     }
+    /**
+     * 进程实例标识：前端一看到它变了就知道服务重启过，
+     * 页面令牌和会话都已作废，需要立刻重载插件页而不是等下轮轮询。
+     */
+    snap.instanceId = `${process.pid}-${PROCESS_STARTED_AT}`;
     return snap;
   };
 
@@ -447,15 +520,101 @@ export async function startWebServer({
    * timingSafeEqual 只防时序侧信道，挡不住「弱 key 被顺序猜」。
    * 正确 key 不受影响（成功后清零），误伤面很小。
    */
+  /**
+   * 面板会话：sid -> 过期时间戳。
+   *
+   * 为什么要有它：accessKey 是长期固定的，挂在 URL 上会进浏览器历史、书签同步、
+   * Referer、反向代理 access_log，每一条都是明文泄露面。换成 HttpOnly Cookie 之后，
+   * 页面脚本读不到、外链带不出去，而且重启进程就全部作废（等于一键踢掉所有会话）。
+   *
+   * 只存内存。重启后要重新用带 ?key= 的地址进一次 —— 这是有意为之：
+   * 落盘就等于多存一份长期凭据，和「减少凭据扩散」的目标相反。
+   */
+  const sessions = new Map();
+  const SESSION_TTL_MS = 7 * 864e5;
+  const sessionTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [k, exp] of sessions) if (exp < now) sessions.delete(k);
+  }, 60_000);
+  sessionTimer.unref?.();
+
   const authFails = new Map(); // ip -> { count, start }
   const AUTH_WINDOW = 60_000;
   const AUTH_MAX_FAILS = 20;
-  const authorized = (req, url) => {
+
+  /**
+   * 从 URL 上的 `pt` 反查插件页面。
+   *
+   * 为什么需要它：插件页在 iframe 里是 **opaque origin**（sandbox 不给
+   * allow-same-origin），既带不了 Cookie，也带不了 X-Access-Key 头，
+   * 唯一的凭证只能挂在地址上。所以给它一把只属于那个页面的随机令牌。
+   */
+  const pickPageToken = (url) => {
+    const pt = url.searchParams.get('pt');
+    if (!pt) return null;
+    for (const r of runtimes) {
+      const hit = r?.plugins?.pages?.findByToken?.(pt);
+      if (hit) return hit;
+    }
+    return null;
+  };
+
+  /**
+   * 页面令牌能碰哪些路径 —— **最小权限**，不是「只读」。
+   *
+   * 只放行这个插件自己的入口：
+   *   /api/pages/<插件id>:<key>/html   iframe 载入页面本体
+   *   /api/plugins/<插件id>/panel      面板数据（dice 的战绩就是这么取的）
+   *   /api/plugins/<插件id>/r/*        插件自己的路由（斗罗后台全在这一层）
+   *   /api/status                      只读状态
+   *
+   * **方法不限制**。斗罗那种运营后台要 POST/PATCH 改数据，只给 GET 会直接
+   * 把它废掉；而「限制插件写自己的数据」没有安全收益 —— 插件本来就有子进程
+   * 执行权。真正的边界是**不让它碰面板接口**：/api/config、/api/logs、
+   * /api/bots、/api/qq/call 一个都不在名单里。
+   */
+  const pageTokenAllows = (pathname, ptPage) => {
+    const id = String(ptPage?.pluginId ?? '');
+    if (!id) return false;
+    if (pathname === `/api/pages/${ptPage.key}/html`) return true;
+    if (pathname === `/api/plugins/${id}/panel`) return true;
+    if (pathname.startsWith(`/api/plugins/${id}/r/`)) return true;
+    if (pathname === '/api/status') return true;
+    return false;
+  };
+
+  const authorized = (req, url, ptPage = null) => {
     if (!accessKey) return true;
+
+    // 插件页面令牌：不是面板密钥，权限由 pageTokenAllows() 再收一道
+    if (ptPage) return true;
+
+    /**
+     * 会话 Cookie —— 浏览器正常路径都走这里。
+     *
+     * 只在正则上限制 64 位十六进制是防「畸形 cookie 撑爆 Map」，
+     * 不是安全边界；真正的校验是下面查表 + 过期判断。
+     */
+    const cookie = String(req.headers.cookie || '');
+    const sid = /(?:^|;\s*)roost_sid=([a-f0-9]{64})/.exec(cookie)?.[1];
+    if (sid) {
+      const exp = sessions.get(sid);
+      if (exp && exp > Date.now()) return true;
+      sessions.delete(sid);
+    }
+
     const ip = req.socket?.remoteAddress || 'unknown';
     const now = Date.now();
     const rec = authFails.get(ip);
-    if (rec && now - rec.start < AUTH_WINDOW && rec.count >= AUTH_MAX_FAILS) return false;
+    if (rec && now - rec.start < AUTH_WINDOW && rec.count >= AUTH_MAX_FAILS) {
+      /**
+       * 锁定期要留痕。以前这里直接 `return false` 一句话都没有，
+       * 于是管理员只看到「访问密钥无效」，分不清是自己敲错还是有人在打，
+       * 也拿不到来源 IP。
+       */
+      log.error(`面板认证失败次数过多，已临时封禁 ${ip}（${Math.ceil((AUTH_WINDOW - (now - rec.start)) / 1000)} 秒后解除）`);
+      return false;
+    }
     // 兼容旧的 X-Token / ?token= 写法
     const given =
       req.headers['x-access-key'] ||
@@ -469,6 +628,8 @@ export async function startWebServer({
       const cur = rec && now - rec.start < AUTH_WINDOW ? rec : { count: 0, start: now };
       cur.count += 1;
       authFails.set(ip, cur);
+      // 记失败但不记密钥本身：只记来源与累计次数
+      log.warn(`面板认证失败：来源 ${ip}，本窗口第 ${cur.count} 次`);
       if (authFails.size > 5000) authFails.clear(); // 防内存膨胀
     }
     return ok;
@@ -491,7 +652,17 @@ export async function startWebServer({
    *
    * 端口不固定（会自动顺延），所以只比 host 部分。
    */
-  const isSameOrigin = (req) => {
+  const isSameOrigin = (req, ptPage = null) => {
+    /**
+     * 插件页的例外：sandbox 不给 allow-same-origin 之后，它就是 opaque origin，
+     * 发请求时 `Origin` 恒为字符串 `"null"`，new URL('null') 会抛错 → 当跨站拒掉。
+     *
+     * 只对「带有效页面令牌」的请求放行，而且这类请求的路径已经被
+     * pageTokenAllows() 限死在该插件自己的接口上。没有 pt 的 `Origin: null`
+     * 依旧按跨站处理。
+     */
+    if (ptPage && String(req.headers.origin || '') === 'null') return true;
+
     const host = String(req.headers['host'] || '');
     for (const h of ['origin', 'referer']) {
       const v = req.headers[h];
@@ -616,6 +787,17 @@ export async function startWebServer({
 
   const server = http.createServer(async (req, res) => {
     /**
+     * 安全响应头：面板一旦反代到公网，这几条是浏览器侧的最后一道。
+     *
+     * `Referrer-Policy: no-referrer` 尤其重要——它顺手堵掉「点面板里的外链
+     * 把 URL 上的密钥带到别人服务器」那条路（GitHub/Gitee 链接就在面板里）。
+     */
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Content-Security-Policy', CSP_MAIN);
+
+    /**
      * URL 解析必须在 try 里面。
      *
      * 以前这两行在 try 外面：`GET /%` 会让 decodeURIComponent 抛 URIError，
@@ -632,10 +814,126 @@ export async function startWebServer({
       return json(res, 400, { error: '请求地址不合法' });
     }
 
+    /**
+     * 首跳把 `?key=` 换成会话 Cookie，然后 302 到干净地址。
+     *
+     * 只对**页面导航**这么做（`/api/` 不动）：脚本类调用方（roost-mcp 这类）
+     * 还在用 `?key=` 直连接口，一刀切会让它们全挂。等它们改成 X-Access-Key 头
+     * 再收掉 query 分支。
+     *
+     * 换成 Cookie 之后浏览器地址栏、历史记录、书签同步里就没有密钥了，
+     * 而 Cookie 是 HttpOnly，页面脚本读不到。
+     */
+    if (!pathname.startsWith('/api/')) {
+      const qKey = url.searchParams.get('key') || url.searchParams.get('token');
+      if (qKey && accessKey && safeEqual(qKey, accessKey)) {
+        const sid = crypto.randomBytes(32).toString('hex');
+        sessions.set(sid, Date.now() + SESSION_TTL_MS);
+        const rest = new URLSearchParams(url.search);
+        rest.delete('key');
+        rest.delete('token');
+        const qs = rest.toString();
+        // 用 url.pathname（原始编码形式）而不是解码后的，否则带 %2F 的路径会被改坏
+        res.writeHead(302, {
+          'Set-Cookie': `roost_sid=${sid}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.floor(
+            SESSION_TTL_MS / 1000,
+          )}`,
+          Location: url.pathname + (qs ? `?${qs}` : ''),
+        });
+        return res.end();
+      }
+    }
+
+    /**
+     * 面板首页的「没凭证」提示。
+     *
+     * 会话改成 Cookie 之后，最常见的新问题是「书签里的地址没有 key 了，打开一片空白」。
+     * 静态文件本身不鉴权（也不该鉴权，不然 CSS/JS 都拿不到），但首页可以给一句人话，
+     * 而不是让用户对着空面板怀疑是不是坏了。
+     */
+    if ((pathname === '/' || pathname === '/index.html') && accessKey) {
+      const ck = String(req.headers.cookie || '');
+      const sid0 = /(?:^|;\s*)roost_sid=([a-f0-9]{64})/.exec(ck)?.[1];
+      const exp0 = sid0 ? sessions.get(sid0) : 0;
+      if (!exp0 || exp0 <= Date.now()) {
+        res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8' });
+        return res.end(
+          '<!doctype html><meta charset="utf-8"><title>需要访问密钥</title>' +
+            '<body style="font:15px/1.6 system-ui;max-width:34em;margin:14vh auto;padding:0 1.2em">' +
+            '<h1 style="font-size:18px">需要访问密钥</h1>' +
+            '<p>面板已开启访问密钥，但当前浏览器还没有会话（进程重启后会话会全部失效）。</p>' +
+            '<p>请用带密钥的地址打开一次，之后会在浏览器里记住 7 天：</p>' +
+            '<pre style="background:rgba(128,128,128,.14);padding:10px 12px;border-radius:6px;overflow:auto">' +
+            `http://${shownHost}:${actualPort}/?key=你的密钥</pre>` +
+            '<p style="opacity:.65;font-size:13px">密钥在 config/bot.json 的 webui.accessKey，或启动时设置的环境变量里。</p>',
+        );
+      }
+    }
+
     try {
       // ---------------- API ----------------
       if (pathname.startsWith('/api/')) {
-        if (!authorized(req, url)) return json(res, 401, { error: '访问密钥无效' });
+        const ptPage = pickPageToken(url);
+
+        /**
+         * 插件页是 opaque origin（跨源），浏览器要求响应带 CORS 头才肯把内容
+         * 交给页面。只在带有效 pt 时回，且回 `null` —— 这只匹配 opaque origin，
+         * 普通网页拿到的 `Access-Control-Allow-Origin: null` 与自己的 Origin
+         * 不相等，仍然读不到。
+         */
+        if (ptPage && String(req.headers.origin || '') === 'null') {
+          res.setHeader('Access-Control-Allow-Origin', 'null');
+          res.setHeader('Vary', 'Origin');
+        }
+
+        /**
+         * CORS 预检直接答，**不要先认令牌**。
+         *
+         * 这里踩过一次：原来写成 `if (ptPage && req.method === 'OPTIONS')`，
+         * 于是「令牌没认出来」的预检会继续往下走，撞到「写操作必须
+         * application/json」那道闸门 —— 预检没有 body，于是回 415，
+         * 浏览器判定预检失败，页面拿到的是 `Failed to fetch`。
+         *
+         * 而插件页里 `fetch` 只要带了 `Content-Type: application/json`
+         * （斗罗对所有请求都带），连 GET 都会触发预检，所以这个坑表现为
+         * 「页面渲染正常、数据一条都没有」。
+         *
+         * 预检不返回任何数据，谁来问都答 204 即可，不需要鉴权。
+         */
+        if (req.method === 'OPTIONS') {
+          const origin = String(req.headers.origin || '');
+          /**
+           * 允许的头**回显浏览器要的那个**，不写死。
+           *
+           * 踩过的坑：原来写死 `Content-Type`，看着没错，但浏览器报的是
+           * 「Request header field content-type is not allowed by
+           * Access-Control-Allow-Headers in preflight response」。
+           * 回显 `Access-Control-Request-Headers` 就永远不会对不上 ——
+           * 它问什么我给什么，反正是插件页自己的只读请求。
+           *
+           * **不要加 `Access-Control-Max-Age`**：加了浏览器会把这次预检结果
+           * 缓存好几分钟，一旦某次响应是错的（或者服务端刚改过逻辑），
+           * 后面再改代码都没用 —— 浏览器压根不会重新来问，只会一直报同一个错，
+           * 排查时会以为是代码没生效。本地面板的预检几乎没有开销，不值得缓存。
+           */
+          const wantHeaders = String(req.headers['access-control-request-headers'] || '');
+          res.writeHead(204, {
+            ...(origin === 'null' ? { 'Access-Control-Allow-Origin': 'null', Vary: 'Origin' } : {}),
+            'Access-Control-Allow-Methods': 'GET, POST, PATCH, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': wantHeaders || 'Content-Type, X-Access-Key, X-Token',
+          });
+          return res.end();
+        }
+
+        if (!authorized(req, url, ptPage)) return json(res, 401, { error: '访问密钥无效' });
+
+        /**
+         * 页面令牌的权限闸门：**紧跟着鉴权做**，不能放到路由里。
+         * 否则拿到任意插件页 token 就能调 /api/config、/api/logs。
+         */
+        if (ptPage && !pageTokenAllows(pathname, ptPage)) {
+          return json(res, 403, { error: '插件页面无权访问这个接口' });
+        }
 
         /**
          * CSRF / 同源校验必须在**路由之前**。
@@ -644,9 +942,41 @@ export async function startWebServer({
          * 完全不受保护——跨站页面一个 text/plain 表单就能把它们打出去。
          */
         if (req.method !== 'GET' && req.method !== 'HEAD' && !isJsonRequest(req)) {
+          /**
+           * 这里以前完全静默 —— 而它恰恰是「插件页一片空白」最可能的入口：
+           * CORS 预检（OPTIONS）没有 body，如果哪天 OPTIONS 分支漏了或顺序错了，
+           * 预检就会掉进这里拿 415，浏览器判定预检失败，页面只看到
+           * `TypeError: Failed to fetch`，服务端一条日志都没有，排查全靠猜。
+           */
+          log.warn(
+            `拒绝写操作：${req.method} ${pathname}` +
+              `（Content-Type: ${req.headers['content-type'] || '无'}，需要 application/json）`,
+          );
           return json(res, 415, { error: '写操作需要 Content-Type: application/json' });
         }
-        if (!isSameOrigin(req)) {
+        if (!isSameOrigin(req, ptPage)) {
+          /**
+           * 这里踩过一个很隐蔽的坑：插件页是 opaque origin，请求 `Origin` 恒为
+           * 字符串 `null`。它发的请求如果没带有效 `pt`（比如面板重启后 iframe
+           * 还拿着旧令牌），就会落到这个分支。
+           *
+           * 两个后果叠加，导致排查极其困难：
+           *   1. 403 响应没带 CORS 头 → 浏览器不给页面读状态码，页面只看到
+           *      `TypeError: Failed to fetch`，看起来像网络断了或服务没起
+           *   2. 这里不写日志 → 服务端一条记录都没有，像是请求根本没到
+           *
+           * 所以：给 opaque origin 补上 CORS 头（让它能读到 403 和错误文案），
+           * 并且**一定要留一条 warn**。没带令牌的情况单独说清楚，否则下次
+           * 还是得靠猜。
+           */
+          if (String(req.headers.origin || '') === 'null') {
+            res.setHeader('Access-Control-Allow-Origin', 'null');
+            res.setHeader('Vary', 'Origin');
+          }
+          log.warn(
+            `拒绝跨站请求：${req.method} ${pathname}` +
+              `（Origin: ${req.headers.origin || '无'}${ptPage ? '，页面令牌有效' : '，无有效页面令牌'}）`,
+          );
           return json(res, 403, { error: '跨站请求被拒绝' });
         }
 
@@ -880,7 +1210,36 @@ export async function startWebServer({
           if (typeof body.appSecret === 'string' && body.appSecret && body.appSecret !== '********') {
             cfg.appSecret = body.appSecret.trim();
           }
-          if (body.baseUrl) cfg.baseUrl = body.baseUrl.trim();
+          /**
+           * baseUrl 必须校验，否则这里等于「把 access_token 送人」的开关。
+           *
+           * `api.js` 用这个 baseUrl 拼请求，并带上 `Authorization: QQBot <token>`。
+           * 面板一旦被改成第三方地址，下一次 API 调用就把机器人令牌发到那台机器，
+           * 拿到令牌就能冒充机器人在它所在的任何群里发消息 —— 面板弱口令会因此
+           * 直接升级成「机器人身份被完全接管」。
+           *
+           * 用 `*.qq.com` 而不是写死 `api.sgroup.qq.com`：官方历史上用过
+           * `api.bot.qq.com` 这类别名（现有配置里就有），写死会把用户自己的
+           * 合法配置挡回去。qq.com 是腾讯的域，第三方拿不到子域。
+           */
+          if (body.baseUrl !== undefined && body.baseUrl !== '') {
+            let u = null;
+            try {
+              u = new URL(String(body.baseUrl).trim());
+            } catch {
+              return json(res, 400, { error: 'baseUrl 不是合法 URL' });
+            }
+            const host = u.hostname.toLowerCase();
+            const official = host === 'qq.com' || host.endsWith('.qq.com');
+            if (u.protocol !== 'https:' || !official) {
+              return json(res, 400, {
+                error:
+                  'baseUrl 只允许 https 的腾讯官方域名（如 https://api.sgroup.qq.com）。\n' +
+                  '改成第三方地址会把 access_token 发过去，等于交出机器人身份。',
+              });
+            }
+            cfg.baseUrl = u.origin;
+          }
           if (body.intents !== undefined) {
             const n = Number(body.intents);
             if (!Number.isInteger(n) || n < 0 || n > 0x7fffffff) {
@@ -1003,7 +1362,12 @@ export async function startWebServer({
          * 面板据此显示「统计不可用」而不是画一堆 0。
          */
         if (pathname === '/api/stats' && req.method === 'GET') {
-          const days = Number(url.searchParams.get('days')) || 7;
+          /**
+           * `days` 必须夹紧。同文件下面的 `/api/stats/export` 早就 clamp 到
+           * 1~365 了，这里漏了 —— 传个极大值就能让 SQLite 扫全表，
+           * 面板上一次点击就变成一次自伤式 DoS。
+           */
+          const days = Math.max(1, Math.min(365, Number(url.searchParams.get('days')) || 7));
           try {
             return json(res, 200, rt.stats?.overview(days) ?? { available: false });
           } catch (e) {
@@ -1148,6 +1512,23 @@ export async function startWebServer({
             res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
             return res.end('页面不存在（插件可能已卸载或重载）');
           }
+          /**
+           * 插件页要单独换一套 CSP：它允许内联脚本和样式。
+           * 不换的话会继承入口那套 `script-src 'self'`，插件页的内联脚本
+           * 直接不执行 —— 表现是页面渲染出来了、但按钮全都没反应。
+           */
+          res.setHeader('Content-Security-Policy', CSP_PAGE);
+          /**
+           * `X-Frame-Options` 必须从入口的 DENY 改成 SAMEORIGIN。
+           *
+           * 入口给所有响应都加了 DENY（防止面板被别的网站嵌套），但插件页
+           * **本来就该被面板自己嵌**。留着 DENY 的后果是：iframe 加载这个地址时
+           * 被浏览器拒绝渲染，Chrome 显示「127.0.0.1 拒绝连接」——
+           * 看起来像服务没起来，实际上是安全头把它自己挡在门外。
+           *
+           * SAMEORIGIN 仍然挡住「外部站点嵌插件页」，这是需要的。
+           */
+          res.setHeader('X-Frame-Options', 'SAMEORIGIN');
           res.writeHead(200, {
             'Content-Type': 'text/html; charset=utf-8',
             // 插件页面可能随插件更新而变，不缓存
@@ -1992,10 +2373,24 @@ export async function startWebServer({
     log.warn(`端口租约写不进去：${e.message}`);
   }
 
-  const url = `http://${shownHost}:${actualPort}/${
-    accessKey ? '?key=' + encodeURIComponent(accessKey) : ''
-  }`;
-  log.info(`可视化面板: ${url}`);
+  /**
+   * 两把地址：一把给人看（进日志），一把给 openBrowser 用（带密钥，不进日志）。
+   *
+   * 以前只有一把，`log.info` 直接把带 `?key=` 的完整 URL 打出去 —— 于是密钥
+   * 落到 logs/、docker logs、截图、贴到群里求助的日志里。而面板 key 等价于
+   * 「能装插件 = 子进程执行代码」，一条日志就是一次长期凭据泄露。
+   *
+   * 服务商日志、容器 json-file、journald 都会把它留存很久，所以只能保证
+   * 「从不产生」，不能靠事后清理。
+   */
+  const baseUrl = `http://${shownHost}:${actualPort}/`;
+  // 自动打开浏览器用（main.js → openBrowser），带密钥，只走内存
+  const url = accessKey ? `${baseUrl}?key=${encodeURIComponent(accessKey)}` : baseUrl;
+
+  log.info(`可视化面板: ${baseUrl}`);
+  if (accessKey) {
+    log.info('面板已开启访问密钥：浏览器会自动带上；手动访问时在地址后加 ?key=<你的密钥>（日志里不打印）');
+  }
 
   return {
     server,

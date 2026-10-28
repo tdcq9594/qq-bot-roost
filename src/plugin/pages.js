@@ -17,8 +17,23 @@
  *   - 页面在 iframe 里渲染：CSS 不会漏到面板上，脚本也拿不到面板的 DOM
  *
  * 关于安全：插件**本身**就是可信代码（内建插件跑在主进程，外部插件是子进程），
- * 所以这里不做权限校验。iframe 的作用是样式隔离和避免互相干扰，不是沙箱边界。
+ * 所以这里不做权限校验。iframe 的作用是样式隔离和避免互相干扰。
+ *
+ * ## 页面令牌（page token）
+ *
+ * 2026-10-28 加：以前 iframe 地址上直接拼面板的 accessKey，插件页一行
+ * `location.search` 就能拿到面板全权（装插件 = 交出面板密码）。现在每个页面
+ * 注册时生成一个随机 token，iframe 只带 `?pt=<token>`，并且在面板侧配
+ * `sandbox="allow-scripts allow-forms"`（不给 allow-same-origin），
+ * 插件页既读不到父页 localStorage，也拿不到面板密钥。
+ *
+ * token 的权限边界由 server.js 的 `authorized()` 决定：只放行**该插件自己**的
+ * 页面与接口（`/api/pages/<id>:<key>/html`、`/api/plugins/<id>/panel`、
+ * `/api/plugins/<id>/r/*`），不放行 `/api/config`、`/api/logs` 等面板接口。
+ * 方法不限于 GET —— 斗罗那类运营后台要 POST 改数据，只读会直接废掉它，
+ * 而限制「插件写自己的数据」没有安全收益（插件本来就有子进程执行权）。
  */
+import crypto from 'node:crypto';
 import { createLogger } from '../logger.js';
 
 const log = createLogger('pages');
@@ -51,7 +66,13 @@ export class PageRegistry {
     }
 
     const full = `${pluginId}:${key}`;
-    this.pages.set(full, { key: full, shortKey: key, label, html, pluginId });
+    /**
+     * 页面令牌：24 字节随机（48 位十六进制），进程内有效。
+     * 插件重载会重新 register，于是自动换一把新的——旧页面标签刷一下就拿不到了，
+     * 这正是想要的（卸载/重载后旧链接失效）。
+     */
+    const token = crypto.randomBytes(24).toString('hex');
+    this.pages.set(full, { key: full, shortKey: key, label, html, pluginId, token });
     log.info(`插件 ${pluginId} 注册了面板页面「${label}」(${full})`);
     return full;
   }
@@ -75,7 +96,22 @@ export class PageRegistry {
       key: p.key,
       label: p.label,
       pluginId: p.pluginId,
+      // 前端拼 iframe 地址用。列表接口本身是鉴权过的，所以这里给得出去
+      token: p.token,
     }));
+  }
+
+  /**
+   * 按页面令牌反查。给 `authorized()` 用：iframe 是 opaque origin，
+   * 拿不到 Cookie，只能靠这个 token 证明「我是这个面板页」。
+   * @returns {{key:string, pluginId:string, token:string}|null}
+   */
+  findByToken(token) {
+    if (!token) return null;
+    for (const p of this.pages.values()) {
+      if (p.token === token) return p;
+    }
+    return null;
   }
 
   get(key) {
