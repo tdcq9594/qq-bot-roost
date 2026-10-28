@@ -1,0 +1,41 @@
+name: 发布指纹校验
+
+# 什么时候跑：推 tag（v*）时。
+#
+# 为什么单独一个 workflow：CI 里的 `sums:check` 只看「当前版本有没有指纹条目」，
+# 防的是「忘了跑 npm run sums」。但还有另一种翻车方式——跑了 sums 之后又改了代码，
+# 指纹就和实际内容对不上了。那种情况会让所有用户的自动更新**校验失败**（有意的），
+# 而且现象是「更新点了没反应」，很难查。
+#
+# tag 上的工作区正好就是将要发布的内容，所以在这里比对指纹最准。
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  verify:
+    name: 指纹与发布内容一致
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+
+      - name: 指纹必须与当前代码一致
+        run: npm run sums:verify
+
+      - name: 版本号与 tag 一致
+        shell: bash
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          ver=$(node -p "require('./package.json').version")
+          echo "tag = $tag, package.json = $ver"
+          if [ "$tag" != "$ver" ]; then
+            echo "tag 和 package.json 的版本号不一致，发布出去的包会自报错误版本"
+            exit 1
+          fi

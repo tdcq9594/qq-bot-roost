@@ -20,6 +20,8 @@ import { createLogger } from './logger.js';
 import { fetchAndExtract } from './tarball.js';
 import { fetchViaMirror, currentMirror } from './mirror.js';
 import { fetchGiteeTree, detectGiteeRef, giteeRawUrl } from './gitee.js';
+import { hashDir } from './hashdir.js';
+import { CODE_ENTRIES, PROTECTED_ENTRIES as PROTECTED } from './update-scope.js';
 import { ROOT } from './config.js';
 
 const log = createLogger('update');
@@ -27,11 +29,11 @@ const log = createLogger('update');
 /** 仓库信息。换成自己的 fork 就改这里 */
 const REPO = 'tdcq9594/qq-bot-roost';
 
-/** 允许被更新覆盖的顶层条目。**用户数据一个都不在里面** */
-const CODE_ENTRIES = ['src', 'web', 'test', 'docs', 'package.json', 'README.md', 'LICENSE', 'start.bat'];
-
-/** 绝对不能删的目录，双保险 */
-const PROTECTED = new Set(['config', 'data', 'logs', 'plugins', 'node_modules', '.git']);
+/**
+ * 允许被更新覆盖的顶层条目、以及绝对不能碰的目录，都在 ./update-scope.js。
+ * 内容指纹用的是**同一份清单**——GitHub tarball 是全量、Gitee 只拉这几个条目，
+ * 范围不一致的话两条下载路径算出来的指纹永远对不上。
+ */
 
 /**
  * Gitee 源下拉取的文件范围：只拉会被更新覆盖的代码条目。
@@ -100,9 +102,58 @@ async function updatedButNotRestarted() {
  * 包一层而不是往 checkUpdate 里塞：里面有好几个返回分支（Gitee /
  * 主站 302 / API 兜底 / 404 / 失败），每个都手写一遍 needsRestart 迟早漏一个。
  */
+/**
+ * 拉 SHA256SUMS，得到「版本 → 内容指纹」的映射。
+ *
+ * 两个源都试：GitHub raw（经下载源改写）和 Gitee raw。任何一边拿到都行，
+ * 因为指纹是「代码内容」的，与从哪个源下载无关。
+ *
+ * @returns {Promise<Map<string,string>>} 版本号 → 64 位十六进制
+ */
+async function fetchSumsMap() {
+  const urls = [
+    `https://raw.githubusercontent.com/${REPO}/master/SHA256SUMS`,
+    `https://gitee.com/${REPO}/raw/master/SHA256SUMS`,
+  ];
+  for (const u of urls) {
+    try {
+      const res = await fetchViaMirror(u, {
+        headers: { 'User-Agent': 'qq-bot-roost-updater' },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!res.ok) continue;
+      const text = await res.text();
+      const map = new Map();
+      for (const line of text.split(/\r?\n/)) {
+        const m = /^([a-f0-9]{64})\s+v?([0-9][\w.+-]*)$/i.exec(line.trim());
+        if (m) map.set(m[2].replace(/^v/i, ''), m[1].toLowerCase());
+      }
+      if (map.size) return map;
+    } catch {
+      // 换下一个源
+    }
+  }
+  return new Map();
+}
+
+/**
+ * 查某个版本的内容指纹。拿不到返回 null —— 真正的拒绝发生在 applyUpdate，
+ * 因为「只检查不安装」时面板仍应正常显示有新版本，只是点更新会失败。
+ */
+async function fetchTreeSha256(version) {
+  try {
+    const map = await fetchSumsMap();
+    return map.get(String(version).replace(/^v/, '')) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function checkUpdate() {
   const needsRestart = await updatedButNotRestarted();
   const r = await checkUpdateCore();
+  // 有新版本才值得多跑一次网络请求
+  if (r?.ok && r.hasUpdate) r.treeSha256 = await fetchTreeSha256(r.latest);
   return { ...r, needsRestart };
 }
 
@@ -441,6 +492,37 @@ async function applyUpdateOnce(info) {
     await fs.access(mainJs).catch(() => {
       throw new Error('下载的包里没有 src/main.js，不是合法的框架包，已中止');
     });
+
+    /**
+     * 内容指纹校验 —— **必须放在备份和替换之前**。
+     *
+     * 这一步失败就等于什么都没发生过：文件没动、备份也没建。
+     *
+     * 为什么必须严格：更新会直接覆盖 `src/`、`web/` 这些要执行的代码。
+     * 只要能改掉下载地址（自定义镜像、上游仓库被入侵、链路劫持），
+     * 就能决定用户下一版跑什么。指纹对不上就说明「下载到的东西不是作者发的」。
+     *
+     * 为什么没有指纹也要拒绝：留一个「没指纹就放行」的口子，攻击者只要把
+     * SHA256SUMS 里那条删掉或让仓库回到没有该文件的形态就能绕过。
+     * 代价是发布流程必须每版都带指纹 —— 这由 CI 的 `npm run sums:check` 守着。
+     */
+    if (!rel.treeSha256) {
+      throw new Error(
+        `v${rel.latest} 没有发布内容指纹（SHA256SUMS 里查不到），已拒绝自动更新。\n` +
+          '这不是你的网络问题：作者这一版可能漏了生成指纹。\n' +
+          '可以手动到 GitHub Releases 下载安装，或等下一版。你的代码没有任何改动。',
+      );
+    }
+    const gotHash = await hashDir(workDir, { only: CODE_ENTRIES });
+    if (gotHash !== rel.treeSha256) {
+      throw new Error(
+        `更新内容校验失败，已中止（你的代码没有任何改动）。\n` +
+          `  期望 ${rel.treeSha256}\n` +
+          `  实际 ${gotHash}\n` +
+          '可能是下载源被篡改，或者发布时改了代码却忘了重跑 npm run sums。',
+      );
+    }
+    log.info(`内容指纹校验通过（${gotHash.slice(0, 12)}…）`);
 
     // 备份现有代码
     await fs.mkdir(backupDir, { recursive: true });

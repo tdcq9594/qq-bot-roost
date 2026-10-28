@@ -77,16 +77,24 @@ async function collect(root) {
 }
 
 /**
- * 算目录的内容指纹。
+ * 按给定的相对路径清单算指纹。
  *
- * @param {string} dir 插件目录
+ * 为什么要单独一个入口：仓库根目录里有 `data/`、`logs/`、`config/`、`plugins/`
+ * 这些**不会被 tarball 打包**的东西，直接 `hashDir(ROOT)` 会把它们算进去，
+ * 跟「解包后的 tarball」永远对不上。
+ *
+ * 所以发布流程用 `git ls-files` 拿到「真正会被打进包的文件」，再喂给这里；
+ * 更新校验则用 `hashDir(解包目录)`。两边必须用同一套拼接方式，否则校验必失败。
+ *
+ * @param {string} root 根目录
+ * @param {string[]} rels 相对路径（`/` 分隔）；内部会去重并排序，顺序无关
  * @returns {Promise<string>} 64 位十六进制
  */
-export async function hashDir(dir) {
-  const files = await collect(dir);
+export async function hashFileList(root, rels) {
+  const files = [...new Set(rels)].sort();
   const h = crypto.createHash('sha256');
   for (const rel of files) {
-    const buf = normalize(await fs.readFile(path.join(dir, rel)));
+    const buf = normalize(await fs.readFile(path.join(root, rel)));
     h.update(rel);
     h.update('\0');
     h.update(String(buf.length));
@@ -95,4 +103,39 @@ export async function hashDir(dir) {
     h.update('\0');
   }
   return h.digest('hex');
+}
+
+/**
+ * 算目录的内容指纹。
+ *
+ * @param {string} dir 插件目录
+ * @param {{exclude?: string[], only?: string[]}} [opts]
+ *   - `exclude`：精确匹配要跳过的相对路径（如 `SHA256SUMS` 这种会自引用的文件）
+ *   - `only`：只算这些路径（`src` 这类目录前缀，或 `package.json` 这类文件名）。
+ *     用途：GitHub 的 tarball 是**全量**（含 .github、scripts、sdk），
+ *     而 Gitee 源只拉会被更新覆盖的那几个条目，两边目录内容天生不同。
+ *     用 `only` 把范围收窄到「真正会被替换的代码」，两边才算得出同一个值。
+ * @returns {Promise<string>} 64 位十六进制
+ */
+export async function hashDir(dir, opts = {}) {
+  /**
+   * 根目录不存在时必须报错，**不能静默返回空哈希**。
+   *
+   * `collect()` 里对每个目录都有 try/catch（遍历时子目录读不到要跳过），
+   * 但连根目录都不存在时它也会安静地返回空数组，算出来就是
+   * `e3b0c442…`（空字符串的 sha256）—— 那是一个**合法值**，会像真指纹一样
+   * 参与比对，现象是「内容全变了」而不是「路径写错了」，排查时非常误导。
+   */
+  const st = await fs.stat(dir).catch(() => null);
+  if (!st?.isDirectory()) throw new Error(`算指纹失败：目录不存在或不是目录 —— ${dir}`);
+
+  const skip = new Set(opts.exclude ?? []);
+  const only = (opts.only ?? []).map((p) => String(p));
+  let files = (await collect(dir)).filter((rel) => !skip.has(rel));
+  if (only.length) {
+    files = files.filter((rel) =>
+      only.some((p) => rel === p || rel.startsWith(p.endsWith('/') ? p : `${p}/`)),
+    );
+  }
+  return hashFileList(dir, files);
 }

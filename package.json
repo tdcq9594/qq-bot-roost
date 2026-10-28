@@ -36,7 +36,10 @@
     "create": "node scripts/create-plugin.mjs",
     "test:plugin": "node scripts/test-plugin.mjs",
     "live": "node scripts/live-test.mjs",
-    "market:index": "node scripts/build-market-index.mjs"
+    "market:index": "node scripts/build-market-index.mjs",
+    "sums": "node scripts/build-sums.mjs",
+    "sums:check": "node scripts/build-sums.mjs --check",
+    "sums:verify": "node scripts/build-sums.mjs --verify"
   },
   "author": {
     "name": "倦飞之鸟"

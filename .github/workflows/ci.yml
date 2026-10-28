@@ -72,6 +72,25 @@ jobs:
       - name: 不应有硬编码的 AppSecret / token
         run: node scripts/check-secrets.mjs
 
+  # 更新指纹单独一个 job：发版忘了留指纹，用户的自动更新会被**拒绝**
+  # （这是有意的严格模式，见 updater.js）。所以把「版本号一变就必须有指纹」
+  # 做成硬门禁，靠机制不靠记性。
+  #
+  # 这个检查只看「条目在不在」，不比对指纹本身——开发中代码一直在变而版本号没变，
+  # 比对指纹会让 CI 天天红，最后大家都把它当噪音。真正的指纹比对放在
+  # release-check.yml（打 tag 时跑），那时工作区就是将要发布的代码。
+  sums:
+    name: 更新指纹
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+      - name: 当前版本必须已有内容指纹
+        run: npm run sums:check
+
   # 换行符单独一个 job：Windows 开发者本地检出是 CRLF，
   # 一不小心就提交进去，而这种问题在 Windows 上跑测试是看不出来的。
   eol:
