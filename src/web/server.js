@@ -582,6 +582,26 @@ export async function startWebServer({
     return out;
   };
 
+  /**
+   * 插件更新 / 卸载之后，把已经生效的 id 从「可更新」缓存里摘掉。
+   *
+   * 缓存 5 分钟是为了少打几次市场接口，但更新完前端会立刻再拉一次
+   * `/api/plugins/updates`——命中旧缓存就继续显示「可更新 x.y.z」和
+   * 「N 个插件有新版本」，看着像没更新成功，得等 5 分钟才消失。
+   *
+   * 插件**代码**是全局共享的，所以每个机器人的缓存都要摘，不只是当前这个。
+   */
+  const forgetUpdates = (ids) => {
+    const drop = new Set((ids || []).filter(Boolean).map(String));
+    if (!drop.size) return;
+    for (const [botId, hit] of updateCache) {
+      const before = hit.updates || [];
+      const left = before.filter((u) => !drop.has(u.id));
+      if (left.length === before.length) continue;
+      updateCache.set(botId, { ...hit, updates: left });
+    }
+  };
+
   // 启动后过一会儿查一次，别拖慢启动；之后每小时一次。
   // 60 秒是有意的：启动瞬间面板、插件、市场可能都在拉数据，
   // 再叠一个 GitHub 请求容易一起超时。fetchIndex 内部也有并发去重兜底。
@@ -1339,6 +1359,8 @@ export async function startWebServer({
               await plugins.forget(id).catch(() => {});
               const scanned = await plugins.rescan();
               suspendPluginWatch(1000);
+              // 卸载后缓存里还留着它的「可更新」，提示条计数会虚高
+              forgetUpdates([id]);
               log.info(`已卸载插件 ${id}（数据目录保留，重装可继续用）`);
               return json(res, 200, { ok: true, id, ...scanned });
             } catch (e) {
@@ -1774,6 +1796,8 @@ export async function startWebServer({
               log.warn(`插件 ${id} 更新后重载失败: ${e.message}`);
             });
             const scanned = await plugins.rescan();
+            // 版本已经落地，缓存里的「可更新」要跟着消失，否则面板还挂着旧标注
+            forgetUpdates([id]);
             return json(res, 200, { ok: true, from: r.updated[0].from, to: r.updated[0].to, ...scanned });
           } catch (e) {
             return json(res, 400, { error: e.message });
@@ -1803,6 +1827,7 @@ export async function startWebServer({
               });
             }
             const scanned = await plugins.rescan();
+            forgetUpdates(r.updated.map((u) => u.id));
             return json(res, 200, { ok: true, ...r, ...scanned });
           } catch (e) {
             return json(res, 400, { error: e.message });
