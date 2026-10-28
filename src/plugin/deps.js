@@ -240,6 +240,42 @@ function venvPython(venvDir) {
 }
 
 /**
+ * requirements.txt 单行的白名单。
+ *
+ * 只接受「包名 + 版本约束」（可带 extras、可带环境标记）这一种形态，其它一律拒。
+ * 不能用黑名单——pip 的选项缩写太多（`-i` = `--index-url`、`-c` = 约束文件、
+ * `-r` = 嵌套 requirement、`--no-index`、`--pre`…），黑名单列不完，
+ * 漏一个就是一条供应链后门：插件作者能把 pip 指到任意源、拉任意代码。
+ *
+ * 环境标记里也不许出现 `--`，否则 `pkg; x --index-url evil` 会绕过这条意图。
+ */
+const REQUIREMENT_RE =
+  /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[A-Za-z0-9._,-]+\])?(?:\s*(?:==|>=|<=|~=|!=|===|>|<)\s*[^\s,]+(?:\s*,\s*[^\s,]+)*)?(?:\s*;\s*(?:(?!--)[^\n])+)?$/;
+
+/**
+ * pip 自己的注释规则（见 pip._internal.req.req_file.COMMENT_RE）：(^|\s+)#.*$
+ * 套白名单前必须按同样规则剥掉，否则 `requests>=2.31  # 固定下限` 这种合法写法
+ * 会被误杀——这里是 throw，误杀等于整个插件装不上。
+ */
+const stripReqComment = (l) => l.replace(/(^|\s+)#.*$/, '').trim();
+
+/**
+ * 校验 requirements.txt 全文。
+ * 抽成独立函数是为了能直接测：白名单一旦被改坏（拒了合法行 / 放了危险行），
+ * 靠构造假 python 走 ensurePluginDeps 很难测全。
+ *
+ * @param {string} requirements 文件全文
+ * @returns {{ok: true} | {ok: false, line: string}} line 是第一条不安全的行（已剥注释）
+ */
+export function checkRequirements(requirements) {
+  const bad = String(requirements ?? '')
+    .split(/\r?\n/)
+    .map((l) => stripReqComment(l.trim()))
+    .find((l) => l !== '' && !REQUIREMENT_RE.test(l));
+  return bad === undefined ? { ok: true } : { ok: false, line: bad };
+}
+
+/**
  * 确保插件的依赖装好。
  *
  * @param {object} p
@@ -311,27 +347,14 @@ export async function ensurePluginDeps({ dir, manifest = {}, log = null, enabled
       /**
        * requirements.txt 里能写 `--index-url`、`-e git+...`、直接写 URL——
        * 等于让插件作者把 pip 指到任意源、拉任意代码。
-       *
-       * 这里用**白名单**（fail-closed）：只接受「包名 + 版本约束」这一种形态，
-       * 其它一律拒。不能用黑名单——pip 的选项缩写太多（`-i` = `--index-url`、
-       * `-c` = 约束文件、`-r` = 嵌套 requirement、`--no-index`、`--pre`…），
-       * 黑名单列不完，漏一个就是一条供应链后门。
-       *
-       * 合法行只匹配：包名（字母数字 + `-_.`）后面可选地跟版本约束
-       * （`==` / `>=` / `~=` / `<=` / `!=` / `>` / `<` 等，或逗号分隔的多个）。
-       * 环境标记（`; python_version < "3.8"`）一并放行，它不含网络指令。
+       * 白名单的细节和理由见上面的 checkRequirements()。
        */
-      const badLine = requirements
-        .split(/\r?\n/)
-        .map((l) => l.trim())
-        .find((l) => {
-          if (!l || l.startsWith('#')) return false; // 空行 / 注释放行
-          return !/^[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[A-Za-z0-9._,-]+\])?(?:\s*(?:==|>=|<=|~=|!=|===|>|<)\s*[^\s,]+(?:\s*,\s*[^\s,]+)*)?(?:\s*;\s*[^\n]+)?$/.test(l);
-        });
-      if (badLine) {
+      const rq = checkRequirements(requirements);
+      if (!rq.ok) {
         throw new Error(
-          `requirements.txt 里有不安全的行，已拒绝安装：${badLine}\n` +
-            '只允许「包名 + 版本约束」（如 requests>=2.31），不接受 -e / --index-url / 直接 URL / pip 选项。',
+          `requirements.txt 里有不安全的行，已拒绝安装：${rq.line}\n` +
+            '只允许「包名 + 版本约束」（如 requests>=2.31），不接受 -e / --index-url / 直接 URL / pip 选项。' +
+            '行尾注释可以写（`# xxx`），但不支持反斜杠续行。',
         );
       }
 

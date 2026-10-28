@@ -438,6 +438,12 @@ async function testWebhook() {
       secret: 'e2e-fake-secret-not-a-real-key',
       onEvent: (name, d, payload) => received.push({ name, d, payload }),
     });
+    /**
+     * op=13 的「24 小时只过一次」是**持久化**的（data/webhook-verified.json）。
+     * 不清掉的话本地连着跑两次 e2e，第二次的 op=13 会被「该 appId 已验证过」
+     * 挡成 403，看起来像代码坏了——CI 每次都是干净环境，所以那里永远不红。
+     */
+    wh.resetVerify('app1');
     const port = await wh.start();
     ok('webhook: 启动监听', wh.running === true, `端口 ${port}`);
 

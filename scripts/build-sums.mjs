@@ -32,6 +32,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { hashFileList } from '../src/hashdir.js';
 import { CODE_ENTRIES } from '../src/update-scope.js';
+import { compareVersion } from '../src/semver.js';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const SUMS_FILE = 'SHA256SUMS';
@@ -81,9 +82,15 @@ function readSums() {
 }
 
 function writeSums(map) {
-  // 版本号倒序（新的在上面），方便肉眼看最近几版
+  /**
+   * 版本号倒序（新的在上面），方便肉眼看最近几版。
+   *
+   * 必须按**语义版本**比，不能按字符串：字符串比较下 `'0.8.10' < '0.8.9'`、
+   * `'0.10.0' < '0.9.0'`，新版会被插到中间，而且每次跑出来的顺序还可能不一样，
+   * 白白多出无意义的 diff。
+   */
   const lines = [...map.entries()]
-    .sort((a, b) => (a[0] < b[0] ? 1 : a[0] > b[0] ? -1 : 0))
+    .sort((a, b) => compareVersion(b[0], a[0]))
     .map(([v, h]) => `${h}  v${v}`);
   fs.writeFileSync(SUMS_PATH, `${lines.join('\n')}\n`, 'utf8');
 }

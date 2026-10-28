@@ -3538,6 +3538,78 @@ await testUpdaterRestartHint();
   check('日志: 真的空才打 (空)', describeForLog({ attachments: [] }, '') === '(空)');
 }
 
+/* ---------- requirements.txt 白名单 ---------- */
+
+/**
+ * 白名单原来没有独立测试（要测它得构造假 python 走 ensurePluginDeps），
+ * 结果 `requests>=2.31  # 固定下限` 这种合法写法被误杀也没人发现——
+ * 这里是 throw，误杀等于整个插件装不上。抽成 checkRequirements() 后可以直接测。
+ */
+async function testRequirementsWhitelist() {
+  const { checkRequirements } = await import('../src/plugin/deps.js');
+
+  // 必须放行：都是 pip 能正常装的合法写法
+  const ok = [
+    'requests',
+    'requests>=2.31',
+    'requests == 2.31.0',
+    'numpy==1.26',
+    'aiohttp~=3.9',
+    'pkgn!=1.0',
+    'django>=3.0,<4.0',
+    'torch>=2.0,<3.0,!=2.1.0',
+    'flask[async]>=2.0',
+    'pkg; python_version < "3.8"',
+    'requests>=2.31  # 行尾注释',
+    'requests>=2.31\t# 制表符前也能注释',
+    '  requests>=2.31  ',
+  ];
+  for (const line of ok) {
+    const r = checkRequirements(line);
+    check(`requirements 白名单放行：${JSON.stringify(line)}`, r.ok, '不该被拒');
+  }
+
+  check('requirements 白名单放行：空文件', checkRequirements('').ok);
+  check('requirements 白名单放行：空行与整行注释', checkRequirements('# 注释\n\nrequests>=2.31').ok);
+  check(
+    'requirements 白名单放行：注释里写了危险选项也不算数',
+    checkRequirements('# --index-url https://evil/simple\nrequests').ok,
+  );
+
+  // 必须拒绝：每一条都能把 pip 指到别处，或拉来任意代码
+  const bad = [
+    '-i https://evil/simple',
+    '--index-url https://evil/simple',
+    '--extra-index-url https://evil/simple',
+    '--no-index',
+    '--pre',
+    '--require-hashes',
+    '--trusted-host evil',
+    '-c evil.txt',
+    '--constraint evil.txt',
+    '-r other.txt',
+    '-f https://evil/wheels',
+    '--find-links https://evil/wheels',
+    '-e .',
+    'git+https://github.com/evil/pkg.git',
+    'https://evil/pkg.whl',
+    'file:///tmp/pkg.whl',
+    'requests @ https://evil/x.whl',
+    'requests>=2.31 --index-url https://evil/simple',
+    // 环境标记里藏选项：pip 会忽略标记里的 --index-url（实测只是 Ignoring），
+    // 但白名单的意图是「不许出现任何疑似选项」，这里不留口子
+    'pkg; python_version < "3.8" --index-url https://evil/simple',
+    // 反斜杠续行不支持（逐行判定），跨行写法必须拒而不是被当成两条
+    'requests>=2.31 \\',
+  ];
+  for (const line of bad) {
+    const r = checkRequirements(line);
+    check(`requirements 白名单拒绝：${JSON.stringify(line)}`, !r.ok, '漏放了！');
+  }
+}
+
+await testRequirementsWhitelist();
+
 /* ---------- 汇总 ---------- */
 await cleanQuotaLedger();
 
