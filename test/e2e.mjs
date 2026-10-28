@@ -99,6 +99,32 @@ async function boot() {
     'utf8',
   );
 
+  /**
+   * ai-chat 必须指到一个**连不上**的地址。
+   *
+   * 插件代码永远从仓库 `plugins/` 取（`paths.js` 里 `plugins` 不跟着
+   * ROOST_HOME 走），配置却从临时 HOME 取——不写这份配置，ai-chat 就用
+   * 它自己的默认值：`dshUrl=http://127.0.0.1:17321`、
+   * `publicUrl=http://127.0.0.1:8080`。
+   *
+   * 17321 正好是开发者本机真在跑的 DSH。于是下面 mock 注入的每条消息都会被
+   * 送进那个**真会话**：机器人真回、真写日记，而回话地址指向没人监听的 8080，
+   * 结果是面板里凭空多出几个「测试用户」会话，日记里多出几条
+   * 「发送失败了两次，网络没通」——测试污染了真实记忆，而且很难查。
+   *
+   * 指向 1 号端口之后，ai-chat 的 fetch 会被它自己的端口黑名单当场拒掉
+   * （`bad port`，连 dial 都不会发起），走「连不上宿主」分支直接放弃，
+   * 一个字节都不会离开这个进程。`publicUrl` 仍填本次真实端口，
+   * 万一以后要测回话链路它是对的。
+   */
+  const aiChatCfg = path.join(HOME, 'config', 'bots', 'main', 'plugins', 'ai-chat.json');
+  await fs.mkdir(path.dirname(aiChatCfg), { recursive: true });
+  await fs.writeFile(
+    aiChatCfg,
+    JSON.stringify({ dshUrl: 'http://127.0.0.1:1', publicUrl: BASE }, null, 2),
+    'utf8',
+  );
+
   server = spawn(NODE, [path.join(ROOT, 'src/main.js'), '--mock', '--serve', '--no-open'], {
     cwd: ROOT,
     stdio: ['pipe', 'pipe', 'pipe'],
