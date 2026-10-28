@@ -251,6 +251,69 @@ export async function verifyPluginDir(entry, dir) {
  * @param {number} [o.timeoutMs]
  * @param {(msg:string)=>void} [o.onRetry]
  */
+/**
+ * 单个文件的 GitHub raw 地址。
+ * 走 `fetchViaMirror`，所以自定义镜像 / 代理一样生效。
+ */
+function githubRawUrl(repo, ref, filePath) {
+  const p = String(filePath ?? '')
+    .split('/')
+    .map((s) => encodeURIComponent(s))
+    .join('/');
+  return `https://raw.githubusercontent.com/${repo}/${encodeURIComponent(ref)}/${p}`;
+}
+
+/**
+ * 把 Gitee 拉不下来的那几个文件，**逐个**从 GitHub 补回来。
+ *
+ * 为什么只补这几个而不是整包重拉：Gitee 的 451 是**按文件**来的 —— douluo
+ * 那么大一个插件只有 4 个文件被挡，其余都拉成功了。为 4 个文件重拉整包
+ * （几十上百个文件）纯属浪费，国内网络下很容易再断一次。
+ *
+ * @param {Array<{path:string,error:string}>} failed fetchGiteeTree 返回的失败清单
+ * @param {(url:string, init?:object)=>Promise<Response>} [fetcher] 取数函数，默认
+ *   走镜像。**给测试注入假网络用**，正常调用不需要传。
+ * @returns {Promise<Array<{path:string,error:string}>>} 补拉后仍然失败的（空数组 = 全补齐了）
+ *
+ * @internal 导出只为可测（selftest 里用它跑假网络），不是公共 API。
+ */
+export async function backfillFromGitHub({
+  repo,
+  branch,
+  destDir,
+  failed,
+  timeoutMs = 120000,
+  onProgress,
+  fetcher = fetchViaMirror,
+}) {
+  const still = [];
+  for (const item of failed) {
+    const dest = path.resolve(path.join(destDir, item.path));
+    // 清单来自服务端，仍按不可信处理，防路径穿越
+    const base = path.resolve(destDir);
+    if (dest !== base && !dest.startsWith(base + path.sep)) {
+      still.push({ path: item.path, error: '越界路径' });
+      continue;
+    }
+    try {
+      const res = await fetcher(githubRawUrl(repo, branch, item.path), {
+        headers: { 'User-Agent': 'qq-bot-roost' },
+        signal: AbortSignal.timeout(Math.min(timeoutMs, 30000)),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (!buf.length) throw new Error('内容是空的');
+      await fs.mkdir(path.dirname(dest), { recursive: true });
+      await fs.writeFile(dest, buf);
+      log.info(`已从 GitHub 补齐 ${item.path}（Gitee 上拉不到）`);
+      onProgress?.(`补齐 ${item.path}`);
+    } catch (e) {
+      still.push({ path: item.path, error: `Gitee 失败后 GitHub 也失败：${e.message}` });
+    }
+  }
+  return still;
+}
+
 async function downloadRepoContents({
   repo,
   branch,
@@ -259,13 +322,53 @@ async function downloadRepoContents({
   expectSha256 = null,
   timeoutMs = 120000,
   onRetry,
+  onProgress,
 }) {
   const id = currentMirror().id;
   const token = currentMirror().giteeToken;
 
-  if (id === 'gitee') {
-    return fetchGiteeTree({ repo, ref: branch, destDir, only, timeoutMs, token });
-  }
+  /**
+   * Gitee 路径统一走这里：允许部分失败，再用 GitHub 把缺口补上。
+   * `allowPartial` 打开后 fetchGiteeTree 不再抛错，失败清单交给下面处理。
+   */
+  const viaGitee = async () => {
+    const r = await fetchGiteeTree({
+      repo,
+      ref: branch,
+      destDir,
+      only,
+      timeoutMs,
+      token,
+      allowPartial: true,
+    });
+    if (!r.failed?.length) return r;
+    log.warn(
+      `Gitee 上有 ${r.failed.length} 个文件拉不到（常见原因是 451 内容审查），` +
+        `改用 GitHub 逐个补齐：${r.failed.slice(0, 3).map((f) => f.path).join('、')}` +
+        (r.failed.length > 3 ? ' 等' : ''),
+    );
+    const still = await backfillFromGitHub({
+      repo,
+      branch,
+      destDir,
+      failed: r.failed,
+      timeoutMs,
+      onProgress,
+    });
+    if (still.length) {
+      throw new Error(
+        `${still.length} 个文件在 Gitee 和 GitHub 上都拉不到：\n  ` +
+          still
+            .slice(0, 5)
+            .map((f) => `${f.path}（${f.error}）`)
+            .join('\n  ') +
+          '\n可以在面板「下载源」里换一个镜像再试。',
+      );
+    }
+    return { ...r, failed: [], backfilled: r.failed.length };
+  };
+
+  if (id === 'gitee') return viaGitee();
 
   try {
     return await fetchAndExtract(branchTarballUrl(repo, branch), destDir, {
@@ -280,7 +383,7 @@ async function downloadRepoContents({
     log.warn(`GitHub 下载失败（${e.message}），改用 Gitee 镜像`);
     // 清掉可能写了一半的残留，再整树重拉
     await fs.rm(destDir, { recursive: true, force: true }).catch(() => {});
-    return fetchGiteeTree({ repo, ref: branch, destDir, only, timeoutMs, token });
+    return viaGitee();
   }
 }
 

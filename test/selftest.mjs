@@ -3702,6 +3702,78 @@ async function testPageTokenPatch() {
 
 await testPageTokenPatch();
 
+/* ---------- Gitee 拉不到的文件从 GitHub 补回 ---------- */
+
+/**
+ * Gitee 会对个别文件返回 451（内容审查），而同一个文件在 GitHub 上是好的
+ * —— 实测 douluo 的 content-pack.sql、check-content.mjs 等 4 个文件就是这样。
+ * 以前 fetchGiteeTree 只要有一个失败就整包中止，等于 4 个文件被挡 →
+ * 整个插件装不上。现在允许部分失败，再用 GitHub 把缺口逐个补上。
+ */
+async function testBackfillFromGitHub() {
+  const fs2 = await import('node:fs/promises');
+  const os2 = await import('node:os');
+  const p = await import('node:path');
+  const { backfillFromGitHub } = await import('../src/plugin/market.js');
+
+  const root = await fs2.mkdtemp(p.join(os2.tmpdir(), 'roost-backfill-'));
+  const destDir = p.join(root, 'repo');
+
+  /** 假网络：按 url 里的文件名决定给什么响应 */
+  const fakeFetch = async (url) => {
+    const name = String(url).split('/').pop();
+    if (name === 'ok.txt') {
+      return {
+        ok: true,
+        arrayBuffer: async () => new TextEncoder().encode('github 内容').buffer,
+      };
+    }
+    if (name === 'empty.txt') {
+      return { ok: true, arrayBuffer: async () => new ArrayBuffer(0) };
+    }
+    if (name === 'gone.txt') return { ok: false, status: 404 };
+    throw new Error('网络断了');
+  };
+
+  const failed = [
+    { path: 'plugins/douluo/ok.txt', error: 'HTTP 451（Gitee 上这个文件不可用）' },
+    { path: 'plugins/douluo/gone.txt', error: 'HTTP 451' },
+    { path: 'plugins/douluo/empty.txt', error: 'HTTP 451' },
+    { path: 'plugins/douluo/boom.txt', error: 'HTTP 451' },
+    // 清单来自服务端，越界路径必须拦住而不是写到目录外
+    { path: '../../escape.txt', error: 'HTTP 451' },
+  ];
+
+  const still = await backfillFromGitHub({
+    repo: 'o/r',
+    branch: 'main',
+    destDir,
+    failed,
+    fetcher: fakeFetch,
+  });
+
+  // 1) 能从 GitHub 拿到的，真的写盘了
+  const written = await fs2.readFile(p.join(destDir, 'plugins/douluo/ok.txt'), 'utf8').catch(() => null);
+  check('补拉: GitHub 拿得到的文件已写盘', written === 'github 内容', String(written));
+
+  // 2) 只有「GitHub 也拿不到」的才留在失败清单里
+  const paths = still.map((f) => f.path);
+  check('补拉: 成功的不留在失败清单', !paths.includes('plugins/douluo/ok.txt'), paths.join(','));
+  check('补拉: GitHub 也 404 的仍失败', paths.includes('plugins/douluo/gone.txt'), paths.join(','));
+  check('补拉: 空内容算失败', paths.includes('plugins/douluo/empty.txt'), paths.join(','));
+  check('补拉: 网络异常算失败', paths.includes('plugins/douluo/boom.txt'), paths.join(','));
+  check('补拉: 失败原因里说清是 GitHub 也失败', /GitHub/.test(still[0]?.error ?? ''), still[0]?.error);
+
+  // 3) 越界路径被拦，且没写到临时目录外面
+  check('补拉: 越界路径被拦', paths.includes('../../escape.txt'), paths.join(','));
+  const escaped = await fs2.readFile(p.join(root, 'escape.txt'), 'utf8').catch(() => null);
+  check('补拉: 越界文件没写到目录外', escaped === null, String(escaped));
+
+  await fs2.rm(root, { recursive: true, force: true }).catch(() => {});
+}
+
+await testBackfillFromGitHub();
+
 /* ---------- 汇总 ---------- */
 await cleanQuotaLedger();
 

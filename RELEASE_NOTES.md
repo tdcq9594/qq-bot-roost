@@ -1,3 +1,61 @@
+## v0.8.13：Gitee 上拉不到的文件，从 GitHub 补回
+
+### 现象
+
+装/更新 douluo 插件时卡住，日志是：
+
+```
+WARN gitee 拉取失败 plugins/douluo/scripts/check-content.mjs: HTTP 451
+WARN gitee 拉取失败 plugins/douluo/src/db/content-pack.sql: HTTP 451
+```
+
+面板上表现为「插件市场更新」报 400。
+
+### 根因
+
+Gitee 会对**个别文件**返回 451（内容审查），而同一个文件在 GitHub 上是
+200。实测 douluo 有 4 个文件被挡：
+
+| 文件 | Gitee | GitHub |
+|---|---|---|
+| `scripts/check-content.mjs` | 451 | 200 |
+| `scripts/import-console-ini.mjs` | 451 | 200 |
+| `src/db/content-pack.sql` | 451 | 200 |
+| `test/journey.mjs` | 451 | 200 |
+
+而 `fetchGiteeTree()` 以前是**一个文件失败就整包中止**，所以 4 个文件被挡
+= 整个插件装不上。下载源设成 Gitee 时尤其明显（那条路径没有任何回退）。
+
+### 修法
+
+- `fetchGiteeTree()` 新增 `allowPartial`：有文件拉不下时**不抛错**，把失败
+  清单交给调用方；
+- 新增 `backfillFromGitHub()`：只对这几个文件用 GitHub raw **逐个**补拉。
+  不整包重拉 —— douluo 那么大一个插件只有 4 个文件被挡，为 4 个文件重拉
+  上百个文件纯属浪费，国内网络下还容易再断一次；
+- 下载源是 `gitee` 时也有兜底了（以前完全没有）；
+- 补完还有缺口才报错，并列出具体文件和原因，提示可以去面板换镜像。
+
+顺带把 `HTTP 451` 翻成人话：`HTTP 451（Gitee 上这个文件不可用，多半被
+内容审查挡了）`。
+
+### 验证
+
+真实跑了一遍 douluo 那 4 个文件，全部补齐（含 96 KB 的 `content-pack.sql`）：
+
+```
+已从 GitHub 补齐 plugins/douluo/scripts/check-content.mjs（Gitee 上拉不到）
+OK  4353 字节    scripts/check-content.mjs
+OK  38622 字节   scripts/import-console-ini.mjs
+OK  96400 字节   src/db/content-pack.sql
+OK  15364 字节   test/journey.mjs
+```
+
+另加 8 项单测（假网络注入）：能补的写盘、GitHub 也 404 的仍算失败、空内容
+算失败、网络异常算失败、越界路径被拦且没写到目录外。
+
+自检 478 → 486、e2e 171/171。
+
 ## v0.8.12：修插件页面 403（0.8.9 引入的回归）
 
 **这是 0.8.9 改插件页令牌时引入的回归，会让带面板页面的插件全部取不到数据。**

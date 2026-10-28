@@ -69,7 +69,14 @@ export function giteeRawUrl(repo, ref, filePath) {
  *                            如 ['src/', 'package.json']；不传拉全仓
  * @param {number} [o.timeoutMs] 单文件超时
  * @param {(msg:string)=>void} [o.onProgress] 每拉完一个文件调一次
- * @returns {Promise<{files:number, skipped:number}>}
+ * @param {boolean} [o.allowPartial] 有文件拉不下时**不抛错**，把失败清单放进
+ *   返回值的 `failed` 里，交给调用方用别的源补拉。默认 false（整体中止）。
+ *
+ *   为什么要这个开关：Gitee 会对个别文件返回 451（内容审查），而**同一个
+ *   文件在 GitHub 上是好的**（实测 douluo 的 content-pack.sql 等 4 个文件）。
+ *   以前只要有一个失败就整包中止，等于一个文件被屏蔽 → 整个插件装不上。
+ *
+ * @returns {Promise<{files:number, skipped:number, failed:Array<{path:string,error:string}>}>}
  */
 export async function fetchGiteeTree({
   repo,
@@ -79,6 +86,7 @@ export async function fetchGiteeTree({
   only = null,
   timeoutMs = 120000,
   onProgress,
+  allowPartial = false,
 }) {
   if (!repo || !/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error(`Gitee 仓库名不合法：${repo}`);
   if (!ref) throw new Error('Gitee 下载缺少分支/tag');
@@ -121,6 +129,7 @@ export async function fetchGiteeTree({
   await fs.mkdir(destDir, { recursive: true });
   let done = 0;
   let failed = 0;
+  const failedList = [];
   let cursor = 0;
 
   async function worker() {
@@ -145,7 +154,15 @@ export async function fetchGiteeTree({
               signal: AbortSignal.timeout(timeoutMs),
             });
             if (res.ok) break;
-            lastErr = new Error(`HTTP ${res.status}`);
+            /**
+             * 451 = Unavailable For Legal Reasons。Gitee 会对个别文件返回它
+             * （内容审查），而同一个文件在 GitHub 上是 200。光写「HTTP 451」
+             * 没人看得懂该去换下载源，所以翻成人话。
+             */
+            lastErr =
+              res.status === 451
+                ? new Error('HTTP 451（Gitee 上这个文件不可用，多半被内容审查挡了）')
+                : new Error(`HTTP ${res.status}`);
             if (!isRetryable(res, null)) {
               res = null;
               break;
@@ -169,6 +186,7 @@ export async function fetchGiteeTree({
         onProgress?.(`${done}/${files.length} ${f.path}`);
       } catch (e) {
         failed += 1;
+        failedList.push({ path: f.path, error: e.message });
         log.warn(`拉取失败 ${f.path}: ${e.message}`);
       }
     }
@@ -177,9 +195,11 @@ export async function fetchGiteeTree({
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, files.length) }, worker));
 
   if (failed) {
+    // 调用方要自己补拉就不抛 —— 它补完还失败会自己报错，那时信息更全
+    if (allowPartial) return { files: done, skipped: files.length - done, failed: failedList };
     throw new Error(`Gitee 下载 ${repo}@${ref}：${files.length} 个文件里 ${failed} 个失败，已中止`);
   }
-  return { files: done, skipped: files.length - done };
+  return { files: done, skipped: files.length - done, failed: [] };
 }
 
 /**
