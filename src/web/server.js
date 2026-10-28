@@ -2200,7 +2200,19 @@ export async function startWebServer({
           const ping = setInterval(() => {
             try {
               res.write(': ping\n\n');
-            } catch {}
+            } catch {
+              /**
+               * 写失败 = 连接其实已经断了，但 `close` 事件可能没触发
+               * （客户端异常断开、半开连接、keep-alive 下不发 FIN）。
+               * 不在这里清的话，这个僵尸连接会一直占着 MAX_SSE 的配额，
+               * 直到真 close 才释放。所以失败即主动清理。
+               */
+              clearInterval(ping);
+              sseClients.delete(res);
+              try {
+                res.end();
+              } catch {}
+            }
           }, 15000);
           req.on('close', () => {
             clearInterval(ping);
