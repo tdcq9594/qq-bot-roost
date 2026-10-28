@@ -1,6 +1,10 @@
 # 运行时配置：含 AppSecret，绝对不能入库
 config/bot.json
 config/bots/
+# 保存配置时的自动备份（src/main.js 写到这里）。**每份都是完整配置，含明文
+# AppSecret**——2026-10-28 就是因为漏了这一行，14 份备份被推到 GitHub + Gitee，
+# 里面 12 份带着真密钥。删掉之后必须去平台重置 AppSecret，历史删不干净。
+config/backups/
 # 真机联调参数（OneBot 地址 / token / 测试群号），每台机器不同
 config/live-test.json
 # 旧版本的配置位置，迁移后留着也不会入库
