@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process';
+import { existsSync, readdirSync } from 'node:fs';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { rel } from '../paths.js';
@@ -74,9 +76,65 @@ async function usable(cmd, args = ['--version']) {
 
 let cachedRuntimes = null;
 
+const IS_WIN = process.platform === 'win32';
+
+/** npm 的安装参数。`--ignore-scripts` 见下面调用处的注释 */
+const NPM_ARGS = ['install', '--omit=dev', '--no-audit', '--no-fund', '--ignore-scripts'];
+
 /**
- * 找出这台机器上能用的 Python / Node 命令。
+ * pnpm 的安装参数。
+ *
+ * `--config.node-linker=hoisted`：默认的 pnpm 用软链把 `node_modules` 指到全局
+ * store，插件是被人手动丢进 `plugins/` 的，不归 pnpm 管；store 一清，
+ * `import` 就断。hoisted 给的是跟 npm 一样的扁平目录，行为最可预期。
+ *
+ * `--ignore-workspace`：插件目录万一落在某个 pnpm workspace 里面（用户把
+ * Roost 放在自己项目里就会），pnpm 会拒绝安装并让你去 workspace 根装。
+ */
+const PNPM_ARGS = ['install', '--prod', '--ignore-scripts', '--config.node-linker=hoisted', '--ignore-workspace'];
+
+/**
+ * DSH 桌面版自带的运行时目录。
+ *
+ * **为什么必须找它**：DSH 是 Electron，安装目录里既没有 `node.exe` 也没有
+ * npm；但它自己带了一整套运行时（node / pnpm / python），放在
+ * `~/.dsh/dsh-runtimes/<runtime>/dependencies/` 下——DSH 装插件用的就是那套 pnpm。
+ *
+ * 只查 PATH 的后果很严重：没单独装过 Node.js 的用户 PATH 里当然没有 npm，
+ * 于是任何带依赖的插件都会「缺少 npm」而**整个加载失败**，
+ * 明明机器上有一套现成能用的。
+ */
+export function bundledRuntimeRoots({ home = os.homedir() } = {}) {
+  const base = path.join(home, '.dsh', 'dsh-runtimes');
+  const out = [];
+  try {
+    for (const name of readdirSync(base)) {
+      const dir = path.join(base, name, 'dependencies');
+      if (existsSync(dir)) out.push(dir);
+    }
+  } catch {
+    // 没有这个目录很正常：用户可能根本没装 DSH 桌面版
+  }
+  // 名字里带 primary 的排前面——DSH 自己也优先用它
+  return out.sort((a, b) => Number(b.includes('primary')) - Number(a.includes('primary')));
+}
+
+/** 在若干运行时根目录里找同一个相对路径，找到就返回绝对路径 */
+function pickIn(roots, ...segs) {
+  for (const r of roots) {
+    const p = path.join(r, ...segs);
+    if (existsSync(p)) return p;
+  }
+  return null;
+}
+
+/**
+ * 找出这台机器上能用的 Python / Node 命令，以及「用谁来装 Node 依赖」。
  * 只在第一次调用时真正探测，之后走缓存。
+ *
+ * 返回里的 `installer` 是个描述符 `{ kind, cmd, args, label }`——
+ * 因为 npm 和 pnpm 的参数不一样，而且 DSH 自带的 pnpm 还得靠自带的 node 去跑，
+ * 光有一个命令名表达不了。
  */
 export async function detectRuntimes({ refresh = false } = {}) {
   if (cachedRuntimes && !refresh) return cachedRuntimes;
@@ -103,7 +161,50 @@ export async function detectRuntimes({ refresh = false } = {}) {
     }
   }
 
-  cachedRuntimes = { python, npm, node: process.execPath };
+  // PATH 上的 pnpm：装了 Node.js 的人常常也装了它，参数比 npm 好控
+  let pnpm = null;
+  for (const c of IS_WIN ? ['pnpm.cmd', 'pnpm'] : ['pnpm']) {
+    if (await usable(c)) {
+      pnpm = c;
+      break;
+    }
+  }
+
+  /* ---------- DSH 自带运行时（PATH 上找不到时的兜底） ---------- */
+  const roots = bundledRuntimeRoots();
+  const bundledNode = pickIn(roots, 'node', 'bin', IS_WIN ? 'node.exe' : 'node');
+  const bundledPnpm = pickIn(roots, 'pnpm', 'bin', 'pnpm.cjs');
+  const bundledPython = IS_WIN
+    ? pickIn(roots, 'python', 'python.exe')
+    : (pickIn(roots, 'python', 'bin', 'python3') || pickIn(roots, 'python', 'bin', 'python'));
+
+  // 系统 Python 优先（用户可能装了带自己库的那个），找不到才用自带的
+  if (!python && bundledPython) python = bundledPython;
+
+  /**
+   * 装依赖用哪个工具。顺序：npm → pnpm → DSH 自带 pnpm。
+   *
+   * 自带 pnpm 必须用**自带的 node** 去跑 `pnpm.cjs`，不能用 `process.execPath`：
+   * 那是 DSH 的 Electron 主程序，只有在带 `ELECTRON_RUN_AS_NODE` 时才当 node 用，
+   * 而这个变量不在 `buildPluginEnv` 的白名单里，直接跑会把 GUI 拉起来。
+   */
+  let installer = null;
+  if (npm) {
+    installer = { kind: 'npm', cmd: npm, args: NPM_ARGS, label: 'npm' };
+  } else if (pnpm) {
+    installer = { kind: 'pnpm', cmd: pnpm, args: PNPM_ARGS, label: 'pnpm' };
+  } else if (bundledPnpm && bundledNode) {
+    installer = { kind: 'dsh-pnpm', cmd: bundledNode, args: [bundledPnpm, ...PNPM_ARGS], label: 'DSH 自带 pnpm' };
+  }
+
+  cachedRuntimes = {
+    python,
+    npm,
+    pnpm,
+    node: process.execPath,
+    installer,
+    bundled: { node: bundledNode, pnpm: bundledPnpm, python: bundledPython },
+  };
   return cachedRuntimes;
 }
 
@@ -146,14 +247,21 @@ function venvPython(venvDir) {
  * @param {object} p.manifest plugin.json 内容
  * @param {object} p.log      日志器
  * @param {boolean} [p.enabled] 是否允许自动安装（来自 config.plugins.autoInstallDeps）
+ * @param {object} [p.runtimes] 直接指定运行时探测结果，跳过 detectRuntimes()。
+ *   **只给测试用**：`detectRuntimes()` 带全局缓存，测「一个工具都没有」这条分支
+ *   只能靠伪造 PATH / HOME，会把别的测试带歪。
  * @returns {Promise<{python?:string, installed:string[], skipped:string[], warnings:string[]}>}
  */
-export async function ensurePluginDeps({ dir, manifest = {}, log = null, enabled = true }) {
+export async function ensurePluginDeps({ dir, manifest = {}, log = null, enabled = true, runtimes = null }) {
   const result = { python: null, installed: [], skipped: [], warnings: [] };
   // 统一转绝对路径：下面给 pip / npm 传的路径和 cwd 都以它为准，避免相对路径被拼两次
   dir = path.resolve(dir);
   const runtime = String(manifest.runtime ?? '').toLowerCase();
   const wantsPython = runtime === 'python' || runtime === 'python3';
+
+  // 一次探测，两处用；注入的优先
+  let rt = runtimes;
+  const getRt = async () => (rt ??= await detectRuntimes());
 
   const reqFile = path.join(dir, 'requirements.txt');
   const pkgFile = path.join(dir, 'package.json');
@@ -162,10 +270,10 @@ export async function ensurePluginDeps({ dir, manifest = {}, log = null, enabled
 
   // 先确定 Python 解释器：有 venv 用 venv 的，没有就找系统的
   if (wantsPython) {
-    const rt = await detectRuntimes();
+    const rt = await getRt();
     if (!rt.python) {
       throw new Error(
-        '这个插件需要 Python，但系统里找不到 python / python3 / py。\n' +
+        '这个插件需要 Python，但系统里找不到 python / python3 / py，也没找到 DSH 自带的 Python。\n' +
           '请先安装 Python 3.9+（https://www.python.org/downloads/），装完重试。',
       );
     }
@@ -250,8 +358,20 @@ export async function ensurePluginDeps({ dir, manifest = {}, log = null, enabled
     } catch {
       result.warnings.push('package.json 不是合法 JSON，已跳过依赖安装');
     }
-    const deps = pkg ? Object.keys({ ...(pkg.dependencies ?? {}), ...(pkg.optionalDependencies ?? {}) }) : [];
-    if (deps.length) {
+
+    /**
+     * **必装和可选必须分开。**
+     *
+     * `dependencies` 缺了插件就是坏的；`optionalDependencies` 缺了只是某个功能
+     * 用不了。以前两者合并成一个列表，于是「语音这种可选能力」能把整个插件
+     * 拦在门外：找不到 npm 就 throw，`loader.js` 接住之后插件直接不加载。
+     * ai-chat 就是这么在没装 Node.js 的机器上整个起不来的。
+     */
+    const required = pkg ? Object.keys(pkg.dependencies ?? {}) : [];
+    const optional = pkg ? Object.keys(pkg.optionalDependencies ?? {}) : [];
+    const all = [...new Set([...required, ...optional])];
+
+    if (all.length) {
       const hasModules = await fs
         .access(path.join(dir, 'node_modules'))
         .then(() => true)
@@ -265,27 +385,41 @@ export async function ensurePluginDeps({ dir, manifest = {}, log = null, enabled
           '检测到 package.json 依赖需要安装，但 config 里 plugins.autoInstallDeps = false，已跳过',
         );
       } else {
-        const rt = await detectRuntimes();
-        if (!rt.npm) {
-          throw new Error('这个插件需要 npm 安装依赖，但系统里找不到 npm（通常随 Node.js 一起安装）');
-        }
-        log?.info(`安装 Node 依赖（${deps.length} 个），首次会慢一点…`);
-        // --ignore-scripts：依赖的 postinstall 就是任意代码执行入口，
-        // 装依赖不该顺带跑别人的安装脚本
-        const r = await run(
-          rt.npm,
-          ['install', '--omit=dev', '--no-audit', '--no-fund', '--ignore-scripts'],
-          { cwd: dir },
-        );
-        if (!r.ok) {
-          throw new Error(
-            `安装 Node 依赖失败：${r.reason || (r.err || r.out).slice(-600)}\n` +
-              `可以手动执行：cd ${rel(dir)} && npm install`,
+        const rt = await getRt();
+        if (!rt.installer) {
+          // 必装缺工具才算致命；可选缺工具只丢功能，不能让插件起不来
+          if (required.length) {
+            throw new Error(
+              `这个插件需要 ${required.length} 个 Node 依赖（${required.join('、')}），`
+                + '但系统里既没有 npm 也没有 pnpm，也没找到 DSH 自带的运行时。\n'
+                + '装一个 Node.js（https://nodejs.org/）再重启即可。',
+            );
+          }
+          result.warnings.push(
+            `有 ${optional.length} 个可选依赖（${optional.join('、')}）没装：`
+              + '找不到 npm / pnpm，也没找到 DSH 自带的运行时。相关功能会不可用，其余功能正常。',
           );
+        } else {
+          log?.info(
+            `安装 Node 依赖（${all.length} 个，用 ${rt.installer.label}）`
+              + `${optional.length && !required.length ? '，都是可选的' : ''}，首次会慢一点…`,
+          );
+          // --ignore-scripts：依赖的 postinstall 就是任意代码执行入口，
+          // 装依赖不该顺带跑别人的安装脚本
+          const r = await run(rt.installer.cmd, rt.installer.args, { cwd: dir });
+          const detail = `${r.reason || (r.err || r.out).slice(-600)}\n`
+            + `可以手动执行：cd ${rel(dir)} && ${rt.installer.label} install`;
+          if (!r.ok) {
+            if (required.length) throw new Error(`安装 Node 依赖失败：${detail}`);
+            result.warnings.push(`可选依赖没装上（不影响主功能）：${detail}`);
+          } else {
+            result.installed.push(`Node 依赖（${rt.installer.label}）`);
+          }
+          // 装过就记账（成不成功都记）。**不能靠它拦住重试**——
+          // 失败时 node_modules 仍然不存在，上面 `!hasModules` 会让下次加载再试一遍
+          marker.packageJson = wantPkg;
+          await writeMarker(dir, marker);
         }
-        result.installed.push('Node 依赖');
-        marker.packageJson = wantPkg;
-        await writeMarker(dir, marker);
       }
     }
   }
