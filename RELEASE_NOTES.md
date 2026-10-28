@@ -1,3 +1,36 @@
+## v0.8.8：没装 Node 也能装带依赖的插件
+
+DSH 桌面版自己带了一套运行时（node 24 + pnpm 11 + python 3.12），装在
+`~/.dsh/dsh-runtimes/<runtime>/dependencies/` 里。但框架找安装器时只翻 PATH，
+完全没往那儿看——于是在一台没单独装过 Node.js 的机器上，装任何带 Node 依赖的
+插件都会得到一句「缺少 npm」，然后插件根本起不来。
+
+这一版把顺序补全了：
+
+- PATH 里的 `npm`（有就用，参数不变）
+- PATH 里的 `pnpm`
+- **DSH 自带的那套**：用它的 node 跑它的 `pnpm.cjs`
+
+用自带的 pnpm 时装法是 `install --prod --ignore-scripts --config.node-linker=hoisted
+--ignore-workspace`。`node-linker=hoisted` 是为了拿到跟 npm 一样的扁平
+`node_modules`——pnpm 默认往全局 store 里软链，store 一清插件就 import 不到。
+`ignore-workspace` 是因为插件目录有可能被丢进某个 pnpm workspace 里，不声明就会被
+外层 workspace 拒收。Python 依赖同理，也会去找自带的那份。
+
+另一件事：**必装依赖和可选依赖分开了**。
+
+以前 `dependencies` 和 `optionalDependencies` 被合成一张必装清单，缺任何一个都抛。
+问题是有些插件的依赖天然是锦上添花——比如 ai-chat 的三个语音依赖，它自己就逐个
+`await import()` 并 try/catch 降级成纯文本。把它们算成必装，等于把「语音用不了」
+升级成了「整个插件不加载」。
+
+现在：
+
+- `dependencies` 缺了 → 照样抛，并且说清缺什么、去哪装
+- `optionalDependencies` 缺了或装失败 → 只记一条警告，插件照常加载
+
+装完仍然写 `.deps.json` 记账，下次不重复装。
+
 ## v0.8.7：更新完的插件，标注立刻消失
 
 在面板上点了「更新」，插件确实升上去了，卡片上那句「可更新 1.2.0」却还挂着，
