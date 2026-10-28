@@ -10,7 +10,7 @@
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
 <img src="https://img.shields.io/badge/tests-600%2B%20passed-brightgreen" alt="测试 600+ 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
-<img src="https://img.shields.io/badge/version-0.8.8-blueviolet" alt="版本 0.8.8">
+<img src="https://img.shields.io/badge/version-0.8.9-blueviolet" alt="版本 0.8.9">
 <img src="https://img.shields.io/badge/license-Non--Commercial-red" alt="禁止商用">
 
 [快速开始](#3-分钟跑起来) ｜ [写插件](docs/插件开发规范.md) ｜ [外部插件协议](docs/插件协议.md) ｜ [配置参考](docs/配置参考.md) ｜ [常见问题](docs/常见问题.md) ｜ [贡献](CONTRIBUTING.md)
@@ -423,9 +423,10 @@ bot/
 │   ├── web/server.js           面板服务端（REST + SSE）
 │   └── plugin/                 插件加载、配置、依赖、子进程宿主、面板页面注册
 ├── test/
-│   ├── selftest.mjs            框架自检（474 项）
-│   ├── e2e.mjs                 端到端测试（147 项，起真实服务打接口）
-│   └── qrlogin.mjs             扫码建机器人（10 项）
+│   ├── selftest.mjs            框架自检（431 项）
+│   ├── e2e.mjs                 端到端测试（168 项，起真实服务打接口）
+│   ├── qrlogin.mjs             扫码建机器人（8 项）
+│   └── deps.mjs                插件依赖安装（11 项）
 ├── web/                        面板前端（原生 JS/CSS，无构建）
 └── docs/
 ```
@@ -470,9 +471,9 @@ openid 完全不同。共享 `roles.json` 等于所有权限记录全部对不�
 ## 开发
 
 ```bash
-npm test              # 自检 484 项（selftest 474 + qrlogin 10）
-npm run test:e2e      # 端到端 147 项（起 mock 服务打全部接口，跑在临时目录）
-npm run test:all      # 全量约 631 项：自检 + 扫码 + e2e（真机驱动要真机，没配就跳过）
+npm test              # 450 项（selftest 431 + qrlogin 8 + deps 11）
+npm run test:e2e      # 端到端 168 项（起 mock 服务打全部接口，跑在临时目录）
+npm run test:all      # 全量约 618 项：自检 + 扫码 + 依赖 + e2e（真机驱动要真机，没配就跳过）
 npm run check:secrets # 扫硬编码凭据（CI 也跑这个，提交前建议过一遍）
 node src/main.js --mock          # 不连 QQ，命令行发假消息调插件
 node src/main.js --mock --serve  # 只开面板，调界面

@@ -1044,8 +1044,12 @@ async function main() {
       host: globalCfg.webhook.host,
       port: globalCfg.webhook.port,
       path: globalCfg.webhook.path,
-      // 默认验签；只在排查「验签总是失败」时可以显式关掉
+      // 默认验签。配里写 verifySignature=false 还不够，必须同时开 allowUnsigned
+      // ——关掉之后任何知道地址和 appId 的人都能伪造事件，见 webhook.js 的注释
       verifySignature: globalCfg.webhook.verifySignature !== false,
+      allowUnsigned: globalCfg.webhook.allowUnsigned === true,
+      allowedIps: globalCfg.webhook.allowedIps,
+      perIpPerMin: globalCfg.webhook.perIpPerMin,
     });
     try {
       const port = await webhookServer.start();

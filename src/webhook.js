@@ -33,19 +33,56 @@ const MAX_BODY = 1024 * 1024;
 
 export class WebhookServer {
   /**
-   * @param {{host?:string, port?:number, path?:string}} opts
+   * @param {{
+   *   host?:string, port?:number, path?:string,
+   *   verifySignature?:boolean, allowUnsigned?:boolean,
+   *   allowedIps?:string[], perIpPerMin?:number
+   * }} opts
    */
-  constructor({ host = '0.0.0.0', port = 15208, path = '/webhook', verifySignature = true } = {}) {
+  constructor({
+    host = '127.0.0.1',
+    port = 15208,
+    path = '/webhook',
+    verifySignature = true,
+    allowUnsigned = false,
+    allowedIps = [],
+    perIpPerMin = 120,
+  } = {}) {
     this.host = host;
     this.port = port;
     this.path = path.startsWith('/') ? path : `/${path}`;
     /**
      * 是否校验事件的 Ed25519 签名。
      *
-     * 默认开。关掉只应出现在「验签总是失败、但又急着收消息」的排查场景，
-     * 关掉之后任何知道回调地址 + appId 的人都能伪造事件。
+     * **双开关**：只写 `verifySignature: false` 不生效，必须同时给
+     * `allowUnsigned: true`。关掉之后，任何知道回调地址 + appId 的人都能伪造
+     * 事件（含冒充群主触发管理命令），这个代价不该由一个配置项决定。
      */
-    this.verifySignature = verifySignature !== false;
+    this.verifySignature = !(verifySignature === false && allowUnsigned === true);
+    if (verifySignature === false && allowUnsigned !== true) {
+      log.warn(
+        'webhook.verifySignature=false 已忽略：要真的关掉验签，必须同时设置 ' +
+          'webhook.allowUnsigned=true。' +
+          '（关掉之后任何知道地址和 appId 的人都能伪造事件，包括冒充群主。默认不给这个口子。）',
+      );
+    }
+    /** 允许的来源 IP（空 = 不限）。公网部署建议填平台出口 IP，或交给反代做 */
+    this.allowedIps = new Set(
+      (Array.isArray(allowedIps) ? allowedIps : []).map((s) => String(s).trim()).filter(Boolean),
+    );
+    /** 每个 IP 每分钟上限，防日志洪泛 */
+    this.perIpPerMin = Math.max(1, Number(perIpPerMin) || 120);
+    /** ip -> { start, count } */
+    this.ipHits = new Map();
+    /**
+     * 事件去重：eventId -> 过期时间戳。
+     *
+     * 平台超时会**重推同一条事件**（报文完全一样），所以不能按签名去重
+     * （那会把重推当攻击拒掉，直接丢消息）。按事件 id 去重才对：第一次正常
+     * 处理，之后的重推一律回 200 但不再分发。顺带也挡住了「抓到一条合法请求
+     * 在时间窗内重放」。
+     */
+    this.seenEvents = new Map();
     /** @type {Map<string, {secret:string, onEvent:Function, onError?:Function}>} */
     this.bots = new Map();
     this.server = null;
@@ -197,7 +234,8 @@ export class WebhookServer {
   async #handle(req, res) {
     // 只接受 POST；健康检查给 GET
     if (req.method === 'GET') {
-      return this.#json(res, 200, { ok: true, service: 'roost-webhook', bots: this.bots.size });
+      // 不返回机器人数量：那是内部信息，不该对匿名探测暴露
+      return this.#json(res, 200, { ok: true, service: 'roost-webhook' });
     }
     if (req.method !== 'POST') {
       return this.#json(res, 405, { error: 'method not allowed' });
@@ -207,6 +245,36 @@ export class WebhookServer {
     const pathname = (req.url || '').split('?')[0].replace(/\/+$/, '') || '/';
     if (pathname !== this.path.replace(/\/+$/, '')) {
       return this.#json(res, 404, { error: 'not found' });
+    }
+
+    /**
+     * 来源白名单 + 每 IP 限速。
+     *
+     * 放在路径校验之后、解析 body 之前：非法路径不该占用配额，也不该被读 body。
+     * 顺序也有讲究——先在网络层挡掉，比在业务逻辑里挡省事得多。
+     */
+    const ip = req.socket?.remoteAddress || 'unknown';
+    if (this.allowedIps.size && !this.allowedIps.has(ip)) {
+      this.counters.rejected += 1;
+      log.warn(`Webhook 拒绝非白名单来源：${ip}`);
+      return this.#json(res, 403, { error: 'forbidden' });
+    }
+    {
+      const now = Date.now();
+      const rec = this.ipHits.get(ip) ?? { start: now, count: 0 };
+      if (now - rec.start >= 60_000) {
+        rec.start = now;
+        rec.count = 0;
+      }
+      if (rec.count >= this.perIpPerMin) {
+        this.counters.rejected += 1;
+        log.warn(`Webhook 请求过频，已限速：${ip}（每分钟上限 ${this.perIpPerMin}）`);
+        return this.#json(res, 429, { error: 'too many requests' });
+      }
+      rec.count += 1;
+      this.ipHits.set(ip, rec);
+      // 防止被大量来源地址把表撑爆
+      if (this.ipHits.size > 5000) this.ipHits.clear();
     }
 
     const url = new URL(req.url || '/', 'http://localhost');
@@ -323,6 +391,36 @@ export class WebhookServer {
         log.warn(`[${appId}] 事件验签失败（${r.reason}），已拒绝`);
         return this.#json(res, 401, { error: 'invalid signature' });
       }
+    }
+
+    /**
+     * 事件级去重。
+     *
+     * 平台超时会**重推同一条事件**（报文完全一样）。所以不能按签名去重——
+     * 那会把重推当攻击拒掉，等于直接丢消息。按事件 id 去重才对：第一次正常
+     * 处理，之后的重推一律 200 但不再分发。顺带也挡住「抓到一条合法请求
+     * 在时间窗内重放」。
+     *
+     * 只用 `payload.id`，不猜别的字段名：猜错会把两个不同事件判成同一个，
+     * 那是真的丢消息。真没有 id 就退回只靠时间戳窗口（sign.js 里的 300 秒），
+     * 并且提醒一次。
+     */
+    const evId = String(payload?.id ?? '');
+    if (evId) {
+      const exp = this.seenEvents.get(evId);
+      if (exp && exp > Date.now()) {
+        return this.#json(res, 200, {}); // 重复：静默接受，不重复处理
+      }
+      this.seenEvents.set(evId, Date.now() + 300_000);
+      if (this.seenEvents.size > 10_000) {
+        this.seenEvents.delete(this.seenEvents.keys().next().value);
+      }
+    } else if (!this.noIdWarned) {
+      this.noIdWarned = true;
+      log.warn(
+        '收到的 Webhook 事件没有 id 字段，无法做重放去重，只能依赖 300 秒时间戳窗口。' +
+          '如果官方后续给事件加了 id，这里会自动生效。',
+      );
     }
 
     this.counters.received += 1;
