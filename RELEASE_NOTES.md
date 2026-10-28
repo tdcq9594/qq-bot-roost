@@ -1,3 +1,71 @@
+## v0.8.10：反代部署、Webhook 加固、pip 白名单
+
+这一版主要解决「本机跑得好好的，一放到 Nginx / 容器 / 公网后面就出问题」的那类事。
+
+### 反代部署
+
+面板挂在 Nginx / Caddy / CDN 后面时，之前有两个隐藏问题：
+
+- **认证限速按错 IP 统计**。以前取 socket 地址，反代后所有请求都来自代理，
+  全挤进一个桶：攻击者发 20 次错误密钥，所有人和运维一起被锁 60 秒，
+  日志里还看不到攻击者 IP。现在新增 `webui.trustProxy`，打开后按真实客户端 IP
+  分桶；`trustProxyHops` 支持 CDN + Nginx 多层（取倒数第 N 个，取最右只会拿到
+  CDN 地址）。默认关，关着的时候伪造 `X-Forwarded-For` 没有任何作用。
+- **保存全部 403**。Nginx 默认把 Host 改写成 `$proxy_host`，与浏览器的 Origin
+  永远不等，结果是读接口正常、**所有保存都失败**。现在同源校验认
+  `X-Forwarded-Host`。
+
+另外：
+
+- 新增免鉴权的 `/healthz` 健康检查端点，反映机器人真实在线数（全掉线给 503）。
+  以前 Docker healthcheck 探 `/api/status`：配了 accessKey 之后恒 401 → 永久
+  unhealthy；不配 key 时机器人掉线了照样报健康，两个方向都错。
+- Docker compose 端口改成只绑 `127.0.0.1`（公网请走反代）；密钥改成
+  `${ROOST_WEBUI_KEY:?...}`，缺了在 `up` 阶段就报错，而不是等容器起来才发现崩了、
+  然后自己想个弱密钥糊过去。
+- 容器内禁用端口顺延（固定映射只对得上配置的端口，顺延即面板不可达且不报错）。
+- 新增 `.env.example`，`.gitignore` 忽略 `.env`。
+
+### Webhook 加固
+
+公网开 Webhook 才会暴露的问题：
+
+- 默认监听从 `0.0.0.0` 改成 `127.0.0.1`：对外回调走反代终结 TLS，
+  不再一开启就对整个网络裸奔（Webhook 收的是群消息和 openid，明文过网）。
+- 新增来源 IP 白名单（`allowedIps`）和每 IP 限速（`perIpPerMin`）。
+- 验签改双开关：只写 `verifySignature=false` 不生效，必须同时 `allowUnsigned=true`。
+  关掉验签 = 任何知道地址和 appId 的人都能伪造事件（含冒充群主触发管理命令），
+  这个代价不该由一个配置项决定。
+- 事件级去重：按 `payload.id`（不是签名）。平台超时会重推**同一条**事件，
+  按签名去重会把重推当攻击拒掉、直接丢消息。按 id 去重才是对的，顺带挡了重放。
+
+### pip 依赖白名单
+
+插件 `requirements.txt` 的校验从黑名单改成**白名单**（fail-closed）。
+
+之前是黑名单正则，而 pip 选项的缩写列不完——`-i`（=`--index-url`）、
+`-c`（约束文件）、`-r`（嵌套 requirement）、`--no-index` 都能绕过，等于让插件
+把 pip 指到任意源。现在只接受「包名 + 版本约束」这一种形态（含 extras 和环境
+标记），其余一律拒绝安装。
+
+### 修复
+
+- **SSE 满载二次写头**：连接数满时对同一个响应写两次头，Node 抛
+  `ERR_HTTP_HEADERS_SENT`，连接也不释放。改成先检查再写头。
+- **SSE 僵尸连接回收**：ping 写失败（连接已断但 close 没触发）时主动清理，
+  不再一直占着连接配额。
+- **`.dockerignore` 漏排密钥**：`config/backups/`（完整配置备份，含明文 AppSecret）
+  和 `config/live-test.json` 之前会被打进 Docker 镜像层，`docker pull` 之后
+  `docker history` 就能挖出来。改成排除整个 `config/`，只留 `*.example.json`。
+
+### 文档
+
+- README 补 CI badge（之前一直缺），测试数、版本徽章对齐真值。
+- SECURITY.md 对齐现状：会话 Cookie、插件页令牌隔离、自动更新内容指纹、
+  pip 白名单。
+- 新增 `docs/发版清单.md`：把发版该做的每一步（含打 tag 后**必须建 GitHub
+  Release**，否则 `releases/latest` 停在旧版、检查更新失效）固化成清单。
+
 ## v0.8.9：插件页不再携带面板密码
 
 这一版是安全加固，其中三条会改变你实际看到的东西，先说清楚。
