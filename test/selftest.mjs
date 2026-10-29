@@ -1,6 +1,7 @@
 // 框架自检：验证 outbound / session / pipeline / plugin config 的行为。
 // 跑法：npm test
 import fs from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Outbound, SendError } from '../src/outbound.js';
@@ -539,12 +540,44 @@ const RUN = Date.now().toString(36);
     );
   } else {
     const r3 = await claimInstance({ appId: B });
+    /**
+     * 失败时把**判活链路的每一环**都打出来。
+     *
+     * 这条断言在 ubuntu runner 上反复红，而本机（Windows，走 tasklist）
+     * 从来没红过——只看一句「没拦住」根本分不清是：
+     *   · 子进程真没了（kill 抛 ESRCH）
+     *   · 进程在，但 /proc/<pid>/comm 读不到或读出来不是 node
+     *   · 锁文件里 B 那条根本没写进去（读的写的不是同一个文件）
+     * 所以把这三件事各自的结果一起打出来，下一次红就能直接定位。
+     */
+    const diag = () => {
+      const d = { pid: child.pid, kill: '', comm: '', lockHasB: '' };
+      try {
+        process.kill(child.pid, 0);
+        d.kill = 'alive';
+      } catch (e) {
+        d.kill = e.code || String(e);
+      }
+      try {
+        d.comm = readFileSync(`/proc/${child.pid}/comm`, 'utf8').trim();
+      } catch (e) {
+        d.comm = e.code || 'ERR';
+      }
+      return d;
+    };
+    let why = '';
+    if (r3.ok === true) {
+      const after = await readLock();
+      const d = diag();
+      why = `pid=${d.pid} kill=${d.kill} comm=${JSON.stringify(d.comm)}`
+        + ` 锁里还有 B=${Boolean(after[B])} 锁里的 pid=${after[B]?.pid ?? '-'}`;
+    }
     check(
       '同 AppID 已有活实例时拒绝启动',
       r3.ok === false && r3.conflict?.pid === child.pid,
       r3.conflict
         ? `冲突 PID=${r3.conflict.pid}`
-        : `没拦住：ok=${r3.ok}，子进程 pid=${child.pid} 存活`,
+        : `没拦住：ok=${r3.ok}｜${why}`,
     );
   }
 

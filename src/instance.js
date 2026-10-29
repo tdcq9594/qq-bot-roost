@@ -59,7 +59,16 @@ function pidLooksLikeNode(pid) {
      */
     if (process.platform === 'linux') {
       const comm = readFileSync(`/proc/${pid}/comm`, 'utf8').trim();
-      return comm ? /node/i.test(comm) : false;
+      /**
+       * 读到空字符串时**按活着算**，不是按死了算。
+       *
+       * 判断不出来的方向要选保守的那个：当成死 → 删记录 → 放行第二次认领
+       * → 同一个 AppID 双开 → 4902 互踢，正是这套机制存在的理由。
+       * 当成活 → 顶多让用户手动清一条残留记录（有 `--force`）。
+       *
+       * 真实的误判代价不对称，所以拿不准就往"活着"倒。
+       */
+      return comm ? /node/i.test(comm) : true;
     }
     const comm = execFileSync('ps', ['-p', String(pid), '-o', 'comm='], {
       encoding: 'utf8',
