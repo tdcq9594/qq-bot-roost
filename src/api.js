@@ -10,6 +10,20 @@ const log = createLogger('api');
 export const FILE_TYPE = { IMAGE: 1, VIDEO: 2, VOICE: 3, FILE: 4 };
 
 /**
+ * 富媒体软限制（字节）。官方口径：图片 20MB / 视频 30MB / 语音 20MB / 文件 200MB；
+ * 超软限会被服务端拒（普通 base64 上传接口直接 413）。
+ *
+ * `message.js` 的 `replyMedia` 用它做「图片超 20MB 自动降级为文件」；
+ * `uploadLocalFile` 拿它当最后一道兜底（防直接调它传超大文件）。
+ */
+export const MEDIA_SOFT_LIMIT = {
+  [FILE_TYPE.IMAGE]: 20 * 1024 * 1024,
+  [FILE_TYPE.VIDEO]: 30 * 1024 * 1024,
+  [FILE_TYPE.VOICE]: 20 * 1024 * 1024,
+  [FILE_TYPE.FILE]: 200 * 1024 * 1024,
+};
+
+/**
  * 被动回复序号的**最后一道**兜底上限。
  *
  * 官方口径按会话类型不同：群聊 5 次（`msg_seq` 1–5），单聊 4 次（1–4）。
@@ -262,11 +276,28 @@ export class QQApi {
     let cacheKey = null;
     try {
       const st = await fs.stat(filePath);
+      /**
+       * 软限制前置校验：普通 base64 上传接口对富媒体有大小上限，
+       * 超了服务端直接 413。在这里先挡一道，报一个能看懂的错误，
+       * 别让调用方拿到「HTTP 413 ... <html>」这种垃圾信息。
+       */
+      const limit = MEDIA_SOFT_LIMIT[fileType];
+      if (limit && st.size > limit) {
+        const mb = (st.size / 1024 / 1024).toFixed(1);
+        const cap = Math.round(limit / 1024 / 1024);
+        throw new Error(`${filePath} 有 ${mb}MB，超过 ${cap}MB 上限，发不出去（先压缩或换张小图）`);
+      }
       cacheKey = `${scene}:${enc(target)}:${fileType}:file:${filePath}:${st.size}:${Math.floor(st.mtimeMs)}`;
       const hit = this.mediaCache.get(cacheKey);
       if (hit && Date.now() - hit.at < MEDIA_TTL) return hit.value;
       if (hit) this.mediaCache.delete(cacheKey);
-    } catch {
+    } catch (e) {
+      /**
+       * stat 失败或超限都落到这里。stat 失败（文件不存在 / 没权限）时
+       * 不能当缓存命中，继续往下走让 `readFile` 抛真正的错误；
+       * 超限是**明确拒绝**，必须直接把错误往上抛，不能悄悄读文件再传一遍。
+       */
+      if (/上限/.test(e?.message ?? '')) throw e;
       /* stat 失败就按无缓存走，readFile 会抛真正的错误 */
     }
 

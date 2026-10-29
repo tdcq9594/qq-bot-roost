@@ -1,5 +1,6 @@
+import fs from 'node:fs/promises';
 import { createLogger } from './logger.js';
-import { FILE_TYPE } from './api.js';
+import { FILE_TYPE, MEDIA_SOFT_LIMIT } from './api.js';
 import { messageKindOf, EVENTS } from './events.js';
 import { renderMenuMd, mdToPlain } from './markdown.js';
 
@@ -670,9 +671,30 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
       const target = kind === 'group' ? groupId : userId;
       if (scene !== 'group' && scene !== 'c2c') return null;
 
+      /**
+       * 图片超软限（20MB）自动降级为文件。
+       *
+       * 普通 base64 上传接口对图片有 20MB 上限，超了服务端直接 413。
+       * 但文件（file_type=4）上限是 200MB，所以本地大图不该直接报错——
+       * 改成按「文件」发出去，用户收到的是文件卡片（可下载查看）。
+       * 官方「超软限降级为文件」的语义，落到这里实现。
+       */
+      let effectiveType = fileType;
+      if (local && fileType === FILE_TYPE.IMAGE) {
+        try {
+          const st = await fs.stat(source);
+          if (st.size > MEDIA_SOFT_LIMIT[FILE_TYPE.IMAGE]) {
+            effectiveType = FILE_TYPE.FILE;
+            log.info(`图片 ${(st.size / 1024 / 1024).toFixed(1)}MB 超过 20MB 软限制，降级按文件发送`);
+          }
+        } catch {
+          /* stat 失败按原类型走，让 uploadLocalFile 抛真正的错误 */
+        }
+      }
+
       const up = local
-        ? await api.uploadLocalFile(scene, target, source, fileType)
-        : await api.uploadMedia(scene, target, { fileType, url: source });
+        ? await api.uploadLocalFile(scene, target, source, effectiveType)
+        : await api.uploadMedia(scene, target, { fileType: effectiveType, url: source });
       if (!up?.file_info) throw new Error('未返回 file_info');
 
       const content = text ? String(text) : ' ';
