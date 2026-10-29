@@ -17,6 +17,7 @@ import { claimInstance, releaseInstance } from './instance.js';
 import { botPaths, DIRS, rel } from './paths.js';
 import { StatsStore } from './storage/index.js';
 import { createReach } from './reach.js';
+import { createLedger } from './ledger.js';
 
 /**
  * 一个机器人的完整运行时。
@@ -180,6 +181,19 @@ export class BotRuntime {
       retentionDays: cfg.stats?.retentionDays ?? 90,
     });
 
+    /**
+     * 事件账本：官方没有历史消息接口，这是**唯一的历史来源**。
+     *
+     * 和 `stats` 是两个库、两套保留策略：统计留 90 天聚合且不存正文，
+     * 账本只留 7 天但存原文。混一个库的话「这个库会不会被拷走」就说不清了。
+     */
+    this.ledger = createLedger({
+      file: this.paths.events,
+      botId: this.id,
+      enabled: cfg.ledger?.enabled !== false,
+      retentionDays: cfg.ledger?.retentionDays ?? 7,
+    });
+
     this.plugins = new PluginManager({
       pluginsDir: DIRS.plugins,
       paths: this.paths,
@@ -193,6 +207,7 @@ export class BotRuntime {
       session: this.session,
       pipeline: this.pipeline,
       reach: this.reach,
+      ledger: this.ledger,
       isOwner: (uid) => cfg.owners.includes(uid),
       // 插件声明了 frameworkVersion 就做兼容校验；作者本地调试可以关掉
       ignoreCompat: this.globalCfg.plugins?.ignoreFrameworkVersion === true,
@@ -204,6 +219,8 @@ export class BotRuntime {
 
     // 统计库要在插件之前打开：插件上报的运行数据也算统计的一部分
     this.stats.open();
+    // 账本更要在插件之前开：插件一加载就可能开始收消息，漏一条就永久没了
+    this.ledger.open();
 
     // 按配置过滤要加载的插件
     await this.plugins.scan({ filter: pluginFilterOf(cfg.plugins) });
@@ -472,6 +489,7 @@ export class BotRuntime {
     await this.roles?.flush().catch(() => {});
     await this.reach?.flush().catch(() => {});
     this.stats?.close();
+    this.ledger?.close();
     if (!this.mock) await releaseInstance(this.cfg.appId).catch(() => {});
     this.state = 'stopped';
   }
@@ -540,6 +558,21 @@ export class BotRuntime {
 
     /* ---- 消息事件 ---- */
     const msg = buildMessage(eventName, d, { api: this.api, cfg, outbound, session });
+
+    /**
+     * 入账：**第一件要做的事**，在去重 / 白名单 / 限流 / 暂停之前。
+     *
+     * 顺序是有讲究的。账本记的是「发生过什么」，不是「我们怎么处理的」：
+     *   - 被去重拦下的那条，官方确实推了两次，事实是「推了两次」，只是我们处理了一次；
+     *   - 暂停期间的消息如果不记，恢复后就永久消失了——官方没有历史消息接口，补不回来。
+     *
+     * 重复推送由 `dedupe` 唯一约束兜底（官方明说「相同 msg_id 可能重复推送」），
+     * 所以放在最前面也不会记重。
+     *
+     * 同步写：`node:sqlite` 是同步 API，一条 INSERT 在 WAL 下是微秒级，
+     * 比「攒批 + 定时刷」更安全——进程被 kill 时不会丢最后一批。
+     */
+    this.ledger?.append(msg);
 
     // 收到私聊 = 好友关系存在的强证据。不置 c2cPush：他能发不等于他允许机器人主动推
     if (msg.kind === 'c2c' && msg.userId) {

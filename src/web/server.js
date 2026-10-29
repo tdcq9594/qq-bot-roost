@@ -2118,6 +2118,41 @@ export async function startWebServer({
           return json(res, 200, { ok: true, ...(await snapshot()) });
         }
 
+        /**
+         * 事件账本：官方没有历史消息接口，这是唯一能翻到「刚才说了什么」的地方。
+         *
+         * 三条路由：
+         *   GET /api/ledger/stats              总量、时间范围、保留天数
+         *   GET /api/ledger?chatId=&limit=     某会话最近 N 条（正序）
+         *   GET /api/ledger/context?chatId=&seq=  以某条为锚点的前后邻文
+         *
+         * `payload`（原始报文）**一律不返回**：里面虽然有脱敏过的凭证，
+         * 但整包给前端没有意义（前端只要正文和元信息），只会把面板变成数据外泄面。
+         */
+        if (pathname === '/api/ledger/stats' && req.method === 'GET') {
+          const st = rt?.ledger?.stats?.() ?? { available: false, total: 0 };
+          return json(res, 200, st);
+        }
+
+        if (pathname === '/api/ledger/context' && req.method === 'GET') {
+          const chatId = String(url.searchParams.get('chatId') ?? '').trim();
+          const seq = Number(url.searchParams.get('seq') ?? 0);
+          if (!chatId || !seq) return json(res, 400, { error: '需要 chatId 和 seq' });
+          const before = Number(url.searchParams.get('before') ?? 2);
+          const after = Number(url.searchParams.get('after') ?? 2);
+          const list = rt?.ledger?.timeline?.({ chatId, anchorSeq: seq, before, after }) ?? [];
+          return json(res, 200, { items: list, empty: list.length === 0 });
+        }
+
+        if (pathname === '/api/ledger' && req.method === 'GET') {
+          const chatId = String(url.searchParams.get('chatId') ?? '').trim();
+          if (!chatId) return json(res, 400, { error: '需要 chatId' });
+          const limit = Number(url.searchParams.get('limit') ?? 50);
+          const beforeSeq = Number(url.searchParams.get('beforeSeq') ?? 0) || undefined;
+          const items = rt?.ledger?.recent?.({ chatId, limit, beforeSeq }) ?? [];
+          return json(res, 200, { items });
+        }
+
         if (pathname === '/api/groups' && req.method === 'GET') {
           const list = await groups.list();
           /**

@@ -1,4 +1,10 @@
-const SENSITIVE_KEY = /^(auth_token|token|access_token|secret|client_secret|cookie|password)$/i;
+/**
+ * 敏感字段名。**导出给事件账本用**——账本要存原始报文，
+ * 但它和日志的取舍不同：日志里整个 `ext` 都可以扔（没人靠日志排查 msg_idx），
+ * 账本必须保留 `msg_idx` / `ref_msg_idx`（引用边全靠它），只能删 `auth_token`。
+ * 所以共用这份名单，各写各的遍历。
+ */
+export const SENSITIVE_KEY = /^(auth_token|token|access_token|secret|client_secret|cookie|password)$/i;
 
 /**
  * 事件报文脱敏。

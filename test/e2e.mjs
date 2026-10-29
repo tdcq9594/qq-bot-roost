@@ -970,9 +970,59 @@ async function testMessageBroadcast() {
   await pump;
 }
 
+/* ---------------- 事件账本 ---------------- */
+
+/**
+ * 账本的端到端验证：注入一条 mock 消息，确认它**真的**进了库。
+ *
+ * 单测已经覆盖了 `EventLedger` 本身，这里验的是另一件事：
+ * `bot.js` 里那个 `this.ledger?.append(msg)` 有没有接对位置。
+ * 接晚了（放在 pipeline 之后）单测看不出来，只有走真实链路才暴露。
+ */
+async function testLedger() {
+  const st0 = await api('/api/ledger/stats');
+  ok('账本: 统计可读', st0.status === 200 && typeof st0.data?.total === 'number', `status=${st0.status}`);
+  ok('账本: 报告可用', st0.data?.available === true, JSON.stringify(st0.data).slice(0, 100));
+
+  const before = Number(st0.data?.total ?? 0);
+  await api('/api/bots/main/online', { method: 'POST', body: '{}' });
+  const inj = await api('/api/mock/message', {
+    method: 'POST',
+    body: JSON.stringify({ text: '记账测试', groupId: 'g-ledger' }),
+  });
+  ok('账本: 注入消息成功', inj.status === 200, `实际 ${inj.status}`);
+  await sleep(600);
+
+  const list = await api('/api/ledger?chatId=g-ledger&limit=10');
+  const items = list.data?.items ?? [];
+  ok('账本: 收消息后自动入账', items.length >= 1, `拿到 ${items.length} 条`);
+  ok(
+    '账本: 入账的是原文',
+    items.some((x) => x.content === '记账测试'),
+    JSON.stringify(items[0] ?? {}).slice(0, 120),
+  );
+  // 原始报文整包给前端没意义，还会把面板变成数据外泄面
+  ok('账本: 不返回原始报文', items.every((x) => x.payload === undefined));
+  ok('账本: 带时间基准', items.every((x) => ['message', 'observation', 'unknown'].includes(x.timeBasis)));
+
+  const st1 = await api('/api/ledger/stats');
+  ok('账本: 总数增加', Number(st1.data?.total ?? 0) > before, `${before} → ${st1.data?.total}`);
+
+  const seq = items[0]?.seq;
+  if (seq) {
+    const ctx = await api(`/api/ledger/context?chatId=g-ledger&seq=${seq}`);
+    ok('账本: 邻文接口可用', ctx.status === 200 && Array.isArray(ctx.data?.items), `status=${ctx.status}`);
+    ok('账本: 邻文含锚点', (ctx.data?.items ?? []).some((x) => x.role === 'hit'));
+  }
+
+  const bad = await api('/api/ledger');
+  ok('账本: 缺 chatId 被拒', bad.status === 400, `实际 ${bad.status}`);
+  const badCtx = await api('/api/ledger/context?chatId=g-ledger');
+  ok('账本: 邻文缺 seq 被拒', badCtx.status === 400, `实际 ${badCtx.status}`);
+}
+
 async function main() {
-  console.log('启动服务…');
-  const bootLog = await boot();
+  console.log('启动服务…');  const bootLog = await boot();
   ok('启动: 无 ERROR', !/ERROR/.test(bootLog), /ERROR.*/.exec(bootLog)?.[0]?.slice(0, 60) || '');
 
   await testBasics();
@@ -994,6 +1044,7 @@ async function main() {
   await testSendAndCred();
   await testQqChannel();
   await testMessageBroadcast();
+  await testLedger();
 
   const fail = results.filter((r) => !r.pass);
   console.log(`\n${results.length - fail.length}/${results.length} 通过`);

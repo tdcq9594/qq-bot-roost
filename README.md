@@ -418,14 +418,16 @@ bot/
 │   ├── api.js                  HTTP API
 │   ├── message.js              事件 → 统一 Message
 │   ├── roles.js                权限存储
+│   ├── reach.js                可达性：好友关系 + 主动推送开关（官方没有查询接口，靠事件维护）
+│   ├── ledger.js               事件账本：原始消息落库，官方无历史消息接口，这是唯一的历史来源
 │   ├── logger.js               日志：控制台 + 落盘 + 轮转
 │   ├── services/               后台服务：健康巡检、清理、配置热加载、定时重启、插件热重载
-│   ├── storage/                统计库：SQLite 连接、表结构迁移、消息与成员统计
+│   ├── storage/                SQLite 连接与两套表结构：统计库（不存正文）/ 事件账本（存原文）
 │   ├── web/server.js           面板服务端（REST + SSE）
 │   └── plugin/                 插件加载、配置、依赖、子进程宿主、面板页面注册
 ├── test/
-│   ├── selftest.mjs            框架自检（511 项）
-│   ├── e2e.mjs                 端到端测试（185 项，起真实服务打接口）
+│   ├── selftest.mjs            框架自检（538 项）
+│   ├── e2e.mjs                 端到端测试（197 项，起真实服务打接口）
 │   ├── qrlogin.mjs             扫码建机器人（8 项）
 │   └── deps.mjs                插件依赖安装（11 项）
 ├── web/                        面板前端（原生 JS/CSS，无构建）

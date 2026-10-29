@@ -8,6 +8,29 @@ import { createToolCaller } from './tools.js';
 
 
 /**
+ * 给插件的账本视图：**只有读方法**。
+ *
+ * 为什么包一层而不是直接给 `ledger` 实例：`append()` 一暴露，插件就能往账本里
+ * 塞一条「用户没说过的话」，而账本的价值恰恰在于「它是原始事实」。
+ * 包一层之后插件想存自己的东西只能走 `ctx.storage`，边界清楚。
+ *
+ * 用 `Object.freeze` 而不是私有字段：这层是防误用，不是防恶意代码
+ * （插件本来就在同进程里跑，真想绕过谁也拦不住）。所以选最轻的方式。
+ */
+function readOnlyLedger(ledger) {
+  return Object.freeze({
+    /** 某会话最近 N 条（正序）。`beforeSeq` 用于翻页 */
+    recent: (opts) => ledger.recent(opts),
+    /** 以某条为锚点取前后邻文，`unknown` 时间的锚点返回空 */
+    timeline: (opts) => ledger.timeline(opts),
+    /** 按事件 id 取一条完整记录（含原始 payload 之外的字段） */
+    get: (id) => ledger.get(id),
+    /** 总量、时间范围、未解析引用数、保留天数 */
+    stats: () => ledger.stats(),
+  });
+}
+
+/**
  * 全局注册表：所有插件注册的命令、事件监听、AI 工具都放这里。
  * 重载插件时按 pluginId 精确清除，互不影响。
  */
@@ -302,7 +325,7 @@ export class PluginStorage {
 /**
  * 插件上下文：插件能用的全部能力都在这里，不暴露内部实现。
  */
-export function createContext({ meta, paths, registry, api, cfg, config, configStore, groups, roles, levels, outbound, session, pipeline, reach, isOwner, pages = null, routes = null, state = null }) {
+export function createContext({ meta, paths, registry, api, cfg, config, configStore, groups, roles, levels, outbound, session, pipeline, reach, ledger, isOwner, pages = null, routes = null, state = null }) {
   const id = meta.id;
   // 日志 tag 带机器人 id，多机器人下同名插件的日志不会串
   const logger = createLogger(`plugin:${paths?.id ?? '-'}:${id}`);
@@ -350,6 +373,16 @@ export function createContext({ meta, paths, registry, api, cfg, config, configS
      * **`unknown` 不能当 `no` 用**——未知是「不知道」，不是「不行」。
      */
     reach,
+    /**
+     * 事件账本（**只读**）：`ctx.ledger.recent({chatId})` / `.timeline({chatId, anchorSeq})` / `.get(id)`。
+     *
+     * 官方没有历史消息接口，这是唯一能翻到「刚才群里说了什么」的地方。
+     * 只给读，不给写：账本记的是「发生过的事实」，插件往里写就等于伪造历史。
+     * 插件要存自己的东西用 `ctx.storage`。
+     *
+     * 注意保留期（默认 7 天），超出范围查不到是正常的，不是 bug。
+     */
+    ledger: ledger ? readOnlyLedger(ledger) : null,
     storage: new PluginStorage(paths.pluginData(id)),
 
     /**

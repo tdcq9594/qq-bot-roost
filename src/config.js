@@ -243,6 +243,19 @@ const BOT_DEFAULTS = {
   },
 
   /**
+   * 事件账本：存原始消息，官方没有历史消息接口，这是唯一的历史来源。
+   *
+   * 和 `stats` 刻意分开：stats 不存正文（只计数），ledger 存正文。
+   * 保留期也短得多——全文落库是隐私成本，只留够做上下文和幂等的窗口即可，
+   * 长期记忆的证据由 dsh-roost 的 journal 自己留快照。
+   */
+  ledger: {
+    enabled: true,
+    /** 原始消息保留天数。7 天够「最近聊了什么」，再长就该由记忆层负责了 */
+    retentionDays: 7,
+  },
+
+  /**
    * 启用哪些插件。三态：
    *   all     — 全部启用，新装插件自动生效
    *   include — 只启用 list 里的
@@ -471,6 +484,7 @@ export async function saveBotConfig(id, cfg) {
     outbound: cfg.outbound,
     session: cfg.session,
     stats: cfg.stats ?? { enabled: true, retentionDays: 90 },
+    ledger: cfg.ledger ?? { enabled: true, retentionDays: 7 },
     plugins: cfg.plugins,
     groupManage: cfg.groupManage ?? { invited: false },
   });

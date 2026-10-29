@@ -117,6 +117,16 @@ export function botPaths(id) {
     reach: path.join(base, 'reach.json'),
     /** 统计库（SQLite，存消息计数与成员活跃，不存正文） */
     stats: path.join(base, 'stats.db'),
+    /**
+     * 事件账本（SQLite，存原始消息）。
+     *
+     * 和 `stats.db` 分开两个文件，不是随手分的：
+     *   - 生命周期不同：stats 留 90 天聚合，events 只留 7 天全文，滚动删的策略和频率都不一样
+     *   - 隐私边界不同：stats 明确「不存正文」，events 存正文。混一个库的话，
+     *     「这个库会不会被拷走」这个问题的答案就说不清了
+     *   - 备份/删除粒度不同：用户想清掉聊天记录，删 `events.db` 一个文件就够
+     */
+    events: path.join(base, 'events.db'),
     pluginState: path.join(base, 'plugins.json'),
     pluginDataDir: path.join(base, 'plugins'),
     /** 日志根目录 */

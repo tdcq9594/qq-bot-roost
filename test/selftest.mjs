@@ -9,6 +9,7 @@ import { Pipeline, dedupMiddleware } from '../src/pipeline.js';
 import { PluginConfig } from '../src/plugin/config.js';
 import { browserCommand } from '../src/browser.js';
 import { createReach } from '../src/reach.js';
+import { EventLedger, resolveTime } from '../src/ledger.js';
 
 /**
  * 清掉测试写进额度账本的条目。
@@ -3944,6 +3945,168 @@ async function testReach() {
 }
 
 await testReach();
+
+/* ---------------- 事件账本 ---------------- */
+
+/**
+ * 造一条 `buildMessage()` 形状的消息。
+ * 账本只读这几个字段，不需要真的构造完整消息对象。
+ */
+function mkMsg(over = {}) {
+  return {
+    id: over.id ?? `m-${Math.random().toString(36).slice(2, 8)}`,
+    kind: 'group',
+    chatId: 'g1',
+    userId: 'u1',
+    userName: '小明',
+    content: '在吗',
+    msgIdx: '',
+    refMsgIdx: '',
+    quoted: '',
+    raw: { id: 'raw1', content: '在吗', timestamp: Date.now() },
+    ...over,
+  };
+}
+
+async function testLedger() {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'roost-ledger-'));
+  const file = path.join(dir, 'events.db');
+
+  const led = new EventLedger({ file, botId: 'b1', retentionDays: 7 });
+  check('账本: 能打开', led.open() === true, 'open() 返回 false');
+
+  // 1) 陌生会话查不到东西
+  check('账本: 陌生会话是空', led.recent({ chatId: 'nope' }).length === 0);
+
+  // 2) 记一条，拿到 seq
+  const a = led.append(mkMsg({ id: 'm1', content: '第一条' }));
+  check('账本: 记一条拿到 seq', a && a.seq > 0, JSON.stringify(a));
+
+  // 3) **同一条消息重复推送**（官方原文：相同 msg_id 可能重复推送）→ 不记重
+  const dup = led.append(mkMsg({ id: 'm1', content: '第一条' }));
+  check('账本: 重复 msg_id 不记重', dup === null, JSON.stringify(dup));
+  check('账本: 重复后总数仍是 1', led.stats().total === 1, String(led.stats().total));
+
+  // 4) 没有 msg_id 时按「会话+人+正文+时间」兜底去重
+  const noId = led.append(
+    mkMsg({ id: '', content: '没 id 的', raw: { content: '没 id 的', timestamp: 1700000000000 } }),
+  );
+  check('账本: 没有 msg_id 也能记', noId && noId.seq > 0);
+
+  // 5) 时间三态
+  const t1 = resolveTime({ timestamp: 1700000000000 });
+  check('账本: 毫秒时间戳判为 message', t1.basis === 'message' && t1.at === 1700000000000, JSON.stringify(t1));
+  const t2 = resolveTime({ timestamp: 1700000000 });
+  check('账本: 秒时间戳也认（×1000）', t2.basis === 'message' && t2.at === 1700000000000, JSON.stringify(t2));
+  const t3 = resolveTime({ timestamp: '2023-11-15T06:13:20+08:00' });
+  check('账本: ISO 字符串能解析', t3.basis === 'message', JSON.stringify(t3));
+  const t4 = resolveTime({}, 1234567890);
+  check(
+    '账本: 没有时间戳退回本地时间并标 observation',
+    t4.basis === 'observation' && t4.at === 1234567890,
+    JSON.stringify(t4),
+  );
+  const t5 = resolveTime({ timestamp: '不是时间' }, 42);
+  check('账本: 垃圾时间戳不炸，退回 observation', t5.basis === 'observation', JSON.stringify(t5));
+
+  // 6) 敏感字段必须被抹掉（群消息的 message_scene.ext 里有 auth_token）
+  led.append(
+    mkMsg({
+      id: 'm-secret',
+      raw: {
+        content: '带令牌的消息',
+        timestamp: Date.now(),
+        author: { member_openid: 'u1', union_openid: 'un-1' },
+        message_scene: { ext: { auth_token: 'SUPER_SECRET_TOKEN', msg_idx: 'REFIDX_abc==' } },
+      },
+    }),
+  );
+  const sec = led.db.prepare('SELECT payload FROM events WHERE msg_id = ?').get('m-secret');
+  check('账本: payload 里 auth_token 被抹掉', !sec.payload.includes('SUPER_SECRET_TOKEN'), sec.payload.slice(0, 80));
+  check('账本: 但 msg_idx 要留着（引用边全靠它）', sec.payload.includes('REFIDX_abc=='), sec.payload.slice(0, 120));
+
+  // 6b) 超大报文：payload 截断，但**正文不能跟着丢**（所以 content 是独立列）
+  const huge = 'x'.repeat(300 * 1024);
+  led.append(
+    mkMsg({
+      id: 'm-huge',
+      content: '正文要留住',
+      raw: { content: '正文要留住', timestamp: Date.now(), msg_elements: [{ text: huge }] },
+    }),
+  );
+  const hugeRow = led.db.prepare('SELECT content, payload FROM events WHERE msg_id = ?').get('m-huge');
+  check('账本: 超大 payload 被截断', hugeRow.payload.includes('_truncated'), hugeRow.payload.slice(0, 60));
+  check('账本: 截断后正文仍然完整', hugeRow.content === '正文要留住', hugeRow.content);
+
+  // 7) 引用边：先记下，能对上目标就 resolved=1
+  led.append(
+    mkMsg({ id: 'm-idx', msgIdx: 'REFIDX_target==', raw: { content: '被引用的', timestamp: Date.now() } }),
+  );
+  led.append(
+    mkMsg({
+      id: 'm-ref',
+      refMsgIdx: 'REFIDX_target==',
+      quoted: '被引用的',
+      raw: { content: '引用它', timestamp: Date.now() },
+    }),
+  );
+  const resolved = led.resolveRefs();
+  check('账本: 引用边能解析', resolved >= 1, `resolved=${resolved}`);
+  const pend = led.stats().unresolvedRefs;
+  check('账本: 解析完没有遗留未解析边', pend === 0, `未解析=${pend}`);
+
+  // 8) 邻文：锚点前后各 2 条
+  const tl = led.timeline({ chatId: 'g1', anchorSeq: a.seq, before: 2, after: 2 });
+  check('账本: 邻文非空', tl.length >= 1, `长度=${tl.length}`);
+  check('账本: 邻文里有 hit 锚点', tl.some((x) => x.role === 'hit'), JSON.stringify(tl.map((x) => x.role)));
+  check('账本: 邻文带正文', tl.some((x) => x.content.length > 0));
+
+  // 9) **unknown 时间的锚点不参与邻文**——拼出来的上下文看着合理但是错的。
+  //    `unknown` 只有导入/补录路径才产生（正常收消息判不准会退回 observation），
+  //    所以要显式传 timeBasis。
+  const unk = led.append(
+    mkMsg({ id: 'm-unknown', content: '时间不可靠' }),
+    { timeBasis: 'unknown' },
+  );
+  const tlUnk = led.timeline({ chatId: 'g1', anchorSeq: unk.seq });
+  check('账本: unknown 锚点取不到邻文', tlUnk.length === 0, `长度=${tlUnk.length}`);
+  // observation 是「本地收到时间」，可信，照常参与
+  const obs = led.append(mkMsg({ id: 'm-obs', content: '本地时间', raw: { content: '本地时间' } }));
+  check(
+    '账本: observation 锚点照常能取邻文',
+    led.timeline({ chatId: 'g1', anchorSeq: obs.seq }).length > 0,
+  );
+
+  // 10) 重启后还在（新实例读同一个文件）
+  led.close();
+  const again = new EventLedger({ file, botId: 'b1', retentionDays: 7 });
+  again.open();
+  check('账本: 重启后数据还在', again.stats().total > 0, String(again.stats().total));
+
+  // 11) seq 删了不复用 —— 账本序必须稳定，游标才不会错位
+  const maxBefore = again.stats().seqMax;
+  await again.prune();
+  const fresh = again.append(mkMsg({ id: 'm-after-prune', content: '清理之后' }));
+  check('账本: 清理后新 seq 只增不减', fresh.seq > maxBefore, `新=${fresh.seq} 旧max=${maxBefore}`);
+
+  // 12) 7 天前的数据被滚动删掉，7 天内的留着
+  const old = Date.now() - 8 * 24 * 3600 * 1000;
+  again.append(mkMsg({ id: 'm-old', content: '八天前', raw: { content: '八天前', timestamp: old } }));
+  const beforePrune = again.stats().total;
+  const deleted = await again.prune();
+  check('账本: 超期数据被删', deleted >= 1, `删了 ${deleted} 条`);
+  check('账本: 删除后总量变小', again.stats().total < beforePrune, `${beforePrune} → ${again.stats().total}`);
+  check('账本: 保留期内的没被误删', again.recent({ chatId: 'g1' }).length > 0);
+
+  // 13) 关闭后不再写入，也不抛
+  again.close();
+  check('账本: 关闭后 append 返回 null', again.append(mkMsg({ id: 'm-closed' })) === null);
+  check('账本: 关闭后查询返回空', again.recent({ chatId: 'g1' }).length === 0);
+
+  await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+}
+
+await testLedger();
 
 await testBackfillFromGitHub();
 
