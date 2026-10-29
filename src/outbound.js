@@ -352,7 +352,16 @@ export class Outbound {
     }
     if (!this.isOnline()) {
       this.stats.offline += 1;
-      throw new SendError('机器人当前没有连上 QQ，消息发不出去', 'offline');
+      /**
+       * 错误消息要**带上下一步怎么办**。
+       *
+       * 只解释原因（「没连上」）时，调用方只能自己猜是重试还是放弃；
+       * 写明「等它上线」，它就知道这类错误不该重试。
+       */
+      throw new SendError(
+        '机器人当前没有连上 QQ，消息发不出去。等它重新上线再试（面板「运行」页能看状态）。',
+        'offline',
+      );
     }
 
     const body = { ...payload };
@@ -440,7 +449,7 @@ export class Outbound {
         if (!this.#allowActiveThisMinute(chatKey)) {
           this.stats.rateBlocked += 1;
           throw new SendError(
-            `这个会话的主动消息发得太密（官方限制 ${this.activePerMin} 条/分钟），稍后再试。`,
+            `这个会话的主动消息发得太密（官方限制 ${this.activePerMin} 条/分钟），**等 1 分钟**就好。`,
             'rate',
           );
         }
