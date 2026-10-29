@@ -233,6 +233,7 @@ async function selectBot(id) {
   if (tab === 'plugins') loadPlugins();
   if (tab === 'events') loadEvents();
   if (tab === 'reach') loadReach();
+  if (tab === 'delivery') loadDelivery();
   if (tab === 'groups') loadGroups();
   if (tab === 'roles') { loadRoles(); loadPeople(); }
   if (tab === 'stats') loadStats();
@@ -599,6 +600,7 @@ function activateTab(name) {
   if (name === 'config') loadConfig();
   if (name === 'groups') loadGroups();
   if (name === 'reach') loadReach();
+  if (name === 'delivery') loadDelivery();
   if (name === 'roles') { loadRoles(); loadPeople(); }
 }
 
@@ -3038,6 +3040,71 @@ function triSelect(field, v, yes = '是', no = '否') {
   return `<select class="mini-select" data-field="${field}" title="人工标注">${
     sel('', '未知') + sel('1', yes) + sel('0', no)
   }</select>`;
+}
+
+/* ---------------- 投递账本 ---------------- */
+
+/**
+ * 状态文案。
+ *
+ * `unknown` 是唯一需要人动手的状态——**它不会自动重发**，
+ * 所以文案要把「去核对」写清楚，而不是只显示「未知」。
+ */
+const DELIVERY_LABEL = {
+  pending: { text: '发送中', tip: '正在发' },
+  sent: { text: '已发送', tip: '确认送达' },
+  audited: { text: '审核中', tip: '主动消息进了审核，既不是成功也不是失败' },
+  failed: { text: '失败', tip: '确定没发出去，可以重试' },
+  unknown: { text: '结果未知', tip: '超时或崩溃，不知道服务端收没收到。不会自动重发，需要人工核对' },
+};
+
+async function loadDelivery() {
+  const body = $('#deliveryBody');
+  if (!body) return;
+  try {
+    renderDelivery(await api('/api/delivery?limit=50'));
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="6" class="empty">加载失败: ${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+function renderDelivery(d) {
+  const stats = d?.stats ?? {};
+  const el = $('#deliveryStats');
+  if (el) {
+    const by = stats.by ?? {};
+    el.innerHTML = Object.keys(DELIVERY_LABEL)
+      .map((k) => {
+        const v = by[k] ?? 0;
+        // 有值才显眼：全 0 的时候整排彩色卡片只会让人以为出事了
+        const hot = k === 'unknown' && v > 0;
+        return `<div class="card"><div class="k">${DELIVERY_LABEL[k].text}</div>`
+          + `<div class="v"${hot ? ' style="color:var(--warn-text)"' : ''}>${v}</div></div>`;
+      })
+      .join('');
+  }
+
+  const body = $('#deliveryBody');
+  const items = d?.items ?? [];
+  if (!items.length) {
+    body.innerHTML = '<tr><td colspan="6" class="empty">还没有记录（只有带幂等键的发送才记账）</td></tr>';
+    return;
+  }
+  body.innerHTML = items
+    .map((x) => {
+      const st = DELIVERY_LABEL[x.state] ?? { text: x.state, tip: '' };
+      const when = x.created_at ? new Date(Number(x.created_at)).toLocaleString('zh-CN', { hour12: false }) : '-';
+      const warn = x.state === 'unknown' || x.state === 'failed';
+      return `<tr>
+        <td>${escapeHtml(when)}</td>
+        <td class="mono">${escapeHtml(String(x.chat_id ?? '').slice(0, 12))}</td>
+        <td${warn ? ' style="color:var(--warn-text)"' : ''} title="${escapeHtml(st.tip)}">${escapeHtml(st.text)}</td>
+        <td>${escapeHtml(String(x.digest ?? '').slice(0, 60))}</td>
+        <td class="num">${Number(x.attempts ?? 0)}</td>
+        <td class="mono">${escapeHtml(String(x.code ?? ''))}</td>
+      </tr>`;
+    })
+    .join('');
 }
 
 async function loadReach() {

@@ -57,6 +57,7 @@
         <button class="tab-item" data-tab="stats">统计</button>
         <button class="tab-item" data-tab="events">事件</button>
         <button class="tab-item" data-tab="reach">可达性</button>
+        <button class="tab-item" data-tab="delivery">投递</button>
         <button class="tab-item" data-tab="logs">日志</button>
       </div>
     </div>
@@ -511,6 +512,34 @@
         <span><b class="ev-dot hit"></b>收到过</span>
       </div>
       <div id="eventGroups" class="event-groups"></div>
+    </div>
+  </section>
+
+  <!-- 投递账本 -->
+  <section id="tab-delivery" class="panel">
+    <div class="box">
+      <div class="box-hd">
+        <h3>投递账本</h3>
+        <span class="hint">带幂等键的消息发没发出去，这里查得到</span>
+      </div>
+      <ul class="tips">
+        <li><b>已发送</b>确认送达；<b>审核中</b>是主动消息进了审核——既不是成功也不是失败，
+          等审核事件回来才会落定</li>
+        <li><b>结果未知</b>：超时或进程崩了，我们<b>不知道服务端收没收到</b>。
+          这种<b>不会自动重发</b>——宁可让人核对一次，也不重复打扰</li>
+        <li><b>失败</b>：确定没发出去（离线 / 超窗 / 额度 / 限流），可以重试</li>
+        <li>只有<b>带幂等键</b>的发送才记账（`qq_send` 那类「一次调用 = 一段话」的）。
+          插件直接回一句话不记账，靠 `msg_seq` 天然去重</li>
+      </ul>
+      <div class="cards" id="deliveryStats"></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>时间</th><th>会话</th><th>状态</th><th>摘要</th><th class="num">重试</th><th>原因码</th></tr>
+          </thead>
+          <tbody id="deliveryBody"><tr><td colspan="6" class="empty">暂无数据</td></tr></tbody>
+        </table>
+      </div>
     </div>
   </section>
 
