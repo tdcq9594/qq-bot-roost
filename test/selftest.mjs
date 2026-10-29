@@ -4205,6 +4205,22 @@ async function testGate() {
   const r2 = await C2.open();
   check('闸: 写过之后 botExisted=true', r2.botExisted === true);
 
+  /**
+   * `--paused` 靠 `persist: false` 实现「这次启动先别说话」。
+   *
+   * 关键是不能落盘：写进 `global.json` 的话，下次不带参数启动却发现还在暂停，
+   * 人会以为程序坏了。
+   */
+  await A.setGlobal(true, { by: 'cli', reason: '--paused' }, { persist: false });
+  check('闸: persist=false 立刻生效', A.check('g1').ok === false);
+  const D = createGate({ dir, botId: 'botA' });
+  await D.open();
+  check('闸: persist=false 不落盘', D.check('g1').ok === true);
+  check(
+    '闸: persist=false 的原因仍然看得见',
+    A.check('g1').reasons.some((r) => String(r.text).includes('--paused')),
+  );
+
   await A.flush();
   await B.flush();
   await C.flush();

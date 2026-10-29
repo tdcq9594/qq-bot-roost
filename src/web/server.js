@@ -2357,6 +2357,12 @@ export async function startWebServer({
          */
         if (pathname === '/api/gate' && req.method === 'GET') {
           const chatId = url.searchParams.get('chatId') || '';
+          /**
+           * `kind` 决定要不要查可达性：私聊查好友关系 + 主动推送开关，
+           * 群聊查群管理员的推送开关。**不传就不查**——不知道是群还是私聊
+           * 就查不了，而「不知道」不该变成「不能」。
+           */
+          const kind = url.searchParams.get('kind') || '';
           const bots = [];
           for (const r of runtimes) {
             const snap = await r.gate?.snapshot?.().catch(() => null);
@@ -2370,7 +2376,7 @@ export async function startWebServer({
               reason: snap?.bot?.reason ?? '',
               chats: snap?.chats ?? [],
               silence: snap?.silence ?? [],
-              canSpeak: chatId ? await r.canSpeak(chatId).catch(() => null) : null,
+              canSpeak: chatId ? await r.canSpeak(chatId, { kind }).catch(() => null) : null,
             });
           }
           const first = await rt.gate?.snapshot?.().catch(() => null);

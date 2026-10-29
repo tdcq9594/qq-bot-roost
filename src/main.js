@@ -63,6 +63,7 @@ qq-bot-roost（栖 Roost）· QQ 机器人框架
   node src/main.js --check      只验证 AppID/AppSecret 和网关，不常驻
   node src/main.js --mock       不连 QQ，用本地假消息开发插件
   node src/main.js --mock --serve   只启动可视化面板，不读标准输入（调界面用）
+  node src/main.js --paused     启动时先全局暂停，确认配置无误后在面板放开
   node src/main.js --force      已经有实例在跑时，强行再开一个（不推荐）
   node src/main.js --help       看这个帮助
 
@@ -1302,6 +1303,30 @@ async function main() {
       }
     },
   });
+
+  /**
+   * `--paused`：这次启动先别说话。
+   *
+   * 放在「启动机器人」之前、面板起来之后：面板已经在跑了，用户能立刻
+   * 看到「已暂停」并在里面放开，不用去改配置文件。
+   *
+   * **只改内存不写盘**（`persist: false`）。这个参数表达的是「这一次先别开口」，
+   * 不是「以后都别开口」——写进 `global.json` 的话，下次不带参数启动却发现
+   * 还在暂停，人会以为程序坏了。
+   *
+   * 每只鸟各有一个 gate 实例、各持一份全局闸，所以必须逐个设。
+   */
+  if (args.has('--paused')) {
+    for (const rt of runtimes) {
+      await rt.gate
+        ?.setGlobal(true, { by: 'cli', reason: '--paused 启动参数' }, { persist: false })
+        .catch((e) => log.warn(`[${rt.id}] 设置启动暂停失败：${e.message}`));
+    }
+    log.warn(
+      `已按 --paused 全局暂停：这次启动不会对任何人说话。` +
+        `确认无误后在面板「概览 → 暂停闸」里点「放开全局」，或去掉 --paused 重启。`,
+    );
+  }
 
   if (web && !args.has('--no-open') && globalCfg.webui?.openBrowser !== false && (!MOCK || SERVE)) {
     if (openBrowser(web.url)) log.info('已在浏览器中打开面板');

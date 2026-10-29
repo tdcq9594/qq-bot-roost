@@ -1150,6 +1150,44 @@ async function testGate() {
     body: JSON.stringify({ scope: 'chat', paused: true }),
   });
   ok('闸: 会话级缺 chatId 回 400', noChat.status === 400, `实际 ${noChat.status}`);
+
+  /**
+   * 可达性接进 `canSpeak`（v9 补）。
+   *
+   * 方案 §1.5 说「等 §1 落地后再把 verdict==='no' 映射成原因」，
+   * 这里守住那条线：人工标成「不是好友」之后，canSpeak 必须说不能，
+   * 而且原因要是 `reach:not-friend`，不是笼统的「不能」。
+   */
+  const nf = 'u-e2e-no-friend';
+  await api('/api/reach', {
+    method: 'POST',
+    body: JSON.stringify({ openid: nf, friend: 0 }),
+  });
+  const gf = await api(`/api/gate?chatId=${encodeURIComponent(nf)}&kind=c2c`);
+  const sp = gf.data?.bots?.[0]?.canSpeak;
+  ok('闸: 非好友被判成不能私聊', sp?.ok === false, JSON.stringify(sp ?? {}).slice(0, 120));
+  ok(
+    '闸: 原因是 reach:not-friend',
+    (sp?.reasons ?? []).some((r) => r.code === 'reach:not-friend'),
+    JSON.stringify((sp?.reasons ?? []).map((r) => r.code)),
+  );
+  ok(
+    '闸: 可达性原因也是人话',
+    (sp?.reasons ?? []).some((r) => String(r.text).includes('好友')),
+    JSON.stringify((sp?.reasons ?? []).map((r) => r.text)),
+  );
+
+  // 不传 kind 就不查可达性——不知道是群还是私聊，而「不知道」不该变成「不能」
+  const gnk = await api(`/api/gate?chatId=${encodeURIComponent(nf)}`);
+  ok('闸: 不传 kind 时不查可达性', gnk.data?.bots?.[0]?.canSpeak?.ok === true, JSON.stringify(gnk.data?.bots?.[0]?.canSpeak ?? {}).slice(0, 100));
+
+  // 标回未知，别把状态留给后面的用例
+  await api('/api/reach', {
+    method: 'POST',
+    body: JSON.stringify({ openid: nf, friend: null }),
+  });
+  const greset = await api(`/api/gate?chatId=${encodeURIComponent(nf)}&kind=c2c`);
+  ok('闸: 标回未知后放行（未知 ≠ 不可达）', greset.data?.bots?.[0]?.canSpeak?.ok === true);
 }
 
 async function testLedger() {

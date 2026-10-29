@@ -221,6 +221,7 @@ export class BotRuntime {
       pipeline: this.pipeline,
       reach: this.reach,
       ledger: this.ledger,
+      gate: this.gate,
       isOwner: (uid) => cfg.owners.includes(uid),
       // 插件声明了 frameworkVersion 就做兼容校验；作者本地调试可以关掉
       ignoreCompat: this.globalCfg.plugins?.ignoreFrameworkVersion === true,
@@ -542,6 +543,35 @@ export class BotRuntime {
    */
   async canSpeak(chatId, { kind = '' } = {}) {
     const reasons = [...this.gate.check(chatId).reasons];
+
+    /**
+     * 可达性：只对**主动消息**有意义。
+     *
+     * 用户刚说完话时的被动回复不受这两道门限制——他就在这儿，回一句当然收得到。
+     * 所以必须传 `kind` 才查：不知道是群还是私聊就查不了，而「不知道」不该变成「不能」。
+     *
+     * `unknown` 一律放行：群里聊过的人很可能早就加了好友，只是还没私聊过。
+     */
+    if (kind === 'c2c') {
+      const v = await this.reach?.canC2C?.(chatId).catch(() => null);
+      if (v?.verdict === 'no') {
+        reasons.push({
+          code: v.reason || 'reach:not-friend',
+          text:
+            v.reason === 'reach:push-off'
+              ? '对方在资料卡里关掉了主动消息推送'
+              : '对方没有加机器人好友',
+        });
+      }
+    } else if (kind === 'group') {
+      const v = await this.reach?.canGroupPush?.(chatId).catch(() => null);
+      if (v?.verdict === 'no') {
+        reasons.push({
+          code: v.reason || 'reach:push-off',
+          text: '群管理员关闭了机器人的主动消息推送',
+        });
+      }
+    }
 
     if (!this.mock && this.state !== 'online') {
       reasons.push({

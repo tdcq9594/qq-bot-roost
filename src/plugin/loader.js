@@ -27,7 +27,7 @@ const log = createLogger('plugins');
  * 启用状态存在 data/bots/<机器人id>/plugins.json，删掉文件夹即等于卸载。
  */
 export class PluginManager {
-  constructor({ pluginsDir, paths, registry, api, cfg, goBin, groups, roles, outbound, session, pipeline, isOwner, reach, ledger, ignoreCompat }) {
+  constructor({ pluginsDir, paths, registry, api, cfg, goBin, groups, roles, outbound, session, pipeline, isOwner, reach, ledger, gate, ignoreCompat }) {
     this.dir = pluginsDir;
     // 该机器人的全套路径（配置/数据/日志），多机器人下互不干扰
     this.paths = paths;
@@ -45,6 +45,8 @@ export class PluginManager {
     this.reach = reach;
     /** 事件账本（只读给插件），见 src/ledger.js */
     this.ledger = ledger;
+    /** 暂停闸（只给会话级，见 context.js 的 readOnlyGate），见 src/gate.js */
+    this.gate = gate;
     this.isOwner = isOwner;
     /** 跳过插件声明的 frameworkVersion 校验（作者本地调试用） */
     this.ignoreCompat = Boolean(ignoreCompat);
@@ -413,6 +415,7 @@ export class PluginManager {
       pipeline: this.pipeline,
       reach: this.reach,
       ledger: this.ledger,
+      gate: this.gate,
       isOwner: this.isOwner,
       pages: this.pages,
       routes: this.routes,

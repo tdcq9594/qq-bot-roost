@@ -31,6 +31,29 @@ function readOnlyLedger(ledger) {
 }
 
 /**
+ * 给插件的闸视图：只能动**会话级**，动不了全局和这只鸟。
+ *
+ * 为什么这样切：`setGlobal` 是「把整个进程停掉」，`setBot` 是「把这只鸟停掉」，
+ * 两个都是运维动作，出了事要从面板确认（那儿有原因、有「谁改的」）。
+ * 插件能停的只有自己正在处理的这个会话——那本来就是它职责范围内的事。
+ *
+ * `by` 记成 `plugin:<id>`，面板上一眼能看出是哪个插件停的。
+ */
+function readOnlyGate(gate, pluginId) {
+  const by = `plugin:${pluginId}`;
+  return Object.freeze({
+    /** 能不能对某个会话说话（含原因） */
+    check: (chatId) => gate.check(chatId),
+    /** 这只鸟的闸状态（同步，不读盘） */
+    peek: () => gate.peek(),
+    /** 静默一段时间（毫秒）；`<= 0` 表示解除 */
+    silence: (chatId, ms) => gate.setSilence(chatId, ms, { by }),
+    /** 暂停 / 恢复一个会话 */
+    pauseChat: (chatId, paused) => gate.setChat(chatId, paused, { by }),
+  });
+}
+
+/**
  * 全局注册表：所有插件注册的命令、事件监听、AI 工具都放这里。
  * 重载插件时按 pluginId 精确清除，互不影响。
  */
@@ -325,7 +348,7 @@ export class PluginStorage {
 /**
  * 插件上下文：插件能用的全部能力都在这里，不暴露内部实现。
  */
-export function createContext({ meta, paths, registry, api, cfg, config, configStore, groups, roles, levels, outbound, session, pipeline, reach, ledger, isOwner, pages = null, routes = null, state = null }) {
+export function createContext({ meta, paths, registry, api, cfg, config, configStore, groups, roles, levels, outbound, session, pipeline, reach, ledger, gate, isOwner, pages = null, routes = null, state = null }) {
   const id = meta.id;
   // 日志 tag 带机器人 id，多机器人下同名插件的日志不会串
   const logger = createLogger(`plugin:${paths?.id ?? '-'}:${id}`);
@@ -383,6 +406,16 @@ export function createContext({ meta, paths, registry, api, cfg, config, configS
      * 注意保留期（默认 7 天），超出范围查不到是正常的，不是 bug。
      */
     ledger: ledger ? readOnlyLedger(ledger) : null,
+    /**
+     * 暂停闸：`ctx.gate.silence(chatId, ms)` / `.pauseChat(chatId, true)` / `.check(chatId)`。
+     *
+     * **不给 `setGlobal` / `setBot`**：那是「把整个进程停掉」和「把这只鸟停掉」，
+     * 属于运维动作，只能从面板做。插件能停的只有自己正在处理的这个会话。
+     *
+     * 静默是给「她自己决定安静一会儿」用的（`<<silence:2h>>`），
+     * 所以一定要能带时长，`ms <= 0` 表示解除。
+     */
+    gate: gate ? readOnlyGate(gate, id) : null,
     storage: new PluginStorage(paths.pluginData(id)),
 
     /**

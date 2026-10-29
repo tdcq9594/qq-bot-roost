@@ -160,10 +160,20 @@ export function createGate({ dir, botId, log = () => {} }) {
 
   /* ---------------- 改闸 ---------------- */
 
-  async function setGlobal(paused, meta) {
+  /**
+   * 改全局闸。
+   *
+   * @param {boolean} paused
+   * @param {{by?:string, reason?:string}} [meta]
+   * @param {{persist?:boolean}} [opts]
+   *   `persist: false` 只改内存不写盘 —— 给 `--paused` 启动参数用。
+   *   那是个**一次性的启动意图**（「这次先别说话」），不是「永久暂停」；
+   *   写进文件的话，下次不带参数启动却发现还在暂停，人会以为坏了。
+   */
+  async function setGlobal(paused, meta, { persist = true } = {}) {
     await open();
     global = { ...global, paused: Boolean(paused), ...metaOf(meta) };
-    await saveGlobal();
+    if (persist) await saveGlobal();
     return { ...global };
   }
 
