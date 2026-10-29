@@ -68,6 +68,23 @@ const skip = (name, reason = '') => {
 let server = null;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const { signCallback, signEventBody } = await import('../src/sign.js');
+const { dateKey } = await import('../src/outbound.js');
+
+/**
+ * 读某个会话今天已用的主动消息条数。
+ *
+ * 为什么要读文件而不是问接口：额度账本**没有对外接口**（只有 `/status`
+ * 命令里的一行文字），而这里要证明的恰恰是「这条发送被记进账本了」。
+ * 直接看 `data/bots/main/quota.json` 是最硬的证据。
+ */
+async function quotaUsed(chatKey) {
+  try {
+    const raw = await fs.readFile(path.join(HOME, 'data', 'bots', 'main', 'quota.json'), 'utf8');
+    return JSON.parse(raw)?.[dateKey()]?.[chatKey] ?? 0;
+  } catch {
+    return 0;
+  }
+}
 
 async function api(p, opts = {}) {
   const res = await fetch(`${BASE}${p}`, {
@@ -579,12 +596,47 @@ async function testWebhook() {
 }
 
 async function testSendAndCred() {
-  // mock 下发送会打印，不该 500
+  /**
+   * 面板发送**必须走 outbound**。
+   *
+   * 只断言 200 是不够的：这条路由以前直连 `api.sendGroup`，同样返回 200，
+   * 但额度账本里一条记录都没有——面板随手点几下就能把官方额度打满，
+   * 而账本上看起来什么事都没发生。所以这里看**落盘的额度账本**。
+   *
+   * 额度的「扣」发生在 outbound 内部，是这条链路唯一不可伪造的痕迹。
+   */
+  const gTarget = 'g-e2e-send';
+  const gBefore = await quotaUsed(`group:${gTarget}`);
   const sd = await api('/api/send', {
     method: 'POST',
-    body: JSON.stringify({ scene: 'group', target: 'g1', content: 'e2e 测试' }),
+    body: JSON.stringify({ scene: 'group', target: gTarget, content: 'e2e 测试' }),
   });
-  ok('发送: mock 下可发', sd.status === 200 || sd.status === 400, sd.data?.error || '');
+  ok('发送: mock 下可发', sd.status === 200 && sd.data?.ok === true, sd.data?.error || '');
+  ok('发送: 返回 id', typeof sd.data?.id === 'string', String(sd.data?.id));
+  ok('发送: 标出是否进审核', typeof sd.data?.pending === 'boolean');
+
+  // 额度账本是 500ms 防抖落盘的，等它写完再查
+  await sleep(800);
+  const gAfter = await quotaUsed(`group:${gTarget}`);
+  ok('发送: 面板发送计入主动额度账本', gAfter === gBefore + 1, `${gBefore} → ${gAfter}`);
+
+  // 单聊走的是另一个分支（kind 不同、额度按 c2c 记账）
+  const uTarget = 'u-e2e-send';
+  const uBefore = await quotaUsed(`c2c:${uTarget}`);
+  const sc = await api('/api/send', {
+    method: 'POST',
+    body: JSON.stringify({ scene: 'c2c', target: uTarget, content: 'e2e 私聊' }),
+  });
+  ok('发送: 单聊可发', sc.status === 200 && sc.data?.ok === true, sc.data?.error || '');
+  await sleep(800);
+  const uAfter = await quotaUsed(`c2c:${uTarget}`);
+  ok('发送: 单聊也计入额度账本', uAfter === uBefore + 1, `${uBefore} → ${uAfter}`);
+
+  const empty = await api('/api/send', {
+    method: 'POST',
+    body: JSON.stringify({ scene: 'group', target: '', content: 'x' }),
+  });
+  ok('发送: 缺 target 回 400', empty.status === 400, `status=${empty.status}`);
 
   const rc = await api('/api/gateway/reconnect', { method: 'POST', body: '{}' });
   ok('网关: 重连接口可用', rc.status === 200, rc.data?.error || '');

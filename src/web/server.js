@@ -24,6 +24,7 @@ import {
 } from '../updater.js';
 // 面板改插件启停时要同步机器人配置里的过滤器，两边不能各说各的
 import { pluginFilterOf, pluginAllowedIn } from '../bot.js';
+import { userFacingSendError } from '../outbound.js';
 import { runRoute } from '../plugin/routes.js';
 import { toggleGroupPlugin } from '../plugin/groupscope.js';
 import { suspendPluginWatch } from '../services/plugin-watch.js';
@@ -2355,12 +2356,43 @@ export async function startWebServer({
         }
 
         // 主动发消息（调试用）
+        /**
+         * 面板手动发消息（调试用）。
+         *
+         * **必须走 outbound**。这条以前直连 `api.sendGroup` / `api.sendC2C`，
+         * 绕过了每秒限速、主动消息额度记账（20/分 + 1000/天）和离线判断。
+         * 面板随手点几下就能把额度打满，而额度账本里一条记录都没有——
+         * **半真的账本比没有账本更糟**，因为你会相信它。
+         *
+         * 错误按 SendError 的 code 分开回：`quota` 用 429（等一会儿能好），
+         * 其余用 400（重试也不会好，比如离线、被动窗口已过）。
+         */
         if (pathname === '/api/send' && req.method === 'POST') {
           const body = await readBody(req);
           const { scene, target, content } = body;
           if (!target || !content) return json(res, 400, { error: '需要 target 和 content' });
-          const sender = scene === 'c2c' ? api?.sendC2C : api?.sendGroup;
+          const kind = scene === 'c2c' ? 'c2c' : 'group';
+          const sender = kind === 'c2c' ? api?.sendC2C : api?.sendGroup;
           if (!sender) return json(res, 503, { error: '未连接' });
+
+          if (rt.outbound) {
+            try {
+              const r = await rt.outbound.send({
+                kind,
+                target,
+                chatKey: `${kind}:${target}`,
+                payload: { content },
+              });
+              // pending = 主动消息进了审核。既不是失败，也不是「已经送达」
+              return json(res, 200, { ok: true, id: r?.id ?? '', pending: Boolean(r?.pending) });
+            } catch (e) {
+              const hint = userFacingSendError(e);
+              if (!hint) throw e; // 真正的接口错误交给外层兜底（500 + 原始信息）
+              return json(res, e.code === 'quota' ? 429 : 400, { error: hint, code: e.code });
+            }
+          }
+
+          // 只有自造 Bot 实例（没建调度器）才会走到这里，直发兜底
           const r = await sender.call(api, target, { content });
           return json(res, 200, { ok: true, id: r?.id });
         }
