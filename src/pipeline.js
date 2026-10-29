@@ -1,4 +1,5 @@
 import { createLogger } from './logger.js';
+import { gateMiddleware } from './gate.js';
 
 const log = createLogger('pipeline');
 
@@ -250,8 +251,16 @@ export function cooldownMiddleware() {
 }
 
 /** 按配置组装默认管道 */
-export function createDefaultPipeline(cfg, { isSticky, metrics = null } = {}) {
+export function createDefaultPipeline(cfg, { isSticky, metrics = null, gate = null } = {}) {
   const p = new Pipeline({ metrics });
+  /**
+   * 闸在最前面，连去重表都不写。
+   *
+   * 账本**不在这里**——`bot.js` 里 `ledger.append()` 在 `pipeline.run()` 之前，
+   * 所以暂停期间的消息照样入账。这条顺序是暂停闸能「不丢消息」的前提：
+   * 闸放在账本之前的话，暂停就等于丢消息，而官方没有历史消息接口，丢了补不回来。
+   */
+  if (gate) p.use('gate', gateMiddleware(gate, { metrics }));
   p.use('dedup', dedupMiddleware(cfg, { metrics }));
   p.use('whitelist', whitelistMiddleware(cfg, { metrics }));
   p.use('ratelimit', ratelimitMiddleware(cfg, { isSticky, metrics }));

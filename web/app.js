@@ -692,6 +692,7 @@ function renderStatus(s) {
     (s.counters.dedup ?? 0) +
     (s.counters.limited ?? 0) +
     (s.counters.rejected ?? 0) +
+    (s.counters.gated ?? 0) +
     (s.counters.ignored ?? 0);
   $('#c-err').textContent = `${s.counters.errors} / ${blocked}`;
 
@@ -712,6 +713,14 @@ function renderStatus(s) {
   $('#i-node').textContent = `${s.node} (${s.platform})`;
   // 框架版本：status 里直接带，不用等用户点「检查更新」
   if (s.version) $('#updCurrent').textContent = s.version;
+
+  /**
+   * 闸状态跟着每 2 秒的 status 一起刷。
+   *
+   * 不单独开一个轮询接口：暂停是紧急操作，如果面板要等用户点进某一页
+   * 才去查，「原来还暂停着」就会拖很久才被发现。
+   */
+  renderGate(s.gate);
 
   const body = $('#chatBody');
   if (!s.chats?.length) {
@@ -934,6 +943,70 @@ $('#btnRefreshCred').addEventListener('click', async (e) => {
   try { await api('/api/credential/refresh', { method: 'POST' }); alert('凭证已刷新'); }
   catch (err) { alert('刷新失败: ' + err.message); }
   finally { e.target.disabled = false; }
+});
+
+/* ---------------- 暂停闸 ---------------- */
+
+/** 最近一次拿到的闸状态。按钮要靠它判断「现在点下去是开还是关」 */
+let LAST_GATE = null;
+
+/**
+ * 画闸状态。
+ *
+ * 按钮文案跟着状态走（「暂停」/「放开」），而不是固定文案 + 一个指示灯——
+ * 指示灯那种设计，用户点之前得先抬头看灯，点错了还要再点一次。
+ */
+function renderGate(gate) {
+  LAST_GATE = gate ?? null;
+  const el = $('#gateState');
+  const bg = $('#btnGateGlobal');
+  const bb = $('#btnGateBot');
+  if (!el || !bg || !bb) return;
+
+  const g = gate?.global ?? {};
+  const b = gate?.bot ?? {};
+
+  bg.textContent = g.paused ? '放开全局' : '全局暂停';
+  bg.classList.toggle('primary', Boolean(g.paused));
+  bb.textContent = b.paused ? '放开这只鸟' : '暂停这只鸟';
+  bb.classList.toggle('primary', Boolean(b.paused));
+
+  const why = [];
+  if (g.paused) why.push(`全局已暂停${g.reason ? `（${g.reason}）` : ''}`);
+  if (b.paused) why.push(`这只鸟已暂停${b.reason ? `（${b.reason}）` : ''}`);
+
+  if (why.length) {
+    el.innerHTML = `<b style="color:var(--warn-text)">${escapeHtml(why.join(' · '))}</b>`;
+    el.title = '暂停期间消息照样进账本，恢复后能补看';
+  } else {
+    el.textContent = '运行中';
+    el.title = '';
+  }
+}
+
+async function setGate(scope, paused) {
+  try {
+    await api('/api/gate', { method: 'POST', body: JSON.stringify({ scope, paused }) });
+    /**
+     * 本地先翻转，不等下一次 status 推送。
+     * status 是 2 秒一轮，点完等两秒才变，用户会以为没点上、再点一次，
+     * 结果又翻回去了——这种「点了没反应」最容易被当成 bug。
+     */
+    if (LAST_GATE) {
+      const k = scope === 'global' ? 'global' : 'bot';
+      renderGate({ ...LAST_GATE, [k]: { ...(LAST_GATE[k] ?? {}), paused } });
+    }
+  } catch (e) {
+    alert(`操作失败: ${e.message}`);
+  }
+}
+
+$('#btnGateGlobal')?.addEventListener('click', () => {
+  setGate('global', !LAST_GATE?.global?.paused);
+});
+
+$('#btnGateBot')?.addEventListener('click', () => {
+  setGate('bot', !LAST_GATE?.bot?.paused);
 });
 
 $('#btnSend').addEventListener('click', async (e) => {

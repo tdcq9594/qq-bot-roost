@@ -78,6 +78,7 @@ export class BotMetrics {
       dedup: 0, // 被去重拦掉
       limited: 0, // 被限流拦掉
       rejected: 0, // 被白名单拦掉
+      gated: 0, // 被暂停闸拦掉（这只鸟或这个会话被暂停了）
       ignored: 0, // 收到但没有任何插件回应，静默丢弃
     };
 

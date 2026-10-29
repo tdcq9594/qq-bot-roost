@@ -256,6 +256,26 @@ const BOT_DEFAULTS = {
   },
 
   /**
+   * 暂停闸。
+   *
+   * 三级闸本身的状态不写在配置里（它天天变，写在 `data/gate/`），
+   * 这里只有一个**启动策略**。
+   */
+  gate: {
+    /**
+     * 首次启动自动暂停。**默认 false**。
+     *
+     * 对标的产品每次启动都全局暂停，我们不抄：他们是「先隔离检查再放开」的
+     * 探索型工具，我们是长期挂机的生产型框架。重启之后不说话，
+     * 用户第一反应是「坏了」，不是「等我确认」。
+     *
+     * 所以只在**首次运行**（闸文件还不存在）时生效：第一次装机要确认，
+     * 之后日常重启不添堵。安装向导生成配置时可以写 true。
+     */
+    pauseOnStart: false,
+  },
+
+  /**
    * 启用哪些插件。三态：
    *   all     — 全部启用，新装插件自动生效
    *   include — 只启用 list 里的
@@ -485,6 +505,7 @@ export async function saveBotConfig(id, cfg) {
     session: cfg.session,
     stats: cfg.stats ?? { enabled: true, retentionDays: 90 },
     ledger: cfg.ledger ?? { enabled: true, retentionDays: 7 },
+    gate: cfg.gate ?? { pauseOnStart: false },
     plugins: cfg.plugins,
     groupManage: cfg.groupManage ?? { invited: false },
   });

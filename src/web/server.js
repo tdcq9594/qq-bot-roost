@@ -562,6 +562,13 @@ export async function startWebServer({
      * 页面令牌和会话都已作废，需要立刻重载插件页而不是等下轮轮询。
      */
     snap.instanceId = `${process.pid}-${PROCESS_STARTED_AT}`;
+    /**
+     * 闸状态。
+     *
+     * 放进每 2 秒推一次的 status 里，是为了面板能**立刻**画出「已暂停」横幅——
+     * 暂停是个紧急操作，等用户点进某个页签才发现「原来还暂停着」就太晚了。
+     */
+    snap.gate = rt?.gate?.peek?.() ?? null;
     return snap;
   };
 
@@ -2335,6 +2342,89 @@ export async function startWebServer({
           await saveGlobalConfig?.(globalCfg).catch(() => {});
           configureMirror(globalCfg);
           return json(res, 200, { ok: true, level: getLevel() });
+        }
+
+        /* ---------------- 暂停闸 ---------------- */
+
+        /**
+         * 闸的读与写。
+         *
+         * `GET /api/gate?chatId=` 一次给全：全局闸、每只鸟的闸、每个会话的闸，
+         * 以及（给了 chatId 时）这只鸟现在能不能对它说话、为什么不能。
+         *
+         * 一次给全是有意的：面板要同时显示「全局暂停着」和「这只鸟也暂停着」，
+         * 分两个接口查就会出现「一个说能、一个说不能」的错位。
+         */
+        if (pathname === '/api/gate' && req.method === 'GET') {
+          const chatId = url.searchParams.get('chatId') || '';
+          const bots = [];
+          for (const r of runtimes) {
+            const snap = await r.gate?.snapshot?.().catch(() => null);
+            bots.push({
+              id: r.id,
+              name: r.name,
+              state: r.state,
+              paused: Boolean(snap?.bot?.paused),
+              pausedAt: snap?.bot?.at ?? 0,
+              pausedBy: snap?.bot?.by ?? '',
+              reason: snap?.bot?.reason ?? '',
+              chats: snap?.chats ?? [],
+              silence: snap?.silence ?? [],
+              canSpeak: chatId ? await r.canSpeak(chatId).catch(() => null) : null,
+            });
+          }
+          const first = await rt.gate?.snapshot?.().catch(() => null);
+          return json(res, 200, {
+            ok: true,
+            global: first?.global ?? { paused: false, at: 0, by: '', reason: '' },
+            bots,
+          });
+        }
+
+        if (pathname === '/api/gate' && req.method === 'POST') {
+          const body = await readBody(req);
+          const scope = String(body.scope ?? 'bot');
+          const paused = Boolean(body.paused);
+          const reason = String(body.reason ?? '').slice(0, 200);
+          const meta = { by: 'panel', reason };
+
+          if (scope === 'global') {
+            if (!rt.gate) return json(res, 501, { error: '当前环境不支持暂停闸' });
+            await rt.gate.setGlobal(paused, meta);
+            /**
+             * 每只鸟各有一个 gate 实例、各缓存一份全局闸。写完必须让
+             * 其他实例重读——否则「全局暂停」要等重启才对其他鸟生效。
+             */
+            for (const r of runtimes) {
+              if (r !== rt) await r.gate?.reloadGlobal?.().catch(() => {});
+            }
+            return json(res, 200, { ok: true, scope, paused });
+          }
+
+          const target = body.botId ? runtimes.find((r) => r.id === body.botId) : rt;
+          if (!target) return json(res, 404, { error: `没有这只鸟：${body.botId}` });
+          if (!target.gate) return json(res, 501, { error: '当前环境不支持暂停闸' });
+
+          if (scope === 'bot') {
+            await target.gate.setBot(paused, meta);
+            return json(res, 200, { ok: true, scope, botId: target.id, paused });
+          }
+
+          const chatId = String(body.chatId ?? '');
+          if (!chatId) return json(res, 400, { error: `scope=${scope} 需要 chatId` });
+
+          if (scope === 'chat') {
+            await target.gate.setChat(chatId, paused, meta);
+            return json(res, 200, { ok: true, scope, botId: target.id, chatId, paused });
+          }
+
+          if (scope === 'silence') {
+            const minutes = Math.max(0, Number(body.minutes) || 0);
+            const r2 = await target.gate.setSilence(chatId, minutes * 60_000, meta);
+            return json(res, 200, { ok: true, scope, botId: target.id, chatId, until: r2.until });
+          }
+
+          return json(res, 400, { error: `不认识的 scope：${scope}（global / bot / chat / silence）` });
         }
 
         // 网关操作

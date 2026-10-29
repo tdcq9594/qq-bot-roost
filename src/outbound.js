@@ -433,6 +433,16 @@ export class Outbound {
   }
 
   /**
+   * 最近 60 秒这个会话发了几条。
+   *
+   * 只读，不占坑——`#allowActiveThisMinute` 会顺手把当前时刻压进队列，
+   * 诊断用的时候不能有这个副作用（面板刷一次就少一次额度就离谱了）。
+   */
+  rateUsed(chatKey, now = Date.now()) {
+    return (this.activeLog.get(chatKey) ?? []).filter((t) => now - t < 60_000).length;
+  }
+
+  /**
    * 主动消息分钟级限流。官方单关系维度是 20/qpm，
    * 日额度够但一分钟内猛发照样会被服务端 40034100 拦下，本地先挡。
    * @returns {boolean} 这一分钟还允许发吗（允许时顺便占一个坑）

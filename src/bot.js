@@ -18,6 +18,7 @@ import { botPaths, DIRS, rel } from './paths.js';
 import { StatsStore } from './storage/index.js';
 import { createReach } from './reach.js';
 import { createLedger } from './ledger.js';
+import { createGate } from './gate.js';
 
 /**
  * 一个机器人的完整运行时。
@@ -96,6 +97,17 @@ export class BotRuntime {
      * 插件可以通过 `bot.reach` 直接问，不用自己监听一遍。
      */
     this.reach = createReach({ file: this.paths.reach });
+    /**
+     * 暂停闸：三级（全局 / 这只鸟 / 单个会话）+ 静默。
+     *
+     * 这是**唯一的刹车**。以前配错一只鸟只能关进程，那连别的鸟一起停了。
+     * 闸状态按鸟拆文件（`data/gate/<id>.json`），跨鸟只有 `global.json` 一个。
+     */
+    this.gate = createGate({
+      dir: DIRS.gate,
+      botId: this.id,
+      log: (m) => this.log.warn(m),
+    });
     this.outbound = null;
     this.session = null;
     this.pipeline = null;
@@ -169,6 +181,7 @@ export class BotRuntime {
     this.pipeline = createDefaultPipeline(cfg, {
       isSticky: (chatId) => this.session.isSticky(chatId),
       metrics: this.metrics,
+      gate: this.gate,
     });
 
     /**
@@ -221,6 +234,22 @@ export class BotRuntime {
     this.stats.open();
     // 账本更要在插件之前开：插件一加载就可能开始收消息，漏一条就永久没了
     this.ledger.open();
+
+    /**
+     * 闸要在插件加载之前读好，否则插件 setup 里发的第一条主动消息就漏过了闸。
+     *
+     * `pauseOnStart` 只在**首次运行**生效（闸文件还不存在）。
+     * 每次启动都暂停会让人以为坏了——重启之后不说话，第一反应是「出故障了」，
+     * 不是「等我确认」。方案里那条「安装时自动暂停」靠这个分支实现。
+     */
+    const { botExisted } = await this.gate.open();
+    if (cfg.gate?.pauseOnStart && !botExisted) {
+      await this.gate.setBot(true, {
+        by: 'config',
+        reason: '首次启动自动暂停（gate.pauseOnStart），确认配置无误后在面板放开',
+      });
+      this.log.warn('首次启动已自动暂停，确认配置无误后在面板「运行」页放开');
+    }
 
     // 按配置过滤要加载的插件
     await this.plugins.scan({ filter: pluginFilterOf(cfg.plugins) });
@@ -488,10 +517,64 @@ export class BotRuntime {
     await this.groups?.flush().catch(() => {});
     await this.roles?.flush().catch(() => {});
     await this.reach?.flush().catch(() => {});
+    await this.gate?.flush().catch(() => {});
     this.stats?.close();
     this.ledger?.close();
     if (!this.mock) await releaseInstance(this.cfg.appId).catch(() => {});
     this.state = 'stopped';
+  }
+
+  /**
+   * 这只鸟现在能不能对 `chatId` 说话，以及不能的**原因**。
+   *
+   * 故障排查从「猜」变成「读」：面板直接把 `reasons` 列成中文，
+   * 用户不用去翻日志猜「为什么她不说话」。
+   *
+   * 归到这里的四类状态：闸（三级 + 静默）、网关在线、日额度、分钟限流。
+   * 没放 `Outbound` 里的理由：outbound 是发送执行器，只知道额度和离线，
+   * 不知道闸；而这个方法要回答的是「这只鸟现在能不能开口」，
+   * 是**运行时诊断**，不是发送动作。
+   *
+   * @param {string} chatId
+   * @param {{kind?:'group'|'c2c'}} [opts] 给了就按对应口径查额度；
+   *   不给就取两种里用得多的那个（chatId 在群和私聊里不会撞）
+   * @returns {Promise<{ok:boolean, reasons:{code:string,text:string}[]}>}
+   */
+  async canSpeak(chatId, { kind = '' } = {}) {
+    const reasons = [...this.gate.check(chatId).reasons];
+
+    if (!this.mock && this.state !== 'online') {
+      reasons.push({
+        code: 'gateway:offline',
+        text: `没连上 QQ（当前状态：${this.state}）`,
+      });
+    }
+
+    if (this.outbound) {
+      const keys = kind ? [`${kind}:${chatId}`] : [`group:${chatId}`, `c2c:${chatId}`];
+      const q = await this.outbound.quotaSnapshot().catch(() => ({}));
+      const used = Math.max(0, ...keys.map((k) => Number(q[k] ?? 0)));
+      if (used >= this.outbound.dailyActive) {
+        reasons.push({
+          code: 'quota:daily',
+          text: `今天的主动消息额度用完了（${used}/${this.outbound.dailyActive} 条）`,
+        });
+      }
+      /**
+       * 分钟限流也列出来，但它是**瞬时**状态——面板上看到这条通常
+       * 等一分钟就自己好了。列它的价值是「不用怀疑别的」，
+       * 而不是让用户去改配置。
+       */
+      const burst = Math.max(0, ...keys.map((k) => this.outbound.rateUsed(k)));
+      if (burst >= this.outbound.activePerMin && this.outbound.activePerMin > 0) {
+        reasons.push({
+          code: 'quota:permin',
+          text: `这一分钟发得太密（${burst}/${this.outbound.activePerMin} 条），等一分钟就好`,
+        });
+      }
+    }
+
+    return { ok: reasons.length === 0, reasons };
   }
 
   /* ---------------- 事件分发 ---------------- */

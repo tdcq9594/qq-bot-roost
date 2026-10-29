@@ -57,6 +57,14 @@ export const DIRS = {
   botsData: path.join(HOME, 'data', 'bots'),
   /** 机器人日志目录 */
   botsLogs: path.join(HOME, 'logs', 'bots'),
+  /**
+   * 暂停闸状态目录：`global.json` + `<botId>.json`。
+   *
+   * 按鸟拆文件而不是一个 `gate.json`：一个进程里可能同时跑好几只鸟，
+   * 共用一个文件时 `.tmp` + `rename` 只能保证「不会写坏」，
+   * 不能保证不丢更新（两只鸟同时改，后写的覆盖先写的）。
+   */
+  gate: path.join(HOME, 'data', 'gate'),
 };
 
 export const PATHS = {

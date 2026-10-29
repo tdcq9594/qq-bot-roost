@@ -170,6 +170,25 @@
       </div>
     </div>
 
+    <!--
+      暂停闸：唯一的刹车，所以放在「发送消息（调试）」之前。
+
+      放在概览而不是单开一页：暂停是个紧急操作，要能在打开面板的第一屏
+      就找到。藏在二级菜单里的刹车，出事时想不起来。
+    -->
+    <div class="box" id="gateBox">
+      <div class="box-hd">
+        <h3>暂停闸</h3>
+        <span class="hint">关着就不对任何人说话。消息照样进账本，恢复后能补看</span>
+      </div>
+      <div class="form-inline">
+        <button class="btn" id="btnGateGlobal">全局暂停</button>
+        <button class="btn" id="btnGateBot">暂停这只鸟</button>
+        <span class="hint" id="gateState">-</span>
+      </div>
+      <div class="hint" id="gateReasons" hidden></div>
+    </div>
+
     <div class="box">
       <div class="box-hd"><h3>发送消息（调试）</h3></div>
       <div class="form-inline">

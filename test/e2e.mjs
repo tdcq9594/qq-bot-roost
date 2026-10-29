@@ -1031,6 +1031,127 @@ async function testMessageBroadcast() {
  * `bot.js` 里那个 `this.ledger?.append(msg)` 有没有接对位置。
  * 接晚了（放在 pipeline 之后）单测看不出来，只有走真实链路才暴露。
  */
+/* ---------------- 暂停闸 ---------------- */
+
+/**
+ * 闸的验收标准只有两条：**点暂停 → 立刻不发**，以及**暂停不等于丢消息**。
+ *
+ * 第二条最容易做错：如果闸拦在账本之前，暂停期间的消息就永久消失了
+ * （官方没有历史消息接口，补不回来）。所以这里专门去账本里查那条消息。
+ */
+async function testGate() {
+  const g0 = await api('/api/gate');
+  ok('闸: 接口可用', g0.status === 200 && g0.data?.ok === true, g0.data?.error || '');
+  ok('闸: 带全局状态', typeof g0.data?.global?.paused === 'boolean');
+  ok('闸: 带每只鸟', Array.isArray(g0.data?.bots) && g0.data.bots.length > 0);
+
+  const before = await api('/api/status');
+  const gatedBefore = Number(before.data?.counters?.gated ?? 0);
+
+  const chatId = 'g-e2e-gate';
+  const on = await api('/api/gate', {
+    method: 'POST',
+    body: JSON.stringify({ scope: 'global', paused: true, reason: 'e2e 演练' }),
+  });
+  ok('闸: 全局暂停成功', on.status === 200 && on.data?.paused === true, on.data?.error || '');
+
+  const g1 = await api('/api/gate');
+  ok('闸: 暂停状态读得回', g1.data?.global?.paused === true);
+  ok('闸: 暂停原因带出来', String(g1.data?.global?.reason ?? '').includes('e2e'));
+
+  const inj = await api('/api/mock/message', {
+    method: 'POST',
+    body: JSON.stringify({ text: '暂停期间说的话', groupId: chatId }),
+  });
+  ok('闸: 暂停期间照常收消息', inj.status === 200, `实际 ${inj.status}`);
+
+  const after = await api('/api/status');
+  const gatedAfter = Number(after.data?.counters?.gated ?? 0);
+  ok('闸: 消息被闸拦下', gatedAfter > gatedBefore, `${gatedBefore} → ${gatedAfter}`);
+
+  // 暂停 ≠ 丢消息：账本里必须有这条
+  await sleep(300);
+  const lg = await api(`/api/ledger?chatId=${encodeURIComponent(chatId)}&limit=5`);
+  const items = lg.data?.items ?? [];
+  ok('闸: 暂停期间的消息照样进账本', items.length > 0, `拿到 ${items.length} 条`);
+  ok(
+    '闸: 账本里存的是原文',
+    items.some((x) => x.content === '暂停期间说的话'),
+    JSON.stringify(items[0] ?? {}).slice(0, 100),
+  );
+
+  const off = await api('/api/gate', {
+    method: 'POST',
+    body: JSON.stringify({ scope: 'global', paused: false }),
+  });
+  ok('闸: 放开成功', off.status === 200 && off.data?.paused === false);
+  const g2 = await api('/api/gate');
+  ok('闸: 放开后状态正确', g2.data?.global?.paused === false);
+
+  // 会话级：只拦这一个会话，且 canSpeak 要说得出原因
+  const sc = await api('/api/gate', {
+    method: 'POST',
+    body: JSON.stringify({ scope: 'chat', chatId, paused: true, reason: '这个群太吵' }),
+  });
+  ok('闸: 会话暂停成功', sc.status === 200 && sc.data?.paused === true, sc.data?.error || '');
+
+  const g3 = await api(`/api/gate?chatId=${encodeURIComponent(chatId)}`);
+  const speak = g3.data?.bots?.[0]?.canSpeak;
+  ok('闸: canSpeak 说不能', speak?.ok === false, JSON.stringify(speak ?? {}).slice(0, 120));
+  ok(
+    '闸: canSpeak 给出原因码',
+    (speak?.reasons ?? []).some((r) => r.code === 'gate:chat'),
+    JSON.stringify((speak?.reasons ?? []).map((r) => r.code)),
+  );
+  ok(
+    '闸: 原因是人话',
+    (speak?.reasons ?? []).some((r) => String(r.text).includes('太吵')),
+    JSON.stringify((speak?.reasons ?? []).map((r) => r.text)),
+  );
+
+  // 别的会话不受影响
+  const g4 = await api('/api/gate?chatId=some-other-chat');
+  ok('闸: 别的会话照常能说', g4.data?.bots?.[0]?.canSpeak?.ok === true, JSON.stringify(g4.data?.bots?.[0]?.canSpeak ?? {}).slice(0, 100));
+
+  await api('/api/gate', {
+    method: 'POST',
+    body: JSON.stringify({ scope: 'chat', chatId, paused: false }),
+  });
+  const g5 = await api('/api/gate');
+  ok(
+    '闸: 取消会话暂停后列表清空',
+    !(g5.data?.bots?.[0]?.chats ?? []).some((c) => c.chatId === chatId),
+  );
+
+  // 静默：带到期时间，不用手动解
+  const sil = await api('/api/gate', {
+    method: 'POST',
+    body: JSON.stringify({ scope: 'silence', chatId, minutes: 2 }),
+  });
+  ok('闸: 静默设置成功', sil.status === 200 && sil.data?.until > Date.now(), String(sil.data?.until));
+  const g6 = await api('/api/gate');
+  ok(
+    '闸: 静默出现在列表里',
+    (g6.data?.bots?.[0]?.silence ?? []).some((s) => s.chatId === chatId),
+  );
+  await api('/api/gate', {
+    method: 'POST',
+    body: JSON.stringify({ scope: 'silence', chatId, minutes: 0 }),
+  });
+
+  const bad = await api('/api/gate', {
+    method: 'POST',
+    body: JSON.stringify({ scope: 'nope' }),
+  });
+  ok('闸: 不认识的 scope 回 400', bad.status === 400, `实际 ${bad.status}`);
+
+  const noChat = await api('/api/gate', {
+    method: 'POST',
+    body: JSON.stringify({ scope: 'chat', paused: true }),
+  });
+  ok('闸: 会话级缺 chatId 回 400', noChat.status === 400, `实际 ${noChat.status}`);
+}
+
 async function testLedger() {
   const st0 = await api('/api/ledger/stats');
   ok('账本: 统计可读', st0.status === 200 && typeof st0.data?.total === 'number', `status=${st0.status}`);
@@ -1097,6 +1218,7 @@ async function main() {
   await testQqChannel();
   await testMessageBroadcast();
   await testLedger();
+  await testGate();
 
   const fail = results.filter((r) => !r.pass);
   console.log(`\n${results.length - fail.length}/${results.length} 通过`);

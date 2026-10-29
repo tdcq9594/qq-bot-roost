@@ -4120,6 +4120,100 @@ async function testLedger() {
 
 await testLedger();
 
+/* ---------- 暂停闸 ---------- */
+
+/**
+ * 闸是唯一的刹车，测的重点是「关得住」和「关得准」：
+ * 三级各拦各的、静默到期自己解除、多鸟互不干扰、写盘之后别的实例看得见。
+ */
+async function testGate() {
+  const { createGate, gateMiddleware } = await import('../src/gate.js');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'roost-gate-'));
+
+  const A = createGate({ dir, botId: 'botA' });
+  await A.open();
+  check('闸: 全新状态放行', A.check('g1').ok === true);
+
+  // 1) 全局闸
+  await A.setGlobal(true, { by: 'test', reason: '演练' });
+  const g = A.check('g1');
+  check('闸: 全局暂停拦住', g.ok === false && g.reasons.some((r) => r.code === 'gate:global'));
+  check('闸: 原因带上说明', String(g.reasons[0].text).includes('演练'), g.reasons[0].text);
+
+  // 2) 落盘 + 跨实例可见
+  const A2 = createGate({ dir, botId: 'botA' });
+  await A2.open();
+  check('闸: 状态落盘，新实例读得回', A2.check('g1').ok === false);
+
+  await A.setGlobal(false, { by: 'test' });
+  /**
+   * 这一条是 `reloadGlobal` 存在的理由：每只鸟各缓存一份全局闸，
+   * 面板改完只写了文件，别的实例内存里还是旧的。
+   */
+  check('闸: 另一个实例不会自己知道放开了', A2.check('g1').ok === false);
+  await A2.reloadGlobal();
+  check('闸: reloadGlobal 之后才看到放开', A2.check('g1').ok === true);
+
+  // 3) 鸟级闸 + 多鸟隔离
+  await A.setBot(true, { by: 'test' });
+  check('闸: 鸟暂停拦住', A.check('g1').reasons.some((r) => r.code === 'gate:bot'));
+  const B = createGate({ dir, botId: 'botB' });
+  await B.open();
+  check('闸: A 鸟暂停不影响 B 鸟', B.check('g1').ok === true);
+  await A.setBot(false, { by: 'test' });
+
+  // 4) 会话级闸
+  await A.setChat('g1', true, { by: 'test' });
+  check('闸: 会话暂停只拦这个会话', A.check('g1').ok === false && A.check('g2').ok === true);
+  check('闸: 会话原因正确', A.check('g1').reasons[0].code === 'gate:chat');
+  await A.setChat('g1', false, { by: 'test' });
+  check('闸: 取消会话暂停后放行', A.check('g1').ok === true);
+
+  // 5) 静默
+  await A.setSilence('g1', 60_000, { by: 'test' });
+  const s1 = A.check('g1');
+  const sil = s1.reasons.find((r) => r.code === 'gate:silence');
+  check('闸: 静默拦住', Boolean(sil));
+  check('闸: 静默带解除时间', sil && sil.until > Date.now());
+  check('闸: 静默不影响别的会话', A.check('g2').ok === true);
+  check('闸: 静默到期自动解除', A.check('g1', Date.now() + 61_000).ok === true);
+  await A.setSilence('g1', 0, { by: 'test' });
+  check('闸: 手动解除静默', A.check('g1').ok === true);
+
+  // 6) 中间件
+  const mw = gateMiddleware(A, {});
+  let passed = false;
+  let halted = false;
+  const mkCtx = () => ({ msg: { chatId: 'g1' }, halt: () => { halted = true; } });
+
+  await mw(mkCtx(), async () => { passed = true; });
+  check('闸: 中间件放行', passed === true && halted === false);
+
+  await A.setBot(true, { by: 'test' });
+  passed = false;
+  halted = false;
+  await mw(mkCtx(), async () => { passed = true; });
+  check('闸: 中间件拦下且不往下走', passed === false && halted === true);
+  await A.setBot(false, { by: 'test' });
+
+  // 7) 首次运行标记（pauseOnStart 靠它决定要不要自动暂停）
+  const C = createGate({ dir, botId: 'botC' });
+  const r1 = await C.open();
+  check('闸: 从没写过时 botExisted=false', r1.botExisted === false);
+  await C.setBot(true, { by: 'test' });
+  const C2 = createGate({ dir, botId: 'botC' });
+  const r2 = await C2.open();
+  check('闸: 写过之后 botExisted=true', r2.botExisted === true);
+
+  await A.flush();
+  await B.flush();
+  await C.flush();
+  await C2.flush();
+  await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+}
+
+await testGate();
+
 await testBackfillFromGitHub();
 
 /* ---------- 汇总 ---------- */
