@@ -365,7 +365,15 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
   // 一律经过 outbound，由它处理被动窗口（群聊 5 分钟 / 单聊 60 分钟）、每秒限速、主动消息额度。
   const send = (opts, passive) => {
     if (kind !== 'group' && kind !== 'c2c') return Promise.resolve(null);
-    const body = passive ? { msgId: msg.id, ...opts } : { ...opts };
+    /**
+     * `requestId` **不是官方字段**，要从 body 里摘出来单独传给 outbound——
+     * 混进去会被 api.js 当成未知参数一路带到接口上。
+     *
+     * 它是投递账本的幂等键（阶段 5）：同一个 id 再调一次只发一条。
+     * 没有它就退回原来的「发一次算一次」。
+     */
+    const { requestId, ...rest } = opts ?? {};
+    const body = passive ? { msgId: msg.id, ...rest } : { ...rest };
     msg.replied = true;
 
     if (!outbound) {
@@ -378,6 +386,7 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
       chatKey: `${kind}:${chatId}`,
       payload: body,
       receivedAt,
+      ...(requestId ? { requestId: String(requestId) } : {}),
     });
   };
 

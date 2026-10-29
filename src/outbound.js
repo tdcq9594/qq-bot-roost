@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createLogger } from './logger.js';
+import { DELIVERY_STATE, digestOf } from './delivery.js';
 import { DIRS } from './paths.js';
 
 const log = createLogger('outbound');
@@ -103,6 +104,23 @@ export class SendError extends Error {
   }
 }
 
+/**
+ * 这次失败是「确定没发出去」还是「不知道发没发出去」。
+ *
+ * 只有 `api` 这一类可能不确定：超时、5xx、连接重置——请求发出去了但响应没回来。
+ * 其余四种（`offline` / `expired` / `quota` / `rate`）都是**本地判定**，
+ * 消息一定没发出去，记 `failed` 可以放心重试。
+ *
+ * 判错的代价不对称：把「确定失败」误判成 unknown，用户要人工核对（麻烦但安全）；
+ * 把 unknown 误判成「确定失败」，就会重发一条可能已经发出去的消息（重复打扰）。
+ * 所以这里宁可保守——拿不准就当 unknown。
+ */
+function uncertainOf(e) {
+  if (e?.code !== 'api') return false;
+  const s = String(e?.detail ?? e?.message ?? '');
+  return /timeout|timed out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|socket hang up|aborted|\b5\d\d\b/i.test(s);
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** 本地日期键，按用户所在时区算，不用 UTC 免得跨天错位 */
@@ -200,8 +218,10 @@ export class Outbound {
    * @param {object} opts.cfg            全局配置
    * @param {() => boolean} opts.isOnline 机器人是否已连上网关
    */
-  constructor({ api, cfg, isOnline = () => true, quotaFile }) {
+  constructor({ api, cfg, isOnline = () => true, quotaFile, delivery = null }) {
     this.api = api;
+    /** 投递账本（阶段 5）。没有它就退回原来的「发一次算一次」 */
+    this.delivery = delivery;
     this.cfg = cfg;
     this.isOnline = isOnline;
 
@@ -257,7 +277,76 @@ export class Outbound {
    * @param {number} [p.receivedAt] 触发本次回复的消息接收时间
    * @returns {Promise<{id?:string, pending?:boolean, degraded?:boolean}>}
    */
-  async send({ kind, target, chatKey, payload, receivedAt }) {
+  /**
+   * 发送。**有 `requestId` 就走投递账本，没有就照旧发一次。**
+   *
+   * 为什么不是「所有发送都记账」：`requestId` 由调用方生成，只有它知道
+   * 「一段话」的语义边界（`qq_send` 每调一次是一段独立消息）。插件直接
+   * `msg.reply()` 那种没有 id，按原行为走——被动回复本身有 `msg_seq` 兜底。
+   *
+   * 账本是**增强**不是主链路：`claim` 失败一律退回「照发」，不能让记账把消息堵死。
+   */
+  async send(opts) {
+    const requestId = String(opts?.requestId ?? '').trim();
+    if (!requestId || !this.delivery) return this.#sendOnce(opts);
+
+    const c = this.delivery.claim({
+      requestId,
+      kind: opts.kind,
+      chatId: opts.target,
+      replyTo: opts.payload?.msgId,
+      msgSeq: opts.payload?.msgSeq,
+      digest: digestOf(opts.payload?.content ?? opts.payload?.text ?? ''),
+    });
+
+    if (c.action === 'reuse') {
+      // 已经发过：直接回上次的结果，**不再打接口**
+      return {
+        id: c.row?.msg_id || '',
+        reused: true,
+        pending: c.row?.state === DELIVERY_STATE.AUDITED,
+        requestId,
+      };
+    }
+    if (c.action === 'unknown') {
+      /**
+       * 上次结果未知，**绝不自动重发**。
+       *
+       * 官方配额下重发的代价是双份：可能重复发一条，还会撞上限流。
+       * 宁可让人去面板核对一次。
+       */
+      throw new SendError(
+        '这条消息上次的发送结果未知（超时或进程崩溃），不会自动重发。请到面板「投递」页核对',
+        'unknown',
+      );
+    }
+    if (c.action === 'wait') {
+      throw new SendError('这条消息正在发送中，别重复调用', 'pending');
+    }
+
+    try {
+      const r = await this.#sendOnce(opts);
+      this.delivery.settle(
+        requestId,
+        r?.pending ? DELIVERY_STATE.AUDITED : DELIVERY_STATE.SENT,
+        { msgId: r?.id },
+      );
+      return { ...r, requestId };
+    } catch (e) {
+      /**
+       * 失败也要结算，否则这一行永远卡在 `pending`。
+       *
+       * `unknown` 只给「不知道发没发出去」的情况（超时 / 5xx / 连接重置）。
+       * `offline` / `expired` / `quota` / `rate` 是**确定没发出去**，记 `failed` 允许重试。
+       */
+      this.delivery.settle(requestId, uncertainOf(e) ? DELIVERY_STATE.UNKNOWN : DELIVERY_STATE.FAILED, {
+        code: e?.code || 'error',
+      });
+      throw e;
+    }
+  }
+
+  async #sendOnce({ kind, target, chatKey, payload, receivedAt }) {
     if (kind !== 'group' && kind !== 'c2c') {
       throw new SendError(`不支持的会话类型: ${kind}`, 'api');
     }

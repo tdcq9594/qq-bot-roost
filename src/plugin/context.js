@@ -773,13 +773,18 @@ export function createContext({ meta, paths, registry, api, cfg, config, configS
      *
      *   await ctx.push(groupOpenid, '今天的魂兽森林刷新了')
      */
-    push(chatId, text, { kind = 'group' } = {}) {
+    push(chatId, text, { kind = 'group', requestId = '' } = {}) {
       if (!outbound) throw new Error('当前环境不支持主动推送');
       return outbound.send({
         kind,
         target: chatId,
         chatKey: `${kind}:${chatId}`,
         payload: { content: String(text ?? '') },
+        /**
+         * 幂等键（阶段 5）。同一个 id 再推一次只发一条——
+         * 调用方（`qq_send`）知道「一段话」的语义边界，只有它给得出这个 id。
+         */
+        ...(requestId ? { requestId: String(requestId) } : {}),
       });
     },
 

@@ -19,6 +19,7 @@ import { StatsStore } from './storage/index.js';
 import { createReach } from './reach.js';
 import { createLedger } from './ledger.js';
 import { createGate } from './gate.js';
+import { createDeliveryLedger } from './delivery.js';
 
 /**
  * 一个机器人的完整运行时。
@@ -233,6 +234,26 @@ export class BotRuntime {
 
     // 统计库要在插件之前打开：插件上报的运行数据也算统计的一部分
     this.stats.open();
+
+    /**
+     * 投递账本（阶段 5）放在统计库里，所以必须等 `stats.open()` 之后。
+     *
+     * `outbound` 在更早的地方就构造好了（它不依赖库），这里补上引用——
+     * 账本是**增强**，`stats` 打不开时 `db` 是 null，账本自己会退回「照发」。
+     */
+    this.delivery = createDeliveryLedger({
+      db: this.stats.db,
+      botId: this.id,
+      log: (m) => this.log.warn(m),
+    });
+    if (this.outbound) this.outbound.delivery = this.delivery;
+    /**
+     * 崩溃恢复：上次进程死掉时还在 `pending` 的，全部标 `unknown`。
+     *
+     * 现在还没有任何发送在跑，所以那些 `pending` 一定是崩溃残留——
+     * 我们不知道发没发出去，只能标未知，等人核对。**不能当失败重发。**
+     */
+    this.delivery.recoverPending();
     // 账本更要在插件之前开：插件一加载就可能开始收消息，漏一条就永久没了
     this.ledger.open();
 

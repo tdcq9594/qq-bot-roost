@@ -4241,6 +4241,87 @@ async function testGate() {
 
 await testGate();
 
+/* ---------- 投递账本 ---------- */
+
+/**
+ * 账本的全部价值在一句话上：**同一个 requestId 调多少次，只有第一次真的发**。
+ *
+ * 这里测的是状态机本身，不测发送——发送的幂等由 e2e 打真实接口来守。
+ */
+async function testDelivery() {
+  const { createDeliveryLedger, DELIVERY_STATE, digestOf } = await import('../src/delivery.js');
+  const { migrate } = await import('../src/storage/schema.js');
+  const { DatabaseSync } = process.getBuiltinModule('node:sqlite');
+
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'roost-deliv-'));
+  const db = new DatabaseSync(path.join(dir, 'stats.db'));
+  migrate(db);
+  const led = createDeliveryLedger({ db, botId: 'botA', log: () => {} });
+
+  const base = { requestId: 'req-1', kind: 'c2c', chatId: 'u1', digest: digestOf('你好') };
+
+  // 1) 第一次：可以发
+  check('投递: 首次认领放行', led.claim(base).action === 'send');
+
+  // 2) 还在 pending 时并发调用 → 拒绝
+  check('投递: 发送中拒绝并发', led.claim(base).action === 'wait');
+
+  // 3) 结算 sent 之后 → 复用，不再发
+  led.settle('req-1', DELIVERY_STATE.SENT, { msgId: 'm-1' });
+  const reuse = led.claim(base);
+  check('投递: 已发送则复用', reuse.action === 'reuse' && reuse.row.msg_id === 'm-1');
+
+  // 4) failed → 允许重试，attempts 累加
+  const fresh = { ...base, requestId: 'req-2' };
+  led.claim(fresh); // 先有记录，settle 才有行可更新
+  led.settle('req-2', DELIVERY_STATE.FAILED, { code: 'quota' });
+  const retry = led.claim(fresh);
+  check('投递: 失败可重试', retry.action === 'send');
+  check('投递: 重试累加次数', led.get('req-2').attempts === 1, String(led.get('req-2').attempts));
+  led.settle('req-2', DELIVERY_STATE.FAILED, { code: 'quota' }); // 收尾，别留 pending
+
+  // 5) unknown → 绝不自动重发
+  led.claim({ ...base, requestId: 'req-3' });
+  led.settle('req-3', DELIVERY_STATE.UNKNOWN, { code: 'timeout' });
+  check('投递: 未知不重发', led.claim({ ...base, requestId: 'req-3' }).action === 'unknown');
+
+  // 6) audited → 当成功复用（等审核事件再结算）
+  led.claim({ ...base, requestId: 'req-4' });
+  led.settle('req-4', DELIVERY_STATE.AUDITED, { msgId: 'm-4' });
+  check('投递: 审核中也算已发', led.claim({ ...base, requestId: 'req-4' }).action === 'reuse');
+
+  // 7) 崩溃恢复：pending 全转 unknown
+  led.claim({ ...base, requestId: 'req-5' });
+  const n = led.recoverPending();
+  check('投递: 崩溃恢复把 pending 转未知', n === 1 && led.get('req-5').state === DELIVERY_STATE.UNKNOWN, `转了 ${n} 条`);
+
+  // 8) 审核事件按 msg_id 结算
+  led.claim({ ...base, requestId: 'req-6' });
+  led.settle('req-6', DELIVERY_STATE.AUDITED, { msgId: 'm-6' });
+  check('投递: 审核通过结为 sent', led.settleByMsgId('m-6', true) && led.get('req-6').state === DELIVERY_STATE.SENT);
+  led.claim({ ...base, requestId: 'req-7' });
+  led.settle('req-7', DELIVERY_STATE.AUDITED, { msgId: 'm-7' });
+  check('投递: 审核驳回结为 failed', led.settleByMsgId('m-7', false) && led.get('req-7').state === DELIVERY_STATE.FAILED);
+
+  // 9) 统计
+  const st = led.stats();
+  check('投递: 统计可用', st.available === true && st.total > 0, JSON.stringify(st.by));
+
+  // 10) digest 不存全文
+  const long = 'x'.repeat(500);
+  const d = digestOf(long);
+  check('投递: 摘要不含全文', d.length < 200 && d.includes('(500)'), `摘要 ${d.length} 字`);
+
+  // 11) 没有库时照发（账本是增强，不是主链路）
+  const bare = createDeliveryLedger({ db: null, botId: 'x', log: () => {} });
+  check('投递: 库不可用时照发', bare.claim(base).action === 'send');
+
+  db.close();
+  await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+}
+
+await testDelivery();
+
 await testBackfillFromGitHub();
 
 /* ---------- 汇总 ---------- */
