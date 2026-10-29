@@ -10,7 +10,7 @@
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
 <img src="https://img.shields.io/badge/tests-700%2B%20passed-brightgreen" alt="测试 700+ 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
-<img src="https://img.shields.io/badge/version-0.9.0-blueviolet" alt="版本 0.9.0">
+<img src="https://img.shields.io/badge/version-0.9.1-blueviolet" alt="版本 0.9.1">
 <img src="https://img.shields.io/badge/license-Non--Commercial-red" alt="禁止商用">
 <a href="https://github.com/tdcq9594/qq-bot-roost/actions"><img src="https://img.shields.io/github/actions/workflow/status/tdcq9594/qq-bot-roost/ci.yml?branch=master" alt="CI"></a>
 
@@ -427,7 +427,7 @@ bot/
 │   └── plugin/                 插件加载、配置、依赖、子进程宿主、面板页面注册
 ├── test/
 │   ├── selftest.mjs            框架自检（538 项）
-│   ├── e2e.mjs                 端到端测试（230 项，起真实服务打接口）
+│   ├── e2e.mjs                 端到端测试（243 项，起真实服务打接口）
 │   ├── qrlogin.mjs             扫码建机器人（8 项）
 │   └── deps.mjs                插件依赖安装（11 项）
 ├── web/                        面板前端（原生 JS/CSS，无构建）
