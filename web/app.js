@@ -3095,11 +3095,17 @@ function renderDelivery(d) {
       const st = DELIVERY_LABEL[x.state] ?? { text: x.state, tip: '' };
       const when = x.created_at ? new Date(Number(x.created_at)).toLocaleString('zh-CN', { hour12: false }) : '-';
       const warn = x.state === 'unknown' || x.state === 'failed';
+      /**
+       * 摘要空的老记录（修 `digestTextOf` 之前发的）一律是 `…(0)#da39a3ee`，
+       * 一列看下来完全分不清谁是谁。显示成一句人话，原文挂在 title 上备查。
+       */
+      const digest = String(x.digest ?? '');
+      const digestText = /^…\(0\)#/.test(digest) ? '（无正文）' : digest.slice(0, 60);
       return `<tr>
         <td>${escapeHtml(when)}</td>
         <td class="mono">${escapeHtml(String(x.chat_id ?? '').slice(0, 12))}</td>
         <td${warn ? ' style="color:var(--warn-text)"' : ''} title="${escapeHtml(st.tip)}">${escapeHtml(st.text)}</td>
-        <td>${escapeHtml(String(x.digest ?? '').slice(0, 60))}</td>
+        <td title="${escapeHtml(digest)}">${escapeHtml(digestText)}</td>
         <td class="num">${Number(x.attempts ?? 0)}</td>
         <td class="mono">${escapeHtml(String(x.code ?? ''))}</td>
       </tr>`;

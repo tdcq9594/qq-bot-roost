@@ -211,6 +211,34 @@ class QuotaLedger {
   }
 }
 
+/**
+ * 从出站报文里挑出「人看得懂的那部分」，喂给 `digestOf`。
+ *
+ * 报文不止一种形状，只认顶层 `content` 会漏掉一大半：
+ *
+ *   · 纯文本   `{ content }`
+ *   · markdown `{ markdown: { content } }` ← ai-chat 默认就走这条
+ *   · 卡片     `{ markdown, keyboard, ark }`
+ *   · 富媒体   `{ msgType: 7, media }`，正文只有一个占位空格
+ *
+ * 漏掉的后果不是发不出去（账本的状态机不看摘要），而是摘要列全变成
+ * `…(0)#da39a3ee`——所有记录长得一模一样，「人工核对」这条路等于堵死，
+ * 真出现 `unknown` 的时候只能靠猜。
+ */
+export function digestTextOf(payload) {
+  const p = payload ?? {};
+  const md = p.markdown;
+  const text = p.content ?? p.text ?? (typeof md === 'string' ? md : md?.content);
+  if (typeof text === 'string' && text.trim()) return text;
+  /**
+   * 没有正文的报文给个占位。一串空摘要里冒出 `[媒体]` / `[卡片]`，
+   * 至少能分辨「这条本来就没有文字」，而不是「摘要功能又坏了」。
+   */
+  if (p.media) return '[媒体]';
+  if (p.ark) return '[卡片]';
+  return '';
+}
+
 export class Outbound {
   /**
    * @param {object} opts
@@ -296,7 +324,7 @@ export class Outbound {
       chatId: opts.target,
       replyTo: opts.payload?.msgId,
       msgSeq: opts.payload?.msgSeq,
-      digest: digestOf(opts.payload?.content ?? opts.payload?.text ?? ''),
+      digest: digestOf(digestTextOf(opts.payload)),
     });
 
     if (c.action === 'reuse') {

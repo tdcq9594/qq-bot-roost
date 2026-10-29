@@ -4403,6 +4403,21 @@ async function testDelivery() {
   const d = digestOf(long);
   check('投递: 摘要不含全文', d.length < 200 && d.includes('(500)'), `摘要 ${d.length} 字`);
 
+  /**
+   * 10b) 摘要得认得各种报文形状。
+   *
+   * 回归用例：ai-chat 默认开 markdown，正文在 `markdown.content` 里。
+   * 以前只认顶层 `content`，摘要一律退化成 `…(0)#da39a3ee`——
+   * 一屏记录长得一模一样，「人工核对」这条路就废了。
+   */
+  const { digestTextOf } = await import('../src/outbound.js');
+  check('投递: 摘要取纯文本', digestTextOf({ content: '你好' }) === '你好');
+  check('投递: 摘要取 markdown', digestTextOf({ markdown: { content: '**粗**' } }) === '**粗**');
+  check('投递: 摘要取 markdown 字符串', digestTextOf({ markdown: '直接给字符串' }) === '直接给字符串');
+  check('投递: 摘要在 markdown 里不落空', !digestOf(digestTextOf({ markdown: { content: '一段话' } })).includes('(0)#'));
+  check('投递: 富媒体有占位', digestTextOf({ msgType: 7, content: ' ', media: {} }) === '[媒体]');
+  check('投递: 空报文不炸', digestTextOf(null) === '' && digestTextOf({}) === '');
+
   // 11) 没有库时照发（账本是增强，不是主链路）
   const bare = createDeliveryLedger({ db: null, botId: 'x', log: () => {} });
   check('投递: 库不可用时照发', bare.claim(base).action === 'send');
