@@ -1376,6 +1376,31 @@ async function testPluginWatch() {
   const { PluginWatchService } = await import('../src/services/plugin-watch.js');
 
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'roost-watch-'));
+  /**
+   * 每次写文件用的 mtime。
+   *
+   * **必须逐次不同，而且不能只靠 Date.now()。**
+   *
+   * 签名是「文件数:最大mtime:总字节」，而这个测试里 `v:1` → `v:2` 长度
+   * 完全一样（都是 34 字节）——count 和 bytes 都不变，**只有 mtime 能区分
+   * 「改了」和「没改」**。
+   *
+   * 两次写之间只隔一次 readdir + stat（实测 0.14–0.85ms），而 `Date.now()`
+   * 是整数毫秒：间隔小于 1ms 时两次调用返回同一个值，两次 `utimes` 就设出
+   * 完全相同的 mtime，签名一样 → 判定「没改」→ 不重载。
+   * 本地一直没撞上是运气（NTFS 的 mtime 精度到 100ns，时序也稍慢），
+   * CI 的 `ubuntu-latest / Node 22.x` 撞上了，一次红 6 项。
+   *
+   * 所以这里用一个**固定基准 + 自增序号**：每次至少差 1ms，与时钟精度无关。
+   *
+   * 注意基准必须取在函数外。写成 `Date.now() - 5000 - seq++` 是错的——
+   * 时钟每前进 1ms、序号就减 1ms，两者正好抵消，两次还是同一个值。
+   * 这个坑是实测出来的：改完跑验证脚本，签名依旧相同。
+   */
+  const stampBase = Date.now() - 5000;
+  let stampSeq = 0;
+  const stamp = () => new Date(stampBase + stampSeq++);
+
   const put = async (id, rel, body) => {
     const p = path.join(root, id, rel);
     await fs.mkdir(path.dirname(p), { recursive: true });
@@ -1387,13 +1412,13 @@ async function testPluginWatch() {
      * `now - mtime` 是负数，会被判成「还没安静够」进 pending，
      * 测试就假失败。拨到过去让判断只依赖 settleMs，不依赖时钟精度。
      */
-    const past = new Date(Date.now() - 5000);
+    const past = stamp();
     await fs.utimes(p, past, past);
   };
   /** 把 mtime 往前拨，模拟「文件已经写完一会儿了」 */
   const age = async (id, rel = 'index.js') => {
     const p = path.join(root, id, rel);
-    const past = new Date(Date.now() - 5000);
+    const past = stamp();
     await fs.utimes(p, past, past);
   };
 
