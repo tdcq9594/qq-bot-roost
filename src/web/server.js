@@ -2625,8 +2625,14 @@ export async function startWebServer({
               return json(res, 400, { error: `${id} 已经是 ${cur}，没有新版` });
             }
 
-            // 拉一次仓库，只更新指定的这一个
-            repo = await syncRepo({ repo: idx.repo, branch: idx.branch || 'main', indexUrl: src });
+            // 拉一次仓库，只更新指定的这一个；only 让它只下这个插件的目录，
+            // 既省流量，又不会被其它插件的坏文件连坐（见 syncRepo 注释）
+            repo = await syncRepo({
+              repo: idx.repo,
+              branch: idx.branch || 'main',
+              indexUrl: src,
+              only: [`plugins/${id}/`],
+            });
             const r = await updatePlugins({
               tmp: repo.tmp,
               index: repo.index,

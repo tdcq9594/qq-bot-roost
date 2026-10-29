@@ -57,6 +57,44 @@ export function giteeRawUrl(repo, ref, filePath) {
   return `https://gitee.com/${repo}/raw/${encodeURIComponent(ref)}/${p}`;
 }
 
+/** blob 地址：`https://gitee.com/api/v5/repos/{repo}/git/blobs/{sha}` */
+export function giteeBlobUrl(repo, sha) {
+  return `${API}/repos/${repo}/git/blobs/${encodeURIComponent(sha)}`;
+}
+
+/**
+ * 用 git blob 接口取单个文件内容，绕开被内容审查挡住的 raw CDN。
+ *
+ * 背景：Gitee 的 raw 端点会对个别文件返回 451（内容审查），而**同一个
+ * blob 走 git 对象接口是 200**——raw 走的是被审查的 CDN，blob 是 git 对象
+ * 仓库，不经过那层审查（实测 douluo 的 content-pack.sql 等 4 个文件）。
+ *
+ * 前置条件：调用方必须拿到这个 blob 的 `sha`。`fetchGiteeTree` 列清单时
+ * trees API 每个条目都带 `sha`，正好够用。
+ *
+ * @param {string} repo `owner/name`
+ * @param {string} sha  blob 的 40 位十六进制 sha（来自 trees 清单）
+ * @param {string} [token] Gitee 私人令牌（选填，加在 API 调用上）
+ * @param {number} [timeoutMs]
+ * @returns {Promise<Buffer>} 文件原始字节
+ */
+async function fetchBlob(repo, sha, token = '', timeoutMs = 120000) {
+  const q = new URLSearchParams();
+  if (token) q.set('access_token', token);
+  const url = `${giteeBlobUrl(repo, sha)}?${q}`;
+  const res = await fetch(url, {
+    headers: { 'User-Agent': UA, accept: 'application/json' },
+    signal: AbortSignal.timeout(Math.min(timeoutMs, 30000)),
+  });
+  if (!res.ok) throw new Error(`blob HTTP ${res.status}`);
+  const data = await res.json().catch(() => null);
+  const content = data?.content;
+  if (typeof content !== 'string' || !content) throw new Error('blob 接口没返回内容');
+  const buf = Buffer.from(content, data?.encoding === 'base64' ? 'base64' : 'utf8');
+  if (!buf.length) throw new Error('blob 内容是空的');
+  return buf;
+}
+
 /**
  * 把仓库某个 ref 的内容拉到本地目录。
  *
@@ -177,7 +215,26 @@ export async function fetchGiteeTree({
             await sleep(attempt * 1000); // 1s、2s 退避
           }
         }
-        if (!res) throw lastErr ?? new Error('未知错误');
+        if (!res) {
+          // raw 全部失败（常见是 451 内容审查）。tree 条目里带了 sha，
+          // 改走 git blob 接口兜底——blob 走的是 git 对象仓库，不经过被
+          // 审查的 raw CDN，同一份内容在 GitHub 上能下、在 blob 上也能下。
+          // 只有 451 才兜底：404 是文件真没有，blob 也拿不到，直接报错。
+          if (lastErr?.message?.startsWith('HTTP 451') && f.sha) {
+            try {
+              const buf = await fetchBlob(repo, f.sha, token, timeoutMs);
+              await fs.mkdir(path.dirname(dest), { recursive: true });
+              await fs.writeFile(dest, buf);
+              done += 1;
+              onProgress?.(`${done}/${files.length} ${f.path}`);
+              log.info(`451 文件已走 blob 接口补回 ${f.path}`);
+              continue;
+            } catch (e) {
+              throw new Error(`blob 兜底也失败：${e.message}`);
+            }
+          }
+          throw lastErr ?? new Error('未知错误');
+        }
         const buf = Buffer.from(await res.arrayBuffer());
         if (!buf.length) throw new Error('内容是空的');
         await fs.mkdir(path.dirname(dest), { recursive: true });

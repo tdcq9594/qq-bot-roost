@@ -2359,6 +2359,39 @@ async function testGitee() {
     await fetchGiteeTree({ repo: 'a/b', ref: 'master', destDir: dest, token: 'tok123' });
     check('Gitee: 令牌加在 API 调用上', apiUrl.includes('access_token=tok123'), apiUrl.slice(0, 120));
     check('Gitee: raw 下载不带令牌', !rawUrl.includes('access_token'), rawUrl.slice(0, 120));
+
+    // 451（内容审查）→ 用 trees 清单里的 sha 走 blob 接口兜底，不整包失败
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('/git/trees/')) {
+        return new Response(
+          JSON.stringify({
+            tree: [
+              { path: 'src/blocked.txt', type: 'blob', sha: 'sha-blocked' },
+              { path: 'src/fine.txt', type: 'blob', sha: 'sha-fine' },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      // raw 对 blocked.txt 返回 451；fine.txt 正常
+      if (u.endsWith('/raw/master/src/blocked.txt')) return new Response('x', { status: 451 });
+      if (u.endsWith('/raw/master/src/fine.txt')) return new Response('fine', { status: 200 });
+      // blob 接口返回 base64 内容
+      if (u.includes('/git/blobs/sha-blocked')) {
+        return new Response(
+          JSON.stringify({ encoding: 'base64', content: Buffer.from('blocked 内容').toString('base64') }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response('nope', { status: 404 });
+    };
+    const destBlob = await fs.mkdtemp(path.join(os.tmpdir(), 'roost-blob-'));
+    const rb = await fetchGiteeTree({ repo: 'a/b', ref: 'master', destDir: destBlob, only: ['src/'] });
+    check('Gitee: 451 文件走 blob 兜底后整体成功', rb.failed.length === 0, JSON.stringify(rb));
+    const blocked = await fs.readFile(path.join(destBlob, 'src/blocked.txt'), 'utf8').catch(() => '');
+    check('Gitee: blob 兜底把内容写盘', blocked === 'blocked 内容', blocked);
+    await fs.rm(destBlob, { recursive: true, force: true }).catch(() => {});
   } finally {
     globalThis.fetch = realFetch;
     await fs.rm(dest, { recursive: true, force: true }).catch(() => {});

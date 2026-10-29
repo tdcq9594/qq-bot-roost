@@ -505,9 +505,14 @@ export function detectUpdates(indexPlugins, localVersions = {}) {
  * 每次几十秒。参考 BetterGI 的 ScriptRepoUpdater——先拉中央仓库，
  * 再从里面逐个检出。调用方用完必须调 `cleanupRepo()`。
  *
+ * 只更新单个插件时传 `only`（如 `['plugins/aichat/']`），就只拉那一个
+ * 插件目录。两个好处：①下载量少一半；②**不会被别的插件的坏文件连坐**——
+ * 否则某个插件在下载源上有个文件拉不动，整仓失败，更新其它插件也一起黄。
+ *
+ * @param {string[]} [only] 只拉这些路径前缀（目录以 `/` 结尾），透传给下载层
  * @returns {Promise<{tmp:string, index:object}>}
  */
-export async function syncRepo({ repo, branch = 'main', indexUrl } = {}) {
+export async function syncRepo({ repo, branch = 'main', indexUrl, only = null } = {}) {
   const index = await fetchIndex(indexUrl);
   if (!repo) repo = index.repo;
   if (!repo) throw new Error('索引里缺少 repo 字段，无法同步');
@@ -519,6 +524,7 @@ export async function syncRepo({ repo, branch = 'main', indexUrl } = {}) {
       repo,
       branch,
       destDir: tmp,
+      only,
       // 索引里带了校验值就验；没带会在 tarball 那边 warn 一句
       expectSha256: index?.archive?.sha256 ?? index?.sha256 ?? null,
       timeoutMs: 180000,
