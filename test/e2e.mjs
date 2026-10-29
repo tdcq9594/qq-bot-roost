@@ -1190,6 +1190,58 @@ async function testGate() {
   ok('闸: 标回未知后放行（未知 ≠ 不可达）', greset.data?.bots?.[0]?.canSpeak?.ok === true);
 }
 
+/* ---------------- 投递账本 ---------------- */
+
+/**
+ * 验收标准只有一条：**同一个 requestId 连调两次，只发一条**。
+ *
+ * 断言读 `counters.sent` 而不是「返回 200」——以前面板发送也返回 200，
+ * 但额度账本里一条记录都没有。**半真的账本比没有账本更糟，因为你会相信它。**
+ */
+async function testDelivery() {
+  const target = 'g-e2e-idem';
+  const rid = 'req-e2e-idem-1';
+  const s0 = await api('/api/status');
+  const sentBefore = Number(s0.data?.counters?.sent ?? 0);
+
+  const body = JSON.stringify({ scene: 'group', target, content: '幂等测试', requestId: rid });
+  const r1 = await api('/api/send', { method: 'POST', body });
+  ok('投递: 第一次真的发', r1.status === 200 && r1.data?.ok === true, r1.data?.error || '');
+  ok('投递: 第一次不是复用', !r1.data?.reused, JSON.stringify(r1.data));
+
+  const r2 = await api('/api/send', { method: 'POST', body });
+  ok('投递: 第二次也返回成功', r2.status === 200 && r2.data?.ok === true, r2.data?.error || '');
+  ok('投递: 第二次标记为复用', r2.data?.reused === true, JSON.stringify(r2.data));
+
+  const s1 = await api('/api/status');
+  const sentAfter = Number(s1.data?.counters?.sent ?? 0);
+  ok('投递: 两次调用只发出一条', sentAfter - sentBefore === 1, `${sentBefore} → ${sentAfter}`);
+
+  // 记录可查
+  const one = await api(`/api/delivery?requestId=${encodeURIComponent(rid)}`);
+  ok('投递: 按 requestId 查得到', one.status === 200 && one.data?.item?.request_id === rid);
+  ok('投递: 状态是已发送', one.data?.item?.state === 'sent', String(one.data?.item?.state));
+  ok('投递: 摘要不含全文', String(one.data?.item?.digest || '').length < 200);
+
+  const list = await api('/api/delivery?limit=5');
+  ok('投递: 列表可读', list.status === 200 && Array.isArray(list.data?.items));
+  ok('投递: 统计可读', list.data?.stats?.available === true, JSON.stringify(list.data?.stats));
+
+  const none = await api('/api/delivery?requestId=req-nope');
+  ok('投递: 查不到回 404', none.status === 404, `实际 ${none.status}`);
+
+  // 不带 requestId 时行为完全不变（账本是增强，不是主链路）
+  const s2 = await api('/api/status');
+  const b2 = Number(s2.data?.counters?.sent ?? 0);
+  const plain = await api('/api/send', {
+    method: 'POST',
+    body: JSON.stringify({ scene: 'group', target, content: '没带 requestId' }),
+  });
+  ok('投递: 不带 requestId 照常发', plain.status === 200 && !plain.data?.reused);
+  const s3 = await api('/api/status');
+  ok('投递: 不带 requestId 不记账', Number(s3.data?.counters?.sent ?? 0) === b2 + 1);
+}
+
 async function testLedger() {
   const st0 = await api('/api/ledger/stats');
   ok('账本: 统计可读', st0.status === 200 && typeof st0.data?.total === 'number', `status=${st0.status}`);
@@ -1257,6 +1309,7 @@ async function main() {
   await testMessageBroadcast();
   await testLedger();
   await testGate();
+  await testDelivery();
 
   const fail = results.filter((r) => !r.pass);
   console.log(`\n${results.length - fail.length}/${results.length} 通过`);

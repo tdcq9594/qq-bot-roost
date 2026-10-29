@@ -2433,6 +2433,30 @@ export async function startWebServer({
           return json(res, 400, { error: `不认识的 scope：${scope}（global / bot / chat / silence）` });
         }
 
+        /* ---------------- 投递账本 ---------------- */
+
+        /**
+         * `GET /api/delivery?requestId=` 查一条；不带就列最近的。
+         *
+         * 给「这条到底发出去没有」一个可查的地方——`unknown` 状态的全部意义
+         * 就是让人能核对，没有这个接口那个状态就只能靠翻日志。
+         */
+        if (pathname === '/api/delivery' && req.method === 'GET') {
+          const rid = String(url.searchParams.get('requestId') ?? '').trim();
+          if (rid) {
+            const row = rt.delivery?.get(rid) ?? null;
+            if (!row) return json(res, 404, { ok: false, error: '没有这条投递记录' });
+            return json(res, 200, { ok: true, item: row });
+          }
+          const limit = Number(url.searchParams.get('limit')) || 50;
+          const state = String(url.searchParams.get('state') ?? '').trim();
+          return json(res, 200, {
+            ok: true,
+            items: rt.delivery?.recent({ limit, state }) ?? [],
+            stats: rt.delivery?.stats() ?? { available: false },
+          });
+        }
+
         // 网关操作
         if (pathname === '/api/gateway/reconnect' && req.method === 'POST') {
           // 已经下线时没有「重连」可言，直接当上线处理，免得点了没反应
@@ -2465,7 +2489,7 @@ export async function startWebServer({
          */
         if (pathname === '/api/send' && req.method === 'POST') {
           const body = await readBody(req);
-          const { scene, target, content } = body;
+          const { scene, target, content, requestId } = body;
           if (!target || !content) return json(res, 400, { error: '需要 target 和 content' });
           const kind = scene === 'c2c' ? 'c2c' : 'group';
           const sender = kind === 'c2c' ? api?.sendC2C : api?.sendGroup;
@@ -2478,9 +2502,20 @@ export async function startWebServer({
                 target,
                 chatKey: `${kind}:${target}`,
                 payload: { content },
+                /**
+                 * 幂等键（阶段 5）。面板重试、脚本重放时带上同一个 id，
+                 * 第二次不会真的再发一遍，直接回上次的结果。
+                 */
+                ...(requestId ? { requestId: String(requestId) } : {}),
               });
               // pending = 主动消息进了审核。既不是失败，也不是「已经送达」
-              return json(res, 200, { ok: true, id: r?.id ?? '', pending: Boolean(r?.pending) });
+              return json(res, 200, {
+                ok: true,
+                id: r?.id ?? '',
+                pending: Boolean(r?.pending),
+                // reused = 这条 requestId 之前已经发过，这次没打接口
+                ...(r?.reused ? { reused: true } : {}),
+              });
             } catch (e) {
               const hint = userFacingSendError(e);
               if (!hint) throw e; // 真正的接口错误交给外层兜底（500 + 原始信息）
