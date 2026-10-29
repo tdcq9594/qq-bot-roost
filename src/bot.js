@@ -247,6 +247,8 @@ export class BotRuntime {
       log: (m) => this.log.warn(m),
     });
     if (this.outbound) this.outbound.delivery = this.delivery;
+    /** 插件管理器更早构造（那时还没有库），这里补上引用 */
+    if (this.plugins) this.plugins.delivery = this.delivery;
     /**
      * 崩溃恢复：上次进程死掉时还在 `pending` 的，全部标 `unknown`。
      *

@@ -39,6 +39,23 @@ function readOnlyLedger(ledger) {
  *
  * `by` 记成 `plugin:<id>`，面板上一眼能看出是哪个插件停的。
  */
+/**
+ * 给插件的投递账本视图：**只能标记失败，不能标记成功**。
+ *
+ * 为什么只给 `fail`：`settle(requestId, 'sent')` 一暴露，插件就能把一条
+ * 根本没发出去的消息标成「已发送」——而账本的全部价值就是「记录的事实」。
+ * 插件唯一正当的需求是「这段我不发了」，所以只给这一个动作。
+ */
+function readOnlyDelivery(ledger) {
+  return Object.freeze({
+    /** 标记这条没发出去（截断、被跳过），允许以后重试 */
+    fail: (requestId, code = 'plugin') =>
+      ledger.settle(String(requestId ?? ''), 'failed', { code }),
+    /** 查一条（只读） */
+    get: (requestId) => ledger.get(requestId),
+  });
+}
+
 function readOnlyGate(gate, pluginId) {
   const by = `plugin:${pluginId}`;
   return Object.freeze({
@@ -348,7 +365,7 @@ export class PluginStorage {
 /**
  * 插件上下文：插件能用的全部能力都在这里，不暴露内部实现。
  */
-export function createContext({ meta, paths, registry, api, cfg, config, configStore, groups, roles, levels, outbound, session, pipeline, reach, ledger, gate, isOwner, pages = null, routes = null, state = null }) {
+export function createContext({ meta, paths, registry, api, cfg, config, configStore, groups, roles, levels, outbound, session, pipeline, reach, ledger, gate, delivery, isOwner, pages = null, routes = null, state = null }) {
   const id = meta.id;
   // 日志 tag 带机器人 id，多机器人下同名插件的日志不会串
   const logger = createLogger(`plugin:${paths?.id ?? '-'}:${id}`);
@@ -416,6 +433,8 @@ export function createContext({ meta, paths, registry, api, cfg, config, configS
      * 所以一定要能带时长，`ms <= 0` 表示解除。
      */
     gate: gate ? readOnlyGate(gate, id) : null,
+    /** 投递账本（阶段 5）：只能 `fail`，见 readOnlyDelivery */
+    delivery: delivery ? readOnlyDelivery(delivery) : null,
     storage: new PluginStorage(paths.pluginData(id)),
 
     /**
