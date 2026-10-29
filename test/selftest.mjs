@@ -4398,6 +4398,26 @@ async function testDelivery() {
   check('投递家族: 查不到回 null', led.family('nope-999') === null);
   check('投递家族: 空 id 回 null', led.family('') === null);
 
+  // 20) 状态坏掉的行不能污染聚合
+  //     给 0（= sent）会让坏行被当成已送达；给 99（= 最坏）又会压过真正的
+  //     unknown，把「绝对不能重发」这条信息淹掉。所以直接不参与比较。
+  //     脏行的 id 要排在前面（`fam-8` < `fam-8#1`），否则旧逻辑靠「第一个
+  //     赢」也会碰巧通过，这条断言就成了摆设。
+  db.prepare(
+    `INSERT INTO deliveries (request_id, bot_id, kind, chat_id, digest, state, attempts, created_at)
+     VALUES (?,?,?,?,?,?,?,?)`,
+  ).run('fam-8', 'botA', 'group', 'g1', 'd', 'state-typo', 0, 1);
+  db.prepare(
+    `INSERT INTO deliveries (request_id, bot_id, kind, chat_id, digest, state, attempts, created_at)
+     VALUES (?,?,?,?,?,?,?,?)`,
+  ).run('fam-8#1', 'botA', 'group', 'g1', 'd', 'sent', 0, 2);
+  const f8 = led.family('fam-8');
+  check(
+    '投递家族: 认不出的状态不参与比较',
+    f8.state === DELIVERY_STATE.SENT && f8.parts === 2,
+    JSON.stringify({ s: f8.state, p: f8.parts }),
+  );
+
   db.close();
   await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
 }

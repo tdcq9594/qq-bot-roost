@@ -309,8 +309,21 @@ export function createDeliveryLedger({ db, botId, log = () => {} }) {
         [DELIVERY_STATE.FAILED]: 3,
         [DELIVERY_STATE.UNKNOWN]: 4,
       };
-      let worst = rows[0];
-      for (const r of rows) if ((rank[r.state] ?? 0) > (rank[worst.state] ?? 0)) worst = r;
+      /**
+       * 认不出的状态**不参与比较**，不能给它一个默认名次。
+       *
+       * 给 0（等于 sent）会让一条状态坏掉的行被当成已送达；
+       * 给 99（等于最坏）又会让它压过真正的 `unknown`，把「绝对不能重发」
+       * 这条信息淹掉。两种情况都会让人对着一个假答案往下走。
+       *
+       * 正常不会出现（`settle` 会校验状态），但账本是跨版本存活的，
+       * 老版本写过什么值谁也不敢保证。
+       */
+      const known = rows.filter((r) => r.state in rank);
+      const pool = known.length ? known : rows;
+      let worst = pool[0];
+      for (const r of pool) if (rank[r.state] > rank[worst.state]) worst = r;
+      if (!known.length) log(`投递账本里有认不出的状态：${rows.map((r) => r.state).join('、')}`);
 
       /** 报最坏那块的 msg_id / code，人核对时想知道的是「哪块出问题了」 */
       const at = rows.reduce((m, r) => Math.max(m, Number(r.settled_at || r.created_at || 0)), 0);
