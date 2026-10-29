@@ -4340,6 +4340,63 @@ async function testDelivery() {
   // 11) 没有库时照发（账本是增强，不是主链路）
   const bare = createDeliveryLedger({ db: null, botId: 'x', log: () => {} });
   check('投递: 库不可用时照发', bare.claim(base).action === 'send');
+  check('投递: 没库时家族查询也不炸', bare.family('req-1') === null);
+
+  /* ---- 家族聚合：一条逻辑消息切成几块，问的是整条 ---- */
+
+  const mk = (id, state, extra = {}) => {
+    led.claim({ ...base, requestId: id });
+    led.settle(id, state, extra);
+  };
+
+  // 12) 单块时 family 等价于 get
+  mk('fam-1', DELIVERY_STATE.SENT, { msgId: 'mm-1' });
+  const f1 = led.family('fam-1');
+  check(
+    '投递家族: 单块等价于 get',
+    f1.state === DELIVERY_STATE.SENT && f1.parts === 1 && f1.msgId === 'mm-1',
+    JSON.stringify({ s: f1.state, p: f1.parts }),
+  );
+
+  // 13) 全成功 → sent
+  mk('fam-2#1', DELIVERY_STATE.SENT, { msgId: 'a1' });
+  mk('fam-2#2', DELIVERY_STATE.SENT, { msgId: 'a2' });
+  const f2 = led.family('fam-2');
+  check('投递家族: 三块全成功才是 sent', f2.state === DELIVERY_STATE.SENT && f2.parts === 2, JSON.stringify({ s: f2.state, p: f2.parts }));
+
+  // 14) 一块被审核驳回 → 整条 failed（不能因为第一块成功就报 sent）
+  mk('fam-3#1', DELIVERY_STATE.SENT);
+  mk('fam-3#2', DELIVERY_STATE.FAILED, { code: 'audit-reject' });
+  const f3 = led.family('fam-3');
+  check(
+    '投递家族: 一块被驳回整条就是 failed',
+    f3.state === DELIVERY_STATE.FAILED && f3.code === 'audit-reject',
+    JSON.stringify({ s: f3.state, c: f3.code }),
+  );
+
+  // 15) unknown 优先级最高 —— 重发会把已经出去的那块再发一遍
+  mk('fam-4#1', DELIVERY_STATE.SENT);
+  mk('fam-4#2', DELIVERY_STATE.UNKNOWN, { code: 'timeout' });
+  check('投递家族: 一块未知整条就是 unknown（不许重发）', led.family('fam-4').state === DELIVERY_STATE.UNKNOWN);
+
+  // 16) failed 压过 audited：能确定失败的先修
+  mk('fam-5#1', DELIVERY_STATE.AUDITED, { msgId: 'x5' });
+  mk('fam-5#2', DELIVERY_STATE.FAILED, { code: 'quota' });
+  check('投递家族: failed 压过 audited', led.family('fam-5').state === DELIVERY_STATE.FAILED);
+
+  // 17) 前缀不误伤：fam-6 不该把 fam-60 算进来
+  mk('fam-6#1', DELIVERY_STATE.SENT);
+  mk('fam-60#1', DELIVERY_STATE.FAILED, { code: 'quota' });
+  check('投递家族: 不会把 fam-60 算进 fam-6', led.family('fam-6').state === DELIVERY_STATE.SENT);
+
+  // 18) base 里的 LIKE 通配符要转义，否则一条 id 能匹配到别人的行
+  mk('fam%7#1', DELIVERY_STATE.SENT);
+  mk('famX7#1', DELIVERY_STATE.FAILED, { code: 'quota' });
+  check('投递家族: base 里的 % 不当下通配符', led.family('fam%7').state === DELIVERY_STATE.SENT);
+
+  // 19) 查不存在的 id → null（路由据此回 gone）
+  check('投递家族: 查不到回 null', led.family('nope-999') === null);
+  check('投递家族: 空 id 回 null', led.family('') === null);
 
   db.close();
   await fs.rm(dir, { recursive: true, force: true }).catch(() => {});

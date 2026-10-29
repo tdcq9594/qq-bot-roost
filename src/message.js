@@ -549,11 +549,17 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
     return send({ content: String(text), ...opts }, false);
   };
 
-  /** Markdown 消息（可带按钮 keyboard）。Markdown 是独立消息类型，先把攒的文本发掉 */
-  msg.replyMarkdown = async (markdown, keyboard) => {
+  /**
+   * Markdown 消息（可带按钮 keyboard）。Markdown 是独立消息类型，先把攒的文本发掉。
+   *
+   * `opts.requestId`：投递账本的幂等键。以前这条路完全绕开账本——
+   * 插件给了 id 也只对纯文本生效，markdown 那条永远记不上，重发就会重复。
+   * 第三个参数是可选的，老调用方不传，行为不变。
+   */
+  msg.replyMarkdown = async (markdown, keyboard, opts = {}) => {
     await msg.flushReplies();
     try {
-      return await send({ markdown, keyboard }, true);
+      return await send({ markdown, keyboard, ...(opts?.requestId ? { requestId: opts.requestId } : {}) }, true);
     } catch (e) {
       /**
        * Markdown 是**独立消息类型**，没有纯文本兜底：平台不放行（没权限、
@@ -581,7 +587,13 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
        * 按钮里的指令本来也会出现在正文里（ctx.menu 渲染时带上），信息不丢。
        */
       log.warn(`Markdown 被拒（${e.message}），降级为纯文本重发`);
-      return send({ content: plain }, true).catch((e2) => {
+      /**
+       * 降级重发**沿用同一个 requestId**：对用户来说这仍然是「一条消息」，
+       * 账本里就该只有一行。上一步抛错时已经结算成 `failed`（可重试），
+       * 所以这里 claim 会放行并复用同一行，最终状态是 `sent`。
+       * 万一是 `unknown`，claim 会抛错——那正是我们要的「不重复发」。
+       */
+      return send({ content: plain, ...(opts?.requestId ? { requestId: opts.requestId } : {}) }, true).catch((e2) => {
         log.error('降级纯文本也没发出去:', e2.message);
         return null;
       });

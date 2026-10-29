@@ -267,5 +267,67 @@ export function createDeliveryLedger({ db, botId, log = () => {} }) {
     }
   }
 
-  return { claim, settle, settleByMsgId, recoverPending, get, recent, stats };
+  /**
+   * 一条逻辑消息可能对应好几行。
+   *
+   * 为什么：被动回复超过 1800 字时，发送层会切成几块各发一次，
+   * 每块一个幂等键（`${base}#1`、`${base}#2`…，见 ai-chat 的 `sendReply`）。
+   * 这是必须的——共用一个 id 的话第 2 块起会被 `claim` 判成 `reuse` 直接丢掉。
+   *
+   * 但「这条消息到底送没送到」问的是**整条**，不是某一块。所以这里把
+   * base 和它的所有分块聚合成一个状态。
+   *
+   * 聚合规则按「坏消息优先」：只要有一块 `unknown`，整条就是 `unknown`
+   * （**绝不能重发**——重发会把已经出去的那块再发一遍）；有一块 `failed`
+   * 就是 `failed`（可重试，重试只会补没发出去的那块，因为 id 是确定的）；
+   * 还在飞就是 `pending`；等审核是 `audited`；全成功才是 `sent`。
+   *
+   * @param {string} requestId base id
+   * @returns {null | {state:string, parts:number, msgId:string, code:string,
+   *   attempts:number, at:number, rows:object[]}}
+   */
+  function family(requestId) {
+    if (!ready()) return null;
+    const base = String(requestId ?? '').trim();
+    if (!base) return null;
+    /**
+     * `LIKE` 里的 `%` `_` 要转义，否则 base 里带这两个字符会误匹配到别人的行。
+     * requestId 是我们自己生成的（`qs-…` / `sp-…`），正常不会有，
+     * 但这里是公共入口，不能靠上游自觉。
+     */
+    const esc = base.replace(/[\\%_]/g, (m) => `\\${m}`);
+    try {
+      const rows = db
+        .prepare(`SELECT * FROM deliveries WHERE request_id = ? OR request_id LIKE ? ESCAPE '\\' ORDER BY request_id`)
+        .all(base, `${esc}#%`);
+      if (!rows.length) return null;
+
+      const rank = {
+        [DELIVERY_STATE.SENT]: 0,
+        [DELIVERY_STATE.AUDITED]: 1,
+        [DELIVERY_STATE.PENDING]: 2,
+        [DELIVERY_STATE.FAILED]: 3,
+        [DELIVERY_STATE.UNKNOWN]: 4,
+      };
+      let worst = rows[0];
+      for (const r of rows) if ((rank[r.state] ?? 0) > (rank[worst.state] ?? 0)) worst = r;
+
+      /** 报最坏那块的 msg_id / code，人核对时想知道的是「哪块出问题了」 */
+      const at = rows.reduce((m, r) => Math.max(m, Number(r.settled_at || r.created_at || 0)), 0);
+      return {
+        state: worst.state,
+        parts: rows.length,
+        msgId: worst.msg_id || '',
+        code: worst.code || '',
+        attempts: rows.reduce((m, r) => Math.max(m, Number(r.attempts || 0)), 0),
+        at,
+        rows,
+      };
+    } catch (e) {
+      log(`投递账本家族查询失败：${e.message}`);
+      return null;
+    }
+  }
+
+  return { claim, settle, settleByMsgId, recoverPending, get, family, recent, stats };
 }
