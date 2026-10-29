@@ -90,7 +90,15 @@ export class SendError extends Error {
   constructor(message, code, detail) {
     super(message);
     this.name = 'SendError';
-    this.code = code; // offline | expired | quota | api
+    /**
+     * 五种，按「多久能好」排序：
+     *   offline  连不上 QQ —— 等它上线
+     *   expired  被动窗口过了 —— 等用户再说一句
+     *   quota    今天这个会话的主动额度用完了 —— 等跨天
+     *   rate     这一分钟发得太密 —— 等一分钟
+     *   api      接口报错 —— 看具体错误码
+     */
+    this.code = code; // offline | expired | quota | rate | api
     this.detail = detail;
   }
 }
@@ -228,7 +236,8 @@ export class Outbound {
       active: 0,
       degraded: 0, // 被动超窗降级为主动的次数
       expired: 0, // 因超窗被拒绝的次数
-      quotaBlocked: 0, // 因额度用完被拒绝的次数
+      quotaBlocked: 0, // 因日额度用完被拒绝的次数（等跨天才好）
+      rateBlocked: 0, // 因分钟限流被拒绝的次数（等一分钟就好）
       throttled: 0, // 因限速排队过的次数
       audit: 0, // 进入审核的主动消息
       offline: 0,
@@ -331,11 +340,19 @@ export class Outbound {
             'quota',
           );
         }
+        /**
+         * 分钟限流单独一个 code（`rate`），**不能和日额度共用 `quota`**。
+         *
+         * 两者的「多久能好」差三个数量级：日额度要等跨天，分钟限流等一分钟。
+         * 以前都叫 `quota`，调用方只能按最坏情况处理——dsh-roost 的主动搭话
+         * 会把「发得太密」当成「今天说满了」，直接放弃一整天。
+         * 反过来按最好情况处理，就是每分钟重试一次空转到跨天。
+         */
         if (!this.#allowActiveThisMinute(chatKey)) {
-          this.stats.quotaBlocked += 1;
+          this.stats.rateBlocked += 1;
           throw new SendError(
             `这个会话的主动消息发得太密（官方限制 ${this.activePerMin} 条/分钟），稍后再试。`,
-            'quota',
+            'rate',
           );
         }
         await this.quota.consume(chatKey);

@@ -2388,7 +2388,9 @@ export async function startWebServer({
             } catch (e) {
               const hint = userFacingSendError(e);
               if (!hint) throw e; // 真正的接口错误交给外层兜底（500 + 原始信息）
-              return json(res, e.code === 'quota' ? 429 : 400, { error: hint, code: e.code });
+              // quota（等跨天）和 rate（等一分钟）都是「等会儿能好」，用 429 让调用方知道可以重试
+              const retriable = e.code === 'quota' || e.code === 'rate';
+              return json(res, retriable ? 429 : 400, { error: hint, code: e.code });
             }
           }
 

@@ -3172,7 +3172,19 @@ await testUpdaterRestartHint();
       break;
     }
   }
-  check('主动消息分钟限流生效', code === 'quota' && sent === 3, `发出 ${sent} 条后拦下（${code}）`);
+  check(
+    '主动消息分钟限流生效',
+    code === 'rate' && sent === 3,
+    `发出 ${sent} 条后拦下（${code}）`,
+  );
+  /**
+   * 分钟限流必须是 `rate` 不是 `quota`。
+   *
+   * 两者「多久能好」差三个数量级：日额度要等跨天，分钟限流等一分钟。
+   * 混成一个 code，调用方只能按最坏情况处理——dsh-roost 的主动搭话会把
+   * 「发得太密」当成「今天说满了」，白白放弃一整天。
+   */
+  check('分钟限流与日额度用不同 code', code !== 'quota', `实际 ${code}`);
   await ob.flush();
 }
 

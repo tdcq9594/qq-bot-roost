@@ -709,7 +709,8 @@ export class BotRuntime {
           await commandEntry.handler(msg, { args: msg.args, raw: msg.content, bot: this });
         } catch (e) {
           this.metrics.bump('errors');
-          if (e?.code === 'offline' || e?.code === 'expired' || e?.code === 'quota') {
+          // 这几种是发送侧的已知限制，不是插件写错了，只 warn 不报堆栈
+          if (['offline', 'expired', 'quota', 'rate'].includes(e?.code)) {
             this.log.warn(`命令 ${commandEntry.name} 回复失败: ${e.message}`);
             return;
           }
