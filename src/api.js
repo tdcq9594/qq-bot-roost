@@ -10,8 +10,11 @@ const log = createLogger('api');
 export const FILE_TYPE = { IMAGE: 1, VIDEO: 2, VOICE: 3, FILE: 4 };
 
 /**
- * 官方硬限制：同一条消息最多被动回复 5 次（`msg_seq` 取 1–5）。
- * 第 6 次服务端返回 40034128「被动回复时间或次数超限」。
+ * 被动回复序号的**最后一道**兜底上限。
+ *
+ * 官方口径按会话类型不同：群聊 5 次（`msg_seq` 1–5），单聊 4 次（1–4）。
+ * 这里只按 `msgId` 记，拿不到会话类型，所以取两者较大的 5 当「绝不可能超过」的硬顶。
+ * 精确拦截在 `outbound.js`（`PASSIVE_MAX_REPLIES[kind]`），正常流程走不到这里。
  */
 const PASSIVE_MAX_SEQ = 5;
 
@@ -164,6 +167,16 @@ export class QQApi {
       const err = new Error(`HTTP ${res.status} ${method} ${path}: ${msg}`);
       err.status = res.status;
       err.body = data;
+      /**
+       * QQ 的业务错误码，和 HTTP 状态码是两回事。
+       *
+       * 同样是 400，`40054004`（无好友关系）和 `40034006`（内容违规）
+       * 该做的事完全不同：前者要更新可达性状态，后者只能改文案。
+       * 上层拿不到这个码就只能瞎猜，所以在这里就拆出来。
+       *
+       * 常见值见 `docs/官方接口限制.md` 与 `src/reach.js`。
+       */
+      err.qqCode = Number(data?.code ?? data?.err_code ?? 0) || 0;
       throw err;
     }
     return data;
@@ -946,14 +959,14 @@ export class QQApi {
   }
 
   /**
-   * 被动回复序号。官方硬限制：**同一条消息最多回复 5 次**（msg_seq 取 1–5），
-   * 第 6 次返回 40034128。这里兜一道，正常流程由 outbound.js 先拦。
+   * 被动回复序号。硬顶见 `PASSIVE_MAX_SEQ`（群聊 5 / 单聊 4，这里取 5 兜底），
+   * 超了服务端返回 40034128。正常流程由 outbound.js 按会话类型先拦。
    */
   #nextSeq(msgId) {
     const cur = this.seqMap.get(msgId) ?? 0;
     if (cur >= PASSIVE_MAX_SEQ) {
       throw new Error(
-        `同一条消息最多回复 ${PASSIVE_MAX_SEQ} 次（QQ 官方限制），这条已经回了 ${cur} 次`,
+        `同一条消息最多回复 5 次（群聊）/ 4 次（单聊），这条已经回了 ${cur} 次`,
       );
     }
     const next = cur + 1;

@@ -104,7 +104,7 @@ export function serializeMessage(botId, msg) {
     mentioned: Boolean(msg.mentioned),
     addressed: Boolean(msg.addressed),
     isCommand: Boolean(msg.isCommand),
-    /** 被动回复用（5 分钟窗口，同一条最多 5 次） */
+    /** 被动回复用（群聊 5 分钟 / 5 次，单聊 60 分钟 / 4 次） */
     msgId: msg.id,
     /** 引用回复用（message_reference.message_id） */
     msgIdx: msg.msgIdx,

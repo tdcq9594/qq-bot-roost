@@ -20,15 +20,36 @@ const log = createLogger('outbound');
  * 插件只管调 msg.reply()，剩下的交给这里。
  */
 
-/** 官方给的有效期是 5 分钟，留 15 秒给网络和服务端时钟差 */
-const PASSIVE_WINDOW_MS = 5 * 60 * 1000;
-const PASSIVE_SAFE_MS = PASSIVE_WINDOW_MS - 15_000;
+/**
+ * 被动回复窗口。**两个接口不一样，别再用一个值。**
+ *
+ *   群聊 `/v2/groups/{group_openid}/messages`：5 分钟、最多 5 次
+ *   单聊 `/v2/users/{user_openid}/messages`：**60 分钟、最多 4 次**
+ *
+ * 以前两者共用「5 分钟 / 5 次」（群聊的口径），单聊的后果是：
+ *   · 5 分钟后就降级成主动消息，白吃「每个好友 1000 条/天」的额度，
+ *     而被动回复本来不占主动额度；
+ *   · 第 5 次回复会被服务端拒（40034128）。
+ *
+ * 各留 15 秒给网络和服务端时钟差。
+ */
+const PASSIVE_WINDOW_MS = {
+  group: 5 * 60 * 1000,
+  c2c: 60 * 60 * 1000,
+};
+const PASSIVE_SAFE_MS = {
+  group: PASSIVE_WINDOW_MS.group - 15_000,
+  c2c: PASSIVE_WINDOW_MS.c2c - 15_000,
+};
 
 /**
- * 官方硬限制：同一条消息最多回复 5 次（`msg_seq` 取 1–5）。
- * 第 6 次服务端会返回 40034128「被动回复时间或次数超限」。
+ * 同一条消息最多回复次数：群聊 5、单聊 4。
+ * 超过会返回 40034128「被动回复时间或次数超限」。
  */
-const PASSIVE_MAX_REPLIES = 5;
+const PASSIVE_MAX_REPLIES = {
+  group: 5,
+  c2c: 4,
+};
 
 /** 主动消息进入审核的返回码，属于正常结果 */
 const CODE_AUDIT = 304023;
@@ -245,11 +266,12 @@ export class Outbound {
     // 1) 被动窗口检查：快过期就别发请求了，直接按主动消息处理
     if (wantPassive) {
       const age = receivedAt ? Date.now() - receivedAt : 0;
-      if (age > PASSIVE_SAFE_MS) {
+      const safeMs = PASSIVE_SAFE_MS[kind];
+      if (age > safeMs) {
         if (!this.downgrade) {
           this.stats.expired += 1;
           throw new SendError(
-            `这条消息已经过去 ${Math.round(age / 1000)} 秒，超过 QQ 的 5 分钟被动回复窗口，回复发不出去了`,
+            `这条消息已经过去 ${Math.round(age / 1000)} 秒，超过 QQ 的 ${Math.round(safeMs / 1000)} 秒被动回复窗口，回复发不出去了`,
             'expired',
           );
         }
@@ -267,17 +289,18 @@ export class Outbound {
     // 2) 排队 + 限速 + 额度扣减 + 实际发送
     //    额度的「查」和「扣」都放在队列里，避免两个并发推送同时通过检查后超额
     return this.#enqueue(chatKey, async () => {
-      // 2a) 被动回复次数上限：官方「每个消息最多回复 5 次」
+      // 2a) 被动回复次数上限：群聊 5 次、单聊 4 次
       //     同一条消息被多个插件连着回、或用户一句话触发多轮时很容易撞上，
       //     本地先拦，省得服务端返回 40034128 再兜底
       let passiveNow = wantPassive && !active;
       if (passiveNow) {
+        const maxReplies = PASSIVE_MAX_REPLIES[kind];
         const used = this.passiveCount.get(body.msgId) ?? 0;
-        if (used >= PASSIVE_MAX_REPLIES) {
+        if (used >= maxReplies) {
           if (!this.downgrade) {
             this.stats.expired += 1;
             throw new SendError(
-              `同一条消息最多回复 ${PASSIVE_MAX_REPLIES} 次（QQ 官方限制），这条已经回满了。\n` +
+              `同一条消息最多回复 ${maxReplies} 次（QQ 官方限制），这条已经回满了。\n` +
                 `等用户再说一句，就能继续用被动回复。`,
               'expired',
             );

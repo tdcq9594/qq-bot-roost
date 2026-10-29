@@ -2021,6 +2021,103 @@ export async function startWebServer({
           }
         }
 
+        /**
+         * 可达性：谁能私聊、哪个群能主动推。
+         *
+         * 官方**没有查好友的接口**，这些状态全部来自 6 个事件
+         * （FRIEND_ADD/DEL、C2C_MSG_REJECT/RECEIVE、GROUP_MSG_REJECT/RECEIVE）。
+         * 接入之前就存在的关系是 `null`（未知）——**未知不等于不可达**，
+         * 面板要把它显示成「未知」而不是「不能」。
+         */
+        if (pathname === '/api/reach' && (req.method === 'GET' || req.method === 'POST')) {
+          /**
+           * 判定结论在服务端算，前端只负责显示。
+           *
+           * 判定顺序（和 `reach.canC2C` 必须一致，否则面板说的和实际发的会打架）：
+           * 无好友 → 关了推送 → 有好友 → 未知。
+           * **`null` 是「未知」不是「不能」**，单独一个分支。
+           */
+          const snapshot = async () => {
+            const snap = (await rt?.reach?.snapshot?.()) ?? { users: {}, groups: {} };
+            const people = rt?.listRecentPeople?.(200) ?? [];
+            const nameOf = (id) => people.find((p) => p.openid === id)?.name || '';
+
+            const users = Object.entries(snap.users).map(([openid, u]) => ({
+              openid,
+              name: nameOf(openid),
+              friend: u.friend ?? null,
+              c2cPush: u.c2cPush ?? null,
+              unionOpenid: u.unionOpenid || '',
+              evidence: u.evidence || '',
+              updatedAt: u.updatedAt || 0,
+              lastFailAt: u.lastFailAt || 0,
+              lastFailCode: u.lastFailCode || 0,
+              lastOkAt: u.lastOkAt || 0,
+              verdict:
+                u.friend === 0
+                  ? 'not-friend'
+                  : u.c2cPush === 0
+                    ? 'push-off'
+                    : u.friend === 1
+                      ? 'ok'
+                      : 'unknown',
+            }));
+
+            const groups = Object.entries(snap.groups).map(([groupOpenid, g]) => ({
+              groupOpenid,
+              name: rt?.groupName?.(groupOpenid) || '',
+              push: g.push ?? null,
+              by: g.by || '',
+              evidence: g.evidence || '',
+              updatedAt: g.updatedAt || 0,
+              verdict: g.push === 0 ? 'push-off' : g.push === 1 ? 'ok' : 'unknown',
+            }));
+
+            return { users, groups };
+          };
+
+          if (req.method === 'GET') return json(res, 200, await snapshot());
+
+          /**
+           * 人工标注。
+           *
+           * 好友事件是增量的，接入之前的老关系永远是 `unknown`，只能人工纠正。
+           * `friend` / `c2cPush` / `push` 三个字段的约定：
+           *   - 不传     → 这项不动
+           *   - `1`/`0`  → 明确设定
+           *   - `null`   → 重置为未知（**撤销标注用这个**）
+           */
+          if (!rt?.reach?.noteManual) {
+            return json(res, 503, { error: '机器人没在运行，改不了可达性状态' });
+          }
+          const body = await readBody(req);
+          const triOf = (v) => (v === 1 || v === true ? 1 : v === 0 || v === false ? 0 : v === null ? null : undefined);
+
+          const gid = String(body?.groupOpenid ?? '').trim();
+          if (gid) {
+            const push = triOf(body?.push);
+            if (push === undefined && body?.push !== undefined) {
+              return json(res, 400, { error: 'push 只能是 1、0 或 null' });
+            }
+            await rt.reach.noteGroupManual({ groupOpenid: gid, push });
+            return json(res, 200, { ok: true, ...(await snapshot()) });
+          }
+
+          const openid = String(body?.openid ?? '').trim();
+          if (!openid) return json(res, 400, { error: 'openid 或 groupOpenid 不能为空' });
+
+          const friend = triOf(body?.friend);
+          const c2cPush = triOf(body?.c2cPush);
+          if (friend === undefined && body?.friend !== undefined) {
+            return json(res, 400, { error: 'friend 只能是 1、0 或 null' });
+          }
+          if (c2cPush === undefined && body?.c2cPush !== undefined) {
+            return json(res, 400, { error: 'c2cPush 只能是 1、0 或 null' });
+          }
+          await rt.reach.noteManual({ openid, friend, c2cPush });
+          return json(res, 200, { ok: true, ...(await snapshot()) });
+        }
+
         if (pathname === '/api/groups' && req.method === 'GET') {
           const list = await groups.list();
           /**

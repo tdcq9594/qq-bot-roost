@@ -8,6 +8,7 @@ import { SessionManager } from '../src/session.js';
 import { Pipeline, dedupMiddleware } from '../src/pipeline.js';
 import { PluginConfig } from '../src/plugin/config.js';
 import { browserCommand } from '../src/browser.js';
+import { createReach } from '../src/reach.js';
 
 /**
  * 清掉测试写进额度账本的条目。
@@ -125,6 +126,58 @@ const RUN = Date.now().toString(36);
   });
   check('超窗后降级', r.degraded === true);
   check('降级后不带 msgId', api.calls[0].body.msgId === undefined);
+  await ob.flush();
+}
+
+/* ---------- 2b. 单聊窗口是 60 分钟，不能套用群聊的 5 分钟 ---------- */
+{
+  const api = makeApi();
+  const ob = new Outbound({ api, cfg, isOnline: () => true });
+  const r = await ob.send({
+    kind: 'c2c',
+    target: 'u1',
+    chatKey: 'c2c:__t2b_window__',
+    payload: { content: 'late-ish', msgId: 'msg-2b' },
+    // 10 分钟：群聊早就超窗了，单聊还有 50 分钟
+    receivedAt: Date.now() - 10 * 60 * 1000,
+  });
+  check('单聊 10 分钟仍走被动回复', r.degraded === false, JSON.stringify(r));
+  check('单聊被动回复带 msgId', api.calls[0]?.body.msgId === 'msg-2b');
+  await ob.flush();
+}
+
+/* ---------- 2c. 单聊超过 60 分钟才降级 ---------- */
+{
+  const api = makeApi();
+  const ob = new Outbound({ api, cfg, isOnline: () => true });
+  const r = await ob.send({
+    kind: 'c2c',
+    target: 'u1',
+    chatKey: 'c2c:__t2c_expire__',
+    payload: { content: 'very late', msgId: 'msg-2c' },
+    receivedAt: Date.now() - 61 * 60 * 1000,
+  });
+  check('单聊超 60 分钟才降级', r.degraded === true);
+  await ob.flush();
+}
+
+/* ---------- 2d. 被动回复次数：单聊只允许 4 次（群聊 5 次） ---------- */
+{
+  const api = makeApi();
+  const ob = new Outbound({ api, cfg, isOnline: () => true });
+  const k = 'c2c:__t2d_replies__';
+  let degradedAt = -1;
+  for (let i = 0; i < 6; i++) {
+    const r = await ob.send({
+      kind: 'c2c',
+      target: 'u1',
+      chatKey: k,
+      payload: { content: 'x' + i, msgId: 'msg-2d' },
+      receivedAt: Date.now(),
+    });
+    if (r.degraded && degradedAt < 0) degradedAt = i;
+  }
+  check('单聊第 5 次被动回复降级', degradedAt === 4, degradedAt < 0 ? '一次都没降级' : `第 ${degradedAt + 1} 次`);
   await ob.flush();
 }
 
@@ -3771,6 +3824,126 @@ async function testBackfillFromGitHub() {
 
   await fs2.rm(root, { recursive: true, force: true }).catch(() => {});
 }
+
+/* ---------- 可达性（reach） ---------- */
+
+/**
+ * 重点验证两层开关是独立的：有好友 ≠ 能主动发。
+ * 这是官方 `C2C_MSG_REJECT` 文档里最容易被漏掉的一句话。
+ */
+async function testReach() {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'roost-reach-'));
+  const file = path.join(dir, 'reach.json');
+  const reach = createReach({ file });
+
+  // 1) 没见过的人：未知。**未知不能当「不可达」**，否则主动搭话永远开不了口
+  const r1 = await reach.canC2C('u1');
+  check('reach: 陌生人是 unknown', r1.verdict === 'unknown', JSON.stringify(r1));
+
+  // 2) 加好友
+  await reach.noteFriendAdd({ openid: 'u1', unionOpenid: 'union-1', scene: 1001 });
+  check('reach: 加好友后可私聊', (await reach.canC2C('u1')).verdict === 'yes');
+  check('reach: union_openid 被记下', (await reach.get('u1'))?.unionOpenid === 'union-1');
+
+  // 3) 有好友但关了主动推送 —— 最容易漏的一层
+  await reach.noteC2cPush({ openid: 'u1', on: false });
+  const r3 = await reach.canC2C('u1');
+  check(
+    'reach: 有好友但关了推送 → 不可发',
+    r3.verdict === 'no' && r3.reason === 'reach:push-off',
+    JSON.stringify(r3),
+  );
+
+  // 4) 重新打开
+  await reach.noteC2cPush({ openid: 'u1', on: true });
+  check('reach: 重新打开推送后可发', (await reach.canC2C('u1')).verdict === 'yes');
+
+  // 5) 删好友
+  await reach.noteFriendDel({ openid: 'u1' });
+  const r5 = await reach.canC2C('u1');
+  check(
+    'reach: 删好友后不可发',
+    r5.verdict === 'no' && r5.reason === 'reach:not-friend',
+    JSON.stringify(r5),
+  );
+
+  // 6) 收到他的私聊 = 好友一定在，但**不能**推出「他允许主动推」
+  await reach.noteC2cObserved({ openid: 'u2' });
+  const u2 = await reach.get('u2');
+  check('reach: 收到私聊反证好友', u2?.friend === 1);
+  check('reach: 收到私聊不推断推送开关', u2?.c2cPush === null, String(u2?.c2cPush));
+
+  // 6b) 按 QQ 业务错误码回写（官方错误码表里明写的那几个）
+  await reach.noteFriendAdd({ openid: 'u5' });
+  await reach.noteSendError({ openid: 'u5', qqCode: 40054004 });
+  const r5b = await reach.canC2C('u5');
+  check('reach: 40054004 → 无好友', r5b.reason === 'reach:not-friend', JSON.stringify(r5b));
+
+  await reach.noteFriendAdd({ openid: 'u6' });
+  await reach.noteSendError({ openid: 'u6', qqCode: 40054013 });
+  const r6b = await reach.canC2C('u6');
+  check('reach: 40054013 → 用户拒收', r6b.reason === 'reach:push-off', JSON.stringify(r6b));
+
+  // 频控/内容违规这类跟「能不能收到」无关，不能改状态
+  await reach.noteFriendAdd({ openid: 'u7' });
+  await reach.noteSendError({ openid: 'u7', qqCode: 40034100 });
+  check('reach: 频控错误不改状态', (await reach.canC2C('u7')).verdict === 'yes');
+
+  // 7) 群维度（开关属于群，不属于人）
+  await reach.noteGroupPush({ groupOpenid: 'g1', on: false, by: 'op1' });
+  const r7 = await reach.canGroupPush('g1');
+  check(
+    'reach: 群关了推送 → 不可推',
+    r7.verdict === 'no' && r7.reason === 'reach:group-push-off',
+    JSON.stringify(r7),
+  );
+  check('reach: 没见过的群是 unknown', (await reach.canGroupPush('g2')).verdict === 'unknown');
+
+  // 7b) 人工标注（面板上纠正用）。
+  // 关键语义：字段传 `undefined` 是「这项不动」，传 `null` 是「重置为未知」。
+  // 这两者混了的话，用户改一项会把另一项悄悄清空，而且没有任何提示。
+  await reach.noteManual({ openid: 'u8', friend: 1, c2cPush: 0 });
+  const r8 = await reach.canC2C('u8');
+  check(
+    'reach: 人工标注生效',
+    r8.verdict === 'no' && r8.reason === 'reach:push-off',
+    JSON.stringify(r8),
+  );
+  check('reach: 标注依据记成 manual', (await reach.get('u8'))?.evidence === 'manual');
+
+  await reach.noteManual({ openid: 'u8', c2cPush: 1 });
+  const u8 = await reach.get('u8');
+  check('reach: 只标一项不动另一项', u8?.friend === 1 && u8?.c2cPush === 1, JSON.stringify(u8));
+
+  await reach.noteManual({ openid: 'u8', friend: null });
+  check('reach: 传 null 撤销回未知', (await reach.canC2C('u8')).verdict === 'unknown');
+
+  await reach.noteGroupManual({ groupOpenid: 'g3', push: 0 });
+  const r8g = await reach.canGroupPush('g3');
+  check(
+    'reach: 群人工标注生效',
+    r8g.verdict === 'no' && r8g.reason === 'reach:group-push-off',
+    JSON.stringify(r8g),
+  );
+
+  // 8) 落盘 + 重新加载
+  await reach.flush();
+  const again = createReach({ file });
+  check('reach: 重启后状态还在', (await again.canC2C('u2')).verdict === 'yes');
+  check('reach: 群状态也还在', (await again.canGroupPush('g1')).verdict === 'no');
+
+  // 9) 手改文件写脏了不至于把判定弄崩
+  const raw = JSON.parse(await fs.readFile(file, 'utf8'));
+  raw.users.u2.friend = 'yes';
+  await fs.writeFile(file, JSON.stringify(raw), 'utf8');
+  const broken = createReach({ file });
+  const rb = await broken.canC2C('u2');
+  check('reach: 脏值归一成 unknown', rb.verdict === 'unknown', JSON.stringify(rb));
+
+  await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+}
+
+await testReach();
 
 await testBackfillFromGitHub();
 

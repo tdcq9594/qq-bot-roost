@@ -16,6 +16,7 @@ import { BotMetrics } from './runtime.js';
 import { claimInstance, releaseInstance } from './instance.js';
 import { botPaths, DIRS, rel } from './paths.js';
 import { StatsStore } from './storage/index.js';
+import { createReach } from './reach.js';
 
 /**
  * 一个机器人的完整运行时。
@@ -86,6 +87,14 @@ export class BotRuntime {
      */
     this.groupNames = new Map();
     this.roles = new RoleStore(this.paths.roles);
+    /**
+     * 可达性：谁能私聊、哪个群能主动推。
+     *
+     * 官方没有查好友的接口，只能靠 6 个事件维护（FRIEND_ADD/DEL、
+     * C2C_MSG_REJECT/RECEIVE、GROUP_MSG_REJECT/RECEIVE）。
+     * 插件可以通过 `bot.reach` 直接问，不用自己监听一遍。
+     */
+    this.reach = createReach({ file: this.paths.reach });
     this.outbound = null;
     this.session = null;
     this.pipeline = null;
@@ -183,6 +192,7 @@ export class BotRuntime {
       outbound: this.outbound,
       session: this.session,
       pipeline: this.pipeline,
+      reach: this.reach,
       isOwner: (uid) => cfg.owners.includes(uid),
       // 插件声明了 frameworkVersion 就做兼容校验；作者本地调试可以关掉
       ignoreCompat: this.globalCfg.plugins?.ignoreFrameworkVersion === true,
@@ -345,6 +355,51 @@ export class BotRuntime {
   }
 
   /**
+   * 用 6 个事件维护可达性。
+   *
+   * 官方**没有查好友列表的接口**（sitemap 里 `friend` 只有两个事件页），
+   * 所以「接入之前就存在的关系」永远是未知的，只能维护「接入之后的变化」。
+   * 三态语义与判定顺序见 `src/reach.js` 头注释。
+   */
+  async #noteReach(eventName, d) {
+    const openid = d?.openid ?? '';
+    switch (eventName) {
+      case 'FRIEND_ADD':
+        await this.reach.noteFriendAdd({
+          openid,
+          unionOpenid: d?.author?.union_openid ?? '',
+          scene: d?.scene ?? 0,
+        });
+        break;
+      case 'FRIEND_DEL':
+        await this.reach.noteFriendDel({ openid });
+        break;
+      case 'C2C_MSG_REJECT':
+        await this.reach.noteC2cPush({ openid, on: false });
+        break;
+      case 'C2C_MSG_RECEIVE':
+        await this.reach.noteC2cPush({ openid, on: true });
+        break;
+      case 'GROUP_MSG_REJECT':
+        await this.reach.noteGroupPush({
+          groupOpenid: d?.group_openid,
+          on: false,
+          by: d?.op_member_openid,
+        });
+        break;
+      case 'GROUP_MSG_RECEIVE':
+        await this.reach.noteGroupPush({
+          groupOpenid: d?.group_openid,
+          on: true,
+          by: d?.op_member_openid,
+        });
+        break;
+      default:
+        break;
+    }
+  }
+
+  /**
    * 补一个群的名字（给面板调的公开入口，内部走带缓存的那份）。
    * 不会抛异常，调用方不用 try/catch。
    */
@@ -415,6 +470,7 @@ export class BotRuntime {
     await this.outbound?.flush().catch(() => {});
     await this.groups?.flush().catch(() => {});
     await this.roles?.flush().catch(() => {});
+    await this.reach?.flush().catch(() => {});
     this.stats?.close();
     if (!this.mock) await releaseInstance(this.cfg.appId).catch(() => {});
     this.state = 'stopped';
@@ -456,6 +512,12 @@ export class BotRuntime {
         await groups.onRemoved(d?.group_openid);
       }
 
+      // 可达性：官方没有查询接口，只能靠这 6 个事件维护（见 src/reach.js）
+      // 放在插件监听器之前，插件读到的就是最新状态
+      await this.#noteReach(eventName, d).catch((e) => {
+        this.log.warn(`可达性更新失败: ${e.message}`);
+      });
+
       const meta = EVENTS[eventName] ?? null;
       for (const l of registry.listeners.get(eventName) ?? []) {
         // 事件里的群：有 group_openid 就按群开关过滤，没有（如私聊事件）就放行
@@ -478,6 +540,14 @@ export class BotRuntime {
 
     /* ---- 消息事件 ---- */
     const msg = buildMessage(eventName, d, { api: this.api, cfg, outbound, session });
+
+    // 收到私聊 = 好友关系存在的强证据。不置 c2cPush：他能发不等于他允许机器人主动推
+    if (msg.kind === 'c2c' && msg.userId) {
+      this.reach
+        .noteC2cObserved({ openid: msg.userId, unionOpenid: d?.author?.union_openid })
+        .catch(() => {});
+    }
+
     /**
      * 先播出去，再做业务处理。
      *

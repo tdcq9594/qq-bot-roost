@@ -232,6 +232,7 @@ async function selectBot(id) {
   if (tab === 'config') loadConfig();
   if (tab === 'plugins') loadPlugins();
   if (tab === 'events') loadEvents();
+  if (tab === 'reach') loadReach();
   if (tab === 'groups') loadGroups();
   if (tab === 'roles') { loadRoles(); loadPeople(); }
   if (tab === 'stats') loadStats();
@@ -597,6 +598,7 @@ function activateTab(name) {
   }
   if (name === 'config') loadConfig();
   if (name === 'groups') loadGroups();
+  if (name === 'reach') loadReach();
   if (name === 'roles') { loadRoles(); loadPeople(); }
 }
 
@@ -2910,6 +2912,175 @@ function renderGroups(list) {
     });
   });
 }
+
+/* ---------------- 可达性 ---------------- */
+
+/**
+ * 能不能主动找到人。
+ *
+ * 这块数据的特殊之处：**三个值不是两个**。`1` 可以、`0` 不可以、`null` 未知。
+ *
+ * 面板上必须把「未知」和「不可以」显示得完全不一样。如果两者都是灰色、
+ * 或者都写「否」，用户会以为这些人真的发不出去，然后跑去手动放开——
+ * 而实际情况只是「机器人上线之前就加的好友，事件补不回来」。
+ */
+
+/** 依据的英文 key → 中文。事件里带参数（`friend_add:0`），所以按冒号前匹配 */
+const REACH_EVIDENCE = {
+  friend_add: '加好友事件',
+  friend_del: '删好友事件',
+  c2c_msg_reject: '用户关了推送',
+  c2c_msg_receive: '用户开了推送',
+  observed_c2c: '收到过私聊',
+  group_msg_reject: '群管理员关了推送',
+  group_msg_receive: '群管理员开了推送',
+  'send:no-friend': '发送失败·无好友',
+  'send:rejected': '发送失败·被拒收',
+  manual: '人工标注',
+};
+
+function evidenceText(ev) {
+  const raw = String(ev || '').trim();
+  if (!raw) return '-';
+  return REACH_EVIDENCE[raw.split(':')[0]] ?? raw;
+}
+
+/** 一句话结论。和后端 `reach.canC2C` 的判定顺序必须一致 */
+const REACH_VERDICT = {
+  ok: { text: '能发', cls: 'on' },
+  'not-friend': { text: '不能：没加好友', cls: 'off' },
+  'push-off': { text: '不能：关了推送', cls: 'off' },
+  unknown: { text: '未知，照常尝试', cls: '' },
+};
+
+/**
+ * 行内三态下拉。
+ *
+ * 用下拉而不是「标为好友 / 标为陌生人」两个按钮：后者没法表达「撤销标注」，
+ * 而且改错了只能改到另一个错的值上。`value=""` 就是回到未知。
+ */
+function triSelect(field, v, yes = '是', no = '否') {
+  const sel = (val, text) =>
+    `<option value="${val}"${String(v ?? '') === val ? ' selected' : ''}>${text}</option>`;
+  return `<select class="mini-select" data-field="${field}" title="人工标注">${
+    sel('', '未知') + sel('1', yes) + sel('0', no)
+  }</select>`;
+}
+
+async function loadReach() {
+  const ub = $('#reachUserBody');
+  const gb = $('#reachGroupBody');
+  if (!ub || !gb) return;
+  try {
+    renderReach(await api('/api/reach'));
+  } catch (e) {
+    ub.innerHTML = `<tr><td colspan="6" class="empty">加载失败: ${escapeHtml(e.message)}</td></tr>`;
+    gb.innerHTML = `<tr><td colspan="5" class="empty">加载失败: ${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+function renderReach(d) {
+  const ub = $('#reachUserBody');
+  const gb = $('#reachGroupBody');
+  if (!ub || !gb) return;
+
+  const users = d?.users ?? [];
+  const groups = d?.groups ?? [];
+
+  ub.innerHTML = users.length
+    ? users
+        .map((u) => {
+          const v = REACH_VERDICT[u.verdict] ?? REACH_VERDICT.unknown;
+          const extra = u.lastFailCode ? ` · 失败码 ${u.lastFailCode}` : '';
+          return `<tr data-openid="${escapeHtml(u.openid)}">
+            <td title="${escapeHtml(u.openid)}">${labelWithId(u.name, u.openid)}</td>
+            <td>${triSelect('friend', u.friend)}</td>
+            <td>${triSelect('c2cPush', u.c2cPush)}</td>
+            <td><span class="badge ${v.cls}">${v.text}</span></td>
+            <td title="${escapeHtml(u.evidence || '')}">${escapeHtml(evidenceText(u.evidence))}${escapeHtml(extra)}</td>
+            <td>${u.updatedAt ? fmtAgo(u.updatedAt) : '-'}</td>
+          </tr>`;
+        })
+        .join('')
+    : '<tr><td colspan="6" class="empty">还没有记录。收到私聊消息、或被加好友之后才会出现。</td></tr>';
+
+  gb.innerHTML = groups.length
+    ? groups
+        .map(
+          (g) => `<tr data-group="${escapeHtml(g.groupOpenid)}">
+            <td title="${escapeHtml(g.groupOpenid)}">${labelWithId(g.name, g.groupOpenid)}</td>
+            <td>${triSelect('push', g.push, '开', '关')}</td>
+            <td title="${escapeHtml(g.by || '')}">${g.by ? labelWithId('', g.by) : '-'}</td>
+            <td title="${escapeHtml(g.evidence || '')}">${escapeHtml(evidenceText(g.evidence))}</td>
+            <td>${g.updatedAt ? fmtAgo(g.updatedAt) : '-'}</td>
+          </tr>`,
+        )
+        .join('')
+    : '<tr><td colspan="5" class="empty">还没有记录。群管理员改过推送开关之后才会出现。</td></tr>';
+}
+
+/**
+ * 行内标注：改下拉即提交。
+ *
+ * 委托绑在 tbody 上，因为 `renderReach` 每次都整个重建 innerHTML，
+ * 逐行 `addEventListener` 会随着重绘丢掉。
+ */
+async function saveReachPatch(sel, body) {
+  sel.disabled = true;
+  try {
+    renderReach(await api('/api/reach', { method: 'POST', body: JSON.stringify(body) }));
+  } catch (e) {
+    alert('标注失败: ' + e.message);
+    sel.disabled = false;
+  }
+}
+
+$('#reachUserBody')?.addEventListener('change', (e) => {
+  const sel = e.target.closest('select[data-field]');
+  if (!sel) return;
+  const openid = sel.closest('tr')?.dataset.openid;
+  if (!openid) return;
+  // 空字符串 = 撤销标注，要显式传 null，不能传 ''（后端会当成非法值）
+  saveReachPatch(sel, { openid, [sel.dataset.field]: sel.value === '' ? null : Number(sel.value) });
+});
+
+$('#reachGroupBody')?.addEventListener('change', (e) => {
+  const sel = e.target.closest('select[data-field]');
+  if (!sel) return;
+  const groupOpenid = sel.closest('tr')?.dataset.group;
+  if (!groupOpenid) return;
+  saveReachPatch(sel, {
+    groupOpenid,
+    push: sel.value === '' ? null : Number(sel.value),
+  });
+});
+
+$('#btnReloadReach')?.addEventListener('click', loadReach);
+
+/** 列表里没有的人（比如老好友、从没私聊过）手动登记一条 */
+$('#btnReachSave')?.addEventListener('click', async () => {
+  const openid = $('#reachOpenidInput')?.value.trim() ?? '';
+  if (!openid) return alert('先填 openid');
+  const friend = $('#reachFriendSel')?.value ?? '';
+  const c2cPush = $('#reachPushSel')?.value ?? '';
+  if (friend === '' && c2cPush === '') return alert('好友和推送至少选一个，不然登记了也是未知');
+
+  const btn = $('#btnReachSave');
+  btn.disabled = true;
+  try {
+    const body = { openid };
+    if (friend !== '') body.friend = Number(friend);
+    if (c2cPush !== '') body.c2cPush = Number(c2cPush);
+    renderReach(await api('/api/reach', { method: 'POST', body: JSON.stringify(body) }));
+    $('#reachOpenidInput').value = '';
+    $('#reachFriendSel').value = '';
+    $('#reachPushSel').value = '';
+  } catch (e) {
+    alert('登记失败: ' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 /**
  * 分群插件开关。

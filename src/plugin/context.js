@@ -302,7 +302,7 @@ export class PluginStorage {
 /**
  * 插件上下文：插件能用的全部能力都在这里，不暴露内部实现。
  */
-export function createContext({ meta, paths, registry, api, cfg, config, configStore, groups, roles, levels, outbound, session, pipeline, isOwner, pages = null, routes = null, state = null }) {
+export function createContext({ meta, paths, registry, api, cfg, config, configStore, groups, roles, levels, outbound, session, pipeline, reach, isOwner, pages = null, routes = null, state = null }) {
   const id = meta.id;
   // 日志 tag 带机器人 id，多机器人下同名插件的日志不会串
   const logger = createLogger(`plugin:${paths?.id ?? '-'}:${id}`);
@@ -343,6 +343,13 @@ export function createContext({ meta, paths, registry, api, cfg, config, configS
     state: state ?? {},
     api,
     logger,
+    /**
+     * 可达性：`ctx.reach.canC2C(openid)` / `ctx.reach.canGroupPush(groupOpenid)`。
+     *
+     * 返回 `{ verdict: 'yes'|'no'|'unknown', reason? }`。
+     * **`unknown` 不能当 `no` 用**——未知是「不知道」，不是「不行」。
+     */
+    reach,
     storage: new PluginStorage(paths.pluginData(id)),
 
     /**

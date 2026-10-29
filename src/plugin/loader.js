@@ -27,7 +27,7 @@ const log = createLogger('plugins');
  * 启用状态存在 data/bots/<机器人id>/plugins.json，删掉文件夹即等于卸载。
  */
 export class PluginManager {
-  constructor({ pluginsDir, paths, registry, api, cfg, goBin, groups, roles, outbound, session, pipeline, isOwner, ignoreCompat }) {
+  constructor({ pluginsDir, paths, registry, api, cfg, goBin, groups, roles, outbound, session, pipeline, isOwner, reach, ignoreCompat }) {
     this.dir = pluginsDir;
     // 该机器人的全套路径（配置/数据/日志），多机器人下互不干扰
     this.paths = paths;
@@ -41,6 +41,8 @@ export class PluginManager {
     this.outbound = outbound;
     this.session = session;
     this.pipeline = pipeline;
+    /** 可达性（能不能私聊/能不能往这个群主动推），见 src/reach.js */
+    this.reach = reach;
     this.isOwner = isOwner;
     /** 跳过插件声明的 frameworkVersion 校验（作者本地调试用） */
     this.ignoreCompat = Boolean(ignoreCompat);
@@ -407,6 +409,7 @@ export class PluginManager {
       outbound: this.outbound,
       session: this.session,
       pipeline: this.pipeline,
+      reach: this.reach,
       isOwner: this.isOwner,
       pages: this.pages,
       routes: this.routes,

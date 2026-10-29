@@ -362,7 +362,7 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
   }
 
   // 底层发送：group 走群接口，c2c 走单聊接口。
-  // 一律经过 outbound，由它处理 5 分钟窗口、每秒限速、主动消息额度。
+  // 一律经过 outbound，由它处理被动窗口（群聊 5 分钟 / 单聊 60 分钟）、每秒限速、主动消息额度。
   const send = (opts, passive) => {
     if (kind !== 'group' && kind !== 'c2c') return Promise.resolve(null);
     const body = passive ? { msgId: msg.id, ...opts } : { ...opts };
@@ -410,7 +410,7 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
   const MAX_CHUNK = 1500; // 单条上限，超了按行切成多条
 
   /**
-   * 被动回复（带 msg_id，5 分钟内有效）。
+   * 被动回复（带 msg_id，群聊 5 分钟内、单聊 60 分钟内有效）。
    * **不会立刻发出**，而是攒到本次处理结束，由 flushReplies() 合并成一条。
    * 想立刻发用 msg.replyNow()。
    */
@@ -446,7 +446,7 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
    * 引用回复：以「引用某条消息」的样式发出去（官方 `message_reference`）。
    *
    * 跟 `reply()` 不是一回事：
-   *   - `reply()` 是**被动回复**，靠 msg_id，5 分钟内、同一条最多 5 次
+   *   - `reply()` 是**被动回复**，靠 msg_id，群聊 5 分钟 / 5 次，单聊 60 分钟 / 4 次
    *   - 这个是**引用**，靠 `REFIDX`，视觉上带"回复某某"的引用块
    *
    * 默认引用当前这条消息（用它的 `msg_idx`）。想引用别的传 `refIdx`。

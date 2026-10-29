@@ -39,7 +39,7 @@ data: {"botId":"main","kind":"group","chatId":"group:B2C3...","groupId":"B2C3...
 |---|---|
 | `botId` | 多机器人时分流 |
 | `chatId` | 会话键，`groupId` 或 `userId` |
-| `msgId` | **被动回复**用（5 分钟窗口，同一条最多 5 次） |
+| `msgId` | **被动回复**用。群聊 5 分钟窗口 / 同一条最多 5 次；单聊 **60 分钟 / 最多 4 次** |
 | `msgIdx` | **引用回复**用（`message_reference.message_id`） |
 | `quoted` | 这条消息如果是引用，这里是被引用的原文 |
 | `attachments[].asrText` | **语音的官方 ASR 结果**，不用自己跑识别 |
@@ -75,7 +75,7 @@ POST /api/qq/call?key=<accessKey>
 
 ```jsonc
 { "ok": true,  "result": { "id": "...", "timestamp": 1761456000000 } }
-{ "ok": false, "error": "被动回复超限（5 分钟窗口，同一条最多 5 次）……", "code": 40034128 }
+{ "ok": false, "error": "被动回复超限（群聊 5 分钟 / 5 次，单聊 60 分钟 / 4 次）……", "code": 40034128 }
 ```
 
 **位置参数怎么传**

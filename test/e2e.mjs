@@ -799,10 +799,75 @@ async function testNav() {
   ok('导航: 插件页面有独立容器', html.includes('id="pluginPageItems"'));
   ok('导航: 分组按钮带 aria-expanded', /aria-haspopup="true"/.test(html));
 
-  // 原来的 8 个页签都还在，只是挪进了菜单里；新增「关于」页
-  const tabs = ['overview', 'stats', 'config', 'plugins', 'events', 'groups', 'roles', 'logs', 'about'];
+  // 原来的 8 个页签都还在，只是挪进了菜单里；新增「关于」「可达性」两页
+  const tabs = ['overview', 'stats', 'config', 'plugins', 'events', 'groups', 'roles', 'logs', 'about', 'reach'];
   const missing = tabs.filter((t) => !html.includes(`data-tab="${t}"`));
-  ok('导航: 9 个页面一个没少', missing.length === 0, missing.join(','));
+  ok('导航: 10 个页面一个没少', missing.length === 0, missing.join(','));
+
+  // 页签和 section 必须成对，否则点了是空白
+  const orphan = tabs.filter((t) => !html.includes(`id="tab-${t}"`));
+  ok('导航: 每个页签都有对应 section', orphan.length === 0, orphan.join(','));
+}
+
+/* ---------------- 可达性 ---------------- */
+
+/**
+ * 官方没有查好友的接口，状态全靠事件推。这里只测**接口层**：
+ * 三态语义（1/0/null）、`undefined` 不动 / `null` 撤销、参数校验。
+ *
+ * 为什么专门测 `undefined` 和 `null` 的区别：这是最容易写错的地方。
+ * 用 `??` 或真值判断的话，用户在面板上改「好友」会把「推送」悄悄清空，
+ * 而且界面上不会有任何提示——错得很安静。
+ */
+async function testReach() {
+  const r0 = await api('/api/reach');
+  ok('可达性: 能读', r0.status === 200 && Array.isArray(r0.data?.users), `status=${r0.status}`);
+  ok(
+    '可达性: 群维度也有',
+    Array.isArray(r0.data?.groups),
+    JSON.stringify(Object.keys(r0.data ?? {})),
+  );
+
+  const set = (body) => api('/api/reach', { method: 'POST', body: JSON.stringify(body) });
+  const find = (d, id) => (d?.users ?? []).find((u) => u.openid === id);
+
+  const a = await set({ openid: 'e2e-reach-a', friend: 1, c2cPush: 0 });
+  const ua = find(a.data, 'e2e-reach-a');
+  ok(
+    '可达性: 标注后立刻能读到',
+    ua?.friend === 1 && ua?.c2cPush === 0,
+    JSON.stringify(ua),
+  );
+  // 有好友但关了推送 → 结论必须是 push-off，不是 ok
+  ok('可达性: 有好友但关了推送判为 push-off', ua?.verdict === 'push-off', ua?.verdict);
+  ok('可达性: 依据记成人工标注', ua?.evidence === 'manual', ua?.evidence);
+
+  const b = await set({ openid: 'e2e-reach-a', c2cPush: 1 });
+  const ub = find(b.data, 'e2e-reach-a');
+  ok('可达性: 只改一项不动另一项', ub?.friend === 1 && ub?.c2cPush === 1, JSON.stringify(ub));
+  ok('可达性: 两项都通判为 ok', ub?.verdict === 'ok', ub?.verdict);
+
+  const c = await set({ openid: 'e2e-reach-a', friend: null });
+  const uc = find(c.data, 'e2e-reach-a');
+  ok('可达性: 传 null 是撤销回未知', uc?.friend === null && uc?.verdict === 'unknown', JSON.stringify(uc));
+  ok('可达性: 撤销一项不影响另一项', uc?.c2cPush === 1, String(uc?.c2cPush));
+
+  const g = await set({ groupOpenid: 'e2e-reach-g', push: 0 });
+  const gg = (g.data?.groups ?? []).find((x) => x.groupOpenid === 'e2e-reach-g');
+  ok('可达性: 群也能标注', gg?.push === 0 && gg?.verdict === 'push-off', JSON.stringify(gg));
+
+  const badVal = await set({ openid: 'e2e-reach-x', friend: 'yes' });
+  ok('可达性: 非法值被拒', badVal.status === 400, `status=${badVal.status}`);
+
+  const noId = await set({});
+  ok('可达性: 空 openid 被拒', noId.status === 400, `status=${noId.status}`);
+
+  // 收拾干净：这是用户真实的数据文件，别留测试垃圾
+  await set({ openid: 'e2e-reach-a', friend: null, c2cPush: null });
+  await set({ groupOpenid: 'e2e-reach-g', push: null });
+  const after = await api('/api/reach');
+  const left = find(after.data, 'e2e-reach-a');
+  ok('可达性: 测试数据已复位', left?.friend === null && left?.c2cPush === null, JSON.stringify(left));
 }
 
 /* ---------------- 主流程 ---------------- */
@@ -924,6 +989,7 @@ async function main() {
   await testMirror();
   await testDoctorAndExport();
   await testNav();
+  await testReach();
   await testStatsAndPages();
   await testSendAndCred();
   await testQqChannel();

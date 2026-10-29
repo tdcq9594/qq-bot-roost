@@ -113,6 +113,8 @@ export function botPaths(id) {
     groups: path.join(base, 'groups.json'),
     roles: path.join(base, 'roles.json'),
     quota: path.join(base, 'quota.json'),
+    /** 可达性（好友关系 / 主动推送开关），官方无查询接口，靠事件维护 */
+    reach: path.join(base, 'reach.json'),
     /** 统计库（SQLite，存消息计数与成员活跃，不存正文） */
     stats: path.join(base, 'stats.db'),
     pluginState: path.join(base, 'plugins.json'),

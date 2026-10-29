@@ -56,6 +56,7 @@
       <div class="tab-menu" hidden>
         <button class="tab-item" data-tab="stats">统计</button>
         <button class="tab-item" data-tab="events">事件</button>
+        <button class="tab-item" data-tab="reach">可达性</button>
         <button class="tab-item" data-tab="logs">日志</button>
       </div>
     </div>
@@ -491,6 +492,93 @@
         <span><b class="ev-dot hit"></b>收到过</span>
       </div>
       <div id="eventGroups" class="event-groups"></div>
+    </div>
+  </section>
+
+  <!-- 可达性 -->
+  <section id="tab-reach" class="panel">
+    <div class="box">
+      <div class="box-hd">
+        <h3>能不能主动找到人</h3>
+        <span class="hint">两道门：先得是好友，还得开着主动推送</span>
+      </div>
+      <ul class="tips">
+        <li><b>好友</b>是用户把机器人加为好友；<b>主动推送</b>是用户在机器人资料卡里单独开的开关——
+          <b>有好友也可能被关掉</b>，关了就发不出去</li>
+        <li>官方<b>没有查询好友的接口</b>，这里的值全部来自事件推送。机器人启动之前就存在的老关系拿不到事件，
+          会一直是「未知」</li>
+        <li><b>未知不等于不可达</b>——未知会照常尝试发送，失败了才记下来。把未知当成「不能」，
+          所有老用户就都被静音了</li>
+      </ul>
+    </div>
+
+    <div class="box">
+      <div class="box-hd">
+        <h3>单聊</h3>
+        <div class="btn-row" style="margin:0">
+          <button class="btn small" id="btnReloadReach">刷新</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>用户</th>
+              <th>好友</th>
+              <th>主动推送</th>
+              <th>结论</th>
+              <th>依据</th>
+              <th>更新</th>
+            </tr>
+          </thead>
+          <tbody id="reachUserBody">
+            <tr><td colspan="6" class="empty">还没有记录。收到私聊消息、或被加好友之后才会出现。</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="hint" style="margin-top:8px">
+        每行的两个下拉框就是<b>人工标注</b>，改完立刻生效并覆盖事件推断的值；选「未知」等于撤销标注。
+      </div>
+      <div class="form-inline" style="margin-top:12px">
+        <input id="reachOpenidInput" placeholder="openid（列表里没有的人可以直接登记）">
+        <select id="reachFriendSel" class="mini-select">
+          <option value="">好友：未知</option>
+          <option value="1">好友：是</option>
+          <option value="0">好友：否</option>
+        </select>
+        <select id="reachPushSel" class="mini-select">
+          <option value="">推送：未知</option>
+          <option value="1">推送：开</option>
+          <option value="0">推送：关</option>
+        </select>
+        <button class="btn primary" id="btnReachSave">登记</button>
+      </div>
+    </div>
+
+    <div class="box">
+      <div class="box-hd">
+        <h3>群主动推送</h3>
+        <span class="hint">群管理员可以整个群关掉机器人的主动消息</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>群</th>
+              <th>主动推送</th>
+              <th>操作人</th>
+              <th>依据</th>
+              <th>更新</th>
+            </tr>
+          </thead>
+          <tbody id="reachGroupBody">
+            <tr><td colspan="5" class="empty">还没有记录。群管理员改过推送开关之后才会出现。</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="hint" style="margin-top:8px">
+        没记录过的群按「未知」处理，照常尝试推送。
+      </div>
     </div>
   </section>
 
