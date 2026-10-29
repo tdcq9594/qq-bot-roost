@@ -3996,7 +3996,18 @@ async function testLedger() {
 
   // 3) **同一条消息重复推送**（官方原文：相同 msg_id 可能重复推送）→ 不记重
   const dup = led.append(mkMsg({ id: 'm1', content: '第一条' }));
-  check('账本: 重复 msg_id 不记重', dup === null, JSON.stringify(dup));
+  /**
+   * 重复时不写新行，但**要把已有那条的 id 返回去**。
+   *
+   * 以前返回 `null`，调用方（dsh-roost 写记忆）就拿不到 eventId——
+   * 而官方明说会重推，重推的那条事实上就在账本里，只是不是这次写的。
+   * 拿不到 id 就等于「这条记忆没有出处」。
+   */
+  check(
+    '账本: 重复 msg_id 不记重，但返回已有那条',
+    dup?.duplicate === true && dup.id === a.id && dup.seq === a.seq,
+    JSON.stringify(dup),
+  );
   check('账本: 重复后总数仍是 1', led.stats().total === 1, String(led.stats().total));
 
   // 4) 没有 msg_id 时按「会话+人+正文+时间」兜底去重

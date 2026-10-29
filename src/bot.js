@@ -685,7 +685,20 @@ export class BotRuntime {
      * 同步写：`node:sqlite` 是同步 API，一条 INSERT 在 WAL 下是微秒级，
      * 比「攒批 + 定时刷」更安全——进程被 kill 时不会丢最后一批。
      */
-    this.ledger?.append(msg);
+    /**
+     * 入账的返回值挂到消息上：`msg.eventId` / `msg.eventSeq`。
+     *
+     * dsh-roost 写记忆时要记「这条记忆从哪条消息来」（场景片段，阶段 4），
+     * 而它是另一个进程，只能靠转发时带过去的 id 反查原文。
+     *
+     * 撞 dedupe（官方重推同一条）时 `append` 也返回已有那条的 id，
+     * 所以重推的消息一样有出处。
+     */
+    const rec = this.ledger?.append(msg);
+    if (rec) {
+      msg.eventId = rec.id;
+      msg.eventSeq = rec.seq;
+    }
 
     // 收到私聊 = 好友关系存在的强证据。不置 c2cPush：他能发不等于他允许机器人主动推
     if (msg.kind === 'c2c' && msg.userId) {

@@ -248,7 +248,17 @@ export class EventLedger {
           payload,
         );
       // changes === 0 说明撞了 dedupe 唯一约束 = 官方重推的同一条消息
-      if (!r?.changes) return null;
+      if (!r?.changes) {
+        /**
+         * 重推时**仍然返回已有那条的 id**。
+         *
+         * 官方明说「相同 msg_id 可能重复推送」。调用方（dsh-roost 写记忆）
+         * 拿不到 eventId 就没法给出处——而这条消息事实上就在账本里，
+         * 只是不是这次写的。
+         */
+        const old = this.db.prepare('SELECT seq, id FROM events WHERE dedupe = ?').get(dedupe);
+        return old ? { seq: Number(old.seq), id: String(old.id), duplicate: true } : null;
+      }
       const seq = Number(r.lastInsertRowid);
 
       // 引用边：先记下「它引用了谁」，能不能对上目标另说（resolved 由 resolveRefs 补）
