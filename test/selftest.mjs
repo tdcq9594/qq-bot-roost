@@ -2134,6 +2134,253 @@ async function testMediaAndTemplate() {
 
 await testMediaAndTemplate();
 
+/* ---------- 大文件分片上传（官方推荐路径） ---------- */
+
+async function testShardedUpload() {
+  const { QQApi, FILE_TYPE, DIRECT_UPLOAD_LIMIT, MD5_10M_SIZE } = await import('../src/api.js');
+  const fsp = await import('node:fs/promises');
+  const osMod = await import('node:os');
+  const pathMod = await import('node:path');
+  const crypto = await import('node:crypto');
+
+  check('分片: md5_10m 取 10002432 字节（官方写死的数字，不是 10MB）', MD5_10M_SIZE === 10002432, String(MD5_10M_SIZE));
+  check('分片: 直传上限是 5MB', DIRECT_UPLOAD_LIMIT === 5 * 1024 * 1024, String(DIRECT_UPLOAD_LIMIT));
+
+  const root = await fsp.mkdtemp(pathMod.join(osMod.tmpdir(), 'roost-shard-'));
+  const realFetch = globalThis.fetch;
+
+  const jsonRes = (obj, status = 200) =>
+    new Response(JSON.stringify(obj), { status, headers: { 'Content-Type': 'application/json' } });
+
+  /**
+   * 造一个假的 QQ 接口。`plan` 控制「第几次 part_finish 失败、失败码是什么」，
+   * 用来分别测正常流程 / 40093001 重试 / 40093002 不重试。
+   */
+  function mockApi({ total, block, failFinish = 0, failCode = 40093001 }) {
+    const seen = { prepare: [], puts: [], finishes: [], files: [] };
+    let left = failFinish;
+    globalThis.fetch = async (url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/upload_prepare')) {
+        seen.prepare.push(JSON.parse(opts.body));
+        const parts = [];
+        for (let i = 0, off = 0; off < total; i++, off += block) {
+          parts.push({
+            index: i,
+            presigned_url: `https://cos.example.com/p${i}`,
+            block_size: String(Math.min(block, total - off)),
+          });
+        }
+        return jsonRes({
+          upload_id: 'up_test',
+          block_size: String(block),
+          parts,
+          upload_config: { concurrency: 1, retry_timeout: 5, retry_delay: 0 },
+        });
+      }
+      if (u.startsWith('https://cos.example.com/')) {
+        seen.puts.push({ url: u, body: Buffer.from(opts.body) });
+        return new Response('', { status: 200 });
+      }
+      if (u.includes('/upload_part_finish')) {
+        const body = JSON.parse(opts.body);
+        seen.finishes.push(body);
+        if (left > 0) {
+          left -= 1;
+          return jsonRes({ code: failCode, message: 'mock' }, 400);
+        }
+        return jsonRes({});
+      }
+      if (u.includes('/files')) {
+        seen.files.push(JSON.parse(opts.body));
+        return jsonRes({ file_uuid: 'uu', file_info: 'fi_shard', ttl: 300 });
+      }
+      throw new Error(`unexpected ${opts.method ?? 'GET'} ${u}`);
+    };
+    return seen;
+  }
+
+  const newApi = () =>
+    new QQApi({
+      tokenManager: { get: async () => 'tok', appId: 'app', refresh: async () => {} },
+      baseUrl: 'http://127.0.0.1:1',
+    });
+
+  try {
+    /* --- ① 正常流程：11MB 切 3 片，跨过 md5_10m 的 10002432 边界 --- */
+    const TOTAL = 11 * 1024 * 1024;
+    const BLOCK = 4 * 1024 * 1024;
+    const content = crypto.randomBytes(TOTAL);
+    const bigFile = pathMod.join(root, 'big.png');
+    await fsp.writeFile(bigFile, content);
+
+    let seen = mockApi({ total: TOTAL, block: BLOCK });
+    const r = await newApi().uploadLocalFileSharded('group', 'g1', bigFile, FILE_TYPE.IMAGE, {});
+    check('分片: 合并后返回 file_info', r?.file_info === 'fi_shard');
+    check('分片: prepare 只调一次', seen.prepare.length === 1, `n=${seen.prepare.length}`);
+
+    const p = seen.prepare[0] ?? {};
+    check(
+      '分片: prepare 带齐官方六个字段',
+      p.file_type === FILE_TYPE.IMAGE &&
+        p.file_size === String(TOTAL) &&
+        p.file_name === 'big.png' &&
+        p.md5?.length === 32 &&
+        p.sha1?.length === 40 &&
+        p.md5_10m?.length === 32,
+      JSON.stringify(Object.keys(p)),
+    );
+    check('分片: md5 是整个文件的', p.md5 === crypto.createHash('md5').update(content).digest('hex'));
+    check(
+      '分片: md5_10m 只算前 10002432 字节（不等于整文件 md5）',
+      p.md5_10m === crypto.createHash('md5').update(content.subarray(0, 10002432)).digest('hex') &&
+        p.md5_10m !== p.md5,
+    );
+
+    check('分片: 11MB 切成 3 片', seen.puts.length === 3, `puts=${seen.puts.length}`);
+    check(
+      '分片: 各片拼回去和原文件逐字节一致',
+      Buffer.concat(seen.puts.map((x) => x.body)).equals(content),
+      `len=${Buffer.concat(seen.puts.map((x) => x.body)).length}`,
+    );
+    check('分片: 三片都确认了 part_finish', seen.finishes.length === 3, `n=${seen.finishes.length}`);
+    check(
+      '分片: part_finish 带 upload_id / part_index / block_size / 分片 md5',
+      seen.finishes.every(
+        (f) =>
+          f.upload_id === 'up_test' &&
+          Number.isInteger(f.part_index) &&
+          typeof f.block_size === 'string' &&
+          f.md5?.length === 32,
+      ),
+      JSON.stringify(seen.finishes[0] ?? {}),
+    );
+    check(
+      '分片: 合并请求带 upload_id + file_name（url 为空）',
+      seen.files.length === 1 &&
+        seen.files[0].upload_id === 'up_test' &&
+        seen.files[0].file_name === 'big.png' &&
+        seen.files[0].srv_send_msg === false &&
+        seen.files[0].url === undefined,
+      JSON.stringify(seen.files[0] ?? {}),
+    );
+
+    /* --- ② 40093001：可重试，重试后应当成功 --- */
+    const smallBuf = crypto.randomBytes(30);
+    const smallFile = pathMod.join(root, 'small.png');
+    await fsp.writeFile(smallFile, smallBuf);
+    seen = mockApi({ total: 30, block: 10, failFinish: 1, failCode: 40093001 });
+    let retryErr = null;
+    try {
+      await newApi().uploadLocalFileSharded('group', 'g1', smallFile, FILE_TYPE.IMAGE, {});
+    } catch (e) {
+      retryErr = e;
+    }
+    check('分片: 40093001 会重试并最终成功', !retryErr, retryErr?.message ?? '');
+    check(
+      '分片: 3 片 + 1 次重试 = 4 次 part_finish',
+      seen.finishes.length === 4,
+      `n=${seen.finishes.length}`,
+    );
+
+    /* --- ③ 传 logger 对象（不是函数）也不能崩 --- */
+    /**
+     * 真实事故：`message.js` 里 `log` 是 `createLogger()` 返回的对象，
+     * 直接 `{ log }` 传进来，分片 prepare 成功后炸 `logFn is not a function`，
+     * 图一张没发出去、日志只有一行看不懂的类型错误。
+     */
+    seen = mockApi({ total: 30, block: 10 });
+    let loggerObjErr = null;
+    try {
+      await newApi().uploadLocalFileSharded('group', 'g1', smallFile, FILE_TYPE.IMAGE, {
+        log: { info: () => {}, warn: () => {}, error: () => {} },
+      });
+    } catch (e) {
+      loggerObjErr = e;
+    }
+    check('分片: 传 logger 对象也不崩（类型归一）', !loggerObjErr, loggerObjErr?.message ?? '');
+    check('分片: 传 logger 对象时流程照常走完', seen.files.length === 1, `n=${seen.files.length}`);
+
+    /* --- ④ 40093002：日配额，重试无用，必须立刻抛 --- */
+    seen = mockApi({ total: 30, block: 10, failFinish: 99, failCode: 40093002 });
+    let quotaErr = null;
+    try {
+      await newApi().uploadLocalFileSharded('group', 'g1', smallFile, FILE_TYPE.FILE, {});
+    } catch (e) {
+      quotaErr = e;
+    }
+    check(
+      '分片: 40093002 不重试，直接抛且带业务码',
+      Number(quotaErr?.qqCode) === 40093002,
+      quotaErr?.message ?? '没抛错',
+    );
+    check('分片: 40093002 只试了 1 次 part_finish', seen.finishes.length === 1, `n=${seen.finishes.length}`);
+
+    /* --- ⑤ 超过 200MB 硬限制：明确拒绝，别去读文件 --- */
+    let hardErr = null;
+    try {
+      // 用 5MB 的文件 + 伪造 stat 不现实，这里只验证常量语义
+      const { MEDIA_HARD_LIMIT } = await import('../src/api.js');
+      check('分片: 硬限制是 200MB', MEDIA_HARD_LIMIT === 200 * 1024 * 1024, String(MEDIA_HARD_LIMIT));
+    } catch (e) {
+      hardErr = e;
+    }
+    check('分片: 硬限制常量可读', !hardErr, hardErr?.message ?? '');
+
+    /* --- ⑥ replyMedia 的路由：>5MB 走分片、≤5MB 走直传 --- */
+    const { buildMessage } = await import('../src/message.js');
+    const calls = [];
+    const routerApi = {
+      uploadLocalFile: async () => {
+        calls.push('direct');
+        return { file_info: 'fi_direct' };
+      },
+      uploadLocalFileSharded: async () => {
+        calls.push('sharded');
+        return { file_info: 'fi_shard' };
+      },
+      uploadMedia: async () => {
+        calls.push('url');
+        return { file_info: 'fi_url' };
+      },
+      sendGroup: async () => ({ id: 'x' }),
+      sendC2C: async () => ({ id: 'x' }),
+    };
+    const mkMsg = () =>
+      buildMessage(
+        'GROUP_AT_MESSAGE_CREATE',
+        {
+          id: 'm9',
+          content: '图',
+          group_openid: 'g1',
+          author: { member_openid: 'u1' },
+          timestamp: String(Date.now()),
+        },
+        { api: routerApi, cfg: { commandPrefix: '/' } },
+      );
+
+    // 6MB：超过直传上限 → 分片
+    const sixMb = pathMod.join(root, 'six.bin');
+    await fsp.writeFile(sixMb, Buffer.alloc(6 * 1024 * 1024));
+    await mkMsg().replyImage(sixMb, { local: true });
+    // 1MB：直传
+    const oneMb = pathMod.join(root, 'one.bin');
+    await fsp.writeFile(oneMb, Buffer.alloc(1 * 1024 * 1024));
+    await mkMsg().replyImage(oneMb, { local: true });
+
+    check(
+      '路由: 6MB 走分片、1MB 走直传',
+      calls.join(',') === 'sharded,direct',
+      calls.join(','),
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+    await fsp.rm(root, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+await testShardedUpload();
+
 /* ---------- 下载源（镜像） ---------- */
 
 async function testMirror() {

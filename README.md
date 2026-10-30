@@ -10,7 +10,7 @@
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
 <img src="https://img.shields.io/badge/tests-700%2B%20passed-brightgreen" alt="测试 700+ 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
-<img src="https://img.shields.io/badge/version-0.9.6-blueviolet" alt="版本 0.9.6">
+<img src="https://img.shields.io/badge/version-0.9.7-blueviolet" alt="版本 0.9.7">
 <img src="https://img.shields.io/badge/license-Non--Commercial-red" alt="禁止商用">
 <a href="https://github.com/tdcq9594/qq-bot-roost/actions"><img src="https://img.shields.io/github/actions/workflow/status/tdcq9594/qq-bot-roost/ci.yml?branch=master" alt="CI"></a>
 
@@ -474,7 +474,7 @@ openid 完全不同。共享 `roles.json` 等于所有权限记录全部对不�
 ## 开发
 
 ```bash
-npm test              # 609 项（selftest 590 + qrlogin 8 + deps 11）
+npm test              # 636 项（selftest 617 + qrlogin 8 + deps 11）
 npm run test:e2e      # 端到端 168 项（起 mock 服务打全部接口，跑在临时目录）
 npm run test:all      # 全量约 618 项：自检 + 扫码 + 依赖 + e2e（真机驱动要真机，没配就跳过）
 npm run check:secrets # 扫硬编码凭据（CI 也跑这个，提交前建议过一遍）

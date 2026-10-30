@@ -16,7 +16,7 @@
 | 人格 | `personas/*.md` + `profile.facts` | 命名人格库（`system_prompt` + `begin_dialogs` + 工具/技能白名单）+ 按会话绑定 + 人格文件夹 | 缺 **begin_dialogs（few-shot 开场）**、缺按会话切人格、缺人格级工具白名单 |
 | 记忆 | facts ≤20 条、显式；对话历史仅内存、无压缩 | 会话↔对话分离（DB）+ 轮数上限 + **`llm_compress` 摘要** + 平台消息历史 + KB/向量 | 缺**中期摘要压缩**、缺长期检索、缺 `/new` `/switch` 多对话、历史不落盘 |
 | QQ 接入/配置 | 手填 `appId/appSecret`（框架层） | **扫码一键创建** + 自动填 secret + 通用平台注册框架 | 缺扫码建 bot（框架层，P0） |
-| 大文件发送 | 有 `uploadPrepare/uploadPartFinish` 但**未接线**，`replyMedia` 单次整包 base64 | >10MB 自动分片（4 并发/重试/日配额 40093002） | 大文件会失败（框架层，P1） |
+| 大文件发送 | **已接线**（2026-10-30）：≤5MB 直传，>5MB 走 `uploadLocalFileSharded` 四步分片；超软限仍降级为文件 | >10MB 自动分片（4 并发/重试/日配额 40093002） | 已对齐（分片 3 并发上限、40093001 重试 / 40093002 直抛） |
 | 工具/技能 | DSH 工具 + `LOCAL_TOOLS` 权限摘除 | tool manager + skills + subagents | 工具生态更丰富；但 DSH agent 本身强，未必照抄 |
 | 多平台 | 仅 QQ 官方 | QQ/微信/钉钉/Telegram 等 | 多平台（看需求，非刚需） |
 | 易用性 | `start.bat` + 手改 JSON | WebUI 向导 + 插件市场 + 一键 | 缺首启引导/一键体检 |
@@ -93,7 +93,9 @@
 
 ### P2（框架层，另开）
 
-6. 大文件分片上传接线（`uploadPrepare/uploadPartFinish` 已有但没接）
+6. ~~大文件分片上传接线（`uploadPrepare/uploadPartFinish` 已有但没接）~~
+   —— **2026-10-30 已完成**：`uploadLocalFileSharded` 走官方四步，见 `src/api.js`；
+   直传上限 5MB（官方口径），超过自动分片；`replyMedia` 按大小路由。
 7. 扫码一键建 bot
 8. 多平台抽象
 

@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import { createLogger } from './logger.js';
 /** 路径里的 id 一律编码：openid / 群号是外部数据，含 / 会拼出别的路径 */
@@ -11,10 +12,10 @@ export const FILE_TYPE = { IMAGE: 1, VIDEO: 2, VOICE: 3, FILE: 4 };
 
 /**
  * 富媒体软限制（字节）。官方口径：图片 20MB / 视频 30MB / 语音 20MB / 文件 200MB；
- * 超软限会被服务端拒（普通 base64 上传接口直接 413）。
+ * 超软限**降级为文件**（file_type=4），超硬限制（200MB）直接报错。
  *
- * `message.js` 的 `replyMedia` 用它做「图片超 20MB 自动降级为文件」；
- * `uploadLocalFile` 拿它当最后一道兜底（防直接调它传超大文件）。
+ * `message.js` 的 `replyMedia` 用它算降级后的 file_type；
+ * `uploadLocalFile` 拿它当最后一道兜底。
  */
 export const MEDIA_SOFT_LIMIT = {
   [FILE_TYPE.IMAGE]: 20 * 1024 * 1024,
@@ -22,6 +23,27 @@ export const MEDIA_SOFT_LIMIT = {
   [FILE_TYPE.VOICE]: 20 * 1024 * 1024,
   [FILE_TYPE.FILE]: 200 * 1024 * 1024,
 };
+
+/** 所有富媒体类型的硬上限。超过它官方直接报 850031，连分片都没用 */
+export const MEDIA_HARD_LIMIT = 200 * 1024 * 1024;
+
+/**
+ * 二进制直传（`file_data`）的上限：**5MB**。
+ *
+ * 官方原文：「直接上传二进制数据……数据大小不能超过 5M，超过建议使用分片上传」。
+ * 实测网关对请求体的容忍比 5MB 大一些（约 10MB），但那是运气不是承诺——
+ * 一张 24.4MB 的图 base64 后 32.5MB，网关直接回 `413 Request Entity Too Large`
+ * （stgw 的 HTML 报错，连 QQ 的业务错误码都没有）。
+ *
+ * 所以超过这个值一律走分片上传，别再赌网关的脾气。
+ */
+export const DIRECT_UPLOAD_LIMIT = 5 * 1024 * 1024;
+
+/**
+ * `md5_10m` 取的字节数：官方写死 10002432（约 9.54MB），不是整数 MB。
+ * 这个值用于「秒传判断」，传错了服务端不会报错、只是秒传不生效。
+ */
+export const MD5_10M_SIZE = 10_002_432;
 
 /**
  * 被动回复序号的**最后一道**兜底上限。
@@ -230,12 +252,22 @@ export class QQApi {
 
   /**
    * 上传富媒体。
+   *
+   * 三种路径，对应官方 `/files` 的三个入参：
+   *   · `url`      —— URL 上传（平台自己去下载转存）
+   *   · `fileData` —— 二进制直传（base64，**5MB 以内**，见 `DIRECT_UPLOAD_LIMIT`）
+   *   · `uploadId` —— 分片上传的合并（分片已由 `uploadLocalFileSharded` 传完）
+   *
    * @param {'group'|'c2c'} scene
    * @param {string} target group_openid 或 user openid
-   * @param {object} opts { fileType, url?, fileData?(base64) }
+   * @param {object} opts { fileType, url?, fileData?(base64), uploadId?, fileName? }
    * @returns {Promise<{file_uuid:string, file_info:string, ttl:number}>}
    */
-  async uploadMedia(scene, target, { fileType = FILE_TYPE.IMAGE, url, fileData, reuse = true } = {}) {
+  async uploadMedia(
+    scene,
+    target,
+    { fileType = FILE_TYPE.IMAGE, url, fileData, uploadId, fileName, reuse = true } = {},
+  ) {
     // 只有按 url 传的才缓存：base64 数据做键得先算哈希，不值当
     const cacheKey = reuse && url ? `${scene}:${enc(target)}:${fileType}:${url}` : null;
     if (cacheKey) {
@@ -252,6 +284,14 @@ export class QQApi {
     const body = { file_type: fileType, srv_send_msg: false };
     if (url) body.url = url;
     if (fileData) body.file_data = fileData;
+    /**
+     * 分片合并：`upload_id` 一进，服务端就走「合并已上传分片」那条路，
+     * `url` 可以为空。但 `file_name` 这条路径**必填**（官方字段说明）。
+     */
+    if (uploadId) {
+      body.upload_id = uploadId;
+      if (fileName) body.file_name = fileName;
+    }
     const r = await this.#request('POST', path, body);
 
     if (cacheKey && r?.file_info) {
@@ -266,26 +306,29 @@ export class QQApi {
   }
 
   /**
-   * 从本地文件读取并上传（自动转 base64）。
+   * 从本地文件读取并上传（**直传**，base64 整包）。
+   *
+   * 只适合小文件：`file_data` 官方限 5MB（`DIRECT_UPLOAD_LIMIT`），
+   * 超过它请用 `uploadLocalFileSharded`——这里不偷偷分片，
+   * 因为「直传」这个方法的语义就是一次请求，隐式换成十几次请求会让调用方
+   * 对耗时和失败几率的预期全错。
    *
    * 带缓存：同一个文件（路径 + 大小 + 修改时间都一样）在 TTL 内不重复上传。
-   * 图片缓存类插件（本地存几百张图，用户点一次发一张）没有这层的话，
-   * 每发一次都要把整张图 base64 传一遍，慢且费额度。
    */
   async uploadLocalFile(scene, target, filePath, fileType = FILE_TYPE.IMAGE) {
     let cacheKey = null;
     try {
       const st = await fs.stat(filePath);
       /**
-       * 软限制前置校验：普通 base64 上传接口对富媒体有大小上限，
-       * 超了服务端直接 413。在这里先挡一道，报一个能看懂的错误，
-       * 别让调用方拿到「HTTP 413 ... <html>」这种垃圾信息。
+       * 直传上限前置校验：超过 5MB 的 base64 请求体，网关会直接回
+       * `413 Request Entity Too Large`（HTML，连业务错误码都没有）。
+       * 在这里挡一道，报一个能看懂的错误。
        */
-      const limit = MEDIA_SOFT_LIMIT[fileType];
-      if (limit && st.size > limit) {
+      if (st.size > DIRECT_UPLOAD_LIMIT) {
         const mb = (st.size / 1024 / 1024).toFixed(1);
-        const cap = Math.round(limit / 1024 / 1024);
-        throw new Error(`${filePath} 有 ${mb}MB，超过 ${cap}MB 上限，发不出去（先压缩或换张小图）`);
+        throw new Error(
+          `${filePath} 有 ${mb}MB，超过直传上限 ${DIRECT_UPLOAD_LIMIT / 1024 / 1024}MB，请改用 uploadLocalFileSharded`,
+        );
       }
       cacheKey = `${scene}:${enc(target)}:${fileType}:file:${filePath}:${st.size}:${Math.floor(st.mtimeMs)}`;
       const hit = this.mediaCache.get(cacheKey);
@@ -297,7 +340,7 @@ export class QQApi {
        * 不能当缓存命中，继续往下走让 `readFile` 抛真正的错误；
        * 超限是**明确拒绝**，必须直接把错误往上抛，不能悄悄读文件再传一遍。
        */
-      if (/上限/.test(e?.message ?? '')) throw e;
+      if (/直传上限/.test(e?.message ?? '')) throw e;
       /* stat 失败就按无缓存走，readFile 会抛真正的错误 */
     }
 
@@ -315,6 +358,176 @@ export class QQApi {
       }
     }
     return up;
+  }
+
+  /**
+   * PUT 一个分片到预签名 URL。**裸 fetch，不带 QQ 的任何头。**
+   *
+   * 为什么不能复用 `#request`：那个方法会拼 `baseUrl + path`（预签名是绝对
+   * URL）、强塞 `Content-Type: application/json`（分片是二进制）、强带
+   * `Authorization: QQBot …`（预签名 URL 自带签名，多带鉴权头反而会被
+   * COS 拒）、超时写死 15 秒（5MB 分片在慢网下要更久）。
+   *
+   * @param {string} presignedUrl 预签名上传地址
+   * @param {Buffer} buf 分片二进制
+   * @param {number} [timeoutMs]
+   */
+  async #putPart(presignedUrl, buf, timeoutMs = 60_000) {
+    let res;
+    try {
+      res = await fetch(presignedUrl, {
+        method: 'PUT',
+        signal: AbortSignal.timeout(timeoutMs),
+        headers: { 'Content-Length': String(buf.length) },
+        body: buf,
+      });
+    } catch (e) {
+      const reason = e?.name === 'TimeoutError' ? `超时（${Math.round(timeoutMs / 1000)}s）` : e.message;
+      throw new Error(`分片 PUT 网络错误: ${reason}`);
+    }
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      throw new Error(`分片 PUT 失败 HTTP ${res.status}${detail ? `：${detail.slice(0, 200)}` : ''}`);
+    }
+  }
+
+  /**
+   * 大文件分片上传（官方推荐路径）。
+   *
+   * 四步（官方文档《富媒体消息概述》）：
+   *   ① `upload_prepare` → upload_id / block_size / parts[] / upload_config
+   *   ② 逐片 `PUT` 到 `parts[i].presigned_url`
+   *   ③ 每片成功后 `upload_part_finish` 确认
+   *   ④ 带 `upload_id` 调 `/files` 合并 → `file_info`
+   *
+   * 返回值与 `uploadLocalFile` 同形状（`{file_uuid, file_info, ttl}`），
+   * 调用方不必分叉。
+   *
+   * **分片顺序不能乱**：`parts` 按 `index` 排序后逐片上传；并发数听
+   * `upload_config.concurrency`（官方默认 1），我们上限 4——再高对
+   * 5MB 一片的 COS PUT 没什么收益，反而容易触发服务端侧限流。
+   *
+   * @param {'group'|'c2c'} scene
+   * @param {string} target
+   * @param {string} filePath 本地文件
+   * @param {number} fileType
+   * @param {object} [opts]
+   * @param {(m:string)=>void} [opts.log]
+   * @returns {Promise<{file_uuid:string, file_info:string, ttl:number}>}
+   */
+  async uploadLocalFileSharded(scene, target, filePath, fileType = FILE_TYPE.FILE, opts = {}) {
+    /**
+     * `opts.log` 可能是**函数**，也可能是 `createLogger()` 那种**对象**（有 .info）。
+     * 统一成函数再往下用——本机就因为这个炸过 `logFn is not a function`：
+     * prepare 已经成功、图却一张没发出去，日志只有一行看不懂的类型错误。
+     */
+    const rawLog = opts.log;
+    const logFn =
+      typeof rawLog === 'function'
+        ? rawLog
+        : typeof rawLog?.info === 'function'
+          ? (m) => rawLog.info(m)
+          : () => {};
+
+    const buf = await fs.readFile(filePath);
+    if (buf.length > MEDIA_HARD_LIMIT) {
+      const mb = (buf.length / 1024 / 1024).toFixed(1);
+      throw new Error(`${filePath} 有 ${mb}MB，超过官方硬限制 200MB，分片也发不出去`);
+    }
+
+    const fileName = filePath.split(/[\\/]/).pop() || 'file';
+    /**
+     * 三个校验值官方都要：
+     *   · `md5` / `sha1` 是整个文件的
+     *   · `md5_10m` 是**前 10002432 字节**的（不是 10MB，官方写死的数字）
+     * 算错了服务端不报错，只是秒传判断失效，所以照官方数字来。
+     */
+    const md5 = crypto.createHash('md5').update(buf).digest('hex');
+    const sha1 = crypto.createHash('sha1').update(buf).digest('hex');
+    const md5_10m = crypto.createHash('md5').update(buf.subarray(0, MD5_10M_SIZE)).digest('hex');
+
+    const prep = await this.uploadPrepare(scene, target, {
+      fileType,
+      fileSize: buf.length,
+      fileName,
+      md5,
+      sha1,
+      md5_10m,
+    });
+    const uploadId = prep?.upload_id;
+    const parts = Array.isArray(prep?.parts) ? prep.parts.slice() : [];
+    if (!uploadId || !parts.length) {
+      throw new Error(`upload_prepare 没返回可用的 upload_id / parts（${JSON.stringify(prep).slice(0, 200)}）`);
+    }
+    parts.sort((a, b) => Number(a.index) - Number(b.index));
+
+    /**
+     * 并发数：听服务端的，但不超 4。
+     * `retry_timeout` / `retry_delay` 也是服务端下发的，用于 40093001 重试。
+     */
+    const conf = prep.upload_config ?? {};
+    const concurrency = Math.max(1, Math.min(Number(conf.concurrency) || 1, 4));
+    const retryTimeoutMs = Math.max(1, Number(conf.retry_timeout) || 300) * 1000;
+    const retryDelayMs = Math.max(0, Number(conf.retry_delay) || 1) * 1000;
+    logFn(`${fileName} ${(buf.length / 1024 / 1024).toFixed(1)}MB · ${parts.length} 片 · 并发 ${concurrency}`);
+
+    /**
+     * 每片的字节区间。**按排序后的顺序累加偏移**，不靠 `index` 当数组下标——
+     * `index` 是服务端给的序号，正常情况下就是 0,1,2…，但拿它直接当
+     * `parts[index]` 用，一旦服务端给的序号不连续就会切错片（内容错位、
+     * 合并出来的文件是坏的，而服务端不会报错）。
+     */
+    const offsets = [];
+    let acc = 0;
+    for (const p of parts) {
+      const size = Number(p.block_size) || 0;
+      offsets.push({ part: p, start: acc, end: size ? acc + size : buf.length });
+      acc += size;
+    }
+
+    /**
+     * 单片的「PUT + 确认」，带 40093001 重试。
+     *
+     * `40093001`（分片转存 BDH 通道异常）是**明确可重试**的，官方给了
+     * `retry_timeout`；`40093002`（日配额上限）重试一万次也没用，必须
+     * 直接抛出去让上层告诉用户「今天发不了了」。
+     */
+    const uploadOne = async ({ part, start, end }) => {
+      const idx = Number(part.index);
+      const chunk = buf.subarray(start, end);
+      const chunkMd5 = crypto.createHash('md5').update(chunk).digest('hex');
+
+      let lastErr = null;
+      const deadline = Date.now() + retryTimeoutMs;
+      while (Date.now() < deadline) {
+        try {
+          await this.#putPart(part.presigned_url, chunk);
+          await this.uploadPartFinish(scene, target, {
+            uploadId,
+            partIndex: idx,
+            blockSize: chunk.length,
+            md5: chunkMd5,
+          });
+          return;
+        } catch (e) {
+          lastErr = e;
+          if (Number(e?.qqCode) === 40093002) throw e; // 日配额，重试无用
+          await new Promise((r) => setTimeout(r, retryDelayMs));
+        }
+      }
+      throw new Error(`分片 ${idx} 上传失败（重试到 retry_timeout 仍不行）：${lastErr?.message ?? '未知'}`);
+    };
+
+    /**
+     * 按 concurrency 分批并发。用「一批一批」而不是「维持 N 个在飞」：
+     * 片数通常 3~10，分批足够，代码简单且失败位置好定位。
+     */
+    for (let i = 0; i < offsets.length; i += concurrency) {
+      await Promise.all(offsets.slice(i, i + concurrency).map(uploadOne));
+    }
+
+    // ④ 合并
+    return this.uploadMedia(scene, target, { fileType, uploadId, fileName, reuse: false });
   }
 
   /** 上传后再以 msg_type=7 发出（被动回复） */

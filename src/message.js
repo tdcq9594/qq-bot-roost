@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import { createLogger } from './logger.js';
-import { FILE_TYPE, MEDIA_SOFT_LIMIT } from './api.js';
+import { FILE_TYPE, MEDIA_SOFT_LIMIT, MEDIA_HARD_LIMIT, DIRECT_UPLOAD_LIMIT } from './api.js';
 import { messageKindOf, EVENTS } from './events.js';
 import { renderMenuMd, mdToPlain } from './markdown.js';
 
@@ -672,29 +672,57 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
       if (scene !== 'group' && scene !== 'c2c') return null;
 
       /**
-       * 图片超软限（20MB）自动降级为文件。
+       * 本地文件先看清两件事：**要不要降级**、**走直传还是分片**。
        *
-       * 普通 base64 上传接口对图片有 20MB 上限，超了服务端直接 413。
-       * 但文件（file_type=4）上限是 200MB，所以本地大图不该直接报错——
-       * 改成按「文件」发出去，用户收到的是文件卡片（可下载查看）。
-       * 官方「超软限降级为文件」的语义，落到这里实现。
+       * ① 软限制（图 20MB / 视频 30MB / 语音 20MB）——官方语义是
+       *    「超过软限制降级为文件类型上传」，所以把 `file_type` 改成 4。
+       * ② 直传上限 5MB——**这才是 413 的真正来源**。一张 24.4MB 的图
+       *    base64 之后 32.5MB，网关直接回 `413 Request Entity Too Large`。
+       *    所以超过 5MB 一律走分片（`uploadLocalFileSharded`），
+       *    降级判断照旧生效（分片时 file_type 也按软限算）。
+       *
+       * 硬限制 200MB 是官方的绝对上限，到了这里连分片也救不了。
        */
       let effectiveType = fileType;
-      if (local && fileType === FILE_TYPE.IMAGE) {
-        try {
-          const st = await fs.stat(source);
-          if (st.size > MEDIA_SOFT_LIMIT[FILE_TYPE.IMAGE]) {
-            effectiveType = FILE_TYPE.FILE;
-            log.info(`图片 ${(st.size / 1024 / 1024).toFixed(1)}MB 超过 20MB 软限制，降级按文件发送`);
-          }
-        } catch {
-          /* stat 失败按原类型走，让 uploadLocalFile 抛真正的错误 */
+      let size = 0;
+      if (local) {
+        const st = await fs.stat(source);
+        size = st.size;
+        if (size > MEDIA_HARD_LIMIT) {
+          throw new Error(
+            `${source} 有 ${(size / 1024 / 1024).toFixed(1)}MB，超过官方 200MB 硬限制`,
+          );
+        }
+        const soft = MEDIA_SOFT_LIMIT[fileType];
+        if (soft && size > soft) {
+          effectiveType = FILE_TYPE.FILE;
+          log.info(`媒体 ${(size / 1024 / 1024).toFixed(1)}MB 超过 ${Math.round(soft / 1024 / 1024)}MB 软限制，降级按文件发送`);
         }
       }
 
-      const up = local
-        ? await api.uploadLocalFile(scene, target, source, effectiveType)
-        : await api.uploadMedia(scene, target, { fileType: effectiveType, url: source });
+      /**
+       * 三选一：
+       *   远程 URL → 平台自己去下载
+       *   本地小文件（≤5MB）→ 直传 base64
+       *   本地大文件（>5MB）→ 分片上传
+       */
+      let up;
+      if (!local) {
+        up = await api.uploadMedia(scene, target, { fileType: effectiveType, url: source });
+      } else if (size > DIRECT_UPLOAD_LIMIT) {
+        log.info(`媒体 ${(size / 1024 / 1024).toFixed(1)}MB 超过直传上限，走分片上传`);
+        up = await api.uploadLocalFileSharded(scene, target, source, effectiveType, {
+          /**
+           * 这里必须包一层：`log` 是 `createLogger()` 返回的**对象**，
+           * 而 `uploadLocalFileSharded` 要的是「一个打印函数」。
+           * 直接传 `{ log }` 会在分片开始前炸 `logFn is not a function`
+           * （2026-10-30 实际踩过，prepare 成功了、图却没发出去）。
+           */
+          log: (m) => log.info(m),
+        });
+      } else {
+        up = await api.uploadLocalFile(scene, target, source, effectiveType);
+      }
       if (!up?.file_info) throw new Error('未返回 file_info');
 
       const content = text ? String(text) : ' ';
