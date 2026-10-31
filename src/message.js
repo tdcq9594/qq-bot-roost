@@ -3,6 +3,7 @@ import { createLogger } from './logger.js';
 import { FILE_TYPE, MEDIA_SOFT_LIMIT, MEDIA_HARD_LIMIT, DIRECT_UPLOAD_LIMIT } from './api.js';
 import { messageKindOf, EVENTS } from './events.js';
 import { renderMenuMd, mdToPlain } from './markdown.js';
+import { newTraceId } from './trace.js';
 
 const log = createLogger('message');
 
@@ -210,7 +211,7 @@ export function parseElements(list, depth = 0) {
 /**
  * 把官方事件体统一成好用的 Message 对象，插件只跟它打交道。
  */
-export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
+export function buildMessage(eventName, d, { api, cfg, outbound, session, traceId }) {
   const kind = messageKindOf(eventName) ?? 'unknown';
 
   let groupId = '';
@@ -251,6 +252,13 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session }) {
 
   const msg = {
     id: d.id ?? '',
+    /**
+     * 链路 id：这一条消息从进站到回话的唯一标识。
+     *
+     * 生成点必须在内核——它先看到原始事件；插件只是路过，
+     * 让插件生成会出现「同一条消息被两个插件各生成一个 id」。
+     */
+    traceId: String(traceId || newTraceId()),
     kind,
     event: eventName,
     // 事件元信息（属于哪个 intent、中文说明），来自 src/events.js

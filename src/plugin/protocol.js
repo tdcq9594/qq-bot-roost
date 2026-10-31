@@ -38,6 +38,8 @@ export const DEFAULTS = {
 export function serializeMessage(msg, extra = {}) {
   return {
     id: msg.id,
+    // 外部插件也要能拿到，否则「任意语言插件」这条路上链路就断了
+    trace: msg.traceId ?? '',
     kind: msg.kind,
     group: msg.groupId || '',
     user: msg.userId || '',
