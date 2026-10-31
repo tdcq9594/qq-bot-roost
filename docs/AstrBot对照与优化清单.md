@@ -5,6 +5,8 @@
 >
 > 定位：我们 = Roost（QQ 官方传输）+ ai-chat（Roost 侧桥）+ dsh-roost（DSH 侧驱动）。
 > 模型、工具、记忆主体都在 DSH 里。AstrBot = 一体化 IM Agent 平台。
+>
+> **⚠️ 时效（2026-10-31）**：本文写于 2026-10-27，部分结论已被后续改动推翻。带「已过期 / 仍成立」标注的行已复核；**未标注的行按写作时的代码为准，照做前先回代码确认**。最新对照见 `deliverables/同类项目检索与自查-2026-10-31.md`。
 
 ---
 
@@ -14,7 +16,7 @@
 |---|---|---|---|
 | 模型接入 | 单宿主 DSH，模型在 DSH 里配 | `ProviderType` 5 类 + 多实例 + 默认/按会话路由 + 多家适配器 + 失败重试 | 无「按群切模型/失败切换」机制（属 DSH 侧，非插件） |
 | 人格 | `personas/*.md` + `profile.facts` | 命名人格库（`system_prompt` + `begin_dialogs` + 工具/技能白名单）+ 按会话绑定 + 人格文件夹 | 缺 **begin_dialogs（few-shot 开场）**、缺按会话切人格、缺人格级工具白名单 |
-| 记忆 | facts ≤20 条、显式；对话历史仅内存、无压缩 | 会话↔对话分离（DB）+ 轮数上限 + **`llm_compress` 摘要** + 平台消息历史 + KB/向量 | 缺**中期摘要压缩**、缺长期检索、缺 `/new` `/switch` 多对话、历史不落盘 |
+| 记忆 | ~~facts ≤20 条~~（现 40 条，在 dsh-roost）；对话历史仅内存、无压缩 | 会话↔对话分离（DB）+ 轮数上限 + **`llm_compress` 摘要** + 平台消息历史 + KB/向量 | dsh 侧已有摘要压缩（`compact.js`）与长期检索；**ai-chat 自己的 `ChatStore` 仍无压缩**，且无 `/new` `/switch` 多对话、历史不落盘 |
 | QQ 接入/配置 | 手填 `appId/appSecret`（框架层） | **扫码一键创建** + 自动填 secret + 通用平台注册框架 | 缺扫码建 bot（框架层，P0） |
 | 大文件发送 | **已接线**（2026-10-30）：≤5MB 直传，>5MB 走 `uploadLocalFileSharded` 四步分片；超软限仍降级为文件 | >10MB 自动分片（4 并发/重试/日配额 40093002） | 已对齐（分片 3 并发上限、40093001 重试 / 40093002 直抛） |
 | 工具/技能 | DSH 工具 + `LOCAL_TOOLS` 权限摘除 | tool manager + skills + subagents | 工具生态更丰富；但 DSH agent 本身强，未必照抄 |
@@ -30,8 +32,8 @@
 
 | 判断 | 结论 | 证据 |
 |---|---|---|
-| facts 上限 20 条 | ✅ 属实 | `plugins/ai-chat/profile.js:62` — `p.facts = p.facts.slice(-20)` |
-| 对话历史只在内存、10 轮 | ✅ 属实 | `plugins/ai-chat/session.js:9` — `historyLimit = 10`，`this.map = new Map()`，无落盘 |
+| facts 上限 20 条 | ⚠️ **已过期**（2026-10-31 复核） | `plugins/ai-chat/profile.js` 已删除；facts 迁到 `dsh-roost/src/memory.js`：`FACTS_MAX = 40`、`FACT_MAX = 200` |
+| 对话历史只在内存、10 轮 | ✅ **仍成立**（2026-10-31 复核） | `plugins/ai-chat/session.js:9` 默认 `historyLimit = 10`，`index.js:432` 可配；dsh 适配器下 ai-chat 仍维护这份内存历史，摘要压缩由 dsh-roost 的 `compact.js` 另做 |
 | 私聊主动、群聊无 | ✅ 属实 | `dsh-roost/src/speakup.js:126` — `send({ scene: 'c2c', ... })` 写死 |
 | 人格无 beginDialogs | ✅ 属实 | `dsh-roost/personas/*.md` 只有 `---` 头里的 `name` / `tags` |
 

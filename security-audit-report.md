@@ -96,6 +96,9 @@
 ## 五、发现清单（结构化）
 
 ### [F-01] 🟠 面板暴露非 loopback 时未强制 accessKey（远程接管/RCE）
+
+> **状态：已修复（2026-10-31 复核）。** `src/web/server.js:381` 现在是**启动期硬阻断**：`webui.host` 非 loopback 且未设 `accessKey` 时直接拒绝启动并打印修复指引，不再是 doctor 软告警。下面保留审计当时（2025-10-25）的原始记录，作为背景。
+
 - **类别**：OWASP A01 / A05；STRIDE Spoofing+Elevation
 - **位置**：`src/web/server.js:241`（默认 127.0.0.1）、`src/web/server.js:389`（`if (!accessKey) return true`）、`src/config.js:27`（accessKey 默认空）
 - **问题描述**：`authorized()` 在 accessKey 为空时**无条件放行**。若运维把 `webui.host` 设为 `0.0.0.0` 却忘记设 key，面板在全部网卡开放且**零认证**。此时远程攻击者可：新建/删除机器人、改配置、调 `/api/market/install` 安装任意插件（插件代码在子进程执行 = RCE）、`/api/shutdown` 关停。doctor 仅软告警(`doctor.js:172-178`)，**无启动期硬阻断**。
