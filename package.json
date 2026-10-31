@@ -31,7 +31,7 @@
     "check": "node src/main.js --check",
     "test": "node test/selftest.mjs && node test/qrlogin.mjs && node test/deps.mjs && node --test test/trust.mjs && node --test test/manifest.mjs && node --test test/trace.mjs && node --test test/fuzz-tar.mjs",
     "test:e2e": "node test/e2e.mjs",
-    "test:all": "node test/selftest.mjs && node test/qrlogin.mjs && node test/deps.mjs && node test/e2e.mjs && node test/live-driver.mjs",
+    "test:all": "node test/selftest.mjs && node test/qrlogin.mjs && node test/deps.mjs && node --test test/trust.mjs && node --test test/manifest.mjs && node --test test/trace.mjs && node --test test/fuzz-tar.mjs && node test/e2e.mjs && node test/live-driver.mjs",
     "check:secrets": "node scripts/check-secrets.mjs",
     "create": "node scripts/create-plugin.mjs",
     "test:plugin": "node scripts/test-plugin.mjs",

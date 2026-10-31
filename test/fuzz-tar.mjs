@@ -72,10 +72,17 @@ test('正常：一个文件 + 一个目录', () => {
 
 test('随机字节：两万次不崩、不死循环、返回数组', () => {
   // 固定种子，失败可复现；不用 Math.random 是为了 CI 上也能重现
+  /**
+   * 用 `Math.imul` 做 32 位 LCG。
+   *
+   * 直接写 `seed * 1103515245` 会超过 2^53，精度丢失后周期变得很短——
+   * 实测 20000 次只有 10714 个不同值，等于「跑了两万次」实际只覆盖了一半。
+   * `Math.imul` 保证乘法在 32 位内精确，周期回到 2^32。
+   */
   let seed = 0x2f6e2b1;
   const rand = () => {
-    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
-    return seed / 0x7fffffff;
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    return seed / 0x100000000;
   };
 
   for (let i = 0; i < 20000; i++) {
@@ -94,8 +101,8 @@ test('随机字节：两万次不崩、不死循环、返回数组', () => {
 test('随机字节：只在头部区域乱写（更容易命中解析分支）', () => {
   let seed = 0x51a3c7;
   const rand = () => {
-    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
-    return seed / 0x7fffffff;
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    return seed / 0x100000000;
   };
 
   for (let i = 0; i < 5000; i++) {
