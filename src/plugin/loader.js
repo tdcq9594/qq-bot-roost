@@ -510,6 +510,11 @@ export class PluginManager {
       repo: raw.repo ?? '',
       supportPlatforms: Array.isArray(raw.supportPlatforms) ? raw.supportPlatforms : [],
       frameworkVersion: raw.frameworkVersion ?? raw.requires?.framework ?? '',
+      /** 清单声明（engines / provides），见 manifest.js */
+      ...(() => {
+        const mf = normalizeManifest(raw);
+        return { engines: mf.engines, provides: mf.provides };
+      })(),
       /**
        * 监听器优先级：高的先跑。见 bot.js 里的排序说明。
        * 外部插件在 plugin.json 里写 `"priority": -100` 就能排到最后。
@@ -739,6 +744,8 @@ export class PluginManager {
       repo: meta?.repo || '',
       supportPlatforms: Array.isArray(meta?.supportPlatforms) ? meta.supportPlatforms : [],
       frameworkVersion: meta?.frameworkVersion || meta?.requires?.framework || '',
+      engines: normalizeManifest(meta).engines,
+      provides: normalizeManifest(meta).provides,
       kind,
       runtime,
     });
@@ -980,6 +987,17 @@ export class PluginManager {
         repo: item?.meta?.repo ?? cached?.repo ?? '',
         supportPlatforms: item?.meta?.supportPlatforms ?? cached?.supportPlatforms ?? [],
         frameworkVersion: item?.meta?.frameworkVersion ?? cached?.frameworkVersion ?? '',
+        /**
+         * 声明与兼容性。`provides` 优先用**实际认领**的那份（decl），
+         * 因为插件可能声明了却没用上；没加载时退回声明原文。
+         */
+        provides: this.decl.byPlugin().get(id) ?? cached?.provides ?? normalizeManifest(item?.meta ?? {}).provides,
+        engines: cached?.engines ?? normalizeManifest(item?.meta ?? {}).engines,
+        enginesOk: checkEngines(
+          cached?.engines ?? normalizeManifest(item?.meta ?? {}).engines,
+          { roost: frameworkVersion(), node: process.versions.node },
+          satisfies,
+        ).ok,
         enabled: this.isEnabled(id),
         loaded: Boolean(item),
         // 未加载时用缓存里的类型，别一律当成 internal

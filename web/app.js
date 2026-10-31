@@ -1823,6 +1823,31 @@ function stopPluginDashPolling() {
   pluginDashTimer = null;
 }
 
+/** 插件卡片上的声明摘要：命令/工具/钩子数量 + 版本要求 */
+function renderDecl(p) {
+  const pr = p.provides || {};
+  const bits = [];
+  if (pr.commands?.length) bits.push(`命令 ${pr.commands.length}`);
+  if (pr.tools?.length) bits.push(`工具 ${pr.tools.length}`);
+  if (pr.hooks?.length) bits.push(`钩子 ${pr.hooks.length}`);
+  const eng = Object.entries(p.engines || {});
+  if (!bits.length && !eng.length) return '';
+  const detail = [
+    pr.commands?.length ? `命令：${pr.commands.join('、')}` : '',
+    pr.tools?.length ? `工具：${pr.tools.join('、')}` : '',
+    pr.hooks?.length ? `钩子：${pr.hooks.join('、')}` : '',
+  ].filter(Boolean).join('；');
+  const engText = eng.map(([k, v]) => `${k} ${v}`).join(' / ');
+  return [
+    bits.length
+      ? `<span class="hint" title="${escapeHtml(detail)}">声明 ${escapeHtml(bits.join(' · '))}</span>`
+      : '',
+    eng.length
+      ? `<span class="hint" title="插件声明的版本要求">${p.enginesOk === false ? '⚠ ' : ''}需 ${escapeHtml(engText)}</span>`
+      : '',
+  ].join('');
+}
+
 async function loadPlugins() {
   const wrap = $('#pluginList');
   // 插件装了/卸了，它注册的面板页面也会变，顺带刷一下标签栏
@@ -1869,6 +1894,7 @@ async function loadPlugins() {
                 ? `<span class="hint" title="插件声明的框架版本要求">需框架 ${escapeHtml(p.frameworkVersion)}</span>`
                 : ''
             }
+            ${renderDecl(p)}
             ${(p.shortDesc || p.description) ? '<br>' + escapeHtml(p.shortDesc || p.description) : ''}
           </div>
           ${chips ? `<div class="plugin-metrics">${chips}</div>` : ''}
