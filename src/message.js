@@ -259,6 +259,11 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
      * 让插件生成会出现「同一条消息被两个插件各生成一个 id」。
      */
     traceId: String(traceId || newTraceId()),
+    /**
+     * 内核拿到这条事件的时间。四段耗时的第一段靠它算：
+     * 官方事件到达 → 插件真正拿到，中间是内核的分发排队。
+     */
+    receivedAt,
     kind,
     event: eventName,
     // 事件元信息（属于哪个 intent、中文说明），来自 src/events.js
