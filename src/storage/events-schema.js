@@ -12,7 +12,7 @@
  * 合表等于把统计库那句「不存消息正文」变成假话。
  */
 
-export const EVENTS_SCHEMA_VERSION = 1;
+export const EVENTS_SCHEMA_VERSION = 2;
 
 const V1 = `
 CREATE TABLE IF NOT EXISTS events (
@@ -60,12 +60,40 @@ CREATE INDEX IF NOT EXISTS refs_to   ON event_refs(to_id) WHERE resolved = 1;
 `;
 
 /**
+ * v2：链路 id。
+ *
+ * 一条消息从进站到回话的唯一标识（见 `src/trace.js`）。加它的理由很具体：
+ * 用户说"刚才那条没回"，现在只能翻四个日志文件对时间戳；有了这一列，
+ * 拿 traceId 一条 SQL 就能找到那次请求对应的原文。
+ *
+ * 老库补空串——空串表示"这条早于 traceId 上线"，不是"查不到"。
+ */
+const V2 = `
+ALTER TABLE events ADD COLUMN trace TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS events_trace ON events(bot_id, trace) WHERE trace != '';
+`;
+
+/** 表里有没有这一列（迁移要幂等，重复 ALTER 会抛） */
+function hasColumn(db, table, col) {
+  try {
+    return db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * @param {object} db DatabaseSync
  */
 export function migrateEvents(db) {
   const cur = Number(db.prepare('PRAGMA user_version').get()?.user_version ?? 0);
   if (cur >= EVENTS_SCHEMA_VERSION) return { from: cur, to: cur };
   if (cur < 1) db.exec(V1);
+  /**
+   * 幂等：老库里如果已经手工加过这一列，`ALTER` 会抛 duplicate column。
+   * 版本号可能因为半途失败停在 1，所以这里必须按「列在不在」判断，不能只看版本。
+   */
+  if (!hasColumn(db, 'events', 'trace')) db.exec(V2);
   db.exec(`PRAGMA user_version = ${EVENTS_SCHEMA_VERSION}`);
   return { from: cur, to: EVENTS_SCHEMA_VERSION };
 }

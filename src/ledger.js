@@ -225,8 +225,8 @@ export class EventLedger {
           `INSERT OR IGNORE INTO events
             (id, bot_id, kind, chat_id, msg_id, user_id, user_name, content,
              at, observed_at, time_basis, dedupe,
-             msg_idx, ref_msg_idx, union_openid, quoted, payload)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+             msg_idx, ref_msg_idx, union_openid, quoted, payload, trace)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         )
         .run(
           id,
@@ -246,6 +246,8 @@ export class EventLedger {
           String(msg.raw?.author?.union_openid ?? '') || null,
           String(msg.quoted ?? '') || null,
           payload,
+          // 链路 id：来自 buildMessage（见 src/trace.js）。老调用方没有就给空串
+          String(msg.traceId ?? ''),
         );
       // changes === 0 说明撞了 dedupe 唯一约束 = 官方重推的同一条消息
       if (!r?.changes) {
@@ -419,14 +421,14 @@ export class EventLedger {
     const rows = beforeSeq
       ? this.db
           .prepare(
-            `SELECT seq, id, kind, chat_id, user_id, user_name, content, at, time_basis, msg_idx, quoted
+            `SELECT seq, id, kind, chat_id, user_id, user_name, content, at, time_basis, msg_idx, quoted, trace
                FROM events WHERE bot_id = ? AND chat_id = ? AND seq < ?
               ORDER BY seq DESC LIMIT ?`,
           )
           .all(this.botId, String(chatId), Number(beforeSeq), lim)
       : this.db
           .prepare(
-            `SELECT seq, id, kind, chat_id, user_id, user_name, content, at, time_basis, msg_idx, quoted
+            `SELECT seq, id, kind, chat_id, user_id, user_name, content, at, time_basis, msg_idx, quoted, trace
                FROM events WHERE bot_id = ? AND chat_id = ?
               ORDER BY seq DESC LIMIT ?`,
           )
@@ -442,6 +444,8 @@ export class EventLedger {
       timeBasis: r.time_basis,
       msgIdx: r.msg_idx,
       quoted: r.quoted,
+      // 链路 id：调用方拿它去查"这条消息后来发生了什么"
+      trace: r.trace ?? '',
       content: contentOf(r),
     }));
   }

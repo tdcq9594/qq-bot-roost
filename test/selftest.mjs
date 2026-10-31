@@ -4354,6 +4354,40 @@ async function testLedger() {
   );
   check('账本: 没有 msg_id 也能记', noId && noId.seq > 0);
 
+  /**
+   * 4b) 链路 id：进站时由 buildMessage 生成，账本要把它存下来。
+   *
+   * 存它的唯一目的就是"出事能查"——用户说"刚才那条没回"，
+   * 拿 traceId 一条 SQL 就能定位原文，不用翻四个日志对时间。
+   */
+  const tr = led.append(mkMsg({ id: 'm-trace', content: '带 trace', traceId: 't-abc123' }));
+  check('账本: trace 存下来了', led.get(tr.id)?.trace === 't-abc123', String(led.get(tr.id)?.trace));
+  const trRecent = led.recent({ chatId: 'g1', limit: 20 }).find((x) => x.id === tr.id);
+  check('账本: recent 也带 trace', trRecent?.trace === 't-abc123', JSON.stringify(trRecent?.trace));
+
+  /**
+   * 4c) 老库升级：v1 没有 trace 列，要能平滑加回来，老行补空串。
+   *
+   * 用真的 DROP COLUMN 造一个 v1 库，而不是"假装"——迁移代码最容易在
+   * "列已存在"和"版本号卡在中间"这两种状态上翻车。
+   */
+  const oldFile = path.join(dir, 'old.db');
+  const oldLed = new EventLedger({ file: oldFile, botId: 'b1' });
+  oldLed.open();
+  oldLed.append(mkMsg({ id: 'old-1', content: '老数据' }));
+  oldLed.db.exec('DROP INDEX IF EXISTS events_trace');
+  oldLed.db.exec('ALTER TABLE events DROP COLUMN trace');
+  oldLed.db.exec('PRAGMA user_version = 1');
+  oldLed.close();
+
+  const upLed = new EventLedger({ file: oldFile, botId: 'b1' });
+  check('账本: 老库能升到 v2', upLed.open() === true);
+  const oldRow = upLed.db.prepare('SELECT trace FROM events WHERE msg_id = ?').get('old-1');
+  check('账本: 老行补空 trace', oldRow?.trace === '', JSON.stringify(oldRow));
+  const newOnOld = upLed.append(mkMsg({ id: 'new-2', content: '升级后新数据', traceId: 't-new' }));
+  check('账本: 升级后能写 trace', upLed.get(newOnOld.id)?.trace === 't-new');
+  upLed.close();
+
   // 5) 时间三态
   const t1 = resolveTime({ timestamp: 1700000000000 });
   check('账本: 毫秒时间戳判为 message', t1.basis === 'message' && t1.at === 1700000000000, JSON.stringify(t1));
