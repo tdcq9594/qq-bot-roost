@@ -40,8 +40,12 @@ export function parseTar(buf) {
     // 全零块 = 结束
     if (header.every((b) => b === 0)) break;
 
-    const readStr = (start, len) => {
-      const slice = header.subarray(start, start + len);
+    /**
+     * 参数叫 `pos` 而不是 `start`：外层那个 `start` 是「本轮在 buf 里的起点」，
+     * 两者含义完全不同，同名遮蔽会让人以为能互相引用。
+     */
+    const readStr = (pos, len) => {
+      const slice = header.subarray(pos, pos + len);
       const end = slice.indexOf(0);
       return slice.subarray(0, end === -1 ? len : end).toString('utf8');
     };
