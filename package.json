@@ -29,7 +29,7 @@
     "start": "node src/main.js",
     "mock": "node src/main.js --mock",
     "check": "node src/main.js --check",
-    "test": "node test/selftest.mjs && node test/qrlogin.mjs && node test/deps.mjs && node --test test/trust.mjs && node --test test/manifest.mjs && node --test test/trace.mjs",
+    "test": "node test/selftest.mjs && node test/qrlogin.mjs && node test/deps.mjs && node --test test/trust.mjs && node --test test/manifest.mjs && node --test test/trace.mjs && node --test test/fuzz-tar.mjs",
     "test:e2e": "node test/e2e.mjs",
     "test:all": "node test/selftest.mjs && node test/qrlogin.mjs && node test/deps.mjs && node test/e2e.mjs && node test/live-driver.mjs",
     "check:secrets": "node scripts/check-secrets.mjs",
@@ -39,7 +39,8 @@
     "market:index": "node scripts/build-market-index.mjs",
     "sums": "node scripts/build-sums.mjs",
     "sums:check": "node scripts/build-sums.mjs --check",
-    "sums:verify": "node scripts/build-sums.mjs --verify"
+    "sums:verify": "node scripts/build-sums.mjs --verify",
+    "test:coverage": "node --experimental-test-coverage --test-coverage-lines=95 --test-coverage-branches=80 --test-coverage-include=src/trust.js --test-coverage-include=src/plugin/manifest.js --test-coverage-include=src/trace.js --test test/trust.mjs test/manifest.mjs test/trace.mjs"
   },
   "author": {
     "name": "倦飞之鸟"

@@ -34,6 +34,8 @@ export function parseTar(buf) {
   let off = 0;
 
   while (off + 512 <= buf.length) {
+    /** 本轮起点：用来判断「有没有真的往前走」，见下面的 next 检查 */
+    const start = off;
     const header = buf.subarray(off, off + 512);
     // 全零块 = 结束
     if (header.every((b) => b === 0)) break;
@@ -45,7 +47,15 @@ export function parseTar(buf) {
     };
 
     const name = readStr(0, 100);
-    const size = parseInt(readStr(124, 12).trim(), 8) || 0;
+    /**
+     * size 必须夹到非负。
+     *
+     * 八进制字段里出现 `-` 时 `parseInt` 会给出负数，后面
+     * `Math.ceil(size / 512) * 512` 就是负的，游标「前进 512 又倒退 512」
+     * 原地打转——而这个循环每轮都 push 一条条目，于是**内存直接爆掉**。
+     * 一个几十字节的畸形 tar 就能把机器人打死（2026-10-31 用 fuzz 撞出来的）。
+     */
+    const size = Math.max(0, parseInt(readStr(124, 12).trim(), 8) || 0);
     const type = String.fromCharCode(header[156]) || '0';
     // ustar 前缀，长路径会用它
     const prefix = readStr(345, 155);
@@ -53,7 +63,21 @@ export function parseTar(buf) {
 
     off += 512;
     const content = buf.subarray(off, off + size);
-    off += Math.ceil(size / 512) * 512;
+    /**
+     * 游标必须严格前进。即使 size 已经夹到非负，这里再兜一道：
+     * 畸形头导致的任何「原地踏步」都会变成死循环 + 内存爆炸，
+     * 而正常的 tar 每轮至少前进 512 字节，不可能触发。
+     */
+    const next = off + Math.ceil(size / 512) * 512;
+    /**
+     * 和**本轮起点**比，不是和 `off` 比。
+     *
+     * `size = 0`（目录条目）时 `next` 正好等于 `off`，拿 `off` 比会把
+     * 正常的空条目误判成「没前进」而提前结束——第一版就是这么写的，
+     * 结果一个含目录的正常 tar 只解析出第一条。
+     */
+    if (next <= start) break;
+    off = next;
 
     if (type === '5') entries.push({ name: fullName, dir: true });
     else if (type === '0' || type === '\0') entries.push({ name: fullName, dir: false, content });

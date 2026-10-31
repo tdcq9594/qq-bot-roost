@@ -50,6 +50,12 @@ jobs:
       - name: 单元自检
         run: npm test
 
+      # 只给「有专门单测」的三个模块设门禁（信任/清单/链路）。
+      # 不给整个 src 设，是因为大部分代码由 selftest 覆盖，而 selftest 不是
+      # node:test，混在一起算出来的数字没意义——宁要窄而真的门禁。
+      - name: 覆盖率门禁（信任/清单/链路）
+        run: npm run test:coverage
+
       - name: 端到端
         run: npm run test:e2e
 
