@@ -398,11 +398,17 @@
         <div class="box-hd"><h3>插件来源校验</h3></div>
         <label class="switch">
           <input type="checkbox" name="trustEnforce">
-          强制校验插件市场签名（默认关闭）
+          强制校验插件市场签名
+          <span class="beta-tag" title="签名文件刚铺开，还没经过一轮完整发版验证">Beta</span>
+          <span class="hint">默认关闭</span>
         </label>
         <div class="hint" id="trustHint">
           开启后，官方市场里未签名或签名不符的插件会被拒绝安装和更新；手写插件、以及你自己配置的市场源不受影响。
           需要框架内置信任公钥——没内置时这个开关不起作用（所有插件照常放行）。
+        </div>
+        <div class="hint">
+          <b>Beta：</b>签名文件还没跟着一次正式发版走完流程，现在打开可能让某些插件装不上。
+          <b>建议先保持关闭</b>，等发版验证过一轮再考虑。
         </div>
       </div>
 

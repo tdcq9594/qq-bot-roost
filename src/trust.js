@@ -38,6 +38,13 @@ export const EMBEDDED_PUBKEY = 'bqmZDZi/gnW7FppqKCOa5Zvc1XUvT/vw7fiiHR2hcIo=';
 export const EMBEDDED_ENFORCE = false;
 
 /**
+ * **发版时保持 false。** 签名链路是 beta：
+ *   · `index.json.sig` 还没跟着一次正式发版走完流程
+ *   · 现在打开会让没签名的插件装不上
+ * 等发版验证过一轮，再决定是否默认开启（或继续让用户自己在面板里开）。
+ */
+
+/**
  * 规范化：键排序 + 无空白 + 数组保序。
  *
  * 不能直接用 `JSON.stringify(data)`——它按插入顺序输出键，
