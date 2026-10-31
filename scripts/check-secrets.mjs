@@ -46,6 +46,26 @@ const DOC_DIRS = ['docs'];
 
 const EXTS = new Set(['.js', '.mjs', '.cjs', '.ts', '.json', '.html', '.yml', '.yaml']);
 
+/**
+ * 可能装私钥的文件后缀。加进来是为了**读内容**，不是为了见到就报——
+ * 公钥也是 `.pem`，公开是应该的。
+ */
+const KEY_EXTS = new Set(['.pem', '.key', '.txt', '.md']);
+
+/**
+ * PEM 私钥块。**只认私钥，不认公钥**：`BEGIN PUBLIC KEY` 是要公开的，
+ * 报了反而会让人把整个检查关掉。
+ *
+ * 为什么单独加这条：原来的判据是「键名像凭据 + 值够长」，
+ * 而 PEM 里根本没有键名——`BEGIN PRIVATE KEY` 那一行后面跟的是一整块
+ * base64，逐行看每一行都不像密钥。于是**整份私钥躺在仓库里也一路绿灯**。
+ * （这里故意不写完整的五个连字符，否则这个脚本会把自己扫出来。）
+ */
+const PEM_PRIVATE = /-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----/;
+
+/** 这些是「打包好的密钥容器」，二进制看不出内容，见到就不许入库 */
+const KEY_CONTAINERS = new Set(['.p12', '.pfx', '.jks', '.keystore']);
+
 /** 只在这个模式下用；git 模式下一个目录都不跳 */
 const SKIP_DIRS = new Set(['node_modules', '.git', 'data', 'logs', 'dist', 'coverage']);
 
@@ -76,7 +96,7 @@ const SAFE = /fake|dummy|example|placeholder|sample|mock|test[-_]|not[-_]a[-_]re
  * 这些不是「可能有密钥」，是「**必然**有明文密钥」：
  * 运行时生成的备份、日志、数据目录。命中就报，不商量。
  */
-const NEVER_TRACK = ['config/backups/'];
+const NEVER_TRACK = ['config/backups/', 'keys/'];
 
 /** 递归收集文件（没有 git 时的退路） */
 function collect(dir, out = []) {
@@ -120,7 +140,10 @@ let scope;
 
 if (tracked) {
   // git 模式：跟踪了什么就扫什么。只按扩展名过滤，不按目录跳
-  files = tracked.filter((f) => EXTS.has(path.extname(f).toLowerCase()));
+  files = tracked.filter((f) => {
+    const ext = path.extname(f).toLowerCase();
+    return EXTS.has(ext) || KEY_EXTS.has(ext);
+  });
   scope = `git 跟踪的 ${files.length} 个文件`;
 } else {
   const dirs = scanAll ? [...CODE_DIRS, ...DOC_DIRS] : CODE_DIRS;
@@ -144,6 +167,12 @@ if (tracked) {
       hard: true,
     });
   }
+
+  /** 密钥容器：二进制，扫不出内容，只能按后缀拦 */
+  for (const f of tracked) {
+    if (!KEY_CONTAINERS.has(path.extname(f).toLowerCase())) continue;
+    hits.push({ file: f, line: 0, key: '密钥容器', preview: '不该入库', hard: true });
+  }
 }
 
 /* ---------- 规则二：值像真密钥 ---------- */
@@ -156,6 +185,25 @@ for (const rel of files) {
     continue;
   }
   const lines = text.split('\n');
+
+  /**
+   * 私钥整块。放在逐行扫描之前，命中就不用再往下找了。
+   *
+   * 这一条是给「签名私钥」准备的：它没有键名，逐行的凭据判据抓不到。
+   * 一旦有人把 `trust-private.pem` 传进仓库，这是最后一道能拦住它的检查。
+   */
+  if (PEM_PRIVATE.test(text)) {
+    const at = lines.findIndex((l) => PEM_PRIVATE.test(l));
+    hits.push({
+      file: rel.split(path.sep).join('/'),
+      line: at + 1,
+      key: '私钥内容',
+      preview: 'PEM PRIVATE KEY（内容已隐藏）',
+      hard: true,
+    });
+    continue;
+  }
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     // 注释掉的代码也可能是从别处粘过来的真密钥，照样扫

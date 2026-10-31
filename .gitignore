@@ -45,3 +45,6 @@ node-path.txt
 
 # Windows 设备名，误建出来的空文件，git 索引不了
 nul
+
+# 签名私钥：只在发版机上，永不入库（公钥内嵌在 src/trust.js，这个目录整个不要）
+keys/

@@ -23,6 +23,8 @@ import { fetchGiteeTree, detectGiteeRef, giteeRawUrl } from './gitee.js';
 import { hashDir } from './hashdir.js';
 import { CODE_ENTRIES, PROTECTED_ENTRIES as PROTECTED } from './update-scope.js';
 import { ROOT } from './config.js';
+import { loadGlobalConfig } from './config.js';
+import { checkTrust, resolveTrust, normalizeText, blockReason } from './trust.js';
 
 const log = createLogger('update');
 
@@ -108,9 +110,9 @@ async function updatedButNotRestarted() {
  * 两个源都试：GitHub raw（经下载源改写）和 Gitee raw。任何一边拿到都行，
  * 因为指纹是「代码内容」的，与从哪个源下载无关。
  *
- * @returns {Promise<Map<string,string>>} 版本号 → 64 位十六进制
+ * @returns {Promise<{map: Map<string,string>, trust: object}>} 版本号 → 64 位十六进制，以及验签结论
  */
-async function fetchSumsMap() {
+async function fetchSums() {
   const urls = [
     `https://raw.githubusercontent.com/${REPO}/master/SHA256SUMS`,
     `https://gitee.com/${REPO}/raw/master/SHA256SUMS`,
@@ -128,12 +130,40 @@ async function fetchSumsMap() {
         const m = /^([a-f0-9]{64})\s+v?([0-9][\w.+-]*)$/i.exec(line.trim());
         if (m) map.set(m[2].replace(/^v/i, ''), m[1].toLowerCase());
       }
-      if (map.size) return map;
+      if (!map.size) continue;
+
+      /**
+       * 验签。指纹和代码同仓，只验指纹等于「让被篡改的清单自己证明自己」——
+       * 必须由独立密钥签过的 `SHA256SUMS.sig` 背书。
+       *
+       * 本版只记录结论、不阻断（`enforce` 还没接进来）；`bad` 要打 error，
+       * 因为它意味着「清单内容和签名对不上」，比「没签名」严重得多。
+       */
+      let sigText = '';
+      try {
+        const sres = await fetchViaMirror(`${u}.sig`, {
+          headers: { 'User-Agent': 'qq-bot-roost-updater' },
+          signal: AbortSignal.timeout(8000),
+        });
+        if (sres.ok) sigText = await sres.text();
+      } catch {
+        // 拿不到签名文件不是网络错误，继续按「未签名」处理
+      }
+      const trust = checkTrust({
+        data: normalizeText(text),
+        sigText,
+        trust: resolveTrust({}),
+        kind: 'SHA256SUMS',
+      });
+      if (trust.status === 'bad' || trust.status === 'invalid') log.error(trust.why);
+      else if (trust.status === 'ok') log.info('SHA256SUMS 签名校验通过');
+
+      return { map, trust };
     } catch {
       // 换下一个源
     }
   }
-  return new Map();
+  return { map: new Map(), trust: { status: 'unavailable', why: '没有拿到 SHA256SUMS' } };
 }
 
 /**
@@ -142,10 +172,10 @@ async function fetchSumsMap() {
  */
 async function fetchTreeSha256(version) {
   try {
-    const map = await fetchSumsMap();
-    return map.get(String(version).replace(/^v/, '')) ?? null;
+    const { map, trust } = await fetchSums();
+    return { sha: map.get(String(version).replace(/^v/, '')) ?? null, trust };
   } catch {
-    return null;
+    return { sha: null, trust: { status: 'unavailable', why: '查询指纹失败' } };
   }
 }
 
@@ -153,7 +183,11 @@ export async function checkUpdate() {
   const needsRestart = await updatedButNotRestarted();
   const r = await checkUpdateCore();
   // 有新版本才值得多跑一次网络请求
-  if (r?.ok && r.hasUpdate) r.treeSha256 = await fetchTreeSha256(r.latest);
+  if (r?.ok && r.hasUpdate) {
+    const info = await fetchTreeSha256(r.latest);
+    r.treeSha256 = info.sha;
+    r.sumsTrust = info.trust;
+  }
   return { ...r, needsRestart };
 }
 
@@ -476,6 +510,22 @@ async function applyUpdateOnce(info) {
   if (!rel.ok) throw new Error(rel.error || '检查更新失败');
   if (!rel.hasUpdate) throw new Error(`已经是最新版本 ${cur}`);
   if (!rel.tarball) throw new Error('没有可下载的包');
+
+  /**
+   * 签名闸门：和插件市场共用面板上那个开关。
+   *
+   * 为什么放在下载之前：被拒的时候用户什么都没损失，不用先下一份再删。
+   * `rel.sumsTrust` 是 `checkUpdate()` 拉 `SHA256SUMS` 时顺手算出来的，
+   * 没拿到就当 `unavailable`（没配公钥 / 网络问题），按「不拦」处理。
+   */
+  const trustCfg = resolveTrust(await loadGlobalConfig().catch(() => ({})));
+  const trustWhy = blockReason(trustCfg, rel.sumsTrust?.status || 'unavailable', '', { official: true });
+  if (trustWhy) {
+    throw new Error(
+      `自更新被拒绝：${trustWhy}\n` +
+        '你的代码没有任何改动。可以到 GitHub Releases 手动下载安装，或先在设置里关掉「插件来源校验」。',
+    );
+  }
 
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const workDir = path.join(ROOT, 'data', `.update-${stamp}`);

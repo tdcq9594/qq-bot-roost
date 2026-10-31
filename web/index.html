@@ -394,6 +394,18 @@
         <div class="hint">修改监听地址或端口需要重启进程才生效。</div>
       </div>
 
+      <div class="box">
+        <div class="box-hd"><h3>插件来源校验</h3></div>
+        <label class="switch">
+          <input type="checkbox" name="trustEnforce">
+          强制校验插件市场签名（默认关闭）
+        </label>
+        <div class="hint" id="trustHint">
+          开启后，官方市场里未签名或签名不符的插件会被拒绝安装和更新；手写插件、以及你自己配置的市场源不受影响。
+          需要框架内置信任公钥——没内置时这个开关不起作用（所有插件照常放行）。
+        </div>
+      </div>
+
       <div class="sticky-actions">
         <span id="cfgMsg" class="hint"></span>
         <button type="submit" class="btn primary">保存配置</button>

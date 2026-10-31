@@ -1066,6 +1066,21 @@ function fillForm(c) {
   f.logLevel.value = c.logLevel || 'info';
 
   f.groupInvited.checked = Boolean(c.groupManage?.invited);
+
+  /**
+   * 插件来源校验开关。`pubkeySet: false` 时必须说清楚「开了也没用」——
+   * 否则用户打开开关、以为已经受保护，实际什么都没发生，这比没有开关更糟。
+   */
+  const trust = c.security?.trust ?? {};
+  f.trustEnforce.checked = Boolean(trust.enforce);
+  const trustHint = $('#trustHint');
+  if (trustHint) {
+    trustHint.textContent = !trust.pubkeySet
+      ? '当前框架没有内置信任公钥，这个开关即使打开也不起作用（所有插件照常放行）。'
+      : !trust.pubkeyValid
+        ? '信任公钥配错了，解析不了——这个开关打开也不会生效。检查配置里的 security.trust.pubkey。'
+        : '开启后，官方市场里未签名或签名不符的插件会被拒绝安装和更新；手写插件、以及你自己配置的市场源不受影响。';
+  }
 }
 
 /* ---------------- 事件订阅 intents ---------------- */
@@ -1347,6 +1362,10 @@ $('#cfgForm').addEventListener('submit', async (e) => {
     },
     groupManage: {
       invited: f.groupInvited.checked,
+    },
+    // 全局设置（config/bot.json），和 webui 一样不写进机器人配置
+    security: {
+      trust: { enforce: f.trustEnforce.checked },
     },
   };
 

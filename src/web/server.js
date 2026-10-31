@@ -16,6 +16,7 @@ import {
   mergeWithInstalled,
   detectUpdates,
   compareVersion,
+  isOfficialSource,
 } from '../plugin/market.js';
 import {
   checkUpdate as checkFrameworkUpdate,
@@ -32,6 +33,7 @@ import { onMessage as onBusMessage } from '../message-bus.js';
 import { handleQqCall, capabilityPayload } from './qq-call.js';
 import { runDoctor, summarize } from '../doctor.js';
 import { createBindTask, pollBindResult } from '../qq/qrlogin.js';
+import { resolveTrust, blockReason, pubkeyUsable } from '../trust.js';
 import { toSvg as qrToSvg } from '../qq/qrsvg.js';
 import {
   PRESETS,
@@ -851,7 +853,7 @@ export async function startWebServer({
 
     const out = { at: Date.now(), updates: [], error: '' };
     try {
-      const idx = await fetchIndex(globalCfg.plugins?.marketUrl || undefined);
+      const idx = await fetchIndex(globalCfg.plugins?.marketUrl || undefined, { trust: resolveTrust(globalCfg) });
       const localVers = await r.plugins.localVersions();
       out.updates = detectUpdates(idx.plugins, localVers).map((u) => ({
         id: u.id,
@@ -1336,6 +1338,7 @@ export async function startWebServer({
 
         // 配置读取（隐藏密钥）
         if (pathname === '/api/config' && req.method === 'GET') {
+          const trust = resolveTrust(globalCfg);
           return json(res, 200, {
             ...cfg,
             // webui 和 logLevel 是**全局**设置（config/bot.json），所有机器人共用，
@@ -1348,6 +1351,19 @@ export async function startWebServer({
               accessKeySet: Boolean(globalCfg.webui?.accessKey),
             },
             logLevel: globalCfg.logLevel ?? 'info',
+            /**
+             * 插件来源校验（全局设置）。只回「开没开」和「有没有公钥」——
+             * 公钥本身是公开的，但配置里可能是整段 PEM，回显没意义还占地方。
+             * `pubkeySet: false` 时面板要提示「开关不起作用」。
+             */
+            security: {
+              trust: {
+                enforce: trust.enforce,
+                pubkeySet: Boolean(trust.pubkey),
+                // 「配了但解析不了」和「没配」要分开：前者开开关等于没开
+                pubkeyValid: pubkeyUsable(trust.pubkey),
+              },
+            },
             appSecret: cfg.appSecret ? '********' : '',
             appSecretSet: Boolean(cfg.appSecret),
           });
@@ -1408,6 +1424,21 @@ export async function startWebServer({
             setLevel(body.logLevel);
             await saveGlobalConfig?.(globalCfg).catch(() => {});
             configureMirror(globalCfg);
+          }
+          /**
+           * 插件来源校验开关（全局，默认关）。
+           *
+           * 只接受布尔值：面板传字符串 "false" 时如果按真值判断，会把「关」
+           * 读成「开」——这类错误在安全开关上代价最大，所以这里严格比类型。
+           *
+           * 立即生效，不需要重启：`resolveTrust` 每次调用都现读 `globalCfg`。
+           */
+          if (body.security?.trust && typeof body.security.trust.enforce === 'boolean') {
+            globalCfg.security = {
+              ...(globalCfg.security ?? {}),
+              trust: { ...(globalCfg.security?.trust ?? {}), enforce: body.security.trust.enforce },
+            };
+            await saveGlobalConfig?.(globalCfg).catch(() => {});
           }
           if (body.whitelist && typeof body.whitelist === 'object') {
             cfg.whitelist = {
@@ -1948,7 +1979,7 @@ export async function startWebServer({
         if (pathname === '/api/market' && req.method === 'GET') {
           const url2 = url.searchParams.get('source') || globalCfg.plugins?.marketUrl || undefined;
           try {
-            const idx = await fetchIndex(url2);
+            const idx = await fetchIndex(url2, { trust: resolveTrust(globalCfg) });
             const installedIds = new Set(plugins.loaded.keys());
             // 目录里存在但没加载成功的也算「已装」
             try {
@@ -1970,6 +2001,8 @@ export async function startWebServer({
                 latest: u.latest,
               })),
               localVersions: localVers,
+              // 索引签名状态：ok / unsigned / bad / unavailable（面板可据此提示）
+              trust: idx?._trust?.status || 'unavailable',
               // 网络挂了用的是本地缓存，面板要提示用户「这是旧数据」
               stale: idx.stale === true,
               staleAge: idx.staleAge || '',
@@ -1986,9 +2019,18 @@ export async function startWebServer({
           if (!id) return json(res, 400, { error: '缺少插件 id' });
           try {
             const src = globalCfg.plugins?.marketUrl || undefined;
-            const idx = await fetchIndex(src);
+            const idx = await fetchIndex(src, { trust: resolveTrust(globalCfg) });
             const entry = idx.plugins.find((p) => p.id === id);
             if (!entry) return json(res, 404, { error: `市场里没有 ${id}` });
+
+            /**
+             * 信任闸。**只对官方源生效**：手写插件走 `plugins/` 目录，根本不经过
+             * 市场索引；用户自己填的市场源是他自己的信任决定，不拦。
+             * 本版 `enforce` 默认 false，所以这里恒放行。
+             */
+            const official = isOfficialSource(src, globalCfg);
+            const trustWhy = blockReason(resolveTrust(globalCfg), idx?._trust?.status || 'unavailable', id, { official });
+            if (trustWhy) return json(res, 403, { error: trustWhy });
 
             /**
              * 下载 + 解包期间要挂起插件热重载。
@@ -2614,9 +2656,18 @@ export async function startWebServer({
           let repo = null;
           try {
             const src = globalCfg.plugins?.marketUrl || undefined;
-            const idx = await fetchIndex(src);
+            const idx = await fetchIndex(src, { trust: resolveTrust(globalCfg) });
             const entry = idx.plugins.find((p) => p.id === id);
             if (!entry) return json(res, 404, { error: `市场里没有 ${id}` });
+
+            /**
+             * 信任闸。**只对官方源生效**：手写插件走 `plugins/` 目录，根本不经过
+             * 市场索引；用户自己填的市场源是他自己的信任决定，不拦。
+             * 本版 `enforce` 默认 false，所以这里恒放行。
+             */
+            const official = isOfficialSource(src, globalCfg);
+            const trustWhy = blockReason(resolveTrust(globalCfg), idx?._trust?.status || 'unavailable', id, { official });
+            if (trustWhy) return json(res, 403, { error: trustWhy });
 
             const localVers = await plugins.localVersions();
             const cur = localVers[id];
