@@ -971,6 +971,17 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
   background: var(--primary-soft, var(--panel-3)); color: var(--primary);
 }
 
+/* 插件分级标签：官方 / 已复核 / 作者自证 / 未验证 */
+.verify-tag {
+  display: inline-block; margin-right: 6px; padding: 0 6px;
+  border-radius: 4px; font-size: 10.5px; font-weight: 600;
+  vertical-align: 1px;
+}
+.verify-tag.vt-official { background: var(--primary-soft); color: var(--primary); }
+.verify-tag.vt-reviewed { background: var(--c-teal-soft); color: var(--c-teal); }
+.verify-tag.vt-self { background: var(--warn-soft); color: var(--warn); }
+.verify-tag.vt-none { background: var(--panel-3); color: var(--muted); }
+
 /* Beta 标记：签名开关还是 beta，不能让它看起来跟别的开关一样成熟 */
 .beta-tag {
   display: inline-block; margin-left: 6px; padding: 0 7px;

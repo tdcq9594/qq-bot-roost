@@ -2268,6 +2268,7 @@ function renderMarketRows() {
             <span class="kind-tag ${p.runtime === 'node' ? 'int' : 'ext'}">
               ${p.runtime === 'node' ? '内建 · node' : '外部 · ' + escapeHtml(p.runtime || '')}
             </span>
+            ${verifyTag(p)}
             ${p.author ? `<span class="hint">by ${escapeHtml(p.author)}</span>` : ''}
             ${p.credits ? `<span class="hint">${escapeHtml(p.credits)}</span>` : ''}
             ${p.description ? '<br>' + escapeHtml(p.description) : ''}
@@ -3583,6 +3584,23 @@ function logLine(e) {
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+/**
+ * 插件分级标签。
+ *
+ * 分级是**我们的判断**（写在插件仓的 verified.json 里），不是插件自述；
+ * 签名是另一回事——它是「这份索引没被改过」的全体属性，所有签名插件
+ * 都落同一个状态，所以不能做成档位。
+ */
+function verifyTag(p) {
+  const map = {
+    official: ['官方维护', 'vt-official', '跟着框架一起发布，代码在同一个仓库里'],
+    reviewed: ['已复核', 'vt-reviewed', '我们看过代码、试过能跑，但不由我们维护'],
+    self: ['作者自证', 'vt-self', '作者声明的内容，我们没有核对'],
+  };
+  const [label, cls, tip] = map[p.verified] || ['未验证', 'vt-none', '没有分级信息'];
+  return `<span class="verify-tag ${cls}" title="${escapeHtml(tip)}">${label}</span>`;
 }
 
 function applyFilter() {
