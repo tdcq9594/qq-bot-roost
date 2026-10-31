@@ -13,6 +13,7 @@ import { ensurePluginDeps } from './deps.js';
 import { satisfies, frameworkVersion } from '../semver.js';
 import { PageRegistry } from './pages.js';
 import { RouteRegistry } from './routes.js';
+import { Declarations, normalizeManifest, checkEngines } from './manifest.js';
 
 const log = createLogger('plugins');
 
@@ -29,6 +30,8 @@ const log = createLogger('plugins');
 export class PluginManager {
   constructor({ pluginsDir, paths, registry, api, cfg, goBin, groups, roles, outbound, session, pipeline, isOwner, reach, ledger, gate, delivery, ignoreCompat }) {
     this.dir = pluginsDir;
+    /** 插件声明的名字占用表（命令/工具/钩子），加载前查冲突、卸载时释放 */
+    this.decl = new Declarations();
     // 该机器人的全套路径（配置/数据/日志），多机器人下互不干扰
     this.paths = paths;
     // 全局配置里的 go 可执行文件路径（机器人配置里没有这一项）
@@ -240,6 +243,49 @@ export class PluginManager {
     );
   }
 
+  /**
+   * 清单检查：版本要求 + 名字声明。
+   *
+   * 放在 `setup()` 之前，理由和 `#assertCompatible` 一样——跑起来才发现
+   * 「这个命令被别的插件占了」太晚，用户看到的是「插件好像没生效」。
+   *
+   * 三件事：
+   *   1. `engines` 不满足就拒绝加载（roost / node / dsh，查不到的键跳过）
+   *   2. `provides` 有冲突就拒绝加载，并说清是谁占了哪个名字
+   *   3. **没声明 `provides` 的老插件照常加载**，只记一条 debug
+   */
+  #assertManifest(id, rawMeta) {
+    const m = normalizeManifest(rawMeta);
+
+    if (!this.ignoreCompat) {
+      const r = checkEngines(
+        m.engines,
+        { roost: frameworkVersion(), node: process.versions.node },
+        satisfies,
+      );
+      if (!r.ok) {
+        throw new Error(`${r.why}。升级后再启用，或者把插件里的 engines 改成兼容的范围`);
+      }
+    }
+
+    const total = m.provides.commands.length + m.provides.tools.length + m.provides.hooks.length;
+    if (!total) {
+      log.debug(`插件 ${id} 没有声明 provides，跳过预检（老插件正常加载）`);
+      return;
+    }
+
+    const conflicts = this.decl.claim(id, m.provides);
+    if (!conflicts.length) return;
+
+    const label = { commands: '命令', tools: '工具名', hooks: '钩子' };
+    const first = conflicts[0];
+    const extra = conflicts.length > 1 ? `（另有 ${conflicts.length - 1} 项冲突）` : '';
+    throw new Error(
+      `和插件 ${first.owner} 抢同一个${label[first.kind] ?? first.kind}「${first.name}」${extra}。` +
+        '两个插件都声明了它，后加载的这一个不会生效——先停用其中一个，或者让作者改个名字',
+    );
+  }
+
   async #detectKind(dir) {
     try {
       await fs.access(path.join(dir, 'plugin.json'));
@@ -301,6 +347,8 @@ export class PluginManager {
       }
       this.errors.set(id, e.message);
       this.errorStacks.set(id, e.stack || e.message);
+      // 声明在 setup 之前就认领了，加载失败必须还回去，否则下次重试会「自己和自己冲突」
+      this.decl.release(id);
       log.error(`插件 ${id} 加载失败: ${e.stack || e.message}`);
       /**
        * 失败时把已经建起来的东西收干净。
@@ -381,6 +429,7 @@ export class PluginManager {
     meta.id = id;
     // 版本兼容在 setup 之前拦——跑起来才发现「ctx.xxx 不是函数」就太晚了
     this.#assertCompatible(id, meta);
+    this.#assertManifest(id, meta);
 
     // 每个插件一份自己的日志文件：logs/bots/<机器人>/plugins/<id>.log
     if (this.cfg.logs?.enabled !== false) {
@@ -471,6 +520,8 @@ export class PluginManager {
     };
 
     this.#assertCompatible(id, meta);
+    // 用 raw 而不是 meta：meta 是逐字段拼的，没有 provides / engines
+    this.#assertManifest(id, raw);
 
     // 每个插件一份自己的日志文件：logs/bots/<机器人>/plugins/<id>.log
     if (this.cfg.logs?.enabled !== false) {
@@ -576,6 +627,8 @@ export class PluginManager {
   /* ---------------- 卸载与重载 ---------------- */
 
   async unload(id) {
+    // 先释放声明：加载失败时也可能已经认领过（claim 在 setup 之前）
+    this.decl.release(id);
     const item = this.loaded.get(id);
     if (!item) return false;
 
@@ -625,6 +678,8 @@ export class PluginManager {
    * 重装之后会被这条旧记录挡住不加载，用户会以为装坏了。
    */
   async forget(id) {
+    // 目录已经删了，但声明可能还占着名字——不释放会让重装的同名插件「和自己冲突」
+    this.decl.release(id);
     let dirty = false;
     if (this.state && id in this.state) {
       delete this.state[id];
