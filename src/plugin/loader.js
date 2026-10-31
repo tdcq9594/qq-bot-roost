@@ -972,9 +972,13 @@ export class PluginManager {
     // diskIds 是「装了但没启用」的那批（include 模式下常见），
     // 也要列出来——否则用户在面板里根本看不到它，也就没法启用。
     const ids = new Set([...this.loaded.keys(), ...this.meta.keys(), ...this.diskIds]);
+    /** 一次算好再进循环：byPlugin() 每次都重建整张表，放进 map 里就是 O(n²) */
+    const claimed = this.decl.byPlugin();
     return [...ids].map((id) => {
       const item = this.loaded.get(id);
       const cached = this.meta.get(id) ?? null;
+      /** 清单声明统一从这里取：加载中用 meta，禁用中用缓存，两者字段一致 */
+      const mf = normalizeManifest(item?.meta ?? cached ?? {});
       const ext = item?.kind === 'external' ? item.host.status : null;
       return {
         id,
@@ -991,10 +995,10 @@ export class PluginManager {
          * 声明与兼容性。`provides` 优先用**实际认领**的那份（decl），
          * 因为插件可能声明了却没用上；没加载时退回声明原文。
          */
-        provides: this.decl.byPlugin().get(id) ?? cached?.provides ?? normalizeManifest(item?.meta ?? {}).provides,
-        engines: cached?.engines ?? normalizeManifest(item?.meta ?? {}).engines,
+        provides: claimed.get(id) ?? mf.provides,
+        engines: mf.engines,
         enginesOk: checkEngines(
-          cached?.engines ?? normalizeManifest(item?.meta ?? {}).engines,
+          mf.engines,
           { roost: frameworkVersion(), node: process.versions.node },
           satisfies,
         ).ok,
