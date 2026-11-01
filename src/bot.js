@@ -89,6 +89,8 @@ export class BotRuntime {
      * 拉不到就退回显示 openid，不影响任何功能。
      */
     this.groupNames = new Map();
+    /** 同群并发补名时复用同一个请求，避免一条消息打两次接口 */
+    this.groupNameInflight = new Map();
     this.roles = new RoleStore(this.paths.roles);
     /**
      * 可达性：谁能私聊、哪个群能主动推。
@@ -520,16 +522,38 @@ export class BotRuntime {
   async #ensureGroupName(groupOpenid) {
     if (!groupOpenid) return;
     const hit = this.groupNames.get(groupOpenid);
-    if (hit && Date.now() - hit.at < 10 * 60_000) return;
+    /** ttl 由写入时决定：成功 10 分钟；11253（无权限）一天；其它失败 30 秒 */
+    if (hit && Date.now() - hit.at < (hit.ttl ?? 10 * 60_000)) return;
 
-    try {
-      const info = await this.api.getGroupInfo(groupOpenid);
-      const name = String(info?.group_name ?? info?.name ?? '').trim();
-      this.groupNames.set(groupOpenid, { name, at: Date.now() });
-    } catch {
-      // 拉不到就算了：openid 也能认，只是没那么好认
-      this.groupNames.set(groupOpenid, { name: '', at: Date.now() });
-    }
+    /**
+     * 同一条群消息可能触发两次（消息事件里一次、面板补一次），
+     * 两次都在 `await getGroupInfo` 之前查缓存 → 都判 miss → 打两次接口。
+     * 用 in-flight Map 让同 key 复用同一个 promise。
+     */
+    const flying = this.groupNameInflight.get(groupOpenid);
+    if (flying) return flying;
+
+    const job = (async () => {
+      try {
+        const info = await this.api.getGroupInfo(groupOpenid);
+        const name = String(info?.group_name ?? info?.name ?? '').trim();
+        this.groupNames.set(groupOpenid, { name, at: Date.now(), ttl: 10 * 60_000 });
+      } catch (e) {
+        // 拉不到就算了：openid 也能认，只是没那么好认
+        const code = Number(e?.code ?? e?.errCode ?? e?.errcode ?? 0);
+        this.groupNames.set(groupOpenid, {
+          name: '',
+          at: Date.now(),
+          // 11253 = 应用无接口访问权限（仅白名单机器人可用），别每 30 秒重试
+          ttl: code === 11253 ? 24 * 3600_000 : 30_000,
+        });
+      } finally {
+        this.groupNameInflight.delete(groupOpenid);
+      }
+    })();
+
+    this.groupNameInflight.set(groupOpenid, job);
+    return job;
   }
 
   async stop() {
