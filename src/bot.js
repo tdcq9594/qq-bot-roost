@@ -488,7 +488,11 @@ export class BotRuntime {
    * @param {{timeoutMs?:number}} [opts]
    */
   async fetchGroupNames(ids = [], { timeoutMs = 2500 } = {}) {
-    const todo = [...new Set(ids.filter((id) => id && !this.groupName(id)))];
+    /**
+     * 不能只拉「还没有名字」的群：那样群改名后缓存永远不刷新。
+     * 统一交给 #ensureGroupName 按 10 分钟 TTL 判断——缓存新的时候它直接返回，不打接口。
+     */
+    const todo = [...new Set(ids.filter(Boolean))];
     if (!todo.length) return;
 
     const work = Promise.allSettled(todo.map((id) => this.#ensureGroupName(id)));
@@ -700,13 +704,13 @@ export class BotRuntime {
      *
      * 以前只缓存不挂到消息上，ai-chat 取不到群名就回退成**发消息人的昵称**——
      * 结果群会话的标题显示成「我的昵称」，和私聊分不开。
-     * 这里挂上缓存值；没有就顺手拉一次（不阻塞这条消息，下一条就有了）。
+     * 这里挂上缓存值，并异步补拉（不阻塞这条消息）。补拉按 TTL 去重，
+     * 所以群改名后最多 10 分钟能刷到。
      */
     if (msg.kind === 'group' && msg.groupId) {
       msg.groupName = this.groupName(msg.groupId) || '';
-      if (!msg.groupName) {
-        this.fetchGroupNames([msg.groupId]).catch(() => {});
-      }
+      /** 每条群消息都问一次（内部按 TTL 去重）：群改名后能刷到，没权限时也不会反复打接口 */
+      this.fetchGroupNames([msg.groupId]).catch(() => {});
     }
 
     /**
