@@ -696,6 +696,20 @@ export class BotRuntime {
     const msg = buildMessage(eventName, d, { api: this.api, cfg, outbound, session });
 
     /**
+     * 群名不在官方事件里（只有 `group_openid`），但框架有缓存。
+     *
+     * 以前只缓存不挂到消息上，ai-chat 取不到群名就回退成**发消息人的昵称**——
+     * 结果群会话的标题显示成「我的昵称」，和私聊分不开。
+     * 这里挂上缓存值；没有就顺手拉一次（不阻塞这条消息，下一条就有了）。
+     */
+    if (msg.kind === 'group' && msg.groupId) {
+      msg.groupName = this.groupName(msg.groupId) || '';
+      if (!msg.groupName) {
+        this.fetchGroupNames([msg.groupId]).catch(() => {});
+      }
+    }
+
+    /**
      * 入账：**第一件要做的事**，在去重 / 白名单 / 限流 / 暂停之前。
      *
      * 顺序是有讲究的。账本记的是「发生过什么」，不是「我们怎么处理的」：
