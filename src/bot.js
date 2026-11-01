@@ -540,7 +540,8 @@ export class BotRuntime {
         this.groupNames.set(groupOpenid, { name, at: Date.now(), ttl: 10 * 60_000 });
       } catch (e) {
         // 拉不到就算了：openid 也能认，只是没那么好认
-        const code = Number(e?.code ?? e?.errCode ?? e?.errcode ?? 0);
+        /** api.js 抛的是 `qqCode`，不是 code；读错字段会让 11253 永远按 30 秒重试 */
+        const code = Number(e?.qqCode ?? e?.code ?? e?.errCode ?? e?.errcode ?? 0);
         this.groupNames.set(groupOpenid, {
           name: '',
           at: Date.now(),
