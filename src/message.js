@@ -812,6 +812,14 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
     let index = 0;
     let streamId = opts.streamMsgId || '';
     const target = userId;
+    /**
+     * **一条流式消息只占一个 `msg_seq`**，所有分片共用。
+     *
+     * 这一步必须在首片之前做：流式接口不走 `#payload`，不主动占号的话
+     * 服务端按默认 1 算，而我们后续的普通回复也从 1 开始递增，
+     * 两边一撞就是 `40054005 消息被去重`（用户看到「发了但没出现」）。
+     */
+    const seq = typeof api.takeSeq === 'function' ? api.takeSeq(msg.id) : 1;
 
     return {
       /** 发一片。返回服务端生成的 stream_msg_id（第一片才有） */
@@ -823,6 +831,7 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
           mode: 'replace',
           streamMsgId: streamId || undefined,
           msgId: msg.id,
+          msgSeq: seq,
           isWakeup: opts.isWakeup,
         });
         if (r?.id && !streamId) streamId = r.id;
@@ -837,6 +846,7 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
           mode: 'replace',
           streamMsgId: streamId || undefined,
           msgId: msg.id,
+          msgSeq: seq,
           isWakeup: opts.isWakeup,
         });
       },

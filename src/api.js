@@ -980,7 +980,21 @@ export class QQApi {
       content_raw: String(p.contentRaw ?? ''),
     };
     if (p.streamMsgId) payload.stream_msg_id = p.streamMsgId;
-    if (p.msgId) payload.msg_id = p.msgId;
+    if (p.msgId) {
+      payload.msg_id = p.msgId;
+      /**
+       * `msg_seq` 必须显式给，而且**所有分片用同一个值**。
+       *
+       * 流式消息是「一条消息在长」，不是多条——官方示例里首片、续片、结束片
+       * 都是同一个 `msg_seq`。不传的话服务端按 1 处理，而我们自己的普通回复
+       * 也从 1 开始递增，于是「先流式、再发图/文件」会撞
+       * `40054005 消息被去重`。
+       *
+       * 取值由调用方先算好传进来（`replyStream` 会在首片前调 `takeSeq`）。
+       */
+      if (p.msgSeq != null) payload.msg_seq = Number(p.msgSeq);
+      else payload.msg_seq = this.#nextSeq(p.msgId);
+    }
     if (p.eventId) payload.event_id = p.eventId;
     if (p.isWakeup) payload.is_wakeup = true;
     return this.#request('POST', `/v2/users/${enc(openid)}/stream_messages`, payload);
@@ -1210,6 +1224,18 @@ export class QQApi {
   }
 
   /* ---------------- 内部 ---------------- */
+
+  /**
+   * 先占一个 `msg_seq`，供流式消息这种「一条消息发好几次」的场景用。
+   *
+   * 为什么要有：流式接口不走 `#payload`，所以以前完全不占序号——首片按默认 1 算，
+   * 而我们自己后续的普通回复也从 1 开始递增，两边撞上就是
+   * `40054005 消息被去重`（用户那边表现为「发了但没出现」）。
+   * 流式所有分片共用这一个值（一条消息一个序号）。
+   */
+  takeSeq(msgId) {
+    return this.#nextSeq(msgId);
+  }
 
   #payload(opts) {
     return buildSendPayload(opts, (id) => this.#nextSeq(id));
