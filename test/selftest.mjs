@@ -3319,6 +3319,12 @@ async function testUpdaterRestartHint() {
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'roost-upd-'));
   const pkg = path.join(tmpDir, 'package.json');
   await fsp.copyFile(src, pkg);
+  /**
+   * 拷贝出来的 mtime 是「现在」，比进程启动还新 —— 第一条断言会判成「刚更新完，要重启」。
+   * 显式拨到一分钟前，让「正常情况」真的正常（CI 的 Linux 上就是这么挂的）。
+   */
+  const past = new Date(Date.now() - 60_000);
+  await fsp.utimes(pkg, past, past);
 
   try {
     // 正常情况：package.json 比进程启动早，不需要重启
