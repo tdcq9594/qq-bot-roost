@@ -3306,20 +3306,30 @@ await testAiChat();
  */
 async function testUpdaterRestartHint() {
   const fsp = await import('node:fs/promises');
-  const pkg = path.resolve(import.meta.dirname, '..', 'package.json');
-  const orig = await fsp.stat(pkg);
+  const src = path.resolve(import.meta.dirname, '..', 'package.json');
   const m = await import('../src/updater.js');
+
+  /**
+   * **拷一份到临时目录再改 mtime。**
+   *
+   * 原来直接改仓库里那个 package.json：两个 `npm test` 并行时，一个把 mtime
+   * 拨到未来、另一个正好读到，于是「正常时不提示重启」假失败（实测 622 条里挂 1 条）。
+   * `checkUpdate({ pkgPath })` 就是为这个开的参数。
+   */
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'roost-upd-'));
+  const pkg = path.join(tmpDir, 'package.json');
+  await fsp.copyFile(src, pkg);
 
   try {
     // 正常情况：package.json 比进程启动早，不需要重启
-    const r1 = await m.checkUpdate();
+    const r1 = await m.checkUpdate({ pkgPath: pkg });
     check('更新: 正常时不提示重启', r1.needsRestart === false, `needsRestart=${r1.needsRestart}`);
     check('更新: 返回值带 current', typeof r1.current === 'string' && r1.current.length > 0, r1.current);
 
-    // 模拟「刚更新完、还没重启」：把 package.json 的 mtime 拨到未来
+    // 模拟「刚更新完、还没重启」：把副本的 mtime 拨到未来
     const future = new Date(Date.now() + 60_000);
     await fsp.utimes(pkg, future, future);
-    const r2 = await m.checkUpdate();
+    const r2 = await m.checkUpdate({ pkgPath: pkg });
     check('更新: 文件比进程新时提示重启', r2.needsRestart === true, `needsRestart=${r2.needsRestart}`);
     check(
       '更新: 已是最新但需重启时 hasUpdate 为 false',
@@ -3327,8 +3337,7 @@ async function testUpdaterRestartHint() {
       `hasUpdate=${r2.hasUpdate}`,
     );
   } finally {
-    // 必须还原：改坏 mtime 会让后面的「需要重启」判断全部错乱
-    await fsp.utimes(pkg, orig.atime, orig.mtime);
+    await fsp.rm(tmpDir, { recursive: true, force: true });
   }
 }
 

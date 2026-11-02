@@ -74,9 +74,9 @@ export async function currentVersion() {
  *
  * 留 2 秒容差：解压/拷贝和 stat 之间总有毫秒级误差。
  */
-async function updatedButNotRestarted() {
+async function updatedButNotRestarted(pkgPath = path.join(ROOT, 'package.json')) {
   try {
-    const st = await fs.stat(path.join(ROOT, 'package.json'));
+    const st = await fs.stat(pkgPath);
     const startedAt = Date.now() - process.uptime() * 1000;
     return st.mtimeMs > startedAt + 2000;
   } catch {
@@ -179,8 +179,13 @@ async function fetchTreeSha256(version) {
   }
 }
 
-export async function checkUpdate() {
-  const needsRestart = await updatedButNotRestarted();
+/**
+ * @param {{pkgPath?: string}} [o] pkgPath 只给测试用：
+ *   自测原来直接改仓库里 package.json 的 mtime，两个 `npm test` 并行就会互相毒化
+ *   （一个把 mtime 拨到未来、另一个正好读到，于是「正常时不提示重启」假失败）。
+ */
+export async function checkUpdate({ pkgPath } = {}) {
+  const needsRestart = await updatedButNotRestarted(pkgPath);
   const r = await checkUpdateCore();
   // 有新版本才值得多跑一次网络请求
   if (r?.ok && r.hasUpdate) {

@@ -91,6 +91,14 @@ export class BotRuntime {
     this.groupNames = new Map();
     /** 同群并发补名时复用同一个请求，避免一条消息打两次接口 */
     this.groupNameInflight = new Map();
+    /**
+     * 群名接口的**全局**并发闸（`getGroupInfo` 是 30 QPM）。
+     *
+     * 原来只在 `fetchGroupNames` 里限流，那是「每次调用」的上限：
+     * 面板批量拉一次、消息链路每条群消息又拉一次，两条并发就翻倍。
+     */
+    this.groupNameActive = 0;
+    this.groupNameWaiters = [];
     this.roles = new RoleStore(this.paths.roles);
     /**
      * 可达性：谁能私聊、哪个群能主动推。
@@ -486,10 +494,16 @@ export class BotRuntime {
    * 再自己刷新一次很别扭；但也不能为了几个群名把面板卡住（接口有频控，
    * 群多了还会串行超时）。所以给一个总超时，到点有多少用多少。
    *
+   * **并发要限**：`getGroupInfo` 是 30 QPM。以前这里是 `allSettled` 全并行，
+   * 群多的用户一次打开面板就打 30+ 个请求，正好撞在限频上——
+   * 结果是**一个群名都拿不到**，面板继续显示一串 openid。
+   *
    * @param {string[]} ids
-   * @param {{timeoutMs?:number}} [opts]
+   * @param {{timeoutMs?:number, concurrency?:number}} [opts]
    */
-  async fetchGroupNames(ids = [], { timeoutMs = 2500 } = {}) {
+  async fetchGroupNames(ids = [], { timeoutMs = 2500, concurrency = 4 } = {}) {
+    /** NaN / 0 / 负数都退回默认值：`Math.min(NaN, n)` 是 NaN，`Array.from({length:NaN})` 是空数组，一个群都不拉 */
+    const limit = Number.isFinite(concurrency) && concurrency >= 1 ? Math.floor(concurrency) : 4;
     /**
      * 不能只拉「还没有名字」的群：那样群改名后缓存永远不刷新。
      * 统一交给 #ensureGroupName 按 10 分钟 TTL 判断——缓存新的时候它直接返回，不打接口。
@@ -497,13 +511,28 @@ export class BotRuntime {
     const todo = [...new Set(ids.filter(Boolean))];
     if (!todo.length) return;
 
-    const work = Promise.allSettled(todo.map((id) => this.#ensureGroupName(id)));
+    const queue = todo.slice();
+    /** 到点之后不再派新的：已经发出去的请求收不回来，但尾巴不能一直延长 */
+    let stopped = false;
+    const worker = async () => {
+      for (;;) {
+        if (stopped) return;
+        const id = queue.shift();
+        if (!id) return;
+        // #ensureGroupName 自己吞异常，这里再兜一层只为保险
+        await this.#ensureGroupName(id).catch(() => {});
+      }
+    };
+    const n = Math.max(1, Math.min(limit, queue.length));
+    const work = Promise.all(Array.from({ length: n }, worker));
+
     let timer;
     const cap = new Promise((r) => {
       timer = setTimeout(r, timeoutMs);
       timer.unref?.();
     });
     await Promise.race([work, cap]);
+    stopped = true;
     clearTimeout(timer);
   }
 
@@ -534,6 +563,8 @@ export class BotRuntime {
     if (flying) return flying;
 
     const job = (async () => {
+      /** 全局闸：不管从哪条链路进来，同时在飞的群名请求不超过 4 个 */
+      await this.#groupNameSlot();
       try {
         const info = await this.api.getGroupInfo(groupOpenid);
         const name = String(info?.group_name ?? info?.name ?? '').trim();
@@ -549,12 +580,29 @@ export class BotRuntime {
           ttl: code === 11253 ? 24 * 3600_000 : 30_000,
         });
       } finally {
+        this.#freeGroupNameSlot();
         this.groupNameInflight.delete(groupOpenid);
       }
     })();
 
     this.groupNameInflight.set(groupOpenid, job);
     return job;
+  }
+
+  /** 拿一个群名请求的名额（最多 4 个同时在飞） */
+  async #groupNameSlot() {
+    if (this.groupNameActive < 4) {
+      this.groupNameActive += 1;
+      return;
+    }
+    await new Promise((resolve) => this.groupNameWaiters.push(resolve));
+  }
+
+  #freeGroupNameSlot() {
+    const next = this.groupNameWaiters.shift();
+    // 有人排队就把名额直接转给它（active 不变），没人排队才真的空出来
+    if (next) next();
+    else this.groupNameActive = Math.max(0, this.groupNameActive - 1);
   }
 
   async stop() {
