@@ -338,6 +338,54 @@ function buildResult(cur, tag, extra = {}) {
 /* ---------------- 下载与解包 ---------------- */
 
 /**
+ * 从 Gitee 拉一份**指定版本**的代码。
+ *
+ * 为什么必须锁 tag：GitHub 那条路下的是 `archive/refs/tags/v<版本>.tar.gz`，
+ * 内容被版本号钉死；Gitee 这条路以前固定拉默认分支，两条路一个锁版本、
+ * 一个跟着分支漂移。结果就是「发版后又往 master 推了个提交」时，
+ * 先更新的用户算出的指纹对得上、后更新的用户全部失败。
+ *
+ * v1.0.1 就是这么挂的（2026-11-04）：tag d76e646 的指纹是 ed2ebca6，
+ * 而 22:24 又推了一个只改 docs 的 7c35106 到 master，指纹变成 822f67f6，
+ * 版本号却没动 —— 从那一刻起所有 Gitee 源的用户都无法更新。
+ *
+ * 回退只在「这个 ref 根本不存在」时发生（列清单 404 / 树是空的）：
+ * 作者漏推 tag 时仍然得能装上，能不能过指纹那一关由 `applyUpdate` 判。
+ * 文件级失败（451 内容审查之类）换 ref 也一样，直接抛。
+ *
+ * @param {object} rel checkUpdate 的返回值（要 `tag`）
+ * @param {string} destDir 目标目录，失败重试前会被清空
+ */
+async function fetchTagFromGitee(rel, destDir) {
+  const token = currentMirror().giteeToken;
+  const tag = String(rel?.tag ?? '').trim();
+
+  const candidates = [];
+  if (tag) candidates.push(tag);
+  const branch = rel?.giteeRef || (await detectGiteeRef(REPO));
+  if (!candidates.includes(branch)) candidates.push(branch);
+
+  let lastErr = null;
+  for (const ref of candidates) {
+    try {
+      await fetchGiteeTree({ repo: REPO, ref, destDir, only: GITEE_ONLY, token });
+      if (tag && ref !== tag) {
+        log.warn(`Gitee 上找不到 ${tag}，已退回分支 ${ref}（内容可能与指纹不一致）`);
+      }
+      return;
+    } catch (e) {
+      lastErr = e;
+      if (!/文件清单失败|没有文件/.test(e.message)) throw e;
+      log.warn(`Gitee ${ref} 拉不到：${e.message}`);
+      // 半截文件不能留着，下一个 ref 要在一片空地上拉
+      await fs.rm(destDir, { recursive: true, force: true }).catch(() => {});
+      await fs.mkdir(destDir, { recursive: true });
+    }
+  }
+  throw lastErr;
+}
+
+/**
  * 下载并解包到临时目录。
  *
  * 两条路：
@@ -349,20 +397,13 @@ function buildResult(cur, tag, extra = {}) {
  * auto 模式下 GitHub 失败会自动切 Gitee——用户选 auto 时这就是承诺。
  *
  * @param {string} tmpDir
- * @param {object} rel checkUpdate 的返回值（带 tarball / giteeRef）
+ * @param {object} rel checkUpdate 的返回值（带 tarball / tag / giteeRef）
  */
 async function downloadTo(tmpDir, rel) {
   const id = currentMirror().id;
-  const token = currentMirror().giteeToken;
 
   if (id === 'gitee') {
-    await fetchGiteeTree({
-      repo: REPO,
-      ref: rel.giteeRef ?? (await detectGiteeRef(REPO)),
-      destDir: tmpDir,
-      only: GITEE_ONLY,
-      token,
-    });
+    await fetchTagFromGitee(rel, tmpDir);
     return tmpDir;
   }
 
@@ -381,13 +422,7 @@ async function downloadTo(tmpDir, rel) {
     log.warn(`GitHub 下载失败（${e.message}），改用 Gitee 镜像`);
     // 清掉可能写了一半的残留，再整树重拉
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
-    await fetchGiteeTree({
-      repo: REPO,
-      ref: await detectGiteeRef(REPO),
-      destDir: tmpDir,
-      only: GITEE_ONLY,
-      token,
-    });
+    await fetchTagFromGitee(rel, tmpDir);
   }
   return tmpDir;
 }

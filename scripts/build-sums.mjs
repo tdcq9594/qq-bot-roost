@@ -70,6 +70,44 @@ function trackedFiles() {
     .filter((f) => CODE_ENTRIES.some((p) => f === p || f.startsWith(`${p}/`)));
 }
 
+/**
+ * 哪些「会被算进指纹的」文件**还没进索引**。
+ *
+ * 为什么必须拦：`trackedFiles()` 和 `hashFileList()` 读的都是**工作区**里的
+ * 文件内容，而指纹要描述的是**提交出去、别人下载到**的那份内容。工作区里还
+ * 躺着没 `git add` 的改动，等于给一个不存在的版本盖章 —— tag 一打，所有从
+ * 这个版本更新的人都会校验失败，而且现象很像「下载源被篡改」，极难往回追。
+ *
+ * 判据是「工作区 vs 索引」，**不是「索引 vs HEAD」**：发版顺序本来就是
+ * `git add -A` → bump → `npm run sums` → commit，跑 sums 时改动已暂存、
+ * 还没提交，那是正常状态，指纹照样准确。
+ *
+ * 两样都算：
+ *   ① `git diff` —— 改了但没 add；
+ *   ② 未跟踪文件 —— `git ls-files` 根本列不到它们，指纹会**静默漏掉**
+ *      （曾经漏了 `src/reach.js`，CI 与 tag 双红）。
+ *
+ * 只看进指纹的条目：改了 `config/`、`logs/` 这些不参与打包的东西不算。
+ *
+ * @returns {string[]} 还没进索引的相对路径
+ */
+function dirtyTracked() {
+  const run = (argv) => {
+    try {
+      return execFileSync('git', argv, { cwd: ROOT, encoding: 'utf8' });
+    } catch {
+      return ''; // 读不到就交给后面的 hashFileList 去报错，这里不添乱
+    }
+  };
+  const unstaged = run(['diff', '--name-only', '-z']).split('\0');
+  const untracked = run(['ls-files', '-o', '--exclude-standard', '-z']).split('\0');
+
+  return [...new Set([...unstaged, ...untracked])]
+    .filter(Boolean)
+    .filter((f) => f !== SUMS_FILE)
+    .filter((f) => CODE_ENTRIES.some((p) => f === p || f.startsWith(`${p}/`)));
+}
+
 /** 读现有 SHA256SUMS → Map<version, hash> */
 function readSums() {
   const map = new Map();
@@ -127,7 +165,13 @@ if (args.has('--verify')) {
     console.error('✗ 指纹不一致：');
     console.error(`  记录 ${rec}`);
     console.error(`  实际 ${actual}`);
-    console.error('  改了代码却忘了重新生成？跑 npm run sums');
+    const dirty = dirtyTracked();
+    if (dirty.length) {
+      console.error(`  注意：有 ${dirty.length} 个改动还没进索引（${dirty.slice(0, 3).join('、')}${dirty.length > 3 ? ' 等' : ''}）`);
+      console.error('        这时算出的「实际」不等于即将提交的内容，先 git add 再验。');
+    } else {
+      console.error('  改了代码却忘了重新生成？跑 npm run sums');
+    }
     process.exit(1);
   }
   console.log(`OK：v${version} 指纹一致（${rec.slice(0, 12)}…）`);
@@ -135,6 +179,24 @@ if (args.has('--verify')) {
 }
 
 // 默认：写入当前版本
+/**
+ * 写入前必须干净。
+ *
+ * `--allow-dirty` 是给「只想预演一下数字」留的逃生阀，**不能用于发版**：
+ * 这样写进去的指纹描述的是工作区，tag 里却是另一个内容。
+ */
+const dirty = dirtyTracked();
+if (dirty.length && !args.has('--allow-dirty')) {
+  console.error(`✗ 有 ${dirty.length} 个改动还没进索引，不能就这么生成指纹：`);
+  for (const f of dirty.slice(0, 10)) console.error(`    ${f}`);
+  if (dirty.length > 10) console.error(`    …还有 ${dirty.length - 10} 个`);
+  console.error('  指纹描述的是「提交出去、别人下载到」的内容。没 add 的改动不在提交里，');
+  console.error('  未跟踪的新文件更是连 git ls-files 都列不到 —— 指纹会漏掉它，');
+  console.error('  该 tag 的自动更新会全部失败。');
+  console.error('  正确顺序：git add -A → bump → npm run sums。只想看数字可以加 --allow-dirty。');
+  process.exit(1);
+}
+
 const prev = existing.get(version);
 existing.set(version, actual);
 writeSums(existing);
