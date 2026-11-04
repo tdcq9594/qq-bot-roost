@@ -603,6 +603,7 @@ function activateTab(name) {
   if (name === 'delivery') loadDelivery();
   if (name === 'roles') { loadRoles(); loadPeople(); }
   if (name === 'identity') loadIdentity();
+  if (name === 'notify') loadNotify();
 }
 
 /**
@@ -1388,6 +1389,78 @@ $('#cfgForm').addEventListener('submit', async (e) => {
     pollStatus();
   } catch (err) {
     $('#cfgMsg').textContent = '保存失败: ' + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+/* ---------------- 通知：SMTP 邮箱配置 ---------------- */
+
+/**
+ * 字段与 BetterGI「设置 → 通知」的邮件部分一致。
+ * 密码和 AppSecret 一个待遇：不回显、只回 passSet、留空表示不修改、提交后立刻清空。
+ */
+async function loadNotify() {
+  try {
+    const c = await api('/api/notify');
+    const f = $('#notifyForm');
+    f.enabled.checked = Boolean(c.enabled);
+    f.host.value = c.host || '';
+    f.port.value = c.port ?? 587;
+    f.user.value = c.user || '';
+    f.pass.value = '';
+    f.pass.placeholder = c.passSet ? '已设置，留空则不修改' : '授权码 / 密码';
+    f.from.value = c.from || '';
+    f.fromName.value = c.fromName || '';
+    f.ownerEmail.value = c.ownerEmail || '';
+    const now = $('#notifySecurityNow');
+    if (now) {
+      now.textContent = c.host
+        ? ` 当前判定：${c.resolvedSecurity}。`
+        : ' 填好服务器和端口后这里会显示实际采用的加密方式。';
+    }
+  } catch (e) {
+    $('#notifyMsg').textContent = '读取配置失败: ' + e.message;
+  }
+}
+
+$('#notifyForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const payload = {
+    enabled: f.enabled.checked,
+    host: f.host.value.trim(),
+    port: Number(f.port.value) || 587,
+    user: f.user.value.trim(),
+    pass: f.pass.value.trim(), // 空 = 保持原值
+    from: f.from.value.trim(),
+    fromName: f.fromName.value.trim(),
+    ownerEmail: f.ownerEmail.value.trim(),
+  };
+  const btn = f.querySelector('button[type=submit]');
+  btn.disabled = true;
+  $('#notifyMsg').textContent = '保存中…';
+  try {
+    await api('/api/notify', { method: 'PUT', body: JSON.stringify(payload) });
+    $('#notifyMsg').textContent = '已保存，立即生效（不用重启）';
+    await loadNotify();
+    setTimeout(() => ($('#notifyMsg').textContent = ''), 4000);
+  } catch (err) {
+    $('#notifyMsg').textContent = '保存失败: ' + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$('#btnNotifyTest').addEventListener('click', async (e) => {
+  const btn = e.currentTarget;
+  btn.disabled = true;
+  $('#notifyTestMsg').textContent = '正在发送…';
+  try {
+    const r = await api('/api/notify/test', { method: 'POST', body: '{}' });
+    $('#notifyTestMsg').textContent = r?.message || '已发送，请查收主人邮箱';
+  } catch (err) {
+    $('#notifyTestMsg').textContent = '发送失败：' + err.message;
   } finally {
     btn.disabled = false;
   }

@@ -8,9 +8,9 @@
 
 <img src="https://img.shields.io/badge/Node.js-22.13%2B-339933?logo=node.js&logoColor=white" alt="Node.js 22.13+">
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
-<img src="https://img.shields.io/badge/tests-737%20passed-brightgreen" alt="测试 737 项">
+<img src="https://img.shields.io/badge/tests-771%20passed-brightgreen" alt="测试 771 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
-<img src="https://img.shields.io/badge/version-1.0.0-blueviolet" alt="版本 1.0.0">
+<img src="https://img.shields.io/badge/version-1.0.1-blueviolet" alt="版本 1.0.1">
 <img src="https://img.shields.io/badge/license-Non--Commercial-red" alt="禁止商用">
 <a href="https://github.com/tdcq9594/qq-bot-roost/actions"><img src="https://img.shields.io/github/actions/workflow/status/tdcq9594/qq-bot-roost/ci.yml?branch=master" alt="CI"></a>
 
@@ -76,6 +76,7 @@
 - **QQ号 / 群号 ↔ openid 绑定**：换机器人（换 AppID）之后 openid 会变，而记忆是按 openid 存的。绑定之后，读记忆会把同一个号码名下的所有键一起读——**存量数据一个字节不动**
 - **面板「身份」页**：绑定、追加、改绑、停用；未识别的人也能看到
 - **群内指令（0 / 1 级）**：`/绑定群号 <群号>`、`/绑定成员 @某人 <QQ号>`。只绑当前群和当前群里被 @ 的人，冲突不强制改绑
+- **普通成员自助绑定**：`/绑定QQ <QQ号>` → 验证码发到 `<QQ号>@qq.com` → `/QQ验证码 <6位数字>` 完成绑定，**不需要管理员**；QQ 号已有绑定记录时直接拒绝。四条绑定指令在 `/help` 的「绑定」分组里，与「管理」同级（管理员看到四条，普通成员只看到自助两条）
 - **消息带四个字段**：`uin` / `groupUin` / `userAliases` / `groupAliases`。插件用 `ctx.identity` 只读视图查，绑定表由框架维护
 - 配套升级：`dsh-roost` 1.0.0（别名合并读取 + 账号迁移页）、`ai-chat` 4.4.1（透传字段）。**三个一起升**，少一个号码就传不到 DSH
 
@@ -150,6 +151,7 @@
 - 实时日志流（SSE），按级别和来源着色
 - 一个面板管多个机器人，顶栏随时切换
 - 插件卡片直接显示它自己上报的运行数据（已回复条数、在线人数…）
+- **「通知」页**（在「身份」与「关于」之间）：配任意邮箱服务商的 SMTP、一键发测试邮件到主人邮箱，普通成员自助绑定的说明也在这里
 - 日间 / 夜间主题，启动自动开浏览器，端口被占用自动顺延
 
 ---
@@ -277,6 +279,7 @@ docker compose up -d
 | 群组 | 全局主人增删、群档案（邀请人 / 群主 / 状态）、手动登记群 |
 | 权限 | 等级与作用域说明、按作用域增删管理员、已授权列表 |
 | 日志 | SSE 实时流，按级别和来源过滤，支持关键词搜索 |
+| 通知 | SMTP 服务器 / 端口 / 用户名 / 授权码 / 发件人 / 主人邮箱、测试邮件通知、普通成员自助绑定说明（位于顶栏「身份」与「关于」之间） |
 
 事件页把官方 47 个事件全列出来，灰掉的是当前 intents 没订阅的：
 
@@ -312,6 +315,8 @@ node src/main.js --mock --serve
 | `/whoami` | 查自己的 openid / 群 openid |
 | `/绑定群号 <群号>` | 把**当前群**绑到群号（仅 0 / 1 级；冲突不强制改绑） |
 | `/绑定成员 @某人 <QQ号>` | 把**当前群里被 @ 的人**绑到 QQ号（仅 0 / 1 级） |
+| `/绑定QQ <QQ号>` | **普通成员自助绑定**：验证码发到 `<QQ号>@qq.com`；需先在面板「通知」页配好 SMTP |
+| `/QQ验证码 <6位数字>` | 核对上一条的验证码，完成绑定（5 分钟有效，最多试 5 次） |
 | `/claim <认领码>` | 认领主人身份（`owners` 为空时可用） |
 | `/ping` | 连通性测试 |
 
@@ -381,6 +386,7 @@ export default {
 | `ctx.identity` | **只读**身份视图：`openidOf(uin)` / `uinOf(openid)` / `aliasesOf(uin)` / `groupOf(openid)`。绑定表由框架维护，插件不能写 |
 | `ctx.registerTool(工具)` | 注册一个 AI 可调用的工具（跨插件，0.8.6+），返回注销函数 |
 | `ctx.tools()` / `ctx.callTool(名, 参数)` | 列出 / 调用别插件注册的工具 |
+| `ctx.mail.send(收件人, 内容)` / `ctx.mail.configured` | **邮件通知**：收件人填完整邮箱（任意服务商）或 QQ 号；SMTP 在面板「通知」页配，见[插件开发规范](docs/插件开发规范.md) |
 | `msg.reply` / `push` / `replyMarkdown` / `replyImage` / … | 各种发送方式 |
 
 ---
@@ -424,6 +430,7 @@ bot/
 │   ├── webhook.js              Webhook 接收服务（多机器人共用一个端口）
 │   ├── sign.js                 Webhook 回调签名（Ed25519）
 │   ├── qq/                     扫码一键建机器人（qrlogin.js / qrsvg.js）
+│   ├── mail/                   零依赖 SMTP 客户端、邮件服务、验证码、自助绑定命令
 │   ├── tarball.js              tar.gz 下载解包（不依赖 git）
 │   ├── updater.js              框架自身检查更新与升级
 │   ├── semver.js               版本比较与范围匹配（框架更新/市场/兼容校验共用）
@@ -438,7 +445,7 @@ bot/
 │   ├── web/server.js           面板服务端（REST + SSE）
 │   └── plugin/                 插件加载、配置、依赖、子进程宿主、面板页面注册
 ├── test/
-│   ├── selftest.mjs            框架自检（538 项）
+│   ├── selftest.mjs            框架自检（622 项）
 │   ├── e2e.mjs                 端到端测试（243 项，起真实服务打接口）
 │   ├── qrlogin.mjs             扫码建机器人（8 项）
 │   └── deps.mjs                插件依赖安装（11 项）

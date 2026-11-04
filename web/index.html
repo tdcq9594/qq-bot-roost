@@ -94,8 +94,11 @@
       </div>
     </div>
 
-    <!-- 身份：QQ号 / 群号 ↔ openid。放在「关于」左边，是常用页而不是设置项 -->
+    <!-- 身份：QQ号 / 群号 ↔ openid。常用页而不是设置项 -->
     <button class="tab" data-tab="identity">身份</button>
+
+    <!-- 通知：SMTP 邮箱配置 + 普通成员自助绑定。字段参考 BetterGI「设置 → 通知」 -->
+    <button class="tab" data-tab="notify">通知</button>
 
     <button class="tab" data-tab="about">关于</button>
   </nav>
@@ -315,6 +318,61 @@
             <tr><td colspan="6" class="empty">还没有绑定</td></tr>
           </tbody>
         </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- 通知 -->
+  <section id="tab-notify" class="panel">
+    <form id="notifyForm">
+      <div class="box">
+        <div class="box-hd">
+          <h3>邮箱通知</h3>
+          <label class="switch"><input type="checkbox" name="enabled"> 启用邮箱通知</label>
+        </div>
+        <div class="hint">
+          账号密码只保存在本机 <span class="mono">config/bot.json</span>，不会上传。
+          QQ 邮箱 / 163 邮箱等需要用<b>授权码</b>而不是登录密码，并先在邮箱网页端开启 SMTP 服务。
+          SMTP 用户名留空表示不做认证（内网中继）。
+        </div>
+        <div class="grid2">
+          <label>SMTP 服务器<input name="host" placeholder="smtp.qq.com / smtp.163.com"></label>
+          <label>SMTP 服务器端口<input name="port" type="number" min="1" max="65535" placeholder="一般为 587"></label>
+          <label>SMTP 用户名<input name="user" placeholder="一般是完整邮箱地址"></label>
+          <label>SMTP 密码 / 授权码<input name="pass" type="password" placeholder="留空则不修改"></label>
+          <label>发件人邮箱<input name="from" placeholder="通常与登录账号一致"></label>
+          <label>发件人姓名<input name="fromName" placeholder="栖"></label>
+          <label>主人邮箱<input name="ownerEmail" placeholder="测试邮件发到这里"></label>
+        </div>
+        <div class="hint" id="notifySecurityHint">
+          加密方式默认「自动」：465 走隐式 TLS、587 走 STARTTLS、25 走明文，其它端口按服务器能力协商；
+          网易系（163 / 126 / yeah）的 587 会自动改走隐式 TLS。
+          <span id="notifySecurityNow"></span>
+        </div>
+        <div class="cred-actions">
+          <span class="hint" id="notifyMsg"></span>
+          <button type="submit" class="btn primary">保存配置</button>
+        </div>
+      </div>
+    </form>
+
+    <div class="box">
+      <div class="box-hd">
+        <h3>测试邮件通知</h3>
+        <span class="hint">发送一封测试邮件到「主人邮箱」</span>
+      </div>
+      <div class="cred-actions">
+        <span class="hint" id="notifyTestMsg"></span>
+        <button type="button" class="btn" id="btnNotifyTest">发送</button>
+      </div>
+    </div>
+
+    <div class="box">
+      <div class="box-hd"><h3>普通成员自助绑定</h3></div>
+      <div class="hint">
+        成员发 <b>绑定QQ 自己的QQ号</b> → 验证码发到 <b>QQ号@qq.com</b> → 再发
+        <b>QQ验证码 6位数字</b> 即完成绑定。收件邮箱由 QQ 号自动拼接，不需要在这里配置。
+        QQ 号已被别人绑定时会直接拒绝；未开通数字邮箱的 QQ 号请找主人用「绑定成员」代绑。
       </div>
     </div>
   </section>

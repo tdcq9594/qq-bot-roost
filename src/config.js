@@ -4,6 +4,7 @@ import readline from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 import { ROOT, DIRS, PATHS, botPaths, ensureDirs, listBotIds, rel } from './paths.js';
 import { createLogger } from './logger.js';
+import { SMTP_DEFAULTS } from './mail/defaults.js';
 
 const log = createLogger('config');
 
@@ -170,6 +171,15 @@ const GLOBAL_DEFAULTS = {
      * 当前框架不满足时会拒绝加载；作者本地调试想硬跑可以打开这个开关。
      */
     ignoreFrameworkVersion: false,
+  },
+
+  /**
+   * 邮箱通知 / SMTP（全局一份，所有机器人共用这个发信通道）。
+   * 字段对齐 BetterGI「设置 → 通知」的邮件部分；面板上就是「通知」页。
+   * 走 saveGlobalConfig（排除式写入），新字段会自动落盘，不用改白名单。
+   */
+  notifications: {
+    smtp: { ...SMTP_DEFAULTS },
   },
 };
 

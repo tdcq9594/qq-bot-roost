@@ -26,6 +26,8 @@ import {
 // 面板改插件启停时要同步机器人配置里的过滤器，两边不能各说各的
 import { pluginFilterOf, pluginAllowedIn } from '../bot.js';
 import { CONFLICT, INVALID } from '../identity.js';
+import { SMTP_DEFAULTS } from '../mail/defaults.js';
+import { extractAddress } from '../mail/smtp.js';
 import { userFacingSendError } from '../outbound.js';
 import { runRoute } from '../plugin/routes.js';
 import { toggleGroupPlugin } from '../plugin/groupscope.js';
@@ -336,6 +338,8 @@ export async function startWebServer({
   onBotRemove,
   onShutdown,
   services = null,
+  /** MailService 单例；没传时邮件接口返回 503，面板其它功能照常 */
+  mail = null,
   mock = false,
 }) {
   const wc = globalCfg.webui ?? {};
@@ -1140,6 +1144,86 @@ export async function startWebServer({
         // 选中要操作的机器人，并用同名变量遮住外层的聚合对象，
         // 这样下面所有 handler 的写法都不用变
         const rt = pickRuntime(url);
+
+        /* ---------------- 通知 / 邮箱能力 ---------------- */
+
+        /** 面板「通知」页读配置：密码不回显，只给 passSet */
+        if (pathname === '/api/notify' && req.method === 'GET') {
+          if (!mail) return json(res, 503, { error: '邮件服务未初始化' });
+          return json(res, 200, mail.publicConfig());
+        }
+
+        /**
+         * 保存 SMTP 配置到**全局** config/bot.json。
+         * 走 saveGlobalConfig（排除式写入），新字段不用加白名单；保存后热生效。
+         */
+        if (pathname === '/api/notify' && req.method === 'PUT') {
+          let body;
+          try { body = await readBody(req); } catch (e) { return json(res, 400, { error: e.message }); }
+          if (!body || typeof body !== 'object') return json(res, 400, { error: '请求体不是对象' });
+
+          const cur = { ...SMTP_DEFAULTS, ...(globalCfg.notifications?.smtp ?? {}) };
+          const next = { ...cur };
+          for (const k of ['host', 'user', 'from', 'fromName', 'ownerEmail', 'security']) {
+            if (typeof body[k] === 'string') next[k] = body[k].trim();
+          }
+          if (typeof body.enabled === 'boolean') next.enabled = body.enabled;
+          if (body.port !== undefined) {
+            const p = Number(body.port);
+            if (!Number.isInteger(p) || p < 1 || p > 65535) {
+              return json(res, 400, { error: 'SMTP 端口要是 1–65535 的整数' });
+            }
+            next.port = p;
+          }
+          // 密码留空 = 保持不变，和 appSecret / webui.accessKey 一个规矩
+          if (typeof body.pass === 'string' && body.pass.trim()) next.pass = body.pass.trim();
+          if (next.from && !extractAddress(next.from)) return json(res, 400, { error: '发件人邮箱不合法' });
+          if (next.ownerEmail && !extractAddress(next.ownerEmail)) return json(res, 400, { error: '主人邮箱不合法' });
+          if (!['auto', 'tls', 'starttls', 'none', 'ssl', 'plain'].includes(next.security)) {
+            return json(res, 400, { error: '加密方式只支持 auto / tls / starttls / none' });
+          }
+
+          globalCfg.notifications = { ...(globalCfg.notifications ?? {}), smtp: next };
+          await saveGlobalConfig?.(globalCfg);
+          return json(res, 200, { ok: true, ...(mail?.publicConfig() ?? {}) });
+        }
+
+        /** 「测试邮件通知」按钮：发到主人邮箱，错误直接回显在页面上 */
+        if (pathname === '/api/notify/test' && req.method === 'POST') {
+          if (!mail) return json(res, 503, { error: '邮件服务未初始化' });
+          try {
+            const out = await mail.test();
+            return json(res, 200, { ok: true, message: `已发送，请查收 ${out.to}` });
+          } catch (e) {
+            return json(res, 400, { ok: false, error: e.message, code: e.code });
+          }
+        }
+
+        /**
+         * 插件 / 外部调用方发邮件。内建插件用 `ctx.mail.send()`，外部走这里。
+         * 收件地址由 MailService.resolveRecipient 统一解析：
+         * 完整邮箱地址（任意服务商）原样使用，QQ 号自动补 @qq.com，openid 反查绑定表。
+         *
+         * body: { uin?, openid?, to?, subject, text, html? }
+         */
+        if (pathname === '/api/mail/send' && req.method === 'POST') {
+          if (!mail) return json(res, 503, { error: '邮件服务未初始化' });
+          let body;
+          try { body = await readBody(req); } catch (e) { return json(res, 400, { error: e.message }); }
+          if (!body || typeof body !== 'object') return json(res, 400, { error: '请求体不是对象' });
+          if (!String(body.subject ?? '').trim() || !String(body.text ?? '').trim()) {
+            return json(res, 400, { error: 'subject 和 text 都不能为空' });
+          }
+          try {
+            const to = mail.resolveRecipient({ uin: body.uin, openid: body.openid, to: body.to });
+            const out = await mail.send({
+              to, subject: body.subject, text: body.text, html: body.html === true,
+            });
+            return json(res, 200, { ok: true, to, messageId: out.messageId });
+          } catch (e) {
+            return json(res, 400, { ok: false, error: e.message, code: e.code });
+          }
+        }
 
         /* ---------------- 官方能力通道（给 AI 宿主 / 外部工具用） ---------------- */
 
