@@ -51,6 +51,18 @@ export function serializeMessage(msg, extra = {}) {
     mentioned: Boolean(msg.mentioned),
     isCommand: Boolean(msg.isCommand),
     at: msg.at ?? Date.now(),
+    /**
+     * 身份对照：号码为空 = 管理员还没在面板绑过，退回用 `user` / `group`（openid）。
+     *
+     * 外部插件（Python / Go / 任意语言）同样需要这个，否则「换机器人就认不出人」
+     * 这条路上只有内建插件能用。别名数组也一并给——读旧记忆要用。
+     */
+    uin: msg.uin || '',
+    groupUin: msg.groupUin || '',
+    identityId: msg.identityId || '',
+    groupIdentityId: msg.groupIdentityId || '',
+    userAliases: msg.userAliases ?? [],
+    groupAliases: msg.groupAliases ?? [],
     ...extra,
   };
 }

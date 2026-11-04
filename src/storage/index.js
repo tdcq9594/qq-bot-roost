@@ -280,6 +280,89 @@ export class StatsStore {
   }
 
   /**
+   * 说过话的人（面板「身份」页的待绑定候选）。
+   *
+   * 数据源是 `members`——累计口径、不随 retention 清，正好当「这个人存在过」的名单。
+   * 没有它就只能从 `messages` 里 `SELECT DISTINCT`，而那张表 90 天就滚掉了，
+   * 半年没说话的老人会从名单里消失，管理员也就没法给他绑定了。
+   *
+   * @param {number} [limit] 默认 200，上限 1000
+   */
+  people(limit = 200) {
+    if (!this.available) return [];
+    this.flush();
+    return this.db
+      .prepare(
+        `SELECT user_id, MIN(first_seen) AS f, MAX(last_seen) AS l,
+                COALESCE(SUM(messages), 0) AS m, COALESCE(SUM(commands), 0) AS c
+           FROM members GROUP BY user_id ORDER BY l DESC LIMIT ?`,
+      )
+      .all(Math.max(1, Math.min(1000, Number(limit) || 200)))
+      .map((r) => ({
+        userId: r.user_id,
+        firstSeen: Number(r.f) || 0,
+        lastSeen: Number(r.l) || 0,
+        messages: Number(r.m) || 0,
+        commands: Number(r.c) || 0,
+      }));
+  }
+
+  /**
+   * 某个人的明细（面板「身份」页用）。
+   *
+   * 管理员在面板上看到一串 openid 时，唯一的判断依据是「这人活跃吗、
+   * 在哪个群说话、说了什么」。没有这些，绑定就变成了猜。
+   *
+   * 两个数据源，口径不一样，**必须分开看**：
+   *   - `members` 是**累计**的（不随 retention 清），给总量和首次/最近时间
+   *   - `messages` 只留 `retentionDays` 天，给「在哪些群说过话」的分布
+   * 所以 `chats[].messages` 加起来可能小于 `messages`，这不是 bug。
+   *
+   * @param {object} p
+   * @param {string} p.userId
+   * @param {number} [p.limit] 最多返回几个会话，默认 20
+   */
+  userDetail({ userId, limit = 20 } = {}) {
+    const empty = { available: false, found: false, firstSeen: 0, lastSeen: 0, messages: 0, commands: 0, chats: [] };
+    if (!this.available || !userId) return empty;
+    this.flush();
+
+    const uid = String(userId);
+    const m =
+      this.db
+        .prepare(
+          `SELECT MIN(first_seen) AS f, MAX(last_seen) AS l,
+                  COALESCE(SUM(messages), 0) AS m, COALESCE(SUM(commands), 0) AS c
+             FROM members WHERE user_id = ?`,
+        )
+        .get(uid) ?? {};
+
+    const chats = this.db
+      .prepare(
+        `SELECT scope, chat_id, COUNT(*) AS m, COALESCE(SUM(is_command), 0) AS c
+           FROM messages WHERE user_id = ?
+          GROUP BY scope, chat_id ORDER BY m DESC LIMIT ?`,
+      )
+      .all(uid, Math.max(1, Math.min(100, Number(limit) || 20)))
+      .map((r) => ({
+        scope: r.scope,
+        chatId: r.chat_id,
+        messages: Number(r.m) || 0,
+        commands: Number(r.c) || 0,
+      }));
+
+    return {
+      available: true,
+      found: Boolean(m.f) || chats.length > 0,
+      firstSeen: Number(m.f) || 0,
+      lastSeen: Number(m.l) || 0,
+      messages: Number(m.m) || 0,
+      commands: Number(m.c) || 0,
+      chats,
+    };
+  }
+
+  /**
    * 导出用：按天 + 按会话 + 按命令三张汇总表。
    *
    * 导出的是**汇总**，不是逐条明细——明细里有 openid 和时间戳，

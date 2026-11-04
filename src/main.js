@@ -19,6 +19,8 @@ import { BotRuntime, pluginAllowedIn } from './bot.js';
 import { toggleGroupPlugin, resetGroupPlugins, describeGroupScope } from './plugin/groupscope.js';
 import { runtime, sanitizePayload } from './runtime.js';
 import { LEVEL, NO_PERM, levelName, parseLevel, parseScope, scopeOf } from './roles.js';
+import { sharedIdentity } from './identity.js';
+import { runBindGroup, runBindUser } from './identity-commands.js';
 import { openBrowser } from './browser.js';
 import { WebhookServer } from './webhook.js';
 import { startWebServer } from './web/server.js';
@@ -113,6 +115,8 @@ function registerCoreCommands(rt) {
     disable: '管理',
     reload: '管理',
     群插件: '管理',
+    绑定群号: '管理',
+    绑定成员: '管理',
     help: '其它',
     menu: '其它',
     claim: '其它',
@@ -280,6 +284,48 @@ function registerCoreCommands(rt) {
   core('ping', { desc: '测试机器人是否在线' }, async (msg) => {
     await msg.reply(`pong（已运行 ${Math.floor(runtime.uptimeMs / 1000)} 秒）`);
   });
+
+  /**
+   * 群内绑定指令：**只给 0 / 1 级（主人、管理员）用**。
+   *
+   * 为什么放在内核而不是插件：绑定表是内核的数据，插件只有只读视图
+   * （`ctx.identity`）。让插件去写会绕开权限模型，而且每个插件都要
+   * 自己实现一遍「谁是管理员」。
+   *
+   * 为什么不做 force：群里一句话就能把别人的身份改掉，代价太高。
+   * 冲突时提示去面板，那里有完整的上下文和二次确认。
+   */
+  core(
+    '绑定群号',
+    { desc: '把本群绑到群号：绑定群号 763366431', admin: true },
+    async (msg) => {
+      const allowed = (await roles.effective(scopeOf(msg), msg.userId, { owners: cfg.owners })) <= LEVEL.admin;
+      const r = await runBindGroup({
+        msg,
+        identity: sharedIdentity(),
+        botId: cfg.id,
+        allowed,
+        log: (m) => log.info(m),
+      });
+      await msg.reply(r.text);
+    },
+  );
+
+  core(
+    '绑定成员',
+    { desc: '把被 @ 的人绑到 QQ号：绑定成员 @某人 10001', admin: true },
+    async (msg) => {
+      const allowed = (await roles.effective(scopeOf(msg), msg.userId, { owners: cfg.owners })) <= LEVEL.admin;
+      const r = await runBindUser({
+        msg,
+        identity: sharedIdentity(),
+        botId: cfg.id,
+        allowed,
+        log: (m) => log.info(m),
+      });
+      await msg.reply(r.text);
+    },
+  );
 
   core('whoami', { desc: '查看自己的 openid（配置主人用）' }, async (msg) => {
     const lv = await roles.effective(scopeOf(msg), msg.userId, { owners: cfg.owners });

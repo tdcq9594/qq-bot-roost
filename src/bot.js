@@ -20,6 +20,7 @@ import { createReach } from './reach.js';
 import { createLedger } from './ledger.js';
 import { createGate } from './gate.js';
 import { createDeliveryLedger } from './delivery.js';
+import { sharedIdentity } from './identity.js';
 
 /**
  * 一个机器人的完整运行时。
@@ -68,6 +69,14 @@ export class BotRuntime {
     this.gateway = null;
     this.registry = new Registry();
     this.groups = new GroupStore(this.paths.groups);
+    /**
+     * 身份对照表（QQ号 / 群号 ↔ openid）。
+     *
+     * **进程级单例、不按机器人拆**——它的全部意义就是横跨机器人。
+     * 在这里建而不是在 `init()` 里：`buildMessage()` 要用它，
+     * 不能依赖「init 已经跑过」。真正的读盘在 `init()` 里 `await load()`。
+     */
+    this.identity = sharedIdentity();
 
     /**
      * 最近说过话的人：openid -> { openid, name, chatId, scope, at }
@@ -166,13 +175,21 @@ export class BotRuntime {
       });
     }
 
+    /**
+     * 身份表要在**插件加载和收消息之前**读好。
+     *
+     * 晚一步的话，启动后第一批消息就没有 `uin`，AI 会把老朋友当陌生人；
+     * 插件 setup 里想用 `ctx.identity` 也会查到空。
+     * 载入失败不拦启动——`load()` 内部已经把坏文件降级成空表并留了档。
+     */
+    await this.identity.load().catch((e) => this.log.warn(`身份表载入失败：${e.message}`));
+
     if (this.mock) {
       this.api = this.makeMockApi ? this.makeMockApi(this) : null;
     } else {
       this.tokens = new TokenManager(cfg);
       this.api = new QQApi({ tokenManager: this.tokens, baseUrl: cfg.baseUrl, metrics: this.metrics });
     }
-
     this.outbound = new Outbound({
       api: this.api,
       cfg,
@@ -233,6 +250,8 @@ export class BotRuntime {
       reach: this.reach,
       ledger: this.ledger,
       gate: this.gate,
+      /** 身份对照表：插件通过 ctx.identity 只读查询（QQ号 → openid） */
+      identity: this.identity,
       isOwner: (uid) => cfg.owners.includes(uid),
       // 插件声明了 frameworkVersion 就做兼容校验；作者本地调试可以关掉
       ignoreCompat: this.globalCfg.plugins?.ignoreFrameworkVersion === true,
@@ -770,7 +789,7 @@ export class BotRuntime {
     }
 
     /* ---- 消息事件 ---- */
-    const msg = buildMessage(eventName, d, { api: this.api, cfg, outbound, session });
+    const msg = buildMessage(eventName, d, { api: this.api, cfg, outbound, session, identity: this.identity });
 
     /**
      * 群名不在官方事件里（只有 `group_openid`），但框架有缓存。

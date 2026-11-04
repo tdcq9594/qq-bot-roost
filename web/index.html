@@ -94,6 +94,9 @@
       </div>
     </div>
 
+    <!-- 身份：QQ号 / 群号 ↔ openid。放在「关于」左边，是常用页而不是设置项 -->
+    <button class="tab" data-tab="identity">身份</button>
+
     <button class="tab" data-tab="about">关于</button>
   </nav>
   <button class="icon-btn" id="btnTheme" title="切换日间 / 夜间" aria-label="切换主题">
@@ -219,6 +222,100 @@
         <button class="btn small" id="btnDoctor">检查</button>
       </div>
       <div id="doctorList" class="doctor-list" hidden></div>
+    </div>
+  </section>
+
+  <!-- 身份：QQ号 / 群号 ↔ openid -->
+  <section id="tab-identity" class="panel">
+    <div class="box">
+      <div class="box-hd">
+        <h3>为什么要在这一页绑</h3>
+        <span class="hint">openid 换机器人就变，号码不会</span>
+      </div>
+      <ul class="tips">
+        <li>官方只给 <b>openid</b>，而且<b>每个机器人一套</b>——换 AppID 之后，同一个人在系统里就变成了另一个人，
+          记忆、权限、群档案全都对不上</li>
+        <li><b>QQ号 / 群号</b>不会变，但官方<b>没有任何「号码 → openid」的查询接口</b>，
+          所以只能在这里人工指认一次</li>
+        <li>绑好之后插件和 AI 都能用号码代替 openid；读旧记忆时，框架会把这个号码名下的
+          <b>所有</b> openid 一起读进来</li>
+        <li>一个号码可以挂多个 openid（换机器人用）。<b>解绑只影响当前这只鸟</b>，
+          旧记录留痕不删——它是读旧记忆唯一的线索</li>
+      </ul>
+    </div>
+
+    <div class="box">
+      <div class="box-hd">
+        <h3>还没认出来的人</h3>
+        <span class="hint" id="identUserHint">说过话、但还没绑 QQ号 的</span>
+        <div class="btn-row" style="margin:0">
+          <button class="btn small" id="btnIdentReload">刷新</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>用户</th>
+              <th>活跃</th>
+              <th>消息</th>
+              <th>最近说过</th>
+              <th style="width:200px">绑 QQ号</th>
+            </tr>
+          </thead>
+          <tbody id="identUserBody">
+            <tr><td colspan="5" class="empty">加载中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="hint" style="margin-top:8px">
+        列表按最近发言排序。前几条会显示「在哪个群说过什么」，方便认出是谁。
+      </div>
+    </div>
+
+    <div class="box">
+      <div class="box-hd">
+        <h3>还没认出来的群</h3>
+        <span class="hint" id="identGroupHint">机器人加入过、但还没绑群号的</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>群</th>
+              <th>最近活跃</th>
+              <th style="width:200px">绑群号</th>
+            </tr>
+          </thead>
+          <tbody id="identGroupBody">
+            <tr><td colspan="3" class="empty">加载中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="box">
+      <div class="box-hd">
+        <h3>已绑定</h3>
+        <span class="hint" id="identBoundHint">这张表跨机器人共享，换机器人也认得出</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>类型</th>
+              <th>号码</th>
+              <th>这只鸟下的 openid</th>
+              <th>全部 openid</th>
+              <th>最近</th>
+              <th style="width:100px">操作</th>
+            </tr>
+          </thead>
+          <tbody id="identBoundBody">
+            <tr><td colspan="6" class="empty">还没有绑定</td></tr>
+          </tbody>
+        </table>
+      </div>
     </div>
   </section>
 
