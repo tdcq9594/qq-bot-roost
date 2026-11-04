@@ -259,6 +259,15 @@ body {
   animation: modal-fade .12s ease-out;
 }
 .modal-mask[hidden] { display: none; }
+/*
+ * 通用确认弹窗（#modalMask）永远压在最上面。
+ *
+ * 四个 .modal-mask 都是 z-index:100，同层级时「DOM 里靠后的盖住靠前的」，
+ * 而 #modalMask 写在 index.html 最前面、插件设置面板在后面 ——
+ * 于是「保存配置」弹的「已保存」整个被插件设置面板挡住，看起来像点了没反应。
+ * 确认弹窗本身是「盖在别的弹窗上回答一个问题」的层，层级必须高人一等。
+ */
+#modalMask { z-index: 200; }
 .modal {
   width: min(420px, calc(100vw - 32px));
   background: var(--panel);
@@ -279,6 +288,14 @@ body {
 .modal-actions {
   display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px;
 }
+/*
+ * 破坏性操作推到最左，右边只留「关闭 / 保存配置」。
+ *
+ * 原先三个按钮挤成一排右对齐，灰色的「关闭」在最左边、离蓝色的「保存配置」
+ * 隔着一个红色的「恢复默认」，用户看完配置直接就去点主按钮，找不到退出的地方。
+ * 把「恢复默认」单独甩到左边后，两个正常出口挨在一起，也顺手拉开了误点的距离。
+ */
+.modal-actions > .act-left { margin-right: auto; }
 @keyframes modal-fade { from { opacity: 0 } to { opacity: 1 } }
 @keyframes modal-pop { from { opacity: 0; transform: translateY(6px) scale(.98) } to { opacity: 1; transform: none } }
 
