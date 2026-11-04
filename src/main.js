@@ -27,6 +27,9 @@ import { startWebServer } from './web/server.js';
 import { Services } from './services/index.js';
 import { recoverInterruptedUpdate } from './updater.js';
 import { emitMessage } from './message-bus.js';
+import { MailService, setSharedMail } from './mail/service.js';
+import { VerifyStore } from './mail/verify.js';
+import { runBindQq, runVerifyQq } from './mail/bind-commands.js';
 
 /* ------------------------------------------------------------------ */
 /* 开箱即用：先把运行环境检查清楚，别让人对着莫名其妙的报错猜              */
@@ -44,6 +47,10 @@ if (!Number.isFinite(nodeMajor) || nodeMajor < MIN_NODE_MAJOR) {
 }
 
 const log = createLogger('core');
+
+/** 邮件能力与待验证验证码：全进程各一份，内核命令和面板共用 */
+let mail = null;
+let verify = null;
 
 /**
  * 已知的系统事件不再单独维护一份白名单——全部事件登记在 src/events.js。
@@ -102,7 +109,9 @@ function registerCoreCommands(rt) {
    * 内核命令分到哪一组。
    *
    * 以前所有命令都塞进「指令」一组，`/help` 主菜单二十多行。
-   * 现在分三组，主菜单只放「常用 + 分类入口」，具体命令进下级菜单。
+   * 现在分四组（基础 / 管理 / 绑定 / 其它），主菜单只放「常用 + 分类入口」，
+   * 具体命令进下级菜单。「绑定」和「管理」同级，四条绑定指令收在一处：
+   * 管理员看到管理员两条 + 自助两条，普通成员只看到自助两条。
    */
   const CORE_SECTION = {
     ping: '基础',
@@ -115,8 +124,10 @@ function registerCoreCommands(rt) {
     disable: '管理',
     reload: '管理',
     群插件: '管理',
-    绑定群号: '管理',
-    绑定成员: '管理',
+    绑定群号: '绑定',
+    绑定成员: '绑定',
+    绑定qq: '绑定',
+    qq验证码: '绑定',
     help: '其它',
     menu: '其它',
     claim: '其它',
@@ -215,7 +226,7 @@ function registerCoreCommands(rt) {
         ]);
       }
 
-      // 3) 内核分组名（基础 / 管理 / 其它）
+      // 3) 内核分组名（基础 / 管理 / 绑定 / 其它）
       const secs = coreSections();
       const hit = secs.get(raw);
       if (hit) return msg.replyMenu(`框架 · ${raw}`, [{ title: raw, items: hit }]);
@@ -322,6 +333,32 @@ function registerCoreCommands(rt) {
         botId: cfg.id,
         allowed,
         log: (m) => log.info(m),
+      });
+      await msg.reply(r.text);
+    },
+  );
+
+  /**
+   * 普通成员自助绑定：不需要任何权限，群聊私聊都能用。
+   * 命令名必须是小写 —— message.js 会把 msg.command 统一 .toLowerCase()。
+   */
+  core(
+    '绑定qq',
+    { desc: '自助绑定自己的 QQ号：绑定QQ 123456（验证码发到 QQ号@qq.com）' },
+    async (msg) => {
+      const r = await runBindQq({
+        msg, mail, verify, identity: sharedIdentity(), botId: cfg.id, log: (m) => log.info(m),
+      });
+      await msg.reply(r.text);
+    },
+  );
+
+  core(
+    'qq验证码',
+    { desc: '核对邮箱验证码完成绑定：QQ验证码 123456' },
+    async (msg) => {
+      const r = await runVerifyQq({
+        msg, verify, identity: sharedIdentity(), botId: cfg.id, log: (m) => log.info(m),
       });
       await msg.reply(r.text);
     },
@@ -974,6 +1011,14 @@ async function runMock(runtimes) {
 
 async function main() {
   const globalCfg = await loadGlobalConfig();
+
+  /**
+   * 邮件能力全局一份：传引用给 MailService，configWatch 改配置后立刻生效，不用重启。
+   * 注册成进程级单例，插件通过 ctx.mail 拿到同一个服务（见 mail/service.js）。
+   */
+  verify = new VerifyStore();
+  mail = setSharedMail(new MailService({ globalCfg, log, identity: sharedIdentity() }));
+
   // 下载源是全局的，模块里缓存一份，免得每个调用点都传配置
   configureMirror(globalCfg);
   setLevel(globalCfg.logLevel);
@@ -1254,6 +1299,7 @@ async function main() {
     saveGlobalConfig,
     onShutdown: shutdown,
     services,
+    mail,
 
     /** 面板「新建机器人」 */
     onBotAdd: async (id, patch) => {

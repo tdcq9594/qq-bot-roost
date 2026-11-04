@@ -5,6 +5,7 @@ import { scopeOf, LEVEL, NO_PERM, levelName } from '../roles.js';
 import { md, renderMenuMd } from '../markdown.js';
 import { normalizeDashboard } from './dashboard.js';
 import { createToolCaller } from './tools.js';
+import { createMailApi, sharedMail } from '../mail/service.js';
 
 
 /**
@@ -445,6 +446,13 @@ export function createContext({ meta, paths, registry, api, cfg, config, configS
      */
     state: state ?? {},
     api,
+    /**
+     * 邮件通知（框架接口）：`await ctx.mail.send(收件人, 内容)`。
+     * 收件人可以是完整邮箱地址（任意服务商），也可以是 QQ 号（自动补 @qq.com）；
+     * 没配 SMTP 时 `ctx.mail.configured` 为 false，send() 会抛中文错误。
+     * 详见 docs/插件开发规范.md。
+     */
+    mail: createMailApi(sharedMail),
     logger,
     /**
      * 可达性：`ctx.reach.canC2C(openid)` / `ctx.reach.canGroupPush(groupOpenid)`。

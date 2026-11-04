@@ -147,7 +147,12 @@ export async function handleQqCall({ runtimes = [], body = {}, fallbackRuntime =
   }
 }
 
-/** `GET /api/qq/capabilities` 的返回：给 AI 看的说明书 */
+/**
+ * `GET /api/qq/capabilities` 的返回：给 AI 看的**QQ 官方接口**说明书。
+ *
+ * 邮件能力属于框架接口，不在这份清单里：内建插件用 `ctx.mail.send(uin, 内容)`
+ * （见 docs/插件开发规范.md），外部调用方用 `POST /api/mail/send`。
+ */
 export function capabilityPayload() {
   return capabilityList();
 }

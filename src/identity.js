@@ -486,7 +486,7 @@ export class IdentityStore {
    * 副作用要知道：给已停用的号码**补绑一条新 openid**（换 AppID 的常规操作）
    * 会顺带把这个号码重新启用，记忆又开始被读到。面板上会提示。
    */
-  async bind({ kind = 'user', uin, openid, botId = '', force = false } = {}) {
+  async bind({ kind = 'user', uin, openid, botId = '', force = false, verifiedBy = 'panel' } = {}) {
     const id = String(uin ?? '').trim();
     if (!isValidUin(id)) throw invalidError(`号码不合法：${uin}（要 5–12 位数字）`, { kind, uin: id });
     if (!isOpenid(openid)) throw invalidError('openid 不合法（空、过长或含空白）', { kind, uin: id });
@@ -558,7 +558,8 @@ export class IdentityStore {
     rec.status = 'active';
     rec.statusUpdatedAt = now;
     rec.updatedAt = now;
-    rec.verifiedBy = 'panel';
+    /** panel = 主人在面板/管理员指认；email = 成员自己用 QQ 邮箱验证码验证 */
+    rec.verifiedBy = String(verifiedBy || 'panel');
     rec.verifiedAt = now;
     if (!rec.createdAt) rec.createdAt = now;
 
