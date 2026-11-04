@@ -56,6 +56,46 @@ function readOnlyDelivery(ledger) {
   });
 }
 
+/**
+ * 给插件的身份对照视图：**只读，而且默认就是「这只鸟」。**
+ *
+ * 为什么不给 `bind` / `unbind`：绑定是「管理员指认谁是谁」的动作，
+ * 写错一次就是别人的记忆被读进这个会话。这种事只能从面板做，
+ * 那里有记录、有「谁改的」。插件需要的只是**查**。
+ *
+ * `botId` 默认取 `paths.id`，插件不用自己传——它只会为这一只鸟服务。
+ * 想查别的机器人的记录（做迁移类工具时）可以显式传第二个参数。
+ *
+ * 返回值里 `uin` 为空串 = 没绑定。要「没绑就提示管理员」用 `requireOpenid()`，
+ * 它会抛 `IDENTITY_UNBOUND`，`err.message` 可以直接回给用户。
+ */
+function readOnlyIdentity(store, botId) {
+  if (!store) return null;
+  const bot = String(botId ?? '');
+  return Object.freeze({
+    /** 这个号码有没有有效绑定 */
+    has: (kind, uin) => store.has(kind, uin),
+    /** QQ号 → 这只鸟下的 openid（没绑返回空串） */
+    openidOf: (uin, forBot = bot) => store.openidOf(forBot, uin),
+    /** 群号 → 这只鸟下的 group_openid */
+    groupOpenidOf: (groupUin, forBot = bot) => store.groupOpenidOf(forBot, groupUin),
+    /** 同 `openidOf`，但没绑定就抛 `IDENTITY_UNBOUND` */
+    requireOpenid: (opts = {}) => store.requireOpenid({ botId: bot, ...opts }),
+    /** openid → QQ号（不限机器人，反查用） */
+    uinOf: (openid) => store.uinOf(openid),
+    /** group_openid → 群号 */
+    groupUinOf: (groupOpenid) => store.groupUinOf(groupOpenid),
+    /** openid → `{ uin, identityId }`，没绑返回 null */
+    resolveUser: (openid, forBot = bot) => store.resolveUser(forBot, openid),
+    resolveGroup: (groupOpenid, forBot = bot) => store.resolveGroup(forBot, groupOpenid),
+    /**
+     * 读旧记忆的备用键：号码 + 这个号码名下所有 openid。
+     * `current` 传当前已经在读的键，会被排除掉。
+     */
+    aliasesOf: (kind, uin, current = '') => store.aliasesOf(kind, uin, current),
+  });
+}
+
 function readOnlyGate(gate, pluginId) {
   const by = `plugin:${pluginId}`;
   return Object.freeze({
@@ -365,7 +405,7 @@ export class PluginStorage {
 /**
  * 插件上下文：插件能用的全部能力都在这里，不暴露内部实现。
  */
-export function createContext({ meta, paths, registry, api, cfg, config, configStore, groups, roles, levels, outbound, session, pipeline, reach, ledger, gate, delivery, isOwner, pages = null, routes = null, state = null }) {
+export function createContext({ meta, paths, registry, api, cfg, config, configStore, groups, roles, levels, outbound, session, pipeline, reach, ledger, gate, delivery, identity, isOwner, pages = null, routes = null, state = null }) {
   const id = meta.id;
   // 日志 tag 带机器人 id，多机器人下同名插件的日志不会串
   const logger = createLogger(`plugin:${paths?.id ?? '-'}:${id}`);
@@ -423,6 +463,20 @@ export function createContext({ meta, paths, registry, api, cfg, config, configS
      * 注意保留期（默认 7 天），超出范围查不到是正常的，不是 bug。
      */
     ledger: ledger ? readOnlyLedger(ledger) : null,
+    /**
+     * 身份对照（**只读**）：QQ号 / 群号 ↔ openid。
+     *
+     * 存在的理由：官方只给 openid，而 openid **换机器人就全变**；
+     * 号码不会变。管理员在面板绑一次之后，插件就能用号码代替 openid：
+     *
+     *   const openid = ctx.identity.openidOf('10001');      // 没绑是空串
+     *   ctx.identity.requireOpenid({ uin: '10001' });        // 没绑抛 IDENTITY_UNBOUND
+     *   ctx.identity.aliasesOf('group', '763366431', chatId); // 读旧记忆的备用键
+     *
+     * 没有 `bind` / `unbind`：绑定只能从面板做，插件写错一次就是串场。
+     * `identity` 为 null 表示宿主没启用（老版本），调用前判断一下。
+     */
+    identity: readOnlyIdentity(identity, paths?.id),
     /**
      * 暂停闸：`ctx.gate.silence(chatId, ms)` / `.pauseChat(chatId, true)` / `.check(chatId)`。
      *

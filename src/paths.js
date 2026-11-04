@@ -31,6 +31,10 @@ import path from 'node:path';
  *
  * 为什么数据必须按机器人隔离：**openid 是每个机器人独立的**，
  * 同一个用户在不同机器人下的 openid 完全不同，共享存档等于全部对不上。
+ *
+ * 唯一的例外是 `data/identity.json`（QQ号/群号 ↔ openid 对照表）。
+ * 它存在的全部意义就是横跨机器人——放进 `data/bots/<id>/` 就等于换机器人
+ * 那一刻又对不上，而这个功能要解决的正是那件事。**别把它当 bug 修掉。**
  */
 
 /** 代码根目录（src/ web/ plugins/ package.json 都在这下面），永远跟着仓库走 */
@@ -76,6 +80,13 @@ export const PATHS = {
   coreLog: path.join(DIRS.logs, 'bot.log'),
   /** 实例互斥记录 */
   instances: path.join(DIRS.data, 'instances.json'),
+  /**
+   * 身份对照表：QQ号 / 群号 ↔ openid。
+   *
+   * **放在 HOME 级、不跟着机器人走**，是上面那条「数据按机器人隔离」的
+   * 唯一刻意例外。openid 换机器人就变，只有号码不变，这张表就是那座桥。
+   */
+  identity: path.join(DIRS.data, 'identity.json'),
   /** 迁移完成标记 */
   migratedFlag: path.join(DIRS.data, '.migrated'),
 };

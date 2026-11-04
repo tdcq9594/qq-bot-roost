@@ -602,6 +602,7 @@ function activateTab(name) {
   if (name === 'reach') loadReach();
   if (name === 'delivery') loadDelivery();
   if (name === 'roles') { loadRoles(); loadPeople(); }
+  if (name === 'identity') loadIdentity();
 }
 
 /**
@@ -3538,6 +3539,245 @@ $('#btnAddRole')?.addEventListener('click', async () => {
     await loadRoles();
   } catch (e) {
     alert('保存失败: ' + e.message);
+  }
+});
+
+/* ---------------- 身份（QQ号 / 群号 ↔ openid） ---------------- */
+
+/**
+ * 为什么这一页存在：openid 是「每个 AppID 一套」的，换机器人就全变；
+ * 号码不会变，但官方没有任何查询接口。只能人工指认一次。
+ *
+ * 页面数据来自三处，缺一样管理员就认不出「这是谁」：
+ *   identity.json  已绑的号码（跨机器人共享）
+ *   stats.db       这人活跃吗、说了多少条
+ *   events 账本    最近说过什么（认人最快的一条线索）
+ * 后两者关掉时对应列留空，页面照常能用——**不能白屏**。
+ */
+async function loadIdentity() {
+  const ub = $('#identUserBody');
+  const gb = $('#identGroupBody');
+  try {
+    const d = await api('/api/identity');
+    renderIdentity(d);
+  } catch (e) {
+    const msg = `<tr><td colspan="5" class="empty">加载失败: ${escapeHtml(e.message)}</td></tr>`;
+    if (ub) ub.innerHTML = msg;
+    if (gb) gb.innerHTML = '<tr><td colspan="3" class="empty">加载失败</td></tr>';
+  }
+}
+
+/** 这只鸟下「当前生效」的那条 claim：按 lastSeenAt 取最新，相等时后追加的优先 */
+function currentClaim(rec, botId) {
+  let best = null;
+  for (const c of rec?.claims ?? []) {
+    if (c.state !== 'active' || String(c.botId ?? '') !== String(botId ?? '')) continue;
+    if (!best || (c.lastSeenAt || 0) >= (best.lastSeenAt || 0)) best = c;
+  }
+  return best;
+}
+
+function renderIdentity(d) {
+  const botId = d?.bot ?? '';
+  const users = d?.unresolved?.users ?? [];
+  const groups = d?.unresolved?.groups ?? [];
+
+  /* ---- 未识别的人 ---- */
+  const ub = $('#identUserBody');
+  if (ub) {
+    ub.innerHTML = users.length
+      ? users
+          .map((u) => {
+            const said = (u.recent ?? []).at(-1);
+            const where = (u.chats ?? [])
+              .slice(0, 2)
+              .map((c) => escapeHtml(c.name || shortId(c.chatId)))
+              .join('、');
+            const tail = [
+              where ? `<b>${where}</b>` : '',
+              said ? escapeHtml(String(said.content ?? '').slice(0, 40)) : '',
+            ]
+              .filter(Boolean)
+              .join(' · ');
+            return `<tr data-openid="${escapeHtml(u.userId)}">
+              <td title="${escapeHtml(u.userId)}">${labelWithId(u.name, u.userId)}</td>
+              <td>${u.lastSeen ? fmtAgo(u.lastSeen) : '-'}</td>
+              <td>${u.messages || 0}</td>
+              <td>${tail || '<span class="hint">还没有记录</span>'}</td>
+              <td>
+                <input class="ident-uin" placeholder="QQ号" inputmode="numeric" style="width:96px">
+                <button class="btn small primary ident-bind">绑定</button>
+                <div class="hint ident-err" hidden></div>
+              </td>
+            </tr>`;
+          })
+          .join('')
+      : '<tr><td colspan="5" class="empty">都认出来了。新来的人说过话之后会出现在这里。</td></tr>';
+  }
+
+  /* ---- 未识别的群 ---- */
+  const gb = $('#identGroupBody');
+  if (gb) {
+    gb.innerHTML = groups.length
+      ? groups
+          .map(
+            (g) => `<tr data-group="${escapeHtml(g.groupOpenid)}">
+              <td title="${escapeHtml(g.groupOpenid)}">${labelWithId(g.name, g.groupOpenid)}</td>
+              <td>${g.lastActiveAt ? fmtAgo(g.lastActiveAt) : '-'}</td>
+              <td>
+                <input class="ident-uin" placeholder="群号" inputmode="numeric" style="width:96px">
+                <button class="btn small primary ident-bind">绑定</button>
+                <div class="hint ident-err" hidden></div>
+              </td>
+            </tr>`,
+          )
+          .join('')
+      : '<tr><td colspan="3" class="empty">都认出来了。</td></tr>';
+  }
+
+  /* ---- 已绑定 ---- */
+  const bb = $('#identBoundBody');
+  if (bb) {
+    const all = [...(d?.users ?? []), ...(d?.groups ?? [])];
+    bb.innerHTML = all.length
+      ? all
+          .map((rec) => {
+            const isGroup = rec.kind === 'group';
+            const uin = isGroup ? rec.groupUin : rec.uin;
+            const mine = currentClaim(rec, botId);
+            const active = (rec.claims ?? []).filter((c) => c.state === 'active');
+            const last = active.reduce((a, c) => Math.max(a, c.lastSeenAt || 0), 0);
+            const off = rec.status === 'disabled' ? ' <span class="badge off">已停用</span>' : '';
+            return `<tr data-kind="${rec.kind}" data-uin="${escapeHtml(uin)}">
+              <td>${isGroup ? '群' : '人'}${off}</td>
+              <td class="mono">${escapeHtml(uin)}</td>
+              <td class="mono" title="${escapeHtml(mine?.openid ?? '')}">${
+                mine ? escapeHtml(shortId(mine.openid)) : '<span class="badge off">这只鸟没绑</span>'
+              }</td>
+              <td>${active.length} 条</td>
+              <td>${last ? fmtAgo(last) : '-'}</td>
+              <td><button class="btn small danger ident-unbind">解绑</button></td>
+            </tr>`;
+          })
+          .join('')
+      : '<tr><td colspan="6" class="empty">还没有绑定。从上面两张表里认一个，填上号码就行。</td></tr>';
+  }
+
+  const hint = $('#identBoundHint');
+  if (hint) {
+    const n = (d?.users?.length ?? 0) + (d?.groups?.length ?? 0);
+    hint.textContent = `跨机器人共享（${n} 条）。解绑只影响当前这只鸟，旧记录留痕不删。`;
+  }
+}
+
+/** 绑定：409 时问一句要不要改绑（force） */
+async function identBind({ kind, uin, openid, btn }) {
+  const errBox = btn.parentElement.querySelector('.ident-err');
+  const showErr = (m) => {
+    if (!errBox) return;
+    errBox.hidden = false;
+    errBox.textContent = m;
+  };
+  if (!/^\d{5,12}$/.test(uin)) {
+    showErr('号码要 5–12 位数字');
+    return;
+  }
+  btn.disabled = true;
+  if (errBox) errBox.hidden = true;
+  try {
+    await api('/api/identity/bind', {
+      method: 'POST',
+      body: JSON.stringify({ kind, uin, openid }),
+    });
+    await loadIdentity();
+    return;
+  } catch (e) {
+    const msg = String(e.message ?? '');
+    /**
+     * 409 = 这个 openid 已经绑到别的号码上了。
+     * 这不是错误，是「管理员改主意了」——问一句，确认后带 force 重发，
+     * 旧号码那条 claim 会被标成失效（留痕不删）。
+     */
+    if (msg.includes('已经绑到')) {
+      const ok = await confirmDialog({
+        title: '这个 openid 已经有主了',
+        message:
+          `${escapeHtml(msg)}<br><br>` +
+          `继续的话，旧号码上这条 openid 会被标成失效（<b>记录保留</b>），` +
+          `然后绑到 <b>${escapeHtml(uin)}</b>。`,
+        okText: '改绑',
+        danger: true,
+      });
+      if (ok) {
+        try {
+          await api('/api/identity/bind', {
+            method: 'POST',
+            body: JSON.stringify({ kind, uin, openid, force: true }),
+          });
+          await loadIdentity();
+          return;
+        } catch (e2) {
+          showErr(String(e2.message ?? '改绑失败'));
+        }
+      }
+    } else {
+      showErr(msg || '绑定失败');
+    }
+    btn.disabled = false;
+  }
+}
+
+$('#btnIdentReload')?.addEventListener('click', loadIdentity);
+
+/** 两张「未识别」表用同一套委托：表格每次整块重建，逐行绑事件会丢 */
+for (const id of ['#identUserBody', '#identGroupBody']) {
+  $(id)?.addEventListener('click', (e) => {
+    const btn = e.target.closest('.ident-bind');
+    if (!btn) return;
+    const tr = btn.closest('tr');
+    const input = tr.querySelector('.ident-uin');
+    const isGroup = tr.hasAttribute('data-group');
+    identBind({
+      kind: isGroup ? 'group' : 'user',
+      uin: String(input?.value ?? '').trim(),
+      openid: isGroup ? tr.dataset.group : tr.dataset.openid,
+      btn,
+    });
+  });
+  // 回车即绑定：填个号码还要去点按钮太别扭
+  $(id)?.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    const input = e.target.closest('.ident-uin');
+    if (!input) return;
+    input.closest('tr')?.querySelector('.ident-bind')?.click();
+  });
+}
+
+$('#identBoundBody')?.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.ident-unbind');
+  if (!btn) return;
+  const tr = btn.closest('tr');
+  const kind = tr.dataset.kind;
+  const uin = tr.dataset.uin;
+  const ok = await confirmDialog({
+    title: '解绑',
+    message:
+      `把 <b>${escapeHtml(uin)}</b> 在当前这只鸟上的绑定解掉？<br><br>` +
+      `只是这条不再生效，<b>记录和旧 openid 都留着</b>——别的时候换回来还能用。`,
+    okText: '解绑',
+    danger: true,
+  });
+  if (!ok) return;
+  btn.disabled = true;
+  try {
+    await api('/api/identity/unbind', {
+      method: 'POST',
+      body: JSON.stringify({ kind, uin }),
+    });
+    await loadIdentity();
+  } catch (err) {
+    btn.disabled = false;
+    btn.parentElement.innerHTML = `<span class="hint">${escapeHtml(err.message ?? '解绑失败')}</span>`;
   }
 });
 

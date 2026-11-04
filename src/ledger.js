@@ -433,21 +433,34 @@ export class EventLedger {
               ORDER BY seq DESC LIMIT ?`,
           )
           .all(this.botId, String(chatId), lim);
-    return rows.reverse().map((r) => ({
-      seq: r.seq,
-      id: r.id,
-      kind: r.kind,
-      chatId: r.chat_id,
-      userId: r.user_id,
-      userName: r.user_name,
-      at: r.at,
-      timeBasis: r.time_basis,
-      msgIdx: r.msg_idx,
-      quoted: r.quoted,
-      // 链路 id：调用方拿它去查"这条消息后来发生了什么"
-      trace: r.trace ?? '',
-      content: contentOf(r),
-    }));
+    return rows.reverse().map(mapRow);
+  }
+
+  /**
+   * 某个人说过的话（跨会话）。
+   *
+   * 面板「身份」页要用它：管理员看到一串 openid 时，得先知道「这人是谁、
+   * 在哪个群说过什么」才能确认该绑哪个 QQ号。只有 stats 的计数不够——
+   * 计数长得都差不多，一句原文立刻就能认出来。
+   *
+   * 走 `events_user` 索引 `(bot_id, user_id, at)`，不需要新建索引。
+   *
+   * @param {object} p
+   * @param {string} p.userId  openid
+   * @param {number} [p.limit] 默认 20，上限 200
+   * @returns {Array<object>} 按时间正序（最后一条是最近的）
+   */
+  byUser({ userId, limit = 20 } = {}) {
+    if (!this.available || this.closed || !userId) return [];
+    const lim = Math.min(Math.max(Number(limit) || 20, 1), 200);
+    const rows = this.db
+      .prepare(
+        `SELECT seq, id, kind, chat_id, user_id, user_name, content, at, time_basis, msg_idx, quoted, trace
+           FROM events WHERE bot_id = ? AND user_id = ?
+          ORDER BY at DESC, seq DESC LIMIT ?`,
+      )
+      .all(this.botId, String(userId), lim);
+    return rows.reverse().map(mapRow);
   }
 
   /** 面板用：总量、时间范围、保留策略 */
@@ -494,6 +507,30 @@ function contentOf(row) {
   } catch {
     return '';
   }
+}
+
+/**
+ * events 行 → 对外的对象。
+ *
+ * 抽出来是因为 `recent()` 和 `byUser()` 查的是同一张表、同一个返回形状，
+ * 各写一遍迟早会漏字段（`trace` 就是后加的，漏了没人发现）。
+ */
+function mapRow(r) {
+  return {
+    seq: r.seq,
+    id: r.id,
+    kind: r.kind,
+    chatId: r.chat_id,
+    userId: r.user_id,
+    userName: r.user_name,
+    at: r.at,
+    timeBasis: r.time_basis,
+    msgIdx: r.msg_idx,
+    quoted: r.quoted,
+    // 链路 id：调用方拿它去查「这条消息后来发生了什么」
+    trace: r.trace ?? '',
+    content: contentOf(r),
+  };
 }
 
 /**

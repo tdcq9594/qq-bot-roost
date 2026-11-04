@@ -210,8 +210,11 @@ export function parseElements(list, depth = 0) {
 
 /**
  * 把官方事件体统一成好用的 Message 对象，插件只跟它打交道。
+ *
+ * @param {object} [p.identity] 身份对照表（`IdentityStore`）。没传就是没启用绑定，
+ *   所有 `uin` / `*Aliases` 字段一律空，老行为不变。
  */
-export function buildMessage(eventName, d, { api, cfg, outbound, session, traceId }) {
+export function buildMessage(eventName, d, { api, cfg, outbound, session, traceId, identity }) {
   const kind = messageKindOf(eventName) ?? 'unknown';
 
   let groupId = '';
@@ -236,6 +239,27 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
   const mentioned = detectMention(d);
   const chatId = groupId || userId;
   const receivedAt = Date.now();
+
+  /**
+   * 身份对照：openid 换机器人就变，QQ号 / 群号不变。
+   *
+   * 这里只**查表**，不做任何自动匹配——认人只能靠管理员在面板「身份」页绑一次。
+   * 未绑定一律给空串、不抛错：内核每条消息都要过这里，抛错会把消息吞掉。
+   * 插件要「没绑就提示管理员」，用 `ctx.identity.requireOpenid()`，那条路才抛。
+   *
+   * `userAliases` / `groupAliases` 是读旧记忆的备用键：号码本身 + 这个号码名下
+   * 所有 openid（含别的机器人的）。**人和群必须分成两组**——合成一个数组，
+   * 群会话就会读到私聊记忆，这种串场很难在事后发现。
+   *
+   * 只在群聊 / 单聊算：频道（guild/dm）的 `channel_id`、`guild_id` 不是 openid，
+   * 拿它去对照 QQ号没有意义。
+   */
+  const idOn = Boolean(identity) && (kind === 'group' || kind === 'c2c');
+  const idUser = idOn ? identity.resolveUser(cfg?.id, userId) : null;
+  const idGroup = idOn && kind === 'group' ? identity.resolveGroup(cfg?.id, groupId) : null;
+  // 记一次「见过」（内部有 60 秒节流，不会每条消息都写盘）
+  if (idUser) identity.touch({ kind: 'user', uin: idUser.uin, botId: cfg?.id, scope: `${kind}:${chatId}` });
+  if (idGroup) identity.touch({ kind: 'group', uin: idGroup.uin, botId: cfg?.id, scope: `group:${chatId}` });
 
   // 没 @ 也不算命令，但可能处在免@窗口内 —— 此时同样算「在跟机器人说话」
   const sticky = Boolean(session?.isSticky(chatId));
@@ -272,6 +296,25 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
     userId,
     userName,
     chatId,
+
+    /* ---------------- 身份（QQ号 / 群号 ↔ openid） ---------------- */
+
+    /**
+     * QQ号。面板绑过才有，否则空串。
+     *
+     * **给 AI 看的时候号码优先、openid 兜底**：openid 换机器人就变，
+     * 号码不变。有号码时按号码认人，没有才退回 openid。
+     */
+    uin: idUser?.uin ?? '',
+    /** 群号，同上 */
+    groupUin: idGroup?.uin ?? '',
+    /** 跨机器人稳定的身份 id：人 `u:<QQ号>`、群 `g:<群号>` */
+    identityId: idUser?.identityId ?? '',
+    groupIdentityId: idGroup?.identityId ?? '',
+    /** 读旧记忆的备用键：号码 + 该号码名下所有 openid（不含当前 chatId） */
+    userAliases: idUser ? identity.aliasesOf('user', idUser.uin, userId) : [],
+    groupAliases: idGroup ? identity.aliasesOf('group', idGroup.uin, groupId) : [],
+
     content,
     raw: d,
     mentioned,

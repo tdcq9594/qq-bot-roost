@@ -28,7 +28,7 @@ const log = createLogger('plugins');
  * 启用状态存在 data/bots/<机器人id>/plugins.json，删掉文件夹即等于卸载。
  */
 export class PluginManager {
-  constructor({ pluginsDir, paths, registry, api, cfg, goBin, groups, roles, outbound, session, pipeline, isOwner, reach, ledger, gate, delivery, ignoreCompat }) {
+  constructor({ pluginsDir, paths, registry, api, cfg, goBin, groups, roles, outbound, session, pipeline, isOwner, reach, ledger, gate, delivery, identity, ignoreCompat }) {
     this.dir = pluginsDir;
     /** 插件声明的名字占用表（命令/工具/钩子），加载前查冲突、卸载时释放 */
     this.decl = new Declarations();
@@ -52,6 +52,8 @@ export class PluginManager {
     this.gate = gate;
     /** 投递账本（只给 fail，见 context.js 的 readOnlyDelivery），见 src/delivery.js */
     this.delivery = delivery;
+    /** 身份对照表（只读给插件，见 context.js 的 readOnlyIdentity），见 src/identity.js */
+    this.identity = identity;
     this.isOwner = isOwner;
     /** 跳过插件声明的 frameworkVersion 校验（作者本地调试用） */
     this.ignoreCompat = Boolean(ignoreCompat);
@@ -468,6 +470,7 @@ export class PluginManager {
       ledger: this.ledger,
       gate: this.gate,
       delivery: this.delivery,
+      identity: this.identity,
       isOwner: this.isOwner,
       pages: this.pages,
       routes: this.routes,

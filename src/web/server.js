@@ -25,6 +25,7 @@ import {
 } from '../updater.js';
 // 面板改插件启停时要同步机器人配置里的过滤器，两边不能各说各的
 import { pluginFilterOf, pluginAllowedIn } from '../bot.js';
+import { CONFLICT, INVALID } from '../identity.js';
 import { userFacingSendError } from '../outbound.js';
 import { runRoute } from '../plugin/routes.js';
 import { toggleGroupPlugin } from '../plugin/groupscope.js';
@@ -2201,6 +2202,247 @@ export async function startWebServer({
           const beforeSeq = Number(url.searchParams.get('beforeSeq') ?? 0) || undefined;
           const items = rt?.ledger?.recent?.({ chatId, limit, beforeSeq }) ?? [];
           return json(res, 200, { items });
+        }
+
+        /**
+         * 身份对照表：QQ号 / 群号 ↔ openid。
+         *
+         * 为什么需要这一页：官方只给 openid，而且**换机器人就全变**；
+         * 号码是唯一稳定的东西，但官方没有任何「号码 → openid」的查询接口。
+         * 所以只能人工指认一次，之后框架负责记住、插件负责查。
+         *
+         * 五条路由：
+         *   GET  /api/identity                列表（已绑 + 未识别候选）
+         *   GET  /api/identity/resolve        单个查询
+         *   POST /api/identity/resolve        批量查询
+         *   POST /api/identity/bind           绑定 / 改绑（force）
+         *   POST /api/identity/unbind         解绑（只影响这只鸟）
+         *
+         * 查不到一律 **200 + `bound:false`**，不是 404：
+         * 「没绑过」是正常状态，前端要拿它来决定「显示绑定按钮」还是「显示已绑」。
+         */
+        if (pathname.startsWith('/api/identity')) {
+          const ident = rt?.identity;
+          if (!ident) return json(res, 503, { error: '身份表不可用' });
+          await ident.load();
+          const botId = rt?.id ?? '';
+
+          /**
+           * 一个查询对象的统一解析。
+           *
+           * **反查（给 openid）可以不写 kind**：openid 是 32 位十六进制，
+           * 人和群不会撞，两个都查一遍就行。
+           * **正查（给号码）必须写 kind**：同一个数字完全可能既是 QQ号 又是群号，
+           * 猜错了就把群记忆读成人的。
+           */
+          const resolveOne = (q) => {
+            const openid = String(q?.openid ?? q?.groupOpenid ?? '').trim();
+            const uin = String(q?.uin ?? '').trim();
+            const kind = String(q?.kind ?? '').trim();
+
+            if (openid) {
+              const asUser = kind === 'group' ? '' : ident.uinOf(openid);
+              const asGroup = kind === 'user' ? '' : ident.groupUinOf(openid);
+              const hits = [];
+              if (asUser) hits.push({ kind: 'user', uin: asUser, identityId: `u:${asUser}` });
+              if (asGroup) hits.push({ kind: 'group', uin: asGroup, identityId: `g:${asGroup}` });
+              const first = hits[0] ?? null;
+              return {
+                query: { openid, kind },
+                bound: hits.length > 0,
+                kind: first?.kind ?? (kind || 'user'),
+                uin: first?.uin ?? '',
+                identityId: first?.identityId ?? '',
+                matches: hits,
+                // 号码优先给 AI 认人，openid 兜底；两个都给，让调用方自己决定
+                openid,
+              };
+            }
+
+            if (!uin) return { query: { openid, uin, kind }, bound: false, error: '需要 openid 或 uin' };
+            if (kind !== 'user' && kind !== 'group') {
+              return {
+                query: { uin, kind },
+                bound: false,
+                error: '按号码查必须带 kind（user 或 group）——同一个数字可能既是 QQ号 又是群号',
+              };
+            }
+            const out = kind === 'group' ? ident.groupOpenidOf(botId, uin) : ident.openidOf(botId, uin);
+            return {
+              query: { uin, kind },
+              bound: Boolean(out),
+              kind,
+              uin,
+              identityId: out ? `${kind === 'group' ? 'g' : 'u'}:${uin}` : '',
+              openid: out,
+              // 读旧记忆的备用键：号码 + 这个号码名下所有 openid
+              aliases: ident.aliasesOf(kind, uin),
+            };
+          };
+
+          if (pathname === '/api/identity/resolve' && req.method === 'GET') {
+            const q = {
+              openid: url.searchParams.get('openid'),
+              groupOpenid: url.searchParams.get('groupOpenid'),
+              uin: url.searchParams.get('uin'),
+              kind: url.searchParams.get('kind'),
+            };
+            const r = resolveOne(q);
+            return json(res, r.error && !r.bound ? 400 : 200, r);
+          }
+
+          if (pathname === '/api/identity/resolve' && req.method === 'POST') {
+            const body = await readBody(req);
+            const items = Array.isArray(body?.items) ? body.items.slice(0, 500) : [];
+            return json(res, 200, { items: items.map(resolveOne) });
+          }
+
+          if (pathname === '/api/identity' && req.method === 'GET') {
+            const kind = String(url.searchParams.get('kind') ?? '').trim();
+            const limit = Math.max(1, Math.min(200, Number(url.searchParams.get('limit') ?? 60) || 60));
+            /**
+             * 只有前 `detail` 条去查「所在群 / 最近几条」。
+             * 每个候选要两条 SQL，200 个候选就是 400 次查询——面板打开会明显卡一下，
+             * 而用户实际只需要看清最前面那几个。
+             */
+            const detail = Math.max(0, Math.min(limit, Number(url.searchParams.get('detail') ?? 30) || 30));
+
+            const records = await ident.list(kind);
+            const bound = await ident.boundOpenids(botId);
+
+            /** 未识别的候选：统计库的成员表 + 内存里的最近发言人（统计关掉时靠后者兜底） */
+            let unboundUsers = [];
+            if (kind !== 'group') {
+              const pool = new Map();
+              for (const p of rt?.stats?.people?.(400) ?? []) pool.set(p.userId, { ...p });
+              for (const p of rt?.listRecentPeople?.(200) ?? []) {
+                const cur = pool.get(p.openid) ?? {
+                  userId: p.openid,
+                  firstSeen: p.at,
+                  lastSeen: p.at,
+                  messages: 0,
+                  commands: 0,
+                };
+                cur.name = p.name || cur.name || '';
+                cur.chatId = p.chatId || cur.chatId || '';
+                cur.scope = p.scope || cur.scope || '';
+                pool.set(p.openid, cur);
+              }
+              unboundUsers = [...pool.values()]
+                .filter((p) => !bound.users.has(p.userId))
+                .sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0))
+                .slice(0, limit);
+
+              for (const [i, u] of unboundUsers.entries()) {
+                u.chats = [];
+                u.recent = [];
+                if (i >= detail) continue;
+                const d = rt?.stats?.userDetail?.({ userId: u.userId, limit: 10 });
+                if (d?.chats?.length) {
+                  u.chats = d.chats.map((c) => ({
+                    ...c,
+                    name: c.scope === 'group' ? (rt?.groupName?.(c.chatId) ?? '') : u.name || '',
+                  }));
+                }
+                u.recent = (rt?.ledger?.byUser?.({ userId: u.userId, limit: 3 }) ?? []).map((x) => ({
+                  at: x.at,
+                  chatId: x.chatId,
+                  // 只给前 120 字：这一栏是给人「认出这是谁」用的，不是聊天记录浏览器
+                  content: String(x.content ?? '').slice(0, 120),
+                }));
+              }
+            }
+
+            /** 未识别的群：群档案里所有没绑过的 */
+            let unboundGroups = [];
+            if (kind !== 'user') {
+              const list = (await rt?.groups?.list?.()) ?? [];
+              unboundGroups = list
+                .filter((g) => g.groupOpenid && !bound.groups.has(g.groupOpenid))
+                .slice(0, limit)
+                .map((g) => ({
+                  groupOpenid: g.groupOpenid,
+                  name: rt?.groupName?.(g.groupOpenid) ?? '',
+                  lastActiveAt: g.lastActiveAt ?? 0,
+                  enabled: g.enabled !== false,
+                }));
+            }
+
+            return json(res, 200, {
+              available: true,
+              bot: botId,
+              botName: rt?.name ?? botId,
+              users: records.filter((r) => r.kind === 'user'),
+              groups: records.filter((r) => r.kind === 'group'),
+              unresolved: { users: unboundUsers, groups: unboundGroups },
+              limits: { limit, detail },
+            });
+          }
+
+          if (pathname === '/api/identity/bind' && req.method === 'POST') {
+            const body = await readBody(req);
+            const kind = body?.kind === 'group' ? 'group' : 'user';
+            /**
+             * `botId` 可选，默认当前这只鸟。
+             *
+             * 为什么需要指定：换机器人之后面板挂在**新的**鸟上，
+             * 而要绑的 openid 是**旧鸟**产生的。归属记错了，
+             * `boundOpenids(旧鸟)` 就永远算不出它，面板上一直显示「未识别」——
+             * 用户会以为绑定没生效，反复绑。
+             * 显式给了但不认识的 id 直接 400，不静默兜底：绑到错的鸟身上更糟。
+             */
+            const want = String(body?.botId ?? '').trim();
+            if (want && !runtimes.some((r) => r.id === want)) {
+              return json(res, 400, { error: `没有这只鸟：${want}` });
+            }
+            const target = want || botId;
+            try {
+              const rec = await ident.bind({
+                kind,
+                uin: String(body?.uin ?? '').trim(),
+                openid: String(body?.openid ?? '').trim(),
+                botId: target,
+                // force = 改绑：这个 openid 已经属于别的号码时，把旧的那条标 revoked 留痕
+                force: body?.force === true,
+              });
+              return json(res, 200, { ok: true, kind, botId: target, uin: rec[kind === 'group' ? 'groupUin' : 'uin'], record: rec });
+            } catch (e) {
+              const code = e.code === CONFLICT ? 409 : e.code === INVALID ? 400 : 500;
+              return json(res, code, { error: e.message, code: e.code ?? '', owner: e.owner ?? '' });
+            }
+          }
+
+          if (pathname === '/api/identity/unbind' && req.method === 'POST') {
+            const body = await readBody(req);
+            const kind = body?.kind === 'group' ? 'group' : 'user';
+            /**
+             * `botId` 可选，和 `/bind` 对齐。
+             *
+             * 换机器人时可能用 `/bind` 显式指定了旧鸟（`{botId:'main'}`），
+             * 那么解绑也必须能指定——只打当前鸟的话会返回 `revoked: 0` 却
+             * 照样 200，界面刷新后什么都没变，用户只会反复点。
+             */
+            const want = String(body?.botId ?? '').trim();
+            if (want && !runtimes.some((r) => r.id === want)) {
+              return json(res, 400, { error: `没有这只鸟：${want}` });
+            }
+            const target = want || botId;
+            const r = await ident.unbind({ kind, uin: String(body?.uin ?? '').trim(), botId: target });
+            if (!r) return json(res, 404, { error: '这个号码还没有绑定记录' });
+            /**
+             * 一条都没撤销 ≠ 成功。可能是绑在**别的**鸟名下，
+             * 也可能是已经解绑过了。不区分的话界面会显示「解绑成功」而实际没变。
+             */
+            if (!r.revoked) {
+              return json(res, 409, {
+                error: `「${target || '当前机器人'}」名下没有这个号码的活绑定`,
+                botId: target,
+              });
+            }
+            return json(res, 200, { ok: true, revoked: r.revoked, botId: target });
+          }
+
+          return json(res, 404, { error: '没有这个接口' });
         }
 
         if (pathname === '/api/groups' && req.method === 'GET') {
