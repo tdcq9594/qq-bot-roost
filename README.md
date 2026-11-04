@@ -8,9 +8,9 @@
 
 <img src="https://img.shields.io/badge/Node.js-22.13%2B-339933?logo=node.js&logoColor=white" alt="Node.js 22.13+">
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
-<img src="https://img.shields.io/badge/tests-679%20passed-brightgreen" alt="测试 679 项">
+<img src="https://img.shields.io/badge/tests-737%20passed-brightgreen" alt="测试 737 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
-<img src="https://img.shields.io/badge/version-0.9.11-blueviolet" alt="版本 0.9.11">
+<img src="https://img.shields.io/badge/version-1.0.0-blueviolet" alt="版本 1.0.0">
 <img src="https://img.shields.io/badge/license-Non--Commercial-red" alt="禁止商用">
 <a href="https://github.com/tdcq9594/qq-bot-roost/actions"><img src="https://img.shields.io/github/actions/workflow/status/tdcq9594/qq-bot-roost/ci.yml?branch=master" alt="CI"></a>
 
@@ -70,6 +70,14 @@
 - **模板消息**：`msg.replyCard()` 一次带上 markdown 正文 + 按钮 + ark 模板，不会拆成三条碎片
 - **素材缓存**：同一个图片 url 两天内只上传一次，省富媒体频控和流量
 - **中间件管道**：去重、白名单、限流、命令冷却都可插拔
+
+**身份与记忆**（v1.0.0）
+
+- **QQ号 / 群号 ↔ openid 绑定**：换机器人（换 AppID）之后 openid 会变，而记忆是按 openid 存的。绑定之后，读记忆会把同一个号码名下的所有键一起读——**存量数据一个字节不动**
+- **面板「身份」页**：绑定、追加、改绑、停用；未识别的人也能看到
+- **群内指令（0 / 1 级）**：`/绑定群号 <群号>`、`/绑定成员 @某人 <QQ号>`。只绑当前群和当前群里被 @ 的人，冲突不强制改绑
+- **消息带四个字段**：`uin` / `groupUin` / `userAliases` / `groupAliases`。插件用 `ctx.identity` 只读视图查，绑定表由框架维护
+- 配套升级：`dsh-roost` 1.0.0（别名合并读取 + 账号迁移页）、`ai-chat` 4.4.1（透传字段）。**三个一起升**，少一个号码就传不到 DSH
 
 **连接与容错**
 
@@ -302,6 +310,8 @@ node src/main.js --mock --serve
 | `/enable` `/disable` `/reload [id]` | 插件管理（需全局管理员） |
 | `/群插件` | 看 / 改**这个群**能用哪些插件（群管理；面板「群组 → 插件」也能改） |
 | `/whoami` | 查自己的 openid / 群 openid |
+| `/绑定群号 <群号>` | 把**当前群**绑到群号（仅 0 / 1 级；冲突不强制改绑） |
+| `/绑定成员 @某人 <QQ号>` | 把**当前群里被 @ 的人**绑到 QQ号（仅 0 / 1 级） |
 | `/claim <认领码>` | 认领主人身份（`owners` 为空时可用） |
 | `/ping` | 连通性测试 |
 
@@ -368,6 +378,7 @@ export default {
 | `ctx.storage.get/set/all` | 插件私有存档 |
 | `ctx.config` / `ctx.setConfig()` | 插件配置读写 |
 | `ctx.can` / `ctx.levelOf` / `ctx.scopeOf` | 权限判断 |
+| `ctx.identity` | **只读**身份视图：`openidOf(uin)` / `uinOf(openid)` / `aliasesOf(uin)` / `groupOf(openid)`。绑定表由框架维护，插件不能写 |
 | `ctx.registerTool(工具)` | 注册一个 AI 可调用的工具（跨插件，0.8.6+），返回注销函数 |
 | `ctx.tools()` / `ctx.callTool(名, 参数)` | 列出 / 调用别插件注册的工具 |
 | `msg.reply` / `push` / `replyMarkdown` / `replyImage` / … | 各种发送方式 |
