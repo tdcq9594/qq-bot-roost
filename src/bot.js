@@ -232,8 +232,17 @@ export class BotRuntime {
       file: this.paths.events,
       botId: this.id,
       enabled: cfg.ledger?.enabled !== false,
-      retentionDays: cfg.ledger?.retentionDays ?? 7,
+      retentionDays: cfg.ledger?.retentionDays ?? 0,
     });
+
+    /**
+     * 后置注入：`outbound` 在 193 行就构造好了（它不依赖账本），
+     * 而账本要等 `paths.events` 就绪，所以只能在这里补引用。
+     *
+     * 照 278 行 `this.outbound.delivery = this.delivery` 的同一做法——
+     * 走构造函数参数的话拿到的是 `undefined`，表现是「出站永远不记，也不报错」。
+     */
+    if (this.outbound) this.outbound.ledger = this.ledger;
 
     this.plugins = new PluginManager({
       pluginsDir: DIRS.plugins,

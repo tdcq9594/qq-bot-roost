@@ -119,13 +119,20 @@ export class EventLedger {
    * @param {string} p.file    events.db 路径
    * @param {string} p.botId
    * @param {boolean} [p.enabled]
-   * @param {number} [p.retentionDays] 保留天数，默认 7
+   * @param {number} [p.retentionDays] 保留天数。**0 = 永久不删**；缺省按 0 处理
    */
-  constructor({ file, botId = '', enabled = true, retentionDays = 7 }) {
+  constructor({ file, botId = '', enabled = true, retentionDays = 0 }) {
     this.file = file;
     this.botId = botId;
     this.enabled = enabled !== false;
-    this.retentionDays = Math.max(1, Number(retentionDays) || 7);
+    /**
+     * `0` 是**合法值**（永久），不能像以前那样 `|| 7` 把它吃掉。
+     *
+     * 这里必须和 `config.js` 的默认值、`bot.js` 的 `?? 0` 三处一致。
+     * 任何一处留 `7`，表现都是「面板显示永久、实际按 7 天删」——不报错、查不出来。
+     */
+    const n = Number(retentionDays);
+    this.retentionDays = n === 0 ? 0 : Math.max(1, Number.isFinite(n) ? n : 0);
 
     this.db = null;
     this.available = false;
@@ -133,6 +140,8 @@ export class EventLedger {
     this.pruneTimer = null;
     /** 只在第一次出错时提醒，别刷屏 */
     this.warned = false;
+    /** 待压缩标记（面板点「压缩」后置位，定时清理时消费） */
+    this.needVacuum = false;
   }
 
   /** 打开库并建表。失败只警告——账本是增强功能，不能因此让机器人起不来 */
@@ -149,6 +158,8 @@ export class EventLedger {
       this.db = openDatabase(this.file);
       migrateEvents(this.db);
       this.available = true;
+      /** 上次进程退出前点过「压缩」但没跑到，这里接上 */
+      this.needVacuum = fs.existsSync(this.vacuumMark());
     } catch (e) {
       log.warn(`事件账本打不开（${this.file}）：${e.message}`);
       this.db = null;
@@ -225,8 +236,8 @@ export class EventLedger {
           `INSERT OR IGNORE INTO events
             (id, bot_id, kind, chat_id, msg_id, user_id, user_name, content,
              at, observed_at, time_basis, dedupe,
-             msg_idx, ref_msg_idx, union_openid, quoted, payload, trace)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+             msg_idx, ref_msg_idx, union_openid, quoted, payload, trace, plugin)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         )
         .run(
           id,
@@ -248,6 +259,11 @@ export class EventLedger {
           payload,
           // 链路 id：来自 buildMessage（见 src/trace.js）。老调用方没有就给空串
           String(msg.traceId ?? ''),
+          /**
+           * 谁说的（v3）。入站一律空串；出站由 `outbound` 带插件 id，
+           * 多插件合并时是逗号分隔（`echo,ai-chat`）。
+           */
+          String(msg.plugin ?? ''),
         );
       // changes === 0 说明撞了 dedupe 唯一约束 = 官方重推的同一条消息
       if (!r?.changes) {
@@ -325,7 +341,20 @@ export class EventLedger {
    */
   async prune() {
     if (!this.available || this.closed) return 0;
+    /**
+     * **先解析引用边，再决定删不删。**
+     *
+     * `resolveRefs()` 是全仓唯一的引用边解析入口（另一个调用点在测试里），
+     * 把它挪到 `retentionDays` 的 guard 后面，永久模式下引用边就永远不解析，
+     * `stats().unresolvedRefs` 会单调涨到全量。
+     */
     this.resolveRefs();
+
+    /** 0 = 永久：只解析引用，不删任何行 */
+    if (!this.retentionDays) {
+      this.runVacuumIfAsked();
+      return 0;
+    }
 
     const cutoff = Date.now() - this.retentionDays * 24 * 3600 * 1000;
     let total = 0;
@@ -346,6 +375,11 @@ export class EventLedger {
       this.db.exec('DELETE FROM event_refs WHERE from_id NOT IN (SELECT id FROM events)');
       log.info(`账本清理：删了 ${total} 条（保留 ${this.retentionDays} 天）`);
     }
+    /**
+     * 压缩只在**这里**做，不在 HTTP 请求里做：`DatabaseSync` 是同步 API，
+     * VACUUM 锁几秒会把所有机器人的收消息一起卡住（见 `host.js:4188` 的同款裁定）。
+     */
+    this.runVacuumIfAsked();
     return total;
   }
 
@@ -421,14 +455,14 @@ export class EventLedger {
     const rows = beforeSeq
       ? this.db
           .prepare(
-            `SELECT seq, id, kind, chat_id, user_id, user_name, content, at, time_basis, msg_idx, quoted, trace
+            `SELECT seq, id, kind, chat_id, user_id, user_name, content, at, time_basis, msg_idx, quoted, trace, plugin, bot_id
                FROM events WHERE bot_id = ? AND chat_id = ? AND seq < ?
               ORDER BY seq DESC LIMIT ?`,
           )
           .all(this.botId, String(chatId), Number(beforeSeq), lim)
       : this.db
           .prepare(
-            `SELECT seq, id, kind, chat_id, user_id, user_name, content, at, time_basis, msg_idx, quoted, trace
+            `SELECT seq, id, kind, chat_id, user_id, user_name, content, at, time_basis, msg_idx, quoted, trace, plugin, bot_id
                FROM events WHERE bot_id = ? AND chat_id = ?
               ORDER BY seq DESC LIMIT ?`,
           )
@@ -455,7 +489,7 @@ export class EventLedger {
     const lim = Math.min(Math.max(Number(limit) || 20, 1), 200);
     const rows = this.db
       .prepare(
-        `SELECT seq, id, kind, chat_id, user_id, user_name, content, at, time_basis, msg_idx, quoted, trace
+        `SELECT seq, id, kind, chat_id, user_id, user_name, content, at, time_basis, msg_idx, quoted, trace, plugin, bot_id
            FROM events WHERE bot_id = ? AND user_id = ?
           ORDER BY at DESC, seq DESC LIMIT ?`,
       )
@@ -472,15 +506,325 @@ export class EventLedger {
       .prepare('SELECT COUNT(*) AS n, MIN(at) AS oldest, MAX(at) AS newest, MAX(seq) AS seqMax FROM events')
       .get();
     const refs = this.db.prepare('SELECT COUNT(*) AS n FROM event_refs WHERE resolved = 0').get();
+    /**
+     * 面板要的「占多少、都有谁」。
+     *
+     * **`total` / `seqMax` 不能改名**：`test/selftest.mjs` 有 5 处断言在吃它们，
+     * `web/server.js:2268` 的兜底也是 `{available:false,total:0}`。
+     * 这里只加字段，不换结构。
+     */
+    let bytes = 0;
+    try {
+      bytes = fs.statSync(this.file).size;
+      const wal = `${this.file}-wal`;
+      if (fs.existsSync(wal)) bytes += fs.statSync(wal).size;
+    } catch {}
+    let byChat = [];
+    try {
+      byChat = this.db
+        .prepare(
+          `SELECT chat_id, kind, COUNT(*) AS n, MIN(at) AS oldest, MAX(at) AS newest
+             FROM events GROUP BY chat_id, kind ORDER BY newest DESC LIMIT 50`,
+        )
+        .all()
+        .map((r) => ({
+          chatId: String(r.chat_id ?? ''),
+          kind: String(r.kind ?? ''),
+          rows: Number(r.n ?? 0),
+          oldestAt: Number(r.oldest ?? 0),
+          newestAt: Number(r.newest ?? 0),
+        }));
+    } catch {}
     return {
       available: true,
       total: Number(row?.n ?? 0),
+      rows: Number(row?.n ?? 0),
       oldestAt: Number(row?.oldest ?? 0),
       newestAt: Number(row?.newest ?? 0),
       seqMax: Number(row?.seqMax ?? 0),
       unresolvedRefs: Number(refs?.n ?? 0),
       retentionDays: this.retentionDays,
+      bytes,
+      file: this.file,
+      byChat,
     };
+  }
+
+  /** 待压缩标记的路径。同目录一个空文件，跨进程有效（照 journal 的做法） */
+  vacuumMark() {
+    return `${this.file}.vacuum`;
+  }
+
+  /**
+   * 请求压缩：**只写标记，不在这里 VACUUM**。
+   *
+   * `DatabaseSync` 是同步 API，VACUUM 锁几秒会把整个进程卡住——所有机器人的
+   * 收消息一起停。所以由定时清理（`prune`）顺手消费，面板点完立刻返回。
+   */
+  requestVacuum() {
+    try {
+      fs.mkdirSync(path.dirname(this.vacuumMark()), { recursive: true });
+      fs.writeFileSync(this.vacuumMark(), String(Date.now()), 'utf8');
+      this.needVacuum = true;
+      return true;
+    } catch (e) {
+      log.warn(`压缩标记没写进去：${e.message}`);
+      return false;
+    }
+  }
+
+  /** 有标记就压一次。返回是否真的压了 */
+  runVacuumIfAsked() {
+    if (!this.available || this.closed || !this.db) return false;
+    const mark = this.vacuumMark();
+    if (!this.needVacuum && !fs.existsSync(mark)) return false;
+    this.needVacuum = false;
+    try {
+      fs.unlinkSync(mark);
+    } catch {}
+    try {
+      this.db.exec('VACUUM');
+      /**
+       * `PRAGMA wal_checkpoint` **返回一行结果**，用 `exec` 拿不到，
+       * 必须 `prepare().get()`。压完顺手把 WAL 截断，否则文件大小不减。
+       */
+      try {
+        this.db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+      } catch {}
+      log.info('账本已压缩');
+      return true;
+    } catch (e) {
+      log.warn(`账本压缩失败：${e.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * 手动删记录（面板用）。三种口径互斥，至少要给一个。
+   *
+   * @param {object} p
+   * @param {string} [p.chatId]   限定会话
+   * @param {number} [p.before]   删这个时间点之前的
+   * @param {number} [p.keepLast] 只保留最近 N 条（**必须同时给 chatId**）
+   * @param {string[]} [p.ids]    按 id 精确删
+   * @returns {{removed:number, error?:string}}
+   */
+  remove({ chatId = '', before = 0, keepLast = 0, ids = [] } = {}) {
+    if (!this.available || this.closed || !this.db) return { removed: 0, error: '账本没开' };
+    const chat = String(chatId || '');
+    const ts = Number(before) || 0;
+    const keep = Number(keepLast) || 0;
+    const list = (Array.isArray(ids) ? ids : []).map(String).filter(Boolean).slice(0, 500);
+
+    if (!chat && !ts && !keep && !list.length) return { removed: 0, error: '没给删除条件' };
+    if (keep && !chat) return { removed: 0, error: '「只保留最近 N 条」必须指定会话' };
+
+    let removed = 0;
+    try {
+      if (list.length) {
+        const marks = list.map(() => '?').join(',');
+        removed += Number(
+          this.db.prepare(`DELETE FROM events WHERE id IN (${marks})`).run(...list).changes ?? 0,
+        );
+      }
+      if (keep && chat) {
+        /**
+         * 用 `seq` 而不是 `at` 定「最近 N 条」：同一毫秒可能有多条，
+         * 按时间排会留下谁说不清，按自增序号才是确定的。
+         */
+        removed += Number(
+          this.db
+            .prepare(
+              `DELETE FROM events
+                WHERE chat_id = ? AND seq < (
+                  SELECT MIN(seq) FROM (
+                    SELECT seq FROM events WHERE chat_id = ? ORDER BY seq DESC LIMIT ?
+                  )
+                )`,
+            )
+            .run(chat, chat, keep).changes ?? 0,
+        );
+      } else if (ts) {
+        removed += Number(
+          this.db
+            .prepare(
+              `DELETE FROM events WHERE at < ?${chat ? ' AND chat_id = ?' : ''}`,
+            )
+            .run(...(chat ? [ts, chat] : [ts])).changes ?? 0,
+        );
+      }
+      if (removed) {
+        this.db.exec('DELETE FROM event_refs WHERE from_id NOT IN (SELECT id FROM events)');
+        this.requestVacuum();
+        log.info(`账本手动删除 ${removed} 条${chat ? `（会话 ${chat.slice(0, 8)}）` : ''}`);
+      }
+      return { removed };
+    } catch (e) {
+      log.warn(`账本删除失败：${e.message}`);
+      return { removed, error: e.message };
+    }
+  }
+
+  /**
+   * 删除前的预览：**只数不删**。
+   *
+   * 面板的确认框要求用户输入「将删除 N 条」里的 N，这个 N 必须来自服务端——
+   * 前端自己算的数和真正删掉的可能不一样（期间有新消息进来），
+   * 拿前端的数去校验等于没校验。
+   */
+  countFor({ chatId = '', before = 0, keepLast = 0 } = {}) {
+    if (!this.available || this.closed || !this.db) return 0;
+    const chat = String(chatId || '');
+    const ts = Number(before) || 0;
+    const keep = Number(keepLast) || 0;
+    try {
+      if (keep && chat) {
+        return Number(
+          this.db
+            .prepare(
+              `SELECT COUNT(*) AS n FROM events
+                WHERE chat_id = ? AND seq < (
+                  SELECT MIN(seq) FROM (
+                    SELECT seq FROM events WHERE chat_id = ? ORDER BY seq DESC LIMIT ?
+                  )
+                )`,
+            )
+            .get(chat, chat, keep)?.n ?? 0,
+        );
+      }
+      if (ts) {
+        const sql = `SELECT COUNT(*) AS n FROM events WHERE at < ?${chat ? ' AND chat_id = ?' : ''}`;
+        return Number(this.db.prepare(sql).get(...(chat ? [ts, chat] : [ts]))?.n ?? 0);
+      }
+      if (chat) {
+        return Number(this.db.prepare('SELECT COUNT(*) AS n FROM events WHERE chat_id = ?').get(chat)?.n ?? 0);
+      }
+      return Number(this.db.prepare('SELECT COUNT(*) AS n FROM events').get()?.n ?? 0);
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * 批量导入（面板用）。
+   *
+   * **走 `append()`，不自己拼 SQL**：去重、索引、`event_refs` 清理全复用同一套逻辑。
+   * 这样「导回去」和「正常收到」写出来的行没有区别，以后改 schema 也不用改两处。
+   *
+   * 幂等靠两层：
+   *   · 有 `msgId` → dedupe = `botId:msgId`，和原来那条一模一样；
+   *   · 没有 `msgId` → dedupe 里带 `at`，同一份文件导两次也只会进一次。
+   *
+   * @param {Array<object>} rows 每行 `{at, kind, chatId, msgId, userId, userName, content, plugin}`
+   * @returns {{added:number, skipped:number, bad:number, error?:string}}
+   */
+  importRows(rows, { max = 5000 } = {}) {
+    if (!this.available || this.closed) return { added: 0, skipped: 0, bad: 0, error: '账本没开' };
+    const list = Array.isArray(rows) ? rows.slice(0, max) : [];
+    let added = 0;
+    let skipped = 0;
+    let bad = 0;
+    for (const r of list) {
+      const at = Number(r?.at);
+      const chatId = String(r?.chatId ?? '').trim();
+      /**
+       * 时间必须能解析成有效毫秒。`resolveTime` 会把解析不出来的当「本地收到时间」，
+       * 那样导进来的历史会全部堆到"现在"，时间线彻底失真——所以这里直接拒。
+       */
+      if (!chatId || !Number.isFinite(at) || at <= 0) {
+        bad += 1;
+        continue;
+      }
+      try {
+        const got = this.append({
+          /** 有 msgId 就用它做去重键；没有就走指纹 */
+          id: String(r?.msgId ?? ''),
+          kind: String(r?.kind ?? 'group'),
+          chatId,
+          userId: String(r?.userId ?? ''),
+          userName: String(r?.userName ?? ''),
+          content: String(r?.content ?? ''),
+          plugin: String(r?.plugin ?? ''),
+          /**
+           * `append()` 只从 `raw.timestamp` 推 `at`（传 `at` 无效）。
+           * 给 ISO 字符串，`resolveTime` 会解析成 `basis: 'message'`——
+           * 正是「这条消息官方给了时间」的语义。
+           */
+          raw: { timestamp: new Date(at).toISOString() },
+        });
+        if (!got) bad += 1;
+        else if (got.duplicate) skipped += 1;
+        else added += 1;
+      } catch {
+        bad += 1;
+      }
+    }
+    if (added) {
+      this.db.exec('DELETE FROM event_refs WHERE from_id NOT IN (SELECT id FROM events)');
+      log.info(`账本导入 ${added} 条（跳过重复 ${skipped}，无效 ${bad}）`);
+    }
+    return { added, skipped, bad };
+  }
+
+  /**
+   * 换 openid：把账本里旧 openid 的记录改成新的。
+   *
+   * 场景：换了 AppID / 重新绑定之后，同一个人的 openid 变了。
+   * 旧记录还挂在旧 openid 下，按新 openid 查就是空的——「记忆看起来丢了」。
+   *
+   * **为什么必须由人指定 from → to**：`identity.js` 的 `bind` 有意不撤销旧 claim
+   * （旧 openid 是读旧记忆唯一的线索），所以一个号码下面可能同时有多条 active 的
+   * openid，代码无法判断哪条才是"新"的。自动猜必然猜错。
+   *
+   * `dedupe` **不动**：它里面也含 chatId，但它是唯一键，批量改可能撞车。
+   * 代价是这批老消息以后不会被当成重复——它们本来就是历史，不会重推。
+   */
+  remapOpenid({ from = '', to = '', scope = 'both', dryRun = false } = {}) {
+    if (!this.available || this.closed || !this.db) return { chat: 0, user: 0, error: '账本没开' };
+    const a = String(from || '').trim();
+    const b = String(to || '').trim();
+    const sc = scope === 'chat' || scope === 'user' ? scope : 'both';
+    if (!a || !b) return { chat: 0, user: 0, error: '要给旧 openid 和新 openid' };
+    if (a === b) return { chat: 0, user: 0, error: '新旧是同一个，不用改' };
+
+    const count = (sql) => Number(this.db.prepare(sql).get(a)?.n ?? 0);
+    try {
+      const out = { chat: 0, user: 0 };
+      if (sc !== 'user') out.chat = count('SELECT COUNT(*) AS n FROM events WHERE chat_id = ?');
+      if (sc !== 'chat') out.user = count('SELECT COUNT(*) AS n FROM events WHERE user_id = ?');
+      if (dryRun) return out;
+      if (sc !== 'user') this.db.prepare('UPDATE events SET chat_id = ? WHERE chat_id = ?').run(b, a);
+      if (sc !== 'chat') this.db.prepare('UPDATE events SET user_id = ? WHERE user_id = ?').run(b, a);
+      if (out.chat || out.user) {
+        this.requestVacuum();
+        log.info(`账本换 openid：会话 ${out.chat} 条、发送者 ${out.user} 条（${a.slice(0, 8)} → ${b.slice(0, 8)}）`);
+      }
+      return out;
+    } catch (e) {
+      log.warn(`账本换 openid 失败：${e.message}`);
+      return { chat: 0, user: 0, error: e.message };
+    }
+  }
+
+  /** 导出用：按条件取行（给 server 拼 CSV） */
+  exportRows({ chatId = '', before = 0, limit = 5000 } = {}) {
+    if (!this.available || this.closed || !this.db) return [];
+    const lim = Math.min(Math.max(Number(limit) || 5000, 1), 50000);
+    const chat = String(chatId || '');
+    const ts = Number(before) || 0;
+    try {
+      const where = [];
+      const args = [];
+      if (chat) { where.push('chat_id = ?'); args.push(chat); }
+      if (ts) { where.push('at < ?'); args.push(ts); }
+      const sql = `SELECT seq, id, kind, chat_id, msg_id, user_id, user_name, content, at, time_basis, plugin, bot_id
+                     FROM events ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+                    ORDER BY seq ASC LIMIT ?`;
+      return this.db.prepare(sql).all(...args, lim);
+    } catch (e) {
+      log.warn(`账本导出失败：${e.message}`);
+      return [];
+    }
   }
 
   close() {
@@ -521,6 +865,8 @@ function mapRow(r) {
     id: r.id,
     kind: r.kind,
     chatId: r.chat_id,
+    /** 哪个机器人实例（运行副本当前是 main）。出站行没有 user_name，靠它显示「谁」 */
+    botId: r.bot_id ?? '',
     userId: r.user_id,
     userName: r.user_name,
     at: r.at,
@@ -529,6 +875,11 @@ function mapRow(r) {
     quoted: r.quoted,
     // 链路 id：调用方拿它去查「这条消息后来发生了什么」
     trace: r.trace ?? '',
+    /**
+     * 谁说的（v3）：出站是插件 id，多插件合并时逗号分隔；入站是空串。
+     * 别默认成 `''` 就当成"入站"——老库里的出站行也是空串。
+     */
+    plugin: r.plugin ?? '',
     content: contentOf(r),
   };
 }

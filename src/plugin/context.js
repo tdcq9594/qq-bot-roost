@@ -6,6 +6,7 @@ import { md, renderMenuMd } from '../markdown.js';
 import { normalizeDashboard } from './dashboard.js';
 import { createToolCaller } from './tools.js';
 import { createMailApi, sharedMail } from '../mail/service.js';
+import { wrapApiForLedger } from './api-record.js';
 
 
 /**
@@ -445,7 +446,13 @@ export function createContext({ meta, paths, registry, api, cfg, config, configS
      *   ctx.state.cache ??= {};
      */
     state: state ?? {},
-    api,
+    /**
+     * 原始接口。**发出去会补记一笔账**（见 `plugin/api-record.js`）——
+     * 以前插件直连这里，出站账本里看不到这些消息，「谁」列也是空的。
+     *
+     * 只是包了一层，不改原对象：`seqMap` / 私有方法 / `instanceof` 都照旧。
+     */
+    api: wrapApiForLedger(api, { outbound, plugin: id, log: logger }),
     /**
      * 邮件通知（框架接口）：`await ctx.mail.send(收件人, 内容)`。
      * 收件人可以是完整邮箱地址（任意服务商），也可以是 QQ 号（自动补 @qq.com）；
@@ -866,6 +873,13 @@ export function createContext({ meta, paths, registry, api, cfg, config, configS
          * 调用方（`qq_send`）知道「一段话」的语义边界，只有它给得出这个 id。
          */
         ...(requestId ? { requestId: String(requestId) } : {}),
+        /**
+         * 账本归属（v3）：这条是哪个插件发的。
+         *
+         * `ctx.push` 是插件主动推送的入口，`msg.reply` 那条路走 `flushReplies`，
+         * 两处都要带——否则账本里「谁说的」会一半有一半没有。
+         */
+        ...(id ? { plugin: id } : {}),
       });
     },
 

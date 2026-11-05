@@ -2284,8 +2284,222 @@ export async function startWebServer({
           if (!chatId) return json(res, 400, { error: '需要 chatId' });
           const limit = Number(url.searchParams.get('limit') ?? 50);
           const beforeSeq = Number(url.searchParams.get('beforeSeq') ?? 0) || undefined;
-          const items = rt?.ledger?.recent?.({ chatId, limit, beforeSeq }) ?? [];
+          const rows = rt?.ledger?.recent?.({ chatId, limit, beforeSeq }) ?? [];
+          /**
+           * 面板显示用的轻量清洗。
+           *
+           * dsh-roost 的 `textOf` 在另一个仓、另一个进程，**不能 import 共用**，
+           * 所以这里按同样口径各写一份：表情原文是 `<faceType=...>`，
+           * 纯图 / 纯 @ 的 `content` 是空串。清洗只作用于展示，不改库里的原文。
+           */
+          const clean = (v) => String(v ?? '').replace(/<faceType=[^>]*>/g, '').trim();
+          const items = rows.map((r) => {
+            const t = clean(r.content);
+            return { ...r, content: t || (String(r.content ?? '') ? '（表情）' : '（图片）') };
+          });
           return json(res, 200, { items });
+        }
+
+        /**
+         * 账本：导出 CSV。
+         *
+         * 这是「删之前的退路」——删除是不可逆的，用户至少该能把原文带走。
+         * `payload` 同样不导：里面是整包报文，面板不需要，导出去反而是数据外泄面。
+         */
+        if (pathname === '/api/ledger/export' && req.method === 'GET') {
+          const chatId = String(url.searchParams.get('chatId') ?? '').trim();
+          const before = Number(url.searchParams.get('before') ?? 0) || 0;
+          const rows = rt?.ledger?.exportRows?.({ chatId, before }) ?? [];
+          /**
+           * 两种格式，用途不同：
+           *   · `csv`（默认）—— 给人看，Excel 直接打开；
+           *   · `jsonl` —— **给导回用**。CSV 里正文带换行时会被引号包起来，
+           *     再解析回来要写一个完整的 CSV 解析器，而 JSONL 一行一条、不需要转义。
+           */
+          if (String(url.searchParams.get('format') || 'csv').toLowerCase() === 'jsonl') {
+            const lines = rows.map((r) =>
+              JSON.stringify({
+                at: Number(r.at),
+                kind: String(r.kind ?? ''),
+                chatId: String(r.chat_id ?? ''),
+                msgId: String(r.msg_id ?? ''),
+                userId: String(r.user_id ?? ''),
+                userName: String(r.user_name ?? ''),
+                content: String(r.content ?? ''),
+                plugin: String(r.plugin ?? ''),
+              }),
+            );
+            res.writeHead(200, {
+              'Content-Type': 'application/x-ndjson; charset=utf-8',
+              'Content-Disposition': `attachment; filename="roost-ledger-${rt.id}-${Date.now()}.jsonl"`,
+              'Cache-Control': 'no-store',
+            });
+            return res.end(`${lines.join('\n')}\n`);
+          }
+          const q = (v) => {
+            const t = String(v ?? '');
+            return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
+          };
+          const lines = [
+            'seq,时间,会话,类型,发送者,插件,正文',
+            ...rows.map((r) =>
+              [
+                r.seq,
+                new Date(Number(r.at)).toISOString(),
+                r.chat_id,
+                r.kind,
+                r.user_name,
+                r.plugin,
+                r.content,
+              ]
+                .map(q)
+                .join(','),
+            ),
+          ];
+          res.writeHead(200, {
+            'Content-Type': 'text/csv; charset=utf-8',
+            'Content-Disposition': `attachment; filename="roost-ledger-${rt.id}-${Date.now()}.csv"`,
+            'Cache-Control': 'no-store',
+          });
+          return res.end(`\ufeff${lines.join('\n')}\n`);
+        }
+
+        /**
+         * 账本：删除（三种口径）。
+         *
+         * `dryRun` 只数不删，面板拿这个数去让用户输入确认；
+         * 真正删除时 `confirm` 必须等于服务端**重新数出来**的条数——
+         * 前端算的数和实际删的可能不一样（期间进了新消息），拿前端的数校验等于没校验。
+         */
+        if (pathname === '/api/ledger/delete' && req.method === 'POST') {
+          const body = await readBody(req);
+          const chatId = String(body.chatId ?? '').trim();
+          const before = Number(body.before ?? 0) || 0;
+          const keepLast = Number(body.keepLast ?? 0) || 0;
+          if (!chatId && !before && !keepLast) {
+            return json(res, 400, { error: '至少要给一个条件：会话 / 某时间前 / 保留最近 N 条' });
+          }
+          if (keepLast && !chatId) {
+            return json(res, 400, { error: '「只保留最近 N 条」必须指定会话' });
+          }
+          const count = rt?.ledger?.countFor?.({ chatId, before, keepLast }) ?? 0;
+          if (body.dryRun) return json(res, 200, { ok: true, count });
+          if (!count) return json(res, 200, { ok: true, count: 0, removed: 0 });
+          if (Number(body.confirm) !== count) {
+            return json(res, 409, {
+              ok: false,
+              count,
+              error: `要删 ${count} 条，确认数字对不上，已取消`,
+            });
+          }
+          const r = rt?.ledger?.remove?.({ chatId, before, keepLast }) ?? { removed: 0 };
+          if (r.error) return json(res, 500, { ok: false, error: r.error });
+          return json(res, 200, {
+            ok: true,
+            count,
+            removed: r.removed,
+            message: `删了 ${r.removed} 条。文件大小不会立刻变小，点「压缩数据库」才会。`,
+          });
+        }
+
+        /**
+         * 账本：换 openid（换 AppID / 重新绑定之后）。
+         *
+         * 同样先 `dryRun` 数一遍、再要 `confirm` 等于那个数——
+         * 这是**改历史数据**，比删更难挽回（删了至少知道少了什么）。
+         */
+        if (pathname === '/api/ledger/remap' && req.method === 'POST') {
+          const body = await readBody(req);
+          const from = String(body.from ?? '').trim();
+          const to = String(body.to ?? '').trim();
+          const scope = ['chat', 'user', 'both'].includes(body.scope) ? body.scope : 'both';
+          if (!from || !to) return json(res, 400, { ok: false, error: '要给旧 openid 和新 openid' });
+          const pre = rt?.ledger?.remapOpenid?.({ from, to, scope, dryRun: true })
+            ?? { chat: 0, user: 0, error: '账本没开' };
+          if (pre.error) return json(res, 400, { ok: false, error: pre.error });
+          const total = Number(pre.chat ?? 0) + Number(pre.user ?? 0);
+          if (body.dryRun) return json(res, 200, { ok: true, ...pre, total });
+          if (!total) return json(res, 200, { ok: true, ...pre, total: 0, message: '没有需要改的记录' });
+          if (Number(body.confirm) !== total) {
+            return json(res, 409, {
+              ok: false,
+              ...pre,
+              total,
+              error: `要改 ${total} 条，确认数字对不上，已取消`,
+            });
+          }
+          const r = rt?.ledger?.remapOpenid?.({ from, to, scope }) ?? { chat: 0, user: 0 };
+          if (r.error) return json(res, 500, { ok: false, error: r.error });
+          return json(res, 200, {
+            ok: true,
+            ...r,
+            total: Number(r.chat ?? 0) + Number(r.user ?? 0),
+            message: `改了会话 ${r.chat} 条、发送者 ${r.user} 条。点「压缩数据库」才会缩文件。`,
+          });
+        }
+
+        /**
+         * 账本：导入（JSONL 解析后的行）。
+         *
+         * 只收 `jsonl` 导出的形状。**不接 CSV**：正文里有换行和引号，
+         * 反解要写一个完整 CSV 解析器，而这条路一年用不了几次，不值。
+         *
+         * 幂等：`ledger.importRows` 走 `append()`，有 `msgId` 时按它去重，
+         * 没有时按 `at + 正文` 指纹去重——同一份文件导两次只会进一次。
+         */
+        if (pathname === '/api/ledger/import' && req.method === 'POST') {
+          let body;
+          try {
+            /** 默认 256KB 不够：一次最多 5000 行，正文可能很长 */
+            body = await readBody(req, 8 * 1024 * 1024);
+          } catch (e) {
+            return json(res, e.status ?? 400, { ok: false, error: e.message });
+          }
+          const rows = Array.isArray(body?.rows) ? body.rows : null;
+          if (!rows) return json(res, 400, { ok: false, error: '要 { rows: [...] }' });
+          if (!rows.length) return json(res, 400, { ok: false, error: '文件里没有记录' });
+          const r = rt?.ledger?.importRows?.(rows) ?? { added: 0, skipped: 0, bad: 0, error: '账本没开' };
+          if (r.error) return json(res, 500, { ok: false, error: r.error });
+          return json(res, 200, {
+            ok: true,
+            ...r,
+            message: `导入 ${r.added} 条；跳过重复 ${r.skipped} 条；无法识别 ${r.bad} 条`,
+          });
+        }
+
+        /**
+         * 账本：压缩。
+         *
+         * **只写标记、立刻返回**：`DatabaseSync` 是同步 API，VACUUM 锁几秒会把
+         * 所有机器人的收消息一起卡住。真正的压缩由定时清理消费（见 `ledger.js`）。
+         */
+        if (pathname === '/api/ledger/vacuum' && req.method === 'POST') {
+          const ok = rt?.ledger?.requestVacuum?.() ?? false;
+          return ok
+            ? json(res, 200, { ok: true, message: '已排队。压缩在下次清理时做（约每小时一次），期间不影响收发消息。' })
+            : json(res, 500, { ok: false, error: '压缩标记没写进去' });
+        }
+
+        /**
+         * 账本：保留期。
+         *
+         * `0` = 永久（默认）。写 config 之后**立刻改内存里的值**——
+         * 只写盘的话要等重启才生效，用户会以为没保存。
+         */
+        if (pathname === '/api/ledger/retention' && req.method === 'PUT') {
+          const body = await readBody(req);
+          const days = Number(body.days);
+          if (!Number.isInteger(days) || days < 0 || days > 36500) {
+            return json(res, 400, { error: '保留天数要在 0–36500 之间（0 = 永久）' });
+          }
+          cfg.ledger = { ...(cfg.ledger ?? {}), retentionDays: days };
+          await saveBotConfig(rt.id, cfg);
+          if (rt.ledger) {
+            rt.ledger.retentionDays = days;
+            /** 从永久改成有期限时，立刻按新规则清一次，别等一小时 */
+            if (days > 0) rt.ledger.prune?.().catch?.(() => {});
+          }
+          return json(res, 200, { ok: true, retentionDays: days });
         }
 
         /**

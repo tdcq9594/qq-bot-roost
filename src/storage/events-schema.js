@@ -12,7 +12,7 @@
  * 合表等于把统计库那句「不存消息正文」变成假话。
  */
 
-export const EVENTS_SCHEMA_VERSION = 2;
+export const EVENTS_SCHEMA_VERSION = 3;
 
 const V1 = `
 CREATE TABLE IF NOT EXISTS events (
@@ -73,6 +73,24 @@ ALTER TABLE events ADD COLUMN trace TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS events_trace ON events(bot_id, trace) WHERE trace != '';
 `;
 
+/**
+ * v3：谁说的。
+ *
+ * 出站记录（AI 或别的插件发的消息）要能标出**是哪个插件说的**——
+ * ai-chat 读账本时要能分清「这句是我说的」还是「回声说的」。
+ *
+ * 为什么是逗号分隔的字符串而不是 JSON 数组：一条出站消息可能由多个插件
+ * 合并而成（`message.js` 的 `flushReplies` 会把 `【回声】…【AI 对话】…` 拼成一条），
+ * 所以值可能是 `echo,ai-chat`。逗号串能直接 `LIKE '%ai-chat%'` 过滤，
+ * 也不用为此引 JSON1 函数。
+ *
+ * 空串的两种含义：入站消息（不是插件发的）、或早于本版（没记）。
+ */
+const V3 = `
+ALTER TABLE events ADD COLUMN plugin TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS events_plugin ON events(plugin) WHERE plugin != '';
+`;
+
 /** 表里有没有这一列（迁移要幂等，重复 ALTER 会抛） */
 function hasColumn(db, table, col) {
   try {
@@ -94,6 +112,13 @@ export function migrateEvents(db) {
    * 版本号可能因为半途失败停在 1，所以这里必须按「列在不在」判断，不能只看版本。
    */
   if (!hasColumn(db, 'events', 'trace')) db.exec(V2);
+  /**
+   * 同样按「列在不在」判，不看版本号：测试里会用 `DROP COLUMN trace`
+   * + 把 user_version 改回 1 的方式造老库，那种库里可能已经有 plugin 列。
+   * 只看版本号会撞 `duplicate column name: plugin`，而 `open()` 会把异常
+   * 吞成一条 warn —— 表现是「账本静默不可用」，最难查。
+   */
+  if (!hasColumn(db, 'events', 'plugin')) db.exec(V3);
   db.exec(`PRAGMA user_version = ${EVENTS_SCHEMA_VERSION}`);
   return { from: cur, to: EVENTS_SCHEMA_VERSION };
 }

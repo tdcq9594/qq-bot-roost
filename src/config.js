@@ -261,8 +261,19 @@ const BOT_DEFAULTS = {
    */
   ledger: {
     enabled: true,
-    /** 原始消息保留天数。7 天够「最近聊了什么」，再长就该由记忆层负责了 */
-    retentionDays: 7,
+    /**
+     * 原始消息保留天数。**0 = 永久不删**（默认）。
+     *
+     * 2026-11-05 从「7 天」改成「永久」：用户要求不丢历史，改由面板
+     * 「账本」页自己管删除（三种口径：整会话 / 某日期前 / 只保留最近 N 条）。
+     *
+     * 代价要说清：全文永久落库意味着这台机器会一直留着所有群聊原文
+     * （含别人的私聊）。所以「占用多少」和「压缩」是配套的，不能省。
+     *
+     * 这个默认值必须和 `ledger.js` 的构造默认、`bot.js` 的 `?? 0` 三处一致——
+     * 任何一处留 7，表现都是「面板显示永久、实际按 7 天删」。
+     */
+    retentionDays: 0,
   },
 
   /**
@@ -514,7 +525,7 @@ export async function saveBotConfig(id, cfg) {
     outbound: cfg.outbound,
     session: cfg.session,
     stats: cfg.stats ?? { enabled: true, retentionDays: 90 },
-    ledger: cfg.ledger ?? { enabled: true, retentionDays: 7 },
+    ledger: cfg.ledger ?? { enabled: true, retentionDays: 0 },
     gate: cfg.gate ?? { pauseOnStart: false },
     plugins: cfg.plugins,
     groupManage: cfg.groupManage ?? { invited: false },

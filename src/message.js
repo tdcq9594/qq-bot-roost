@@ -429,7 +429,26 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
      * 它是投递账本的幂等键（阶段 5）：同一个 id 再调一次只发一条。
      * 没有它就退回原来的「发一次算一次」。
      */
-    const { requestId, ...rest } = opts ?? {};
+    /**
+     * `plugin` 同理要摘出来：它只用于账本归属（v3），
+     * 混进 body 会被 `api.js` 的白名单丢掉（不会 400），
+     * 但会让 payload 里多一个谁也看不懂的字段。
+     */
+    /**
+     * `fileType` 也摘出来：它只用于账本给「（图片）/（语音）/（文件）」占位，
+     * 混进 body 会被 api 当未知参数带出去。
+     */
+    const { requestId, plugin, fileType, ...rest } = opts ?? {};
+    /**
+     * 出站归属统一在这里注入 —— **一处覆盖所有发送路径**。
+     *
+     * 以前只在 `flushReplies` 拼 `plugins`，于是 `replyMarkdown` /
+     * `replyMedia` / `replyImageBuffer` 这些绕过攒批的路径全部漏掉，
+     * 真机 549 行里 `plugin` 非空 0 条就是这么来的。
+     * `msg.pluginId` 由 bot.js 在分发前设置；`bot.js:1035` 是串行 await，
+     * 异步回话时它不会被后续监听器覆盖。
+     */
+    const sender = String(plugin ?? msg.pluginId ?? '');
     const body = passive ? { msgId: msg.id, ...rest } : { ...rest };
     msg.replied = true;
 
@@ -444,6 +463,8 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
       payload: body,
       receivedAt,
       ...(requestId ? { requestId: String(requestId) } : {}),
+      ...(sender ? { plugin: sender } : {}),
+      ...(fileType ? { fileType: Number(fileType) } : {}),
     });
   };
 
@@ -505,7 +526,19 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
   /** 绕过合并，立刻发一条 */
   msg.replyNow = (text, opts = {}) => {
     if (text === undefined || text === null || text === '') return Promise.resolve(null);
-    return send({ content: String(text), ...opts }, true);
+    /**
+     * 带插件归属（v3）。
+     *
+     * `msg.reply` 那条路走 `flushReplies`，会从 `replyBuf` 里拼出 `plugins`；
+     * 但 `replyNow`（多段直发）**绕过合并**，直接调 `send`。真机实测两条出站
+     * 记录的 `plugin` 都是空，就是这么漏的。这里从 `msg.pluginId` 补上——
+     * 它由 `bot.js` 在调监听器之前设好，闭包里拿得到。
+     */
+    return send({
+      content: String(text),
+      ...opts,
+      ...(msg.pluginId ? { plugin: String(msg.pluginId) } : {}),
+    }, true);
   };
 
   /**
@@ -534,6 +567,13 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
     if (!replyBuf.length) return null;
     const items = replyBuf.splice(0, replyBuf.length);
     const opts = items[0].opts ?? {};
+    /**
+     * 这条合并消息里出现了哪些插件（去重、逗号分隔）。
+     *
+     * 一个群的一轮里可能有「回声」和「AI 对话」都回了，合并成一条发出去，
+     * 正文里有 `【回声】` 这种标题，但那是文本、查不了。账本要的是可过滤的列。
+     */
+    const plugins = [...new Set(items.map((i) => i.pluginId).filter(Boolean))].join(',');
 
     /**
      * 合并策略：**多个插件都回了才加标题**。
@@ -592,7 +632,7 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
        * 结果是**一个群的一条消息发不出去，所有机器人一起退出**。
        */
       try {
-        last = await send({ content: c, ...opts }, true);
+        last = await send({ content: c, ...opts, ...(plugins ? { plugin: plugins } : {}) }, true);
       } catch (e) {
         log.warn(`回复发送失败（${chunks.length > 1 ? '分段 ' : ''}已跳过）：${e.message}`);
       }
@@ -782,7 +822,11 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
       if (!up?.file_info) throw new Error('未返回 file_info');
 
       const content = text ? String(text) : ' ';
-      return await send({ msgType: 7, content, media: { file_info: up.file_info } }, true);
+      return await send({
+        msgType: 7, content, media: { file_info: up.file_info },
+        /** 有效类型（可能因超过软限被降级成 FILE），账本占位按它来 */
+        fileType: effectiveType,
+      }, true);
     } catch (e) {
       log.error(`发送富媒体(type=${fileType}) 失败:`, e.message);
       return null;
@@ -821,7 +865,9 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
         reuse: false, // base64 本来就不进缓存
       });
       if (!up?.file_info) throw new Error('未返回 file_info');
-      return await send({ msgType: 7, content: ' ', media: { file_info: up.file_info } }, true);
+      return await send({
+        msgType: 7, content: ' ', media: { file_info: up.file_info }, fileType,
+      }, true);
     } catch (e) {
       log.error('发送图片 Buffer 失败:', e.message);
       return null;
@@ -845,14 +891,40 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
    */
   msg.replyStream = (opts = {}) => {
     if (kind !== 'c2c') {
-      // 群聊没有流式接口，退化成普通 markdown 回复，别让插件崩
+      /**
+       * 群聊没有流式接口，退化成一条 markdown。
+       *
+       * 以前 push() 和 end() 各调一次 replyMarkdown，于是「分两段说」在群里
+       * 会发两条独立消息、账本记两笔；而流式契约里 end() 传的是**最终全量正文**，
+       * push() 只是中间态，真按两条发出去用户看到的是半截内容。
+       * 现在 push() 只缓存、end() 发一次最终全文，与单聊 end() 补记一笔的口径对齐。
+       * 调用方按契约必须调 end()；只 push() 不 end() 时不再单独发一条。
+       */
+      const pieces = [];
+      let ended = false;
+      let endResult = null;
       return {
-        push: async (text) => msg.replyMarkdown({ content: String(text ?? '') }),
-        end: async (text) => msg.replyMarkdown({ content: String(text ?? '') }),
+        push: async (text) => {
+          const t = String(text ?? '');
+          if (t) pieces.push(t);
+          return null;
+        },
+        end: async (text) => {
+          if (ended) return endResult;
+          const final = String(text ?? '') || pieces.join('');
+          ended = true;
+          endResult = await msg.replyMarkdown({ content: final });
+          return endResult;
+        },
       };
     }
 
     let index = 0;
+    /** end() 可能被重复调用，出站账本只记一笔 */
+    let recorded = false;
+    /** 重复 end() 也不该再打一次接口；成功后才置位，失败仍可重试 */
+    let ended = false;
+    let endResult = null;
     let streamId = opts.streamMsgId || '';
     const target = userId;
     /**
@@ -882,7 +954,9 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
       },
       /** 结束流。contentRaw 传最终全量正文 */
       async end(contentRaw) {
-        return api.sendStreamMessage(target, {
+        /** 重复调用回首次结果：不打接口、不自增 index、不重复记账 */
+        if (ended) return endResult;
+        const r = await api.sendStreamMessage(target, {
           contentRaw,
           index: index++,
           state: 10,
@@ -892,6 +966,30 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
           msgSeq: seq,
           isWakeup: opts.isWakeup,
         });
+        /** 接口成功后才封口：发送失败时允许重试，别把重试永久挡死 */
+        ended = true;
+        endResult = r;
+        /**
+         * 流式回复直连 api，**不经过 outbound.send** —— 那边两个记账出口
+         * 都覆盖不到，单聊长回复会整条不进账本、「谁」列依旧是空的。
+         * 成功后补记一笔最终全文；recorded 防 end() 重复调用造成双记。
+         * 群聊在开头就退化成 replyMarkdown，那条路已经走 send()，不会到这。
+         */
+        if (!recorded) {
+          recorded = true;
+          try {
+            outbound?.recordDirect?.({
+              kind,
+              target,
+              content: String(contentRaw ?? ''),
+              plugin: String(opts.plugin ?? msg.pluginId ?? ''),
+              id: String(r?.id ?? streamId ?? ''),
+            });
+          } catch (e) {
+            log.warn(`流式回复没记进账本（不影响发送）：${e.message}`);
+          }
+        }
+        return r;
       },
     };
   };

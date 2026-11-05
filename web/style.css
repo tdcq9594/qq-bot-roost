@@ -1398,3 +1398,30 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
   background: currentColor;
   opacity: 0.25;
 }
+
+/* ---------------- 事件账本页 ---------------- */
+
+/*
+ * 列宽为什么要写死：默认 `table-layout: auto` 下，浏览器按内容分配宽度，
+ * 「2026/11/1 01:23:57」这种长串会被压成两行，一列变两行之后整张表就对不齐了
+ * （截图实测：时间和人名都折行，条数跑到别的列下面）。
+ * 时间和人名的宽度是固定的，把剩下的都给正文。
+ */
+#tab-ledger .table-wrap { max-height: 460px; }
+#tab-ledger table { table-layout: fixed; }
+#tab-ledger .lg-chat { width: 190px; overflow: hidden; text-overflow: ellipsis; }
+#tab-ledger .lg-kind { width: 64px; }
+#tab-ledger .lg-num { width: 72px; }
+#tab-ledger .lg-range { width: 190px; white-space: nowrap; }
+#tab-ledger .lg-ops { width: 132px; white-space: nowrap; }
+#tab-ledger .lg-when { width: 150px; white-space: nowrap; }
+#tab-ledger .lg-who { width: 150px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#tab-ledger .lg-content { word-break: break-word; }
+/* 概览里的时间范围：两行短格式，字号小一档，别撑破卡片 */
+#tab-ledger .card .v.lg-range-v {
+  font-size: 12.5px;
+  line-height: 1.45;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow-wrap: anywhere;
+}

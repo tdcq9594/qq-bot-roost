@@ -74,7 +74,7 @@ function briefOf(payload) {
   if (b.ark) parts.push('[ark 卡片]');
   if (b.media) {
     // fileType 是数字（1 图 / 2 视频 / 3 语音 / 4 文件），直接打数字没人看得懂
-    const name = { 1: '图片', 2: '视频', 3: '语音', 4: '文件' }[b.media.fileType];
+    const name = { 1: '图片', 2: '视频', 3: '语音', 4: '文件' }[b.media.fileType ?? b.fileType];
     parts.push(name ? `[${name}消息]` : '[媒体消息]');
   }
   if (b.keyboard) parts.push('[按钮键盘]');
@@ -234,7 +234,17 @@ export function digestTextOf(payload) {
    * 没有正文的报文给个占位。一串空摘要里冒出 `[媒体]` / `[卡片]`，
    * 至少能分辨「这条本来就没有文字」，而不是「摘要功能又坏了」。
    */
-  if (p.media) return '[媒体]';
+  /**
+   * 富媒体占位。
+   *
+   * 数值来自 api.js 的 FILE_TYPE，要能一眼看出是哪种媒体。
+   * 注意 `sendMedia` 的报文是 `{fileType, url}`——**没有 `media` 字段**，
+   * 以前只看 `p.media` 时，插件经 `ctx.api.sendMedia` 直发的消息在账本里
+   * 就是一条空摘要（复核实测：`digestTextOf({fileType:1,url}) === ''`）。
+   */
+  const mediaName = { 1: '（图片）', 2: '（视频）', 3: '（语音）', 4: '（文件）' }[Number(p.fileType)];
+  if (p.media) return mediaName ?? '[媒体]';
+  if (mediaName) return mediaName;
   if (p.ark) return '[卡片]';
   return '';
 }
@@ -246,10 +256,16 @@ export class Outbound {
    * @param {object} opts.cfg            全局配置
    * @param {() => boolean} opts.isOnline 机器人是否已连上网关
    */
-  constructor({ api, cfg, isOnline = () => true, quotaFile, delivery = null }) {
+  constructor({ api, cfg, isOnline = () => true, quotaFile, delivery = null, ledger = null }) {
     this.api = api;
     /** 投递账本（阶段 5）。没有它就退回原来的「发一次算一次」 */
     this.delivery = delivery;
+    /**
+     * 事件账本（v3 出站入账）。**不能走构造函数传**——`bot.js` 里
+     * `createLedger` 在 `new Outbound` 之后才执行，这里拿到的是 undefined。
+     * 真正生效的是 `bot.js` 里那句后置注入 `this.outbound.ledger = this.ledger`。
+     */
+    this.ledger = ledger;
     this.cfg = cfg;
     this.isOnline = isOnline;
 
@@ -317,7 +333,16 @@ export class Outbound {
    */
   async send(opts) {
     const requestId = String(opts?.requestId ?? '').trim();
-    if (!requestId || !this.delivery) return this.#sendOnce(opts);
+    if (!requestId || !this.delivery) {
+      /**
+       * 没有幂等键（被动回复 / 富媒体 / 框架菜单）走这里。
+       * 以前直接 return，导致图片、菜单全都不入账。
+       * 与下面的 settle 分支互斥：这里不经过 delivery，reuse 也进不来。
+       */
+      const r = await this.#sendOnce(opts);
+      this.#recordOutbound(opts, r);
+      return r;
+    }
 
     const c = this.delivery.claim({
       requestId,
@@ -360,6 +385,13 @@ export class Outbound {
         r?.pending ? DELIVERY_STATE.AUDITED : DELIVERY_STATE.SENT,
         { msgId: r?.id },
       );
+      /**
+       * 两个成功出口各记一次，**互斥**：
+       *   · 这里 = 有 requestId、走 delivery 的路径；
+       *   · 早返回分支 = 无 requestId（被动回复 / 富媒体 / 菜单）。
+       * reuse 不调 #sendOnce，catch 里发送失败，两者都不记。
+       */
+      this.#recordOutbound(opts, r);
       return { ...r, requestId };
     } catch (e) {
       /**
@@ -375,7 +407,75 @@ export class Outbound {
     }
   }
 
-  async #sendOnce({ kind, target, chatKey, payload, receivedAt }) {
+  /**
+   * 出站入账（v3）。
+   *
+   * 只在**发送成功之后**记：没发出去就等于没说过，记了会污染时间线，
+   * 而时间线正是 `chat_look` 和巩固的原料。
+   *
+   * 三条边界：
+   *   · 账本没接（老版本 / 被关）→ 直接返回，不报错；
+   *   · `append` 抛错 → 只 warn，**绝不影响发送**（账本是增强不是主链路）；
+   *   · `at` 由 `timeBasis:'observation'` 决定（= 本地发送时刻）。
+   *     `append()` 不认外部传的 `at`，它只从 `msg.raw.timestamp` 推——别传，
+   *     传了也不会生效，反而会让人以为时间被固定住了。
+   *
+   * `userId` / `userName` 留空：机器人自己的 openid 要 `api.getMe()`（网络调用），
+   * 不能阻塞发送。时间线里出站行显示的是插件名，不缺这两个字段。
+   */
+  /**
+   * 给「不经过本类 send() 的发送路径」补记一笔出站事件。
+   *
+   * 目前只有 `msg.replyStream`：它直连 `api.sendStreamMessage`，绕过
+   * `#sendOnce` 与 delivery，所以 `send()` 里那两个记账出口都覆盖不到它
+   * —— 单聊长回复会整条不进账本、「谁」列依旧空（复核抓到的 P1）。
+   * 由调用方在**发送成功之后**调一次，幂等由调用方保证。
+   */
+  recordDirect({ kind, target, content, payload = null, plugin = '', id = '' } = {}) {
+    this.#recordOutbound(
+      {
+        kind,
+        target,
+        /**
+         * 能传完整报文就传：只给 `content` 的话，插件发 `{markdown:{content}}`
+         * 或纯媒体时摘要会是空串，账本里就成了一行没有内容的记录。
+         */
+        payload: payload ?? { content: String(content ?? '') },
+        plugin,
+      },
+      { id: String(id ?? '') },
+    );
+  }
+
+  #recordOutbound(opts, r) {
+    if (!this.ledger?.append) return;
+    try {
+      this.ledger.append(
+        {
+          kind: String(opts.kind ?? ''),
+          chatId: String(opts.target ?? ''),
+          userId: '',
+          userName: '',
+          content: digestTextOf({
+            ...opts.payload,
+            ...(opts.fileType != null ? { fileType: opts.fileType } : {}),
+          }),
+          id: String(r?.id ?? ''),
+          msgIdx: String(r?.raw?.ext_info?.ref_idx ?? ''),
+          /**
+           * 谁说的。多插件合并时是逗号分隔（`echo,ai-chat`），
+           * 由 `message.js` 的 `flushReplies` 拼好传下来。
+           */
+          plugin: String(opts.plugin ?? ''),
+        },
+        { timeBasis: 'observation' },
+      );
+    } catch (e) {
+      log.warn(`出站没记进账本（不影响发送）：${e.message}`);
+    }
+  }
+
+  async #sendOnce({ kind, target, chatKey, payload, receivedAt, fileType }) {
     if (kind !== 'group' && kind !== 'c2c') {
       throw new SendError(`不支持的会话类型: ${kind}`, 'api');
     }
@@ -486,7 +586,7 @@ export class Outbound {
       }
 
       try {
-        const r = await this.#post(kind, target, body, active ? '主动' : '被动');
+        const r = await this.#post(kind, target, body, active ? '主动' : '被动', fileType);
         if (active) this.stats.active += 1;
         else this.stats.passive += 1;
         if (r?.pending) this.stats.audit += 1;
@@ -517,7 +617,7 @@ export class Outbound {
         delete fallback.msgId;
         delete fallback.msgSeq;
         log.warn(`被动回复被拒（${e.message}），改发主动消息 · ${chatKey}`);
-        const r = await this.#post(kind, target, fallback, '降级主动');
+        const r = await this.#post(kind, target, fallback, '降级主动', fileType);
         this.stats.degraded += 1;
         this.stats.active += 1;
         if (r?.pending) this.stats.audit += 1;
@@ -528,7 +628,7 @@ export class Outbound {
 
   /* ---------------- 内部 ---------------- */
 
-  async #post(kind, target, body, how = '') {
+  async #post(kind, target, body, how = '', fileType) {
     const r = kind === 'group'
       ? await this.api.sendGroup(target, body)
       : await this.api.sendC2C(target, body);
@@ -536,7 +636,8 @@ export class Outbound {
     // 发出去了什么。放在这里而不是调用处：三个调用点（正常 / 降级 / 审核中）
     // 都要打，写在一处不会漏
     const where = String(target ?? '').slice(0, 10) || '-';
-    const what = briefOf(body) || '(空)';
+    /** 顶层 fileType 不进 body（会被 api 当未知字段带出去），只用于日志与账本 */
+    const what = briefOf({ ...body, ...(fileType != null ? { fileType } : {}) }) || '(空)';
 
     // 主动消息需要审核，接口会用业务码返回「审核中」，这不是失败
     if (r && typeof r === 'object' && Number(r.code) === CODE_AUDIT) {

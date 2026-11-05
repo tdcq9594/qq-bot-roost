@@ -232,6 +232,7 @@ async function selectBot(id) {
   if (tab === 'config') loadConfig();
   if (tab === 'plugins') loadPlugins();
   if (tab === 'events') loadEvents();
+  if (tab === 'ledger') loadLedger();
   if (tab === 'reach') loadReach();
   if (tab === 'delivery') loadDelivery();
   if (tab === 'groups') loadGroups();
@@ -582,6 +583,7 @@ function activateTab(name) {
     stopPluginDashPolling();
   }
   if (name === 'events') loadEvents();
+  if (name === 'ledger') loadLedger();
   // 统计页：进来先拉一次，之后 10 秒一轮（统计本身是 1 秒批量落盘的，不用更密）
   if (name === 'stats') {
     loadStats();
@@ -2057,6 +2059,323 @@ async function loadPlugins() {
     wrap.innerHTML = `<div class="empty">加载失败: ${escapeHtml(e.message)}</div>`;
   }
 }
+
+/* ---------------- 事件账本 ---------------- */
+
+const LEDGER_KIND = { group: '群', c2c: '私聊', guild: '频道', dm: '私信' };
+/** 当前展开的会话；`cursor` 是上一页最早那条的 seq（账本 recent 返回正序） */
+let ledgerView = { chatId: '', cursor: 0 };
+
+function fmtBytes(n) {
+  const v = Number(n) || 0;
+  if (v < 1024) return `${v} B`;
+  if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`;
+  return `${(v / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function fmtWhen(ts) {
+  if (!ts) return '-';
+  return new Date(Number(ts)).toLocaleString('zh-CN', { hour12: false });
+}
+
+/** 列表里用的短格式：年份对「刚才/上周」没意义，省下来的宽度给正文 */
+function fmtShort(ts) {
+  if (!ts) return '-';
+  const d = new Date(Number(ts));
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+async function loadLedger() {
+  const body = $('#ledgerChats');
+  if (!body) return;
+  try {
+    const st = await api('/api/ledger/stats');
+    renderLedgerStats(st);
+    renderLedgerChats(st);
+    syncLedgerRetention(st?.retentionDays);
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="5" class="empty">加载失败: ${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+function renderLedgerStats(st) {
+  const el = $('#ledgerStats');
+  if (!el) return;
+  const days = Number(st?.retentionDays);
+  const cards = [
+    ['记录条数', Number(st?.total ?? 0)],
+    ['占用', fmtBytes(st?.bytes)],
+    ['保留', days === 0 ? '永久' : `${days} 天`],
+  ];
+  /**
+   * 时间范围用**短格式**：`2026/11/1 01:23:57 → 2026/11/4 21:13:33` 比卡片宽一倍，
+   * 会直接溢出到框外（截图实测）。年份在「最近」这个语境里没有信息量，
+   * 省下来的宽度正好放进一张卡。
+   */
+  const range = st?.oldestAt
+    ? `${fmtShort(st.oldestAt)}<br>→ ${fmtShort(st.newestAt)}`
+    : '还没有记录';
+  el.innerHTML = cards
+    .map(([k, v]) => `<div class="card"><div class="k">${k}</div><div class="v">${escapeHtml(String(v))}</div></div>`)
+    .join('') + `<div class="card"><div class="k">时间范围</div><div class="v lg-range-v">${range}</div></div>`;
+}
+
+function renderLedgerChats(st) {
+  const body = $('#ledgerChats');
+  if (!body) return;
+  const list = st?.byChat ?? [];
+  if (!list.length) {
+    body.innerHTML = '<tr><td colspan="5" class="empty">账本里还没有记录（或者账本关着）</td></tr>';
+    return;
+  }
+  body.innerHTML = list
+    .map((c) => {
+      const id = String(c.chatId ?? '');
+      const short = id.length > 14 ? `${id.slice(0, 14)}…` : id;
+      return `<tr>
+        <td class="mono lg-chat" title="${escapeHtml(id)}">${escapeHtml(short)}</td>
+        <td class="lg-kind">${escapeHtml(LEDGER_KIND[c.kind] ?? c.kind ?? '')}</td>
+        <td class="num lg-num">${Number(c.rows ?? 0)}</td>
+        <td class="lg-range">${escapeHtml(fmtShort(c.oldestAt))} → ${escapeHtml(fmtShort(c.newestAt))}</td>
+        <td class="lg-ops">
+          <button class="btn small" data-ledger-open="${escapeHtml(id)}">查看</button>
+          <button class="btn small danger" data-ledger-del="${escapeHtml(id)}">删除</button>
+        </td>
+      </tr>`;
+    })
+    .join('');
+}
+
+function syncLedgerRetention(days) {
+  const sel = $('#ledgerRetention');
+  const input = $('#ledgerRetentionDays');
+  if (!sel || !input) return;
+  const d = Number(days);
+  const known = ['0', '7', '30'];
+  if (known.includes(String(d))) {
+    sel.value = String(d);
+    input.style.display = 'none';
+  } else {
+    sel.value = 'custom';
+    input.style.display = '';
+    input.value = String(d);
+  }
+}
+
+async function openLedgerChat(chatId) {
+  ledgerView = { chatId, cursor: 0 };
+  const box = $('#ledgerRowsBox');
+  if (box) box.hidden = false;
+  const t = $('#ledgerRowsTitle');
+  if (t) t.textContent = `记录 · ${String(chatId).slice(0, 14)}`;
+  const body = $('#ledgerRows');
+  if (body) body.innerHTML = '<tr><td colspan="3" class="empty">加载中…</td></tr>';
+  await loadLedgerRows(true);
+}
+
+async function loadLedgerRows(reset) {
+  const body = $('#ledgerRows');
+  const chatId = ledgerView.chatId;
+  if (!body || !chatId) return;
+  try {
+    const q = new URLSearchParams({ chatId, limit: '50' });
+    if (!reset && ledgerView.cursor) q.set('beforeSeq', String(ledgerView.cursor));
+    const d = await api(`/api/ledger?${q.toString()}`);
+    const items = d?.items ?? [];
+    if (reset) body.innerHTML = '';
+    if (!items.length && reset) {
+      body.innerHTML = '<tr><td colspan="3" class="empty">这个会话没有记录</td></tr>';
+      const more = $('#ledgerMore');
+      if (more) more.disabled = true;
+      return;
+    }
+    body.insertAdjacentHTML(
+      'afterbegin',
+      items
+        .map((x) => {
+          /**
+           * 出站行没有 user_name，直接在「谁」列显示发出它的插件：
+           * 插件 → 插件名；框架内建（`__core`，菜单等）→ 机器人实例名（默认 main）。
+           * 原来那个独立的 `[plugin]` 标记撤掉，否则同一行会重复两遍。
+           * 入站的 `userName || userId` 兜底保持不变。
+           */
+          const actor = x.plugin && x.plugin !== '__core' ? x.plugin : (x.botId || 'main');
+          const who = x.userName || x.userId || actor;
+          return `<tr>
+            <td class="lg-when">${escapeHtml(fmtWhen(x.at))}</td>
+            <td class="lg-who" title="${escapeHtml(who)}">${escapeHtml(who)}</td>
+            <td class="lg-content">${escapeHtml(String(x.content ?? '').slice(0, 200))}</td>
+          </tr>`;
+        })
+        .join(''),
+    );
+    /** 账本返回的是**正序**（老的在前），所以「更早的一页」的游标是第一条的 seq */
+    ledgerView.cursor = items.length ? Number(items[0].seq) : 0;
+    const more = $('#ledgerMore');
+    if (more) more.disabled = items.length < 50;
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="3" class="empty">加载失败: ${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+/**
+ * 删除：先 dryRun 数一遍，让用户**输入那个数字**再真删。
+ *
+ * 为什么用 `prompt` 而不是 `confirmDialog`：这里要的不是「确定/取消」，
+ * 而是「把条数打出来」。只点两下的删除对不可逆操作太轻了。
+ */
+async function ledgerDelete(cond) {
+  try {
+    const pre = await api('/api/ledger/delete', {
+      method: 'POST',
+      body: JSON.stringify({ ...cond, dryRun: true }),
+    });
+    const count = Number(pre?.count ?? 0);
+    if (!count) return alert('这个条件下没有可删的记录');
+    const typed = window.prompt(
+      `将删除 ${count} 条记录，不可恢复。\n请输入 ${count} 确认：`,
+      '',
+    );
+    if (typed === null) return;
+    if (Number(typed) !== count) return alert('数字对不上，已取消');
+    const r = await api('/api/ledger/delete', {
+      method: 'POST',
+      body: JSON.stringify({ ...cond, confirm: count }),
+    });
+    alert(r?.message || `删了 ${r?.removed ?? 0} 条`);
+    await loadLedger();
+    if (ledgerView.chatId) await loadLedgerRows(true);
+  } catch (e) {
+    alert(`删除失败: ${e.message}`);
+  }
+}
+
+$('#ledgerChats')?.addEventListener('click', (e) => {
+  const open = e.target.closest('[data-ledger-open]');
+  if (open) return openLedgerChat(open.getAttribute('data-ledger-open'));
+  const del = e.target.closest('[data-ledger-del]');
+  if (del) return ledgerDelete({ chatId: del.getAttribute('data-ledger-del') });
+});
+
+$('#ledgerMore')?.addEventListener('click', () => loadLedgerRows(false));
+
+$('#ledgerDelChat')?.addEventListener('click', () => {
+  if (!ledgerView.chatId) return;
+  return ledgerDelete({ chatId: ledgerView.chatId });
+});
+
+$('#ledgerRetention')?.addEventListener('change', (e) => {
+  const input = $('#ledgerRetentionDays');
+  if (!input) return;
+  const custom = e.target.value === 'custom';
+  input.style.display = custom ? '' : 'none';
+  if (custom) input.focus();
+});
+
+$('#ledgerRetentionSave')?.addEventListener('click', async () => {
+  const sel = $('#ledgerRetention');
+  const input = $('#ledgerRetentionDays');
+  const raw = sel?.value === 'custom' ? Number(input?.value) : Number(sel?.value);
+  if (!Number.isInteger(raw) || raw < 0 || raw > 36500) return alert('天数要在 0–36500 之间（0 = 永久）');
+  try {
+    await api('/api/ledger/retention', { method: 'PUT', body: JSON.stringify({ days: raw }) });
+    alert(raw === 0 ? '已改成永久保留' : `已改成保留 ${raw} 天，超出部分会在下次清理时删掉`);
+    await loadLedger();
+  } catch (e) {
+    alert(`保存失败: ${e.message}`);
+  }
+});
+
+$('#ledgerVacuum')?.addEventListener('click', async () => {
+  try {
+    const r = await api('/api/ledger/vacuum', { method: 'POST', body: '{}' });
+    alert(r?.message || '已排队');
+  } catch (e) {
+    alert(`压缩失败: ${e.message}`);
+  }
+});
+
+/** 换 openid：先预览条数，再要用户输入那个数——改历史数据比删更难挽回 */
+$('#ledgerRemapGo')?.addEventListener('click', async () => {
+  const from = String($('#ledgerRemapFrom')?.value ?? '').trim();
+  const to = String($('#ledgerRemapTo')?.value ?? '').trim();
+  const scope = $('#ledgerRemapScope')?.value ?? 'both';
+  if (!from || !to) return alert('旧 openid 和新 openid 都要填');
+  if (from === to) return alert('新旧是同一个，不用改');
+  try {
+    const pre = await api('/api/ledger/remap', {
+      method: 'POST',
+      body: JSON.stringify({ from, to, scope, dryRun: true }),
+    });
+    const total = Number(pre?.total ?? 0);
+    if (!total) return alert('这个 openid 下没有记录');
+    const typed = window.prompt(
+      `将改动 ${total} 条（会话 ${pre.chat} / 发送者 ${pre.user}），改完不可自动还原。\n请输入 ${total} 确认：`,
+      '',
+    );
+    if (typed === null) return;
+    if (Number(typed) !== total) return alert('数字对不上，已取消');
+    const r = await api('/api/ledger/remap', {
+      method: 'POST',
+      body: JSON.stringify({ from, to, scope, confirm: total }),
+    });
+    alert(r?.message || '已改完');
+    await loadLedger();
+  } catch (e) {
+    alert(`改失败: ${e.message}`);
+  }
+});
+
+$('#ledgerExport')?.addEventListener('click', () => {
+  const q = ledgerView.chatId ? `?chatId=${encodeURIComponent(ledgerView.chatId)}` : '';
+  window.location.href = `/api/ledger/export${q}`;
+});
+
+/** JSONL 才是「导回」用的格式：一行一条，正文里的换行不用转义 */
+$('#ledgerExportJson')?.addEventListener('click', () => {
+  const p = new URLSearchParams({ format: 'jsonl' });
+  if (ledgerView.chatId) p.set('chatId', ledgerView.chatId);
+  window.location.href = `/api/ledger/export?${p.toString()}`;
+});
+
+$('#ledgerImport')?.addEventListener('click', () => $('#ledgerImportFile')?.click());
+
+$('#ledgerImportFile')?.addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const rows = text
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .map((l) => {
+        try {
+          return JSON.parse(l);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+    if (!rows.length) {
+      return alert('文件里没有可识别的记录。要的是「导出 JSON」那种一行一条的格式。');
+    }
+    if (!window.confirm(`将导入 ${rows.length} 行。重复的会自动跳过，继续？`)) return;
+    const r = await api('/api/ledger/import', {
+      method: 'POST',
+      body: JSON.stringify({ rows }),
+    });
+    alert(r?.message || '导入完成');
+    await loadLedger();
+    if (ledgerView.chatId) await loadLedgerRows(true);
+  } catch (err) {
+    alert(`导入失败: ${err.message}`);
+  } finally {
+    /** 清掉，否则同一个文件选第二次不会触发 change */
+    e.target.value = '';
+  }
+});
 
 /* ---------------- 事件订阅与接收 ---------------- */
 

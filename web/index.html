@@ -58,6 +58,7 @@
         <button class="tab-item" data-tab="events">事件</button>
         <button class="tab-item" data-tab="reach">可达性</button>
         <button class="tab-item" data-tab="delivery">投递</button>
+        <button class="tab-item" data-tab="ledger">账本</button>
         <button class="tab-item" data-tab="logs">日志</button>
       </div>
     </div>
@@ -712,6 +713,92 @@
           </thead>
           <tbody id="deliveryBody"><tr><td colspan="6" class="empty">暂无数据</td></tr></tbody>
         </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- 事件账本 -->
+  <section id="tab-ledger" class="panel">
+    <div class="box">
+      <div class="box-hd">
+        <h3>事件账本</h3>
+        <span class="hint">每条消息的原文都在这——她翻记录、查上下文都靠它</span>
+      </div>
+      <ul class="tips">
+        <li>默认<b>永久保留</b>。全文落库意味着这台机器会一直留着群聊原文（含别人的私聊）——
+          要控制占用就改保留期，或者手动删。</li>
+        <li><b>删除不可逆</b>，但会先让你核对条数。删完文件<b>不会立刻变小</b>，
+          点「压缩数据库」才会（压缩在下次清理时做，约每小时一次，期间不影响收发）。</li>
+        <li><b>导出 JSON 是给导回用的</b>：一行一条、不带转义，导回去重复的会自动跳过。
+          导出 CSV 是给人看的，Excel 能直接打开，但正文里的换行会让它没法原样导回。</li>
+      </ul>
+      <div class="cards" id="ledgerStats"></div>
+      <div class="btn-row" style="align-items:center">
+        <label for="ledgerRetention" class="hint" style="margin:0">保留</label>
+        <select id="ledgerRetention" style="width:150px">
+          <option value="0">永久</option>
+          <option value="7">7 天</option>
+          <option value="30">30 天</option>
+          <option value="custom">自定义…</option>
+        </select>
+        <input id="ledgerRetentionDays" type="number" min="1" max="36500" placeholder="天数"
+               style="width:110px;display:none">
+        <button id="ledgerRetentionSave" class="btn small">保存</button>
+        <span style="flex:1"></span>
+        <button id="ledgerExport" class="btn small">导出 CSV</button>
+        <button id="ledgerExportJson" class="btn small">导出 JSON</button>
+        <button id="ledgerImport" class="btn small">导入…</button>
+        <input id="ledgerImportFile" type="file" accept=".jsonl,.json,application/x-ndjson" hidden>
+        <button id="ledgerVacuum" class="btn small">压缩数据库</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>会话</th><th>类型</th><th class="num">条数</th><th>时间范围</th><th>操作</th></tr>
+          </thead>
+          <tbody id="ledgerChats"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody>
+        </table>
+      </div>
+      <div id="ledgerRowsBox" hidden style="margin-top:14px">
+        <div class="box-hd">
+          <h3 id="ledgerRowsTitle">记录</h3>
+          <span class="hint" id="ledgerRowsHint"></span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>时间</th><th>谁</th><th>内容</th></tr></thead>
+            <tbody id="ledgerRows"></tbody>
+          </table>
+        </div>
+        <div class="btn-row">
+          <button id="ledgerMore" class="btn small">下一页</button>
+          <button id="ledgerDelChat" class="btn small danger">删掉这个会话的记录</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="box" style="margin-top:14px">
+      <div class="box-hd">
+        <h3>openid 变更</h3>
+        <span class="hint">换 AppID / 重新绑定之后，把旧 openid 下的记录改到新的</span>
+      </div>
+      <ul class="tips">
+        <li>一个号码可能同时挂着<b>多条</b> openid——绑定是<b>有意不撤销旧的</b>
+          （旧 openid 是读旧记忆唯一的线索）。所以这里要你手动指定「从哪条改到哪条」，
+          代码猜不出来。</li>
+        <li>只改「会话」和「发送者」两列；去重键不动（老消息本来也不会重推）。</li>
+        <li>openid 从「身份」页复制：那里每个号码下面列着它的全部 openid 和最后出现时间。</li>
+      </ul>
+      <div class="btn-row" style="align-items:center">
+        <input id="ledgerRemapFrom" placeholder="旧 openid" style="width:250px">
+        <span class="hint" style="margin:0">→</span>
+        <input id="ledgerRemapTo" placeholder="新 openid" style="width:250px">
+        <select id="ledgerRemapScope" style="width:130px">
+          <option value="both">会话 + 发送者</option>
+          <option value="chat">只改会话</option>
+          <option value="user">只改发送者</option>
+        </select>
+        <button id="ledgerRemapGo" class="btn small">预览并执行</button>
       </div>
     </div>
   </section>
