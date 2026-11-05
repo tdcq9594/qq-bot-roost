@@ -1,1 +1,1 @@
-{"alg":"ed25519","keyId":"roost-2026-11","sig":"NeUdyCc4eAzS2lHt9+9RURfkqnPPLJNMPnz9sl2X+pEghIynUlT9LomjXd4DQ3U7KyoCFwkb8cpTtuf4NEkVBQ=="}
+{"alg":"ed25519","keyId":"roost-2026-11","sig":"xEnCnBPbqCcG7i6KMG9Tj5YXdGrtjQCC5PZt4dntNLZAqyws8BYKEQa6tUvk3rJGROfr/PS2HGzab6Q3pZ1tAA=="}

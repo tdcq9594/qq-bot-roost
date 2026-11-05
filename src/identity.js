@@ -727,14 +727,24 @@ export class IdentityStore {
      */
     this.flushing = true;
     try {
-      // 写前重读：别的机器人进程可能刚写过
-      const diskMtime = await this.#mtime();
-      if (diskMtime && diskMtime !== this.mtimeMs) {
-        const raw = await readJsonSafe(this.file, (m) => log.error(m));
-        const disk = this.#normalizeRoot(raw);
-        this.data = this.#merge(this.data, disk);
-        this.#rebuildIndexes();
-      }
+      /**
+       * 写前重读：别的机器人进程可能刚写过。
+       *
+       * **必须无条件重读，不能拿 mtime 做「磁盘变没变」的判断。**
+       * `mtimeMs` 只有毫秒精度（Windows 上尤其粗），同一毫秒里连着两次落盘
+       * mtime 一模一样 → 判定「磁盘没变」→ 不重读 → 用内存里的旧状态整份覆盖，
+       * 别的进程刚做的解绑 / 停用就被翻回去了。
+       * 这不是假想：CI 的 Windows + Node 22 上两条「旧进程不许复活解绑」的
+       * 用例稳定复现，第一次报 21 号、重跑报 35 号——同一毫秒内谁先谁后看运气。
+       *
+       * 代价可控：落盘本来就有 300ms 节流、只在 `dirty` 时跑，多读一个小 JSON
+       * 可以忽略；文件不存在 / 读坏时 `readJsonSafe` 返回 null，归一化成空表，
+       * 合并结果仍是内存这份，不会丢。
+       */
+      const raw = await readJsonSafe(this.file, (m) => log.error(m));
+      const disk = this.#normalizeRoot(raw);
+      this.data = this.#merge(this.data, disk);
+      this.#rebuildIndexes();
 
       this.data.version = DATA_VERSION;
       this.data.updatedAt = Date.now();

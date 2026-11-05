@@ -410,6 +410,37 @@ test('解绑不会被旧进程的落盘复活', async () => {
   await b.close();
 });
 
+test('mtime 判不出变化（同一毫秒内两次落盘）时，解绑照样不被覆盖', async () => {
+  const file = tmpFile();
+  const a = new IdentityStore(file);
+  const b = new IdentityStore(file);
+  await a.load();
+  await a.bind({ kind: 'user', uin: '10001', openid: OPENID_A, botId: 'botA' });
+  await a.flush();
+
+  await b.load();
+  await a.unbind({ kind: 'user', uin: '10001', botId: 'botA' });
+  await a.flush();
+
+  /**
+   * 把 b 记的 mtime 强行改成「和磁盘现在一模一样」——这正是同一毫秒内
+   * 连着两次落盘的真实情形：mtimeMs 只有毫秒精度，判不出文件变过。
+   * 以前 `#flushOnce` 会因此跳过重读，用内存里的 active 整份覆盖，
+   * 解绑就复活了。CI 上 Windows + Node 22 稳定复现（第一次 21 号、重跑 35 号）。
+   */
+  b.mtimeMs = fs.statSync(file).mtimeMs;
+
+  await b.bind({ kind: 'user', uin: '20002', openid: OPENID_B, botId: 'botB' });
+  await b.flush();
+
+  const check = new IdentityStore(file);
+  await check.load();
+  assert.equal(check.resolveUser('botA', OPENID_A), null, 'mtime 相同也不能把解绑翻回去');
+  assert.equal(check.resolveUser('botB', OPENID_B)?.uin, '20002', 'b 自己写的那条要还在');
+  await a.close();
+  await b.close();
+});
+
 test('同进程并发 bind 不互相覆盖', async () => {
   const file = tmpFile();
   const s = new IdentityStore(file);
