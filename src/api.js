@@ -58,7 +58,7 @@ const PASSIVE_MAX_SEQ = 5;
  * 构造发送报文。抽成纯函数是为了能单测——`#payload` 是私有方法，测试摸不到。
  *
  * @param {object} opts 驼峰字段：content / msgType / msgId / msgSeq / eventId /
- *                      markdown / keyboard / media / ark / messageReference
+ *                      markdown / keyboard / media / card / ark / messageReference
  * @param {(msgId:string)=>number} nextSeq 取下一个 msg_seq
  * @returns {object} 官方要的 snake_case 报文
  */
@@ -72,6 +72,7 @@ export function buildSendPayload(opts = {}, nextSeq = () => 1) {
     markdown,
     keyboard,
     media,
+    card,
     ark,
     messageReference,
   } = opts;
@@ -99,6 +100,21 @@ export function buildSendPayload(opts = {}, nextSeq = () => 1) {
   if (ark) {
     payload.ark = ark;
     payload.msg_type = 3;
+  }
+  /**
+   * 图文卡片（`msg_type=8`，官方 2026-10-28 新增，群聊/单聊都支持）。
+   *
+   * 放在 ark 之后是有意的：`msg_type` 是**单值**，一条消息只能有一种富文本。
+   * 同时给 markdown 和 card 时以 card 为准（最后写的赢），调用方本该只给一个。
+   *
+   * `content` 置空照抄 markdown 那条路的做法——官方示例里 `msg_type=8`
+   * 根本没有 content 字段，而 `#payload` 总会带一个 `content: ''`，
+   * 留着空串跟「类型与内容不匹配」（22006）只差一步。
+   */
+  if (card) {
+    payload.card = card;
+    payload.msg_type = 8;
+    payload.content = '';
   }
   /**
    * 引用回复。官方是独立字段，不是 msg_id 那套被动回复：
@@ -234,7 +250,7 @@ export class QQApi {
   /**
    * 发送群消息
    * @param {string} groupOpenid
-   * @param {object} opts content / msgType / msgId / eventId / markdown / keyboard / media / ark / messageReference
+   * @param {object} opts content / msgType / msgId / eventId / markdown / keyboard / media / card / ark / messageReference
    */
   async sendGroup(groupOpenid, opts = {}) {
     const r = await this.#request('POST', `/v2/groups/${enc(groupOpenid)}/messages`, this.#payload(opts));

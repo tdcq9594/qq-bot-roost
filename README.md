@@ -8,7 +8,7 @@
 
 <img src="https://img.shields.io/badge/Node.js-22.13%2B-339933?logo=node.js&logoColor=white" alt="Node.js 22.13+">
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
-<img src="https://img.shields.io/badge/tests-797%20passed-brightgreen" alt="测试 797 项">
+<img src="https://img.shields.io/badge/tests-807%20passed-brightgreen" alt="测试 807 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
 <img src="https://img.shields.io/badge/version-1.0.6-blueviolet" alt="版本 1.0.6">
 <img src="https://img.shields.io/badge/license-Non--Commercial-red" alt="禁止商用">
@@ -68,6 +68,7 @@
 - **多轮对话**：`ctx.prompt()` 问一句等回答，文字游戏的地基
 - **流式回复**：`msg.replyStream()` 做 AI 打字机效果，自动维护分片序号；群聊自动降级成普通消息
 - **模板消息**：`msg.replyCard()` 一次带上 markdown 正文 + 按钮 + ark 模板，不会拆成三条碎片
+- **图文卡片**：`msg.replyTuwen({title, description, url, picUrl})` 发官方 2026-10-28 新增的 `msg_type=8` 卡片，字段长度和 https 在发之前就校验
 - **素材缓存**：同一个图片 url 两天内只上传一次，省富媒体频控和流量
 - **中间件管道**：去重、白名单、限流、命令冷却都可插拔
 

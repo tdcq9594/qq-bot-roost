@@ -43,6 +43,34 @@ function stripMention(content) {
 }
 
 /**
+ * 图文卡片（`msg_type=8`）的官方硬约束，发之前先查一遍。
+ *
+ * 为什么要自己查：官方对参数不合规只回一个 `304061 消息内容无效`，
+ * **不说是哪个字段**。四个字段里有一个超长或写成了 http，日志里就只有
+ * 这么一句话，排查全靠逐个试。在这里提前拦下，日志能直接写
+ * 「description 要 1–200 字（当前 231）」。
+ *
+ * 长度按字符算（`.length`）：中文一个字算一位，跟官方「1–50 字符」对齐。
+ * emoji 会占 2 位——这只会让判断偏严，不会放过超长的内容。
+ *
+ * @returns {string} 不合格的原因；空串表示通过
+ */
+function tuwenProblem({ title, description, url, picUrl } = {}) {
+  const len = (v) => String(v ?? '').length;
+  if (!len(title)) return 'title 不能为空';
+  if (len(title) > 50) return `title 要 1–50 字（当前 ${len(title)}）`;
+  if (!len(description)) return 'description 不能为空';
+  if (len(description) > 200) return `description 要 1–200 字（当前 ${len(description)}）`;
+  for (const [name, v] of [['url', url], ['picUrl', picUrl]]) {
+    if (!len(v)) return `${name} 不能为空`;
+    /** 官方：必须是 https；http 会被拒，而且报的同样是 304061 */
+    if (!/^https:\/\//i.test(String(v))) return `${name} 必须是 https 开头`;
+    if (len(v) > 1024) return `${name} 超过 1024 字符（当前 ${len(v)}）`;
+  }
+  return '';
+}
+
+/**
  * 从正文里捞 @ 的 openid。
  *
  * 官方文档说：消息里 @ 某成员时，content 里会写成 `<@member_openid>`。
@@ -726,6 +754,12 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
    *
    * ark 和 markdown 同时给时以 markdown 为准（官方不支持一条消息两种富文本）。
    *
+   * **ark 这条路现在基本用不上**：官方「消息类型」页把结构化卡片在单聊和
+   * 群聊都标成「发 ❌ / 收 ✅」，也就是只能收不能发（频道曾是唯一支持发送的
+   * 场景）。真实插件里也没有人调它——ark 在本项目主要是**接收侧**在用
+   * （解析别人发来的卡片）。参数保留是为了老代码不报错，新代码要发卡片
+   * 请用 `replyTuwen()`（`msg_type=8`，2026-10-28 官方新出的图文卡片）。
+   *
    * @param {{markdown?:object, keyboard?:object, ark?:object}} card
    */
   msg.replyCard = async (card = {}) => {
@@ -749,12 +783,70 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
   };
 
   /**
+   * 发**图文卡片**（`msg_type=8`，官方 2026-10-28 新增，群聊 / 单聊都支持）。
+   *
+   * 一张可点的卡片：标题 + 一句描述 + 跳转链接 + 封面图。四个字段都是必填。
+   *
+   *   await msg.replyTuwen({
+   *     title: 'iPhone 17 Pro 正式发布',
+   *     description: '全新 A20 芯片 / 钛金属机身 / 支持卫星通信',
+   *     url: 'https://news.qq.com/rain/a/20261014A05XYZ00',
+   *     picUrl: 'https://inews.gtimg.com/newsapp_bt/0/xxx/1000.jpg',
+   *   });
+   *
+   * **和 `replyCard()` 不是一回事**，虽然名字都带 card：那个发的是
+   * markdown + 按钮 + ark 的组合，ark 属于旧版结构化模板，官方现在
+   * 群聊 / 单聊都标「发 ❌」；这个发的是卡片消息类型本身，是新东西。
+   * 另起一个方法而不是塞进 `replyCard`，是因为两者的「同时给了怎么办」
+   * 逻辑不一样——那边要丢一个，这边没有并列的字段。
+   *
+   * 没有任何降级：卡片渲染不出来就是失败，不像 markdown 能退成纯文本
+   * （退成纯文本等于把图和链接都丢掉，发出去反而更奇怪）。
+   *
+   * @param {{title:string, description:string, url:string, picUrl:string}} card
+   * @returns {Promise<object|null>} 发送结果；参数不合格时是 null
+   */
+  msg.replyTuwen = async (card = {}) => {
+    const bad = tuwenProblem(card);
+    if (bad) {
+      log.error(`图文卡片没发：${bad}`);
+      return null;
+    }
+    await msg.flushReplies();
+    return send({
+      /**
+       * `msgType` 显式带上，和 `replyImage` 传 7 是同一个理由：真正决定
+       * `msg_type` 的是 `buildSendPayload` 里 `card` 那一支，但中间还有
+       * 出站记账要读这个字段，不传它账本里这条消息就是「未知类型」。
+       */
+      msgType: 8,
+      card: {
+        type: 'tuwen',
+        content: {
+          title: String(card.title),
+          description: String(card.description),
+          url: String(card.url),
+          pic_url: String(card.picUrl),
+        },
+      },
+    }, true).catch((e) => {
+      log.error('发送图文卡片失败:', e.message);
+      return null;
+    });
+  };
+
+  /**
    * 发富媒体：上传后以 msg_type=7 发送。
    *
    * 富媒体在官方接口里只能是独立消息（msg_type=7），但这条消息自带
    * `content` 文本字段：传了 `text` 就和图走**同一条**，不用先发一句话
-   * 再发一张图（那是两条消息，群里看着是两截）。不传 text 时保持老
-   * 行为——content 给一个空格（官方不接受空 content）。
+   * 再发一张图（那是两条消息，群里看着是两截）。
+   *
+   * 不传 text 时**不带 content 字段**。官方对 `msg_type=7` 的 content
+   * 没有语义要求（只有 `msg_type=0` 时它才是全文），客户端拿到
+   * 「富媒体 + 空正文」就是一张干净的图。以前这里塞了个空格占位，
+   * 理由是「官方不接受空 content」——那说的是传 `''`，跟不传不是一回事，
+   * 结果客户端按图文混排渲染，图外面多出一圈文字区（v1.0.6 修掉）。
    *
    * 发送前会先把攒着的文本 flush 掉，免得「缓冲中的回复」被这条
    * 富媒体消息挤成顺序错乱的两条。

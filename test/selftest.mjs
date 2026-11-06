@@ -2140,6 +2140,44 @@ async function testMediaAndTemplate() {
       !!sent[0].body.media,
     JSON.stringify(sent[0]?.body ?? null),
   );
+
+  /**
+   * 图文卡片（`msg_type=8`，官方 2026-10-28 新增，群聊/单聊都支持）。
+   *
+   * 两件事要断言：报文形状对（驼峰 `picUrl` 要变成官方要的 `pic_url`），
+   * 以及四个字段的硬约束在**发之前**就被拦下——官方对参数不合规只回
+   * 一个笼统的 `304061 消息内容无效`，不说是哪个字段。
+   */
+  const tcard = {
+    title: 'iPhone 17 Pro 正式发布',
+    description: '全新 A20 芯片 / 钛金属机身 / 支持卫星通信',
+    url: 'https://news.qq.com/rain/a/20261014A05XYZ00',
+    picUrl: 'https://inews.gtimg.com/newsapp_bt/0/xxx/1000.jpg',
+  };
+  sent.length = 0;
+  const rTuwen = await msg.replyTuwen(tcard);
+  check(
+    '图文卡片: msg_type=8，picUrl 落成 pic_url',
+    sent.length === 1 &&
+      sent[0].body.msgType === 8 &&
+      sent[0].body.card?.type === 'tuwen' &&
+      sent[0].body.card?.content?.title === tcard.title &&
+      sent[0].body.card?.content?.pic_url === tcard.picUrl,
+    JSON.stringify(sent[0]?.body ?? null),
+  );
+  check('图文卡片: caller 不自己塞 content（由报文层置空）', !('content' in (sent[0]?.body ?? {})));
+  check('图文卡片: 返回了发送结果', rTuwen?.id === 'x');
+
+  for (const [name, badCard] of [
+    ['title 超 50 字', { ...tcard, title: 'x'.repeat(51) }],
+    ['description 超 200 字', { ...tcard, description: 'x'.repeat(201) }],
+    ['url 不是 https', { ...tcard, url: 'http://news.qq.com/a' }],
+    ['缺 picUrl', { ...tcard, picUrl: '' }],
+  ]) {
+    sent.length = 0;
+    const bad = await msg.replyTuwen(badCard);
+    check(`图文卡片: ${name} 直接不发`, sent.length === 0 && bad === null, `发了 ${sent.length} 条`);
+  }
 }
 
 await testMediaAndTemplate();
@@ -3437,6 +3475,20 @@ await testUpdaterRestartHint();
 
   const p3 = buildSendPayload({ content: 'x', eventId: 'evt-1' }, () => 1);
   check('报文: event_id 被动回复', p3.event_id === 'evt-1' && p3.msg_id === undefined);
+
+  /**
+   * 图文卡片（`msg_type=8`）。这里验的是**最终发出去的报文**，
+   * 上面对 replyTuwen 的断言只能看到组装前的 opts。
+   * 两处都是必要的：opts 层看 caller 传对没有，这里看落成官方字段没有。
+   */
+  const pCard = buildSendPayload({
+    card: { type: 'tuwen', content: { title: 't', description: 'd', url: 'https://a/b', pic_url: 'https://a/c' } },
+  }, () => 1);
+  check(
+    '报文: 图文卡片自动落成 msg_type=8',
+    pCard.msg_type === 8 && pCard.card?.type === 'tuwen' && !!pCard.card?.content?.pic_url,
+  );
+  check('报文: 图文卡片不带正文（content 置空）', pCard.content === '');
 }
 
 /* ---------- 20. 事件载荷解析：附件 / 引用索引 / 消息元素 ---------- */

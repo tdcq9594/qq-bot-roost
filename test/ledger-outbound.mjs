@@ -81,6 +81,14 @@ test('digestTextOf：富媒体按 fileType 给中文占位', () => {
   assert.equal(digestTextOf({ content: '有正文' }), '有正文');
 });
 
+test('digestTextOf：图文卡片带标题，别让账本里十条长得一样', () => {
+  const card = (title) => ({ msgType: 8, card: { type: 'tuwen', content: { title, description: 'd', url: 'https://a/b', pic_url: 'https://a/c' } } });
+  assert.equal(digestTextOf(card('iPhone 17 Pro 发布')), '[图文卡片] iPhone 17 Pro 发布');
+  assert.equal(digestTextOf({ card: { type: 'tuwen', content: {} } }), '[图文卡片]');
+  // 没有标题也不能退回空串：空摘要等于这条记录在账本里消失了
+  assert.notEqual(digestTextOf({ card: { type: 'tuwen' } }), '');
+});
+
 test('出站入账：没有 requestId（被动回复 / 富媒体 / 菜单）也要记', async (t) => {
   const { ledger, out, calls } = rig(t);
   await out.send(base({ plugin: 'ai-chat' }));

@@ -241,6 +241,8 @@ export function makeMsg({
   const replies = [];
   /** markdown 消息单独记一份，好断言「走的是富文本还是纯文本」 */
   const markdowns = [];
+  /** 图文卡片同理：结构化留一份，插件测试能断言 title/url 有没有传对 */
+  const tuwens = [];
   const prefix = '/';
   const isCommand = content.startsWith(prefix);
   const body = isCommand ? content.slice(prefix.length).trim() : content;
@@ -268,6 +270,7 @@ export function makeMsg({
     replied: false,
     replies,
     markdowns,
+    tuwens,
 
     async reply(text) {
       msg.replied = true;
@@ -298,6 +301,15 @@ export function makeMsg({
     async replyCard(card) {
       msg.replied = true;
       replies.push(card?.markdown?.content ?? '[card]');
+      return { id: 'x' };
+    },
+    async replyTuwen(card) {
+      msg.replied = true;
+      // 和真身一样先校验：插件测试里传错字段也该像线上那样「发不出去」
+      const bad = !card?.title || !card?.description || !card?.url || !card?.picUrl;
+      if (bad) return null;
+      tuwens.push({ ...card });
+      replies.push(`[tuwen] ${card.title} :: ${card.url}`);
       return { id: 'x' };
     },
     async replyImage(src, opts = {}) {

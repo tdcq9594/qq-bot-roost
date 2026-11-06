@@ -219,6 +219,7 @@ class QuotaLedger {
  *   · 纯文本   `{ content }`
  *   · markdown `{ markdown: { content } }` ← ai-chat 默认就走这条
  *   · 卡片     `{ markdown, keyboard, ark }`
+ *   · 图文卡片 `{ msgType: 8, card: { type:'tuwen', content:{ title … } } }`
  *   · 富媒体   `{ msgType: 7, media }`，**不带 content**（7 里 content 没有语义，
  *              填了客户端会当正文，渲染出一块空文字区）
  *
@@ -247,6 +248,12 @@ export function digestTextOf(payload) {
   if (p.media) return mediaName ?? '[媒体]';
   if (mediaName) return mediaName;
   if (p.ark) return '[卡片]';
+  /**
+   * 图文卡片（`msg_type=8`）带上标题。只写 `[卡片]` 的话，一天发十条卡片
+   * 就是十条一模一样的记录，账本里根本分不出哪条是哪条。
+   */
+  const cardTitle = p.card?.content?.title;
+  if (p.card) return cardTitle ? `[图文卡片] ${cardTitle}` : '[图文卡片]';
   return '';
 }
 
