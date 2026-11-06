@@ -547,9 +547,15 @@ export class QQApi {
   async sendMedia(scene, target, { fileType, url, fileData, msgId, messageReference }) {
     const up = await this.uploadMedia(scene, target, { fileType, url, fileData });
     if (!up?.file_info) throw new Error('上传成功但未返回 file_info');
+    /**
+     * **不要 content。**
+     *
+     * 官方字段表：`msg_type=7` 时生效的是 `media`，`content` 只在
+     * `msg_type=0` 时是全文。以前这里填了一个空格占位，客户端会把
+     * 它当成正文，渲染出一块空的文字区（图被挤到一侧）。
+     */
     const opts = {
       msgType: 7,
-      content: ' ',
       media: { file_info: up.file_info },
       msgId,
       messageReference,

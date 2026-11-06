@@ -219,7 +219,8 @@ class QuotaLedger {
  *   · 纯文本   `{ content }`
  *   · markdown `{ markdown: { content } }` ← ai-chat 默认就走这条
  *   · 卡片     `{ markdown, keyboard, ark }`
- *   · 富媒体   `{ msgType: 7, media }`，正文只有一个占位空格
+ *   · 富媒体   `{ msgType: 7, media }`，**不带 content**（7 里 content 没有语义，
+ *              填了客户端会当正文，渲染出一块空文字区）
  *
  * 漏掉的后果不是发不出去（账本的状态机不看摘要），而是摘要列全变成
  * `…(0)#da39a3ee`——所有记录长得一模一样，「人工核对」这条路等于堵死，

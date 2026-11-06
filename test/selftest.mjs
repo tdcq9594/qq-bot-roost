@@ -2122,13 +2122,23 @@ async function testMediaAndTemplate() {
     JSON.stringify(Object.keys(sent[0]?.body ?? {})),
   );
 
-  // 不传 text 保持老行为：content 给占位空格（官方不接受空 content）
+  /**
+   * 不传 text = 纯图：**报文里不该有 content**。
+   *
+   * 老注释写着「官方不接受空 content」——那说的是传 `''`，不是「不传」。
+   * 官方字段表里 `msg_type=7` 生效的是 `media`，`content` 只在 `msg_type=0`
+   * 时才是全文。塞一个空格占位，客户端会把它当正文，渲染出一块空的文字区，
+   * 群里看到的是「一张图 + 一块空框」。
+   */
   sent.length = 0;
   await msg.replyImage('https://x/1.png');
   check(
-    '富媒体: 不传 text 时 content 是占位空格',
-    sent.length === 1 && sent[0].body.msgType === 7 && sent[0].body.content === ' ',
-    JSON.stringify(sent[0]?.body?.content ?? null),
+    '富媒体: 不传 text 时不带 content',
+    sent.length === 1 &&
+      sent[0].body.msgType === 7 &&
+      !('content' in sent[0].body) &&
+      !!sent[0].body.media,
+    JSON.stringify(sent[0]?.body ?? null),
   );
 }
 

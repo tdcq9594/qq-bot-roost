@@ -821,9 +821,18 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
       }
       if (!up?.file_info) throw new Error('未返回 file_info');
 
-      const content = text ? String(text) : ' ';
+      /**
+       * **没话要说就别带 content。**
+       *
+       * 官方字段表里 `msg_type=7` 是「富媒体(media)」，`content` 只在
+       * `msg_type=0` 时才是全文，在 7 里没有语义。以前这里塞一个空格占位，
+       * 客户端收到「富媒体 + 非空 content」就按图文排版——图被挤进卡片一侧，
+       * 群里看到的是「一张图 + 一块空文字框」，而不是一张干净的图。
+       */
       return await send({
-        msgType: 7, content, media: { file_info: up.file_info },
+        msgType: 7,
+        ...(text ? { content: String(text) } : {}),
+        media: { file_info: up.file_info },
         /** 有效类型（可能因超过软限被降级成 FILE），账本占位按它来 */
         fileType: effectiveType,
       }, true);
@@ -865,8 +874,9 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
         reuse: false, // base64 本来就不进缓存
       });
       if (!up?.file_info) throw new Error('未返回 file_info');
+      /** 同上：不带 content。buffer 分支没有「附一句话」的入口，所以永远不该有 */
       return await send({
-        msgType: 7, content: ' ', media: { file_info: up.file_info }, fileType,
+        msgType: 7, media: { file_info: up.file_info }, fileType,
       }, true);
     } catch (e) {
       log.error('发送图片 Buffer 失败:', e.message);
