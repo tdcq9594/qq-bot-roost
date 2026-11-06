@@ -83,6 +83,15 @@ function pidLooksLikeNode(pid) {
 /** pid 是否还活着（且确实是 node 进程）。EPERM 说明进程存在但没权限，也算活着 */
 function isAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
+  /**
+   * 问「我自己还活着吗」恒为真，不用查进程名。
+   *
+   * 「进程名是不是 node」那一步是为了识别 **PID 复用**——系统把回收的 pid 分给了
+   * 别的程序。可这件事对自己根本不适用：pid 就是我的，那个进程当然是我。
+   * 而多查这一步反而会出错：CI 的 ubuntu + Node 24 上，面板「实例锁」把
+   * 本进程自己那条显示成「已退出」（自检里 635/636 就挂在这一条）。
+   */
+  if (pid === process.pid) return true;
   try {
     process.kill(pid, 0);
   } catch (e) {
