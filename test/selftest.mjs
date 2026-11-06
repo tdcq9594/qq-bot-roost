@@ -601,6 +601,100 @@ const RUN = Date.now().toString(36);
   check('退出后能注销自己的登记', !after[A] && !after[B] && !after[C_]);
 }
 
+/* ---------- 16b. 实例锁（面板能看见、能清）与 PID 复用 ---------- */
+{
+  const mod = await import('../src/instance.js');
+  const { claimInstance, releaseInstance, clearInstance, listInstancesAll, _commandLineOf } = mod;
+  const { DIRS } = await import('../src/paths.js');
+  const { spawn } = await import('node:child_process');
+  const lockFile = path.join(DIRS.data, 'instances.json');
+  const readLock = async () => {
+    try {
+      return JSON.parse(await fs.readFile(lockFile, 'utf8'));
+    } catch {
+      return {};
+    }
+  };
+  const writeLock = (o) => fs.writeFile(lockFile, JSON.stringify(o, null, 2));
+
+  /**
+   * 为什么要有这一段：`listInstances()` 曾经定义了但**全仓零引用**。
+   * 用户看到「AppID xxx 已有实例在运行（PID 2816）」时既不知道 2816 是谁，
+   * 也没有任何入口能清掉那条记录——只能自己去翻 data/instances.json。
+   */
+  const K = '__test_lock__';
+  await claimInstance({ appId: K });
+  const mine = (await listInstancesAll()).find((x) => x.appId === K);
+  check('实例锁: 能列出本进程自己那条，并标出来', Boolean(mine) && mine.self === true && mine.alive === true);
+
+  const refused = await clearInstance(K);
+  check(
+    '实例锁: 不许清本进程自己那条（清了就放开同进程双开）',
+    refused.ok === false && /本进程/.test(refused.message || ''),
+    refused.message,
+  );
+
+  // 死进程留下的记录：面板要标「已退出」，并且能一键清掉
+  const D = '__test_dead__';
+  const l1 = await readLock();
+  l1[D] = { pid: 999999, at: Date.now() - 60000 };
+  await writeLock(l1);
+  const dead = (await listInstancesAll()).find((x) => x.appId === D);
+  check('实例锁: 死记录标成已退出', Boolean(dead) && dead.alive === false && dead.self === false);
+  const cleared = await clearInstance(D);
+  check('实例锁: 死记录能被清掉', cleared.ok === true && cleared.pid === 999999);
+  check('实例锁: 清完文件里就没这条了', !(await readLock())[D]);
+
+  /**
+   * PID 复用：这个 pid 现在跑的是**别的 node 程序**（命令行里有 .js，
+   * 但没有本框架的特征）。不能把它当成「我的机器人还在跑」。
+   *
+   * 真实场景：被强杀的机器人留下一条记录，pid 后来被你的构建脚本、
+   * 或者别的 bot 框架占走，于是启动被拒、记录也删不掉。
+   */
+  const other = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)', 'not-roost.js'], {
+    stdio: 'ignore',
+  });
+  const waitAlive = async (pid, ms = 5000) => {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
+    return false;
+  };
+  const alive = other.pid ? await waitAlive(other.pid) : false;
+  const R = '__test_reuse__';
+  if (!alive) {
+    skip('PID 复用: 别的 node 程序占着这个 pid 时不算自己还在跑', '环境起不来子进程');
+  } else {
+    const cmd = _commandLineOf(other.pid);
+    if (!cmd) {
+      // 拿不到命令行时会保守判成「活着」。这不是逻辑错，是环境缺工具
+      skip('PID 复用: 别的 node 程序占着这个 pid 时不算自己还在跑', '本机拿不到命令行（wmic 被移除 / PowerShell 不可用）');
+    } else {
+      const l2 = await readLock();
+      l2[R] = { pid: other.pid, at: Date.now() };
+      await writeLock(l2);
+      const r = await claimInstance({ appId: R });
+      check(
+        'PID 复用: 别的 node 程序占着这个 pid 时不算自己还在跑',
+        r.ok === true,
+        r.ok ? `已放行（命令行：${cmd.slice(0, 60)}）` : `被拦住了：PID ${r.conflict?.pid}`,
+      );
+    }
+  }
+  try {
+    other.kill();
+  } catch {}
+  await releaseInstance(K);
+  await releaseInstance(R);
+}
+
 /* ---------- 17. storage 原子更新（并发不丢数据） ---------- */
 {
   const { PluginStorage } = await import('../src/plugin/context.js');

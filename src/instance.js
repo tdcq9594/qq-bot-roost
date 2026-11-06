@@ -92,6 +92,91 @@ function isAlive(pid) {
   return pidLooksLikeNode(pid);
 }
 
+/**
+ * 这个进程的命令行。
+ *
+ * 拿不到（工具不在、没权限、进程刚好退出）返回 null —— 调用方要区分
+ * 「问不到」和「问到了但不匹配」，这两种的处理方向完全相反。
+ */
+function commandLineOf(pid) {
+  if (process.platform === 'win32') {
+    /**
+     * 先用 wmic：开一个进程约 40ms，比 PowerShell 快一个数量级。
+     * Win11 24H2 起 wmic 已被移除（本机实测 ENOENT），所以要留后路。
+     */
+    try {
+      const out = execFileSync(
+        'wmic',
+        ['process', 'where', `ProcessId=${pid}`, 'get', 'CommandLine', '/value'],
+        { encoding: 'utf8', timeout: 3000, windowsHide: true },
+      );
+      const m = /CommandLine=(.+)/.exec(out);
+      if (m) return m[1].trim() || null;
+    } catch {}
+    /**
+     * 退回 PowerShell。慢（起一个进程 300–600ms），所以**只在冲突路径上调用**：
+     * 正常启动、正常注销、面板刷新都不会走到这里。
+     */
+    try {
+      const out = execFileSync(
+        'powershell',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine`,
+        ],
+        { encoding: 'utf8', timeout: 8000, windowsHide: true },
+      );
+      return out.trim() || null;
+    } catch {
+      return null;
+    }
+  }
+  try {
+    if (process.platform === 'linux') {
+      // 内核直接给，不用 fork；参数之间是 \0
+      return readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ').trim() || null;
+    }
+    return (
+      execFileSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8', timeout: 3000 }).trim() ||
+      null
+    );
+  } catch {
+    return null;
+  }
+}
+
+/** 本框架进程的特征。安装目录各不相同，所以只认「包名」和「入口文件名」 */
+const ROOST_HINT = /(qq-bot-roost|src[\\/]main\.js)/i;
+
+/**
+ * pid 是否还活着（且确实是本框架的进程）。
+ *
+ * 三层，一层比一层贵：
+ *   ① `isAlive` —— pid 存在 + 进程名是 node（便宜，正常路径都走这个）
+ *   ② 命令行里有没有本框架的特征（慢，**只在冲突时**才查）
+ *
+ * 第 ② 层是为 PID 复用准备的：Windows 会把回收的 PID 分给别的程序。
+ * 踩过的坑——被强杀的机器人留下 pid=15008，后来 15008 被
+ * SearchProtocolHost.exe 占用（进程名不是 node，① 就挡住了）。但如果占用者
+ * 是**另一个 node 程序**（你的构建脚本、别的 bot），① 看不出来，于是
+ * 「机器人还在跑」——启动被拒、记录删不掉、界面上显示一个你从没见过的 PID。
+ *
+ * 方向仍然是「拿不准就往活着倒」：误判成死 → 同 AppID 双开 → 4902 互踢，
+ * 比「多让用户点一次清理」严重得多。
+ *
+ * @returns {Promise<boolean>}
+ */
+async function isOurRoost(pid) {
+  if (!isAlive(pid)) return false;
+  const cmd = commandLineOf(pid);
+  if (cmd === null) return true; // 问不到 → 当成我们的
+  if (ROOST_HINT.test(cmd)) return true;
+  // 命令行里跑着某个 .js，却不含本框架特征 → 是别的 node 程序，占的是复用的 pid
+  return !/\.[cm]?js\b/i.test(cmd);
+}
+
 async function readAll() {
   try {
     const raw = JSON.parse(await fs.readFile(FILE, 'utf8'));
@@ -156,7 +241,18 @@ export async function claimInstance({ appId, force = false }) {
 
   const existing = data[key];
   if (existing && existing.pid !== process.pid && !force) {
-    return { ok: false, conflict: { pid: existing.pid, at: existing.at } };
+    /**
+     * 冲突时**再核一次**：那个 pid 现在还是不是本框架。
+     *
+     * `prune()` 走的是便宜的判断（pid 在 + 进程名是 node），挡不住
+     * 「pid 被复用给另一个 node 程序」——那种情况用户会看到一个从没见过的
+     * PID 拦着自己，而记录删不掉。这里多花一次命令行查询，
+     * **只在这条冲突路径上花**，正常启动一次都不会走到。
+     */
+    if (await isOurRoost(Number(existing.pid))) {
+      return { ok: false, conflict: { pid: existing.pid, at: existing.at } };
+    }
+    // 命令行显示是别的程序占了复用的 pid → 当死记录，继续往下认领
   }
 
   inProcessClaims.add(key);
@@ -179,7 +275,60 @@ export async function listInstances() {
   return prune(await readAll());
 }
 
+/**
+ * 面板用：把文件里的记录**原样**列出来，并标出每条还活着没。
+ *
+ * 和 `listInstances()` 的区别：那个是互斥判定用的，只返回活的；这个连死记录
+ * 一起返回——用户要清的恰恰是死记录，看不到就没法清。
+ */
+export async function listInstancesAll() {
+  const data = await readAll();
+  return Object.entries(data)
+    .filter(([, rec]) => rec && typeof rec === 'object')
+    .map(([appId, rec]) => {
+      const pid = Number(rec.pid) || 0;
+      return {
+        appId,
+        pid,
+        at: Number(rec.at) || 0,
+        mock: Boolean(rec.mock),
+        alive: isAlive(pid),
+        /** 是不是当前这个面板进程自己在用的（那条不能清） */
+        self: pid === process.pid,
+      };
+    })
+    .sort((a, b) => b.at - a.at);
+}
+
+/**
+ * 强制清掉一条实例记录（面板「实例锁」里手动清理用）。
+ *
+ * 不检查 pid 还活着没——用户点它，本来就是冲着「进程明明没了却还拦着我」来的。
+ * 但**本进程自己那条不许清**：那是正在生效的互斥，删掉等于放开同进程双开，
+ * 两个机器人用同一个 AppID 连网关会 4902 互踢。
+ *
+ * @returns {Promise<{ok:boolean, message?:string, pid?:number}>}
+ */
+export async function clearInstance(appId) {
+  const key = String(appId ?? '').trim();
+  if (!key) return { ok: false, message: '要指定 AppID' };
+  const data = await readAll();
+  const rec = data[key];
+  if (!rec) return { ok: false, message: `没有 ${key} 的记录` };
+  if (Number(rec.pid) === process.pid) {
+    return { ok: false, message: '这条是本进程自己在用的，不能清——先把那个机器人下线' };
+  }
+  delete data[key];
+  await writeAll(data);
+  return { ok: true, pid: Number(rec.pid) || 0 };
+}
+
 /** 测试用：直接看文件内容（不剪枝） */
 export async function _rawRead() {
   return readAll();
+}
+
+/** 测试用：看某个 pid 的命令行拿不拿得到（拿不到返回 null） */
+export function _commandLineOf(pid) {
+  return commandLineOf(pid);
 }

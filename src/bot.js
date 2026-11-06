@@ -379,7 +379,19 @@ export class BotRuntime {
     const claimed = await claimInstance({ appId: cfg.appId });
     if (!claimed.ok) {
       this.state = 'error';
-      this.lastError = `AppID ${cfg.appId} 已有实例在运行（PID ${claimed.conflict.pid}）`;
+      /**
+       * 文案得能指导下一步。
+       *
+       * 以前只有「AppID xxx 已有实例在运行（PID 2816）」——用户既不知道 2816
+       * 是谁，也没有任何地方能查。而他遇到的往往是「那个进程早就不在了，
+       * 只是记录没删掉」，这时候要做的事跟「真的有另一个进程在跑」完全不同。
+       */
+      const cpid = Number(claimed.conflict?.pid) || 0;
+      const who = cpid === process.pid ? '本进程里的另一个机器人配置' : `PID ${cpid}`;
+      this.lastError =
+        `AppID ${cfg.appId} 已被${who}占用。` +
+        '如果那个进程已经关了，去「设置 → 实例锁」清掉这条记录再上线；' +
+        '如果它确实还在跑，先把另一个停掉';
       this.log.error(this.lastError);
       return this.state;
     }
@@ -401,6 +413,13 @@ export class BotRuntime {
       this.state = 'error';
       this.lastError = e.message;
       this.log.error(`连接失败: ${e.message}`);
+      /**
+       * 连接失败就把认领还回去。
+       *
+       * 不还的话会留下一条「我这个 pid 还占着这个 AppID」的记录——而实际上
+       * 我根本没连上网关。那个 pid 之后被系统复用，就变成一条永远清不掉的脏记录。
+       */
+      if (!this.mock) await releaseInstance(cfg.appId).catch(() => {});
     }
     return this.state;
   }

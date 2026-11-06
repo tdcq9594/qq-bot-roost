@@ -573,6 +573,31 @@
         <button type="submit" class="btn primary">保存配置</button>
       </div>
     </form>
+
+    <!--
+      实例锁：同一个 AppID 只允许一个进程连网关。
+      平时不用看，出现「已有实例在运行」时才来这里。
+      放在 form 外面：这里的按钮不能触发「保存配置」。
+    -->
+    <div class="box">
+      <div class="box-hd">
+        <h3>实例锁</h3>
+        <div class="plugin-tools">
+          <button class="btn small" type="button" id="btnRefreshInstances">刷新</button>
+        </div>
+      </div>
+      <div class="hint">
+        每个机器人被哪个进程（PID）占着。机器人已经退出了却还提示「已有实例在运行」时，
+        把那条「已退出」的记录清掉就行——不需要自己去翻文件。
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>AppID</th><th>PID</th><th>状态</th><th>登记时间</th><th></th></tr></thead>
+          <tbody id="instancesBody"><tr><td colspan="5" class="empty">读取中…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="hint" id="instancesFoot"></div>
+    </div>
   </section>
 
   <!-- 统计 -->

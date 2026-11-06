@@ -1326,7 +1326,84 @@ async function loadConfig() {
   } catch (e) {
     $('#cfgMsg').textContent = '读取配置失败: ' + e.message;
   }
+  refreshInstances();
 }
+
+/* ---------------- 实例锁 ---------------- */
+
+/**
+ * 拉实例表并渲染。
+ *
+ * 为什么要有这块 UI：以前 `listInstances()` 定义了但**全仓零引用**。用户看到
+ * 「AppID xxx 已有实例在运行（PID 2816）」时，既不知道 2816 是谁、也不知道
+ * 上哪查，唯一出路是自己去删 `data/instances.json`——而大多数人不知道有这个文件。
+ */
+async function refreshInstances() {
+  const body = $('#instancesBody');
+  if (!body) return;
+  let data;
+  try {
+    data = await api('/api/instances');
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="5" class="empty">读不到实例表：${escapeHtml(e.message)}</td></tr>`;
+    return;
+  }
+  const list = Array.isArray(data?.instances) ? data.instances : [];
+  if (!list.length) {
+    body.innerHTML = '<tr><td colspan="5" class="empty">没有实例记录</td></tr>';
+  } else {
+    body.innerHTML = list
+      .map((it) => {
+        // 用内联色值：面板没有现成的状态类，硬造新 class 还得改 style.css
+        const state = it.alive
+          ? '<span style="color:var(--ok)">在跑</span>'
+          : '<span style="color:var(--err)">已退出</span>';
+        const self = it.self ? ' <span class="hint">本进程</span>' : '';
+        const when = it.at ? new Date(it.at).toLocaleString('zh-CN') : '-';
+        // 本进程那条是正在生效的互斥，清掉等于放开同进程双开
+        const action = it.self
+          ? '<span class="hint">—</span>'
+          : `<button class="btn small" data-clear="${escapeHtml(it.appId)}">清理</button>`;
+        return `<tr>
+          <td class="mono">${escapeHtml(it.appId)}</td>
+          <td class="mono">${it.pid || '-'}</td>
+          <td>${state}${self}</td>
+          <td>${escapeHtml(when)}</td>
+          <td>${action}</td>
+        </tr>`;
+      })
+      .join('');
+  }
+  const foot = $('#instancesFoot');
+  if (foot) {
+    foot.textContent = data?.file
+      ? `记录文件：${data.file}${list.some((x) => !x.alive) ? '（「已退出」的记录可以直接清）' : ''}`
+      : '';
+  }
+}
+
+$('#btnRefreshInstances')?.addEventListener('click', () => refreshInstances());
+
+// 清理按钮走事件委托：行是 innerHTML 拼的，逐行绑事件会在每次刷新后失效
+document.addEventListener('click', async (e) => {
+  const btn = e.target?.closest?.('[data-clear]');
+  if (!btn) return;
+  const appId = btn.dataset.clear;
+  const ok = await confirmDialog({
+    title: '清掉这条实例记录？',
+    message: `AppID <b>${escapeHtml(appId)}</b> 的占用记录会被删除。<br><br>
+      只有确认那个进程<b>已经不在跑了</b>才能清。如果它其实还活着，清掉之后两个进程会用同一个 AppID 连网关，互相踢下线。`,
+    okText: '清掉',
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    await api('/api/instances/clear', { method: 'POST', body: JSON.stringify({ appId }) });
+    refreshInstances();
+  } catch (err) {
+    alert('清理失败：' + err.message);
+  }
+});
 
 $('#cfgForm').addEventListener('submit', async (e) => {
   e.preventDefault();

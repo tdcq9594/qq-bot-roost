@@ -26,6 +26,8 @@ import {
 // 面板改插件启停时要同步机器人配置里的过滤器，两边不能各说各的
 import { pluginFilterOf, pluginAllowedIn } from '../bot.js';
 import { CONFLICT, INVALID } from '../identity.js';
+// 实例锁：面板要能看见「哪个 AppID 被谁占着」并清掉残留记录
+import { listInstancesAll, clearInstance, releaseInstance } from '../instance.js';
 import { SMTP_DEFAULTS } from '../mail/defaults.js';
 import { extractAddress } from '../mail/smtp.js';
 import { userFacingSendError } from '../outbound.js';
@@ -1352,6 +1354,28 @@ export async function startWebServer({
           if ((await listBotIds()).includes(id)) {
             return json(res, 409, { error: `机器人 ${id} 已存在` });
           }
+          /**
+           * AppID 也必须唯一。
+           *
+           * 以前只查 id：面板里能建出两只鸟填同一个 AppID，第二只点上线必报
+           * 「AppID xxx 已有实例在运行（PID yyy）」——而那个 yyy 就是面板自己。
+           * 用户看到这句话完全想不到问题出在「有两个配置填了同一个 AppID」上。
+           */
+          const appIdWanted = String(body.appId ?? '').trim();
+          if (appIdWanted) {
+            for (const other of await listBotIds()) {
+              if (other === id) continue;
+              let oc = null;
+              try {
+                oc = JSON.parse(await fs.readFile(botPaths(other).config, 'utf8'));
+              } catch {}
+              if (String(oc?.appId ?? '').trim() === appIdWanted) {
+                return json(res, 409, {
+                  error: `AppID ${appIdWanted} 已经被机器人 ${other} 用了。一个 AppID 只能配一只鸟——先改掉那边，或者用另一个 AppID`,
+                });
+              }
+            }
+          }
           try {
             const created = await onBotAdd(id, {
               name: String(body.name ?? '').trim() || id,
@@ -1458,6 +1482,8 @@ export async function startWebServer({
         if (pathname === '/api/config' && req.method === 'PUT') {
           const body = await readBody(req);
           const before = JSON.stringify({ appId: cfg.appId, intents: cfg.intents });
+          /** 改 AppID 之后要释放旧记录、认领新记录，所以先把旧值存下来 */
+          const oldAppId = String(cfg.appId ?? '');
           const oldSecret = cfg.appSecret;
 
           if (typeof body.appId === 'string') cfg.appId = body.appId.trim();
@@ -1598,8 +1624,27 @@ export async function startWebServer({
               tokens.token = '';
               tokens.expiresAt = 0;
             }
-            log.info('连接参数变化，正在重连网关...');
-            rt.gateway?.restart?.().catch(() => {});
+            /**
+             * 换 AppID 不能只 `gateway.restart()`。
+             *
+             * 那条路径只重连 WebSocket，**不经过 goOnline，也就永远不会 claim
+             * 新 AppID** —— 于是换完之后互斥对新值完全失效：两个进程用同一个新
+             * AppID 双开也不会被拦，直接 4902 互踢。反过来旧 AppID 的记录还挂着
+             * 自己的 pid，想换回去又会被它拦住。
+             *
+             * 所以走「下线 → 上线」：`goOffline` 释放（此时 cfg.appId 已经是新值，
+             * 老 key 要单独清），`goOnline` 认领新的。
+             */
+            if (oldAppId && oldAppId !== cfg.appId) {
+              await releaseInstance(oldAppId).catch(() => {});
+              if (rt.state === 'online') {
+                await rt.goOffline?.().catch(() => {});
+                await rt.goOnline?.().catch(() => {});
+              }
+            } else {
+              log.info('连接参数变化，正在重连网关...');
+              rt.gateway?.restart?.().catch(() => {});
+            }
           }
 
           // 填完 AppID / AppSecret 顺手把「默认机器人」换成官方昵称
@@ -2907,6 +2952,36 @@ export async function startWebServer({
           const body = await readBody(req);
           await roles.remove(String(body.scope || ''), String(body.openid || ''));
           return json(res, 200, { ok: true });
+        }
+
+        /**
+         * 实例锁：谁占着哪个 AppID。
+         *
+         * 这张表以前**只写不读**——`listInstances()` 定义了但全仓零引用。
+         * 于是用户看到「AppID xxx 已有实例在运行（PID 2816）」时，既不知道 2816
+         * 是谁，也没有任何地方能清掉它，唯一出路是自己去删 `data/instances.json`，
+         * 而大多数人根本不知道有这个文件。
+         */
+        if (pathname === '/api/instances' && req.method === 'GET') {
+          return json(res, 200, {
+            instances: await listInstancesAll(),
+            /** 当前面板进程的 pid：前端用它标出「这条是你正在用的」 */
+            pid: process.pid,
+            /** 文件路径：接口也清不掉时，至少告诉用户手动去哪删 */
+            file: path.join(DIRS.data, 'instances.json'),
+          });
+        }
+
+        /**
+         * 清掉一条残留记录。
+         *
+         * 只删「不是本进程在用」的那条——本进程的记录是正在生效的互斥，
+         * 删了就等于放开同进程双开（两个机器人同一 AppID → 4902 互踢）。
+         */
+        if (pathname === '/api/instances/clear' && req.method === 'POST') {
+          const body = await readBody(req);
+          const r = await clearInstance(String(body?.appId ?? ''));
+          return json(res, r.ok ? 200 : 400, r);
         }
 
         // 日志
