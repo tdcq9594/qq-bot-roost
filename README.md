@@ -10,7 +10,7 @@
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
 <img src="https://img.shields.io/badge/tests-797%20passed-brightgreen" alt="测试 797 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
-<img src="https://img.shields.io/badge/version-1.0.5-blueviolet" alt="版本 1.0.5">
+<img src="https://img.shields.io/badge/version-1.0.6-blueviolet" alt="版本 1.0.6">
 <img src="https://img.shields.io/badge/license-Non--Commercial-red" alt="禁止商用">
 <a href="https://github.com/tdcq9594/qq-bot-roost/actions"><img src="https://img.shields.io/github/actions/workflow/status/tdcq9594/qq-bot-roost/ci.yml?branch=master" alt="CI"></a>
 
@@ -474,14 +474,9 @@ openid 完全不同。共享 `roles.json` 等于所有权限记录全部对不�
 | [官方接口限制](docs/官方接口限制.md) | 官方限制清单、免@粘性原理、实现要点对照 |
 | [常见问题](docs/常见问题.md) | 收不到消息、发不出去、面板打不开、数据在哪 |
 | [真机联调](docs/真机联调.md) | 用小号（OneBot v11）在真群里跟机器人对话，测 intents / 被动回复 / msg_seq |
-| [对标 ElainaBot](docs/对标ElainaBot.md) | 与主流 Python 框架的逐项对比、差距与取舍 |
-| [事件与接口清单](docs/事件与接口清单.md) | 官方 47 个事件、47 个接口的覆盖审计（含频道生态缺口） |
-| [官方接口核查](docs/官方接口核查与AI工具化方案.md) | 逐页核对官方文档的结果：哪些接口真没有、官方能力怎么给 AI 用 |
-| [DSH-Aurabot 适配 v2](docs/DSH-Aurabot适配方案-v2.md) | 按 v0.7.2 的真实能力重写的接入方案：通道设计、模块去留、分期 |
 | [架构说明](docs/架构说明.md) | 进程模型、数据隔离、事件流、插件加载、面板多机器人实现 |
 | [DSH 接入指南](docs/DSH接入.md) | 装进 DeepSeek Harness，用 AI 管机器人：安装、配置、验证、排查 |
 | [AI 宿主接入](docs/AI宿主接入.md) | 外部 AI 驱动 Roost：SSE 消息下行、通用能力上行、能力清单 |
-| [同类项目调研](docs/GitHub同类项目调研.md) | 与 AstrBot / NoneBot2 / Koishi / ZeroBot 的对比 |
 
 ### 相关仓库
 
