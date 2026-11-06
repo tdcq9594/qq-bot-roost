@@ -606,6 +606,8 @@ function activateTab(name) {
   if (name === 'roles') { loadRoles(); loadPeople(); }
   if (name === 'identity') loadIdentity();
   if (name === 'notify') loadNotify();
+  // 纯展示同步：侧栏 / 底栏高亮、面包屑、抽屉收起。不碰任何数据加载。
+  syncNav(name);
 }
 
 /**
@@ -4482,4 +4484,209 @@ function connectStream() {
   doctorWhenReady();
   // 机器人确定后再刷一次：上面那次是抢时间，这次才是准数据
   if (initial) activateTab(initial);
+})();
+
+/* ============================================================
+   响应式导航外观（2026-11-06 重构新增）
+   ------------------------------------------------------------
+   这一整段只做「壳」：高亮、面包屑、抽屉开合、表格标签、theme-color。
+   不调用任何数据加载函数，不改任何 API、轮询或 iframe 逻辑。
+   ============================================================ */
+
+/**
+ * 页签切换后同步各处导航状态。
+ * 由 activateTab() 末尾调用；切机器人 / hashchange 走的也是 activateTab，
+ * 所以不需要额外注册第二套监听。
+ */
+function syncNav(name) {
+  const nav = $('#mainNav');
+  if (!nav) return;
+  const btn = $$('[data-tab]').find(
+    (b) => b.dataset.tab === name && b.classList.contains('tab-item'),
+  );
+  const crumb = $('#navCrumb');
+  if (crumb) {
+    crumb.textContent = btn ? btn.textContent.trim()
+      : (name.startsWith('page:') ? '插件页面' : '概览');
+  }
+  // 停在非高频页时，底栏「更多」给个提示态，免得用户以为没有当前页
+  const more = $('#navMore');
+  if (more) more.classList.toggle('has-active', Boolean(btn) && !btn.hasAttribute('data-primary'));
+  // 切到某个页签时把它所在的折叠组展开，否则用户看不到自己选中了哪一页
+  const group = btn?.closest('.tab-group');
+  if (group?.classList.contains('group-collapsed')) setGroupCollapsed(group, false);
+  // 选完页就把抽屉 / 平板展开态收起来
+  nav.classList.remove('drawer-open', 'expanded');
+  const toggle = $('#navToggle');
+  if (toggle) toggle.setAttribute('aria-expanded', 'false');
+  if (more) more.setAttribute('aria-expanded', 'false');
+}
+
+/* 侧栏偏好：纯外观状态，存 localStorage，不参与任何业务数据 */
+const NAV_COMPACT_KEY = 'roost_nav_compact';
+const NAV_GROUPS_KEY = 'roost_nav_groups';
+
+/** 折叠 / 展开一个分组，并记住选择 */
+function setGroupCollapsed(group, on) {
+  if (!group) return;
+  group.classList.toggle('group-collapsed', on);
+  const key = group.dataset.group;
+  if (!key) return;
+  let list = [];
+  try { list = JSON.parse(localStorage.getItem(NAV_GROUPS_KEY) || '[]'); } catch {}
+  if (!Array.isArray(list)) list = [];
+  const next = on ? [...new Set([...list, key])] : list.filter((x) => x !== key);
+  try { localStorage.setItem(NAV_GROUPS_KEY, JSON.stringify(next)); } catch {}
+}
+
+/** 恢复上次的收起 / 折叠状态；当前页所在组强制展开 */
+function applyNavPrefs() {
+  try {
+    if (localStorage.getItem(NAV_COMPACT_KEY) === '1') {
+      document.body.classList.add('nav-compact');
+    }
+    const list = JSON.parse(localStorage.getItem(NAV_GROUPS_KEY) || '[]');
+    if (Array.isArray(list)) {
+      $$('.app-nav .tab-group').forEach((g) => {
+        if (list.includes(g.dataset.group)) g.classList.add('group-collapsed');
+      });
+    }
+  } catch {}
+  const active = $('.app-nav .tab-item.active')?.closest('.tab-group');
+  if (active) setGroupCollapsed(active, false);
+}
+
+/**
+ * 给表格单元格补 data-label，供窄屏卡片化的 td::before 使用。
+ *
+ * 12 张表的行几乎全是 JS 动态渲染的（app.js 里 80 多处 <td 模板），
+ * 逐处改模板既伤业务代码又容易漏。这里用 MutationObserver 在 tbody
+ * 内容变化时按 thead 的列序自动贴标签，纯展示、零业务侵入。
+ * 空状态行（colspan）不贴，避免卡片上出现一个没有值的字段。
+ */
+function initTableLabels() {
+  const labelsFor = (table) =>
+    [...table.querySelectorAll('thead th')].map((th) => th.textContent.trim());
+
+  const decorate = (tbody) => {
+    const table = tbody.closest('table');
+    if (!table) return;
+    const labels = labelsFor(table);
+    for (const tr of tbody.rows) {
+      Array.from(tr.cells).forEach((td, i) => {
+        if (td.hasAttribute('colspan') || !labels[i]) return;
+        if (!td.dataset.label) td.dataset.label = labels[i];
+      });
+    }
+  };
+
+  const bodies = $$('table tbody');
+  bodies.forEach(decorate);
+  if (typeof MutationObserver === 'undefined') return;
+
+  const mo = new MutationObserver((records) => {
+    for (const r of records) {
+      const t = r.target;
+      if (!t) continue;
+      if (t.tagName === 'TBODY') decorate(t);
+      else if (t.closest) {
+        const tb = t.closest('tbody');
+        if (tb) decorate(tb);
+      }
+    }
+  });
+  // subtree: 业务若往已有 <tr> 里追加 <td>（不是整块 innerHTML 替换）也要补标签
+  bodies.forEach((tb) => mo.observe(tb, { childList: true, subtree: true }));
+}
+
+/** 手机浏览器地址栏跟随深浅色，纯展示，不碰 setTheme() */
+function initThemeColor() {
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (!meta) return;
+  const apply = () => {
+    meta.setAttribute(
+      'content',
+      document.documentElement.dataset.theme === 'dark' ? '#19120e' : '#f8f5f1',
+    );
+  };
+  apply();
+  if (typeof MutationObserver === 'undefined') return;
+  new MutationObserver(apply).observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ['data-theme'],
+  });
+}
+
+(function initNavChrome() {
+  const nav = $('#mainNav');
+  if (!nav) return;
+  const toggle = $('#navToggle');
+  const more = $('#navMore');
+  const close = $('#navClose');
+
+  const setOpen = (on) => {
+    // 只挂当前档位对应的 class：同时挂两个，用户拖动窗口跨断点时会残留另一个形态
+    const isPhone = window.matchMedia('(max-width: 720px)').matches;
+    nav.classList.toggle('drawer-open', on && isPhone);
+    nav.classList.toggle('expanded', on && !isPhone);
+    if (toggle) toggle.setAttribute('aria-expanded', String(on));
+    if (more) more.setAttribute('aria-expanded', String(on));
+  };
+
+  toggle?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (window.matchMedia('(max-width: 720px)').matches) {
+      // 手机：打开全量抽屉
+      setOpen(!nav.classList.contains('drawer-open'));
+    } else if (window.matchMedia('(min-width: 721px) and (max-width: 1023px)').matches) {
+      // 平板：展开 / 收回 60px 图标条
+      setOpen(!nav.classList.contains('expanded'));
+    } else {
+      // 桌面：收起 / 展开侧栏，记住选择
+      const compact = !document.body.classList.contains('nav-compact');
+      document.body.classList.toggle('nav-compact', compact);
+      try { localStorage.setItem(NAV_COMPACT_KEY, compact ? '1' : '0'); } catch {}
+      toggle.setAttribute('aria-expanded', String(!compact));
+      toggle.title = compact ? '展开侧栏' : '收起侧栏';
+    }
+  });
+
+  // 分组标题点击 = 折叠 / 展开下级菜单（snowluma 那种手风琴）
+  $$('.app-nav .tab-parent').forEach((p) => {
+    p.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const g = p.closest('.tab-group');
+      if (!g) return;
+      // 收起态下点分组图标 = 「我想看这一组」，直接展开侧栏并展开该组
+      if (document.body.classList.contains('nav-compact')
+        && window.matchMedia('(min-width: 1024px)').matches) {
+        document.body.classList.remove('nav-compact');
+        try { localStorage.setItem(NAV_COMPACT_KEY, '0'); } catch {}
+        setGroupCollapsed(g, false);
+        return;
+      }
+      setGroupCollapsed(g, !g.classList.contains('group-collapsed'));
+    });
+  });
+
+  more?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setOpen(true);
+  });
+  close?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setOpen(false);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') setOpen(false);
+  });
+
+  // 初始化：先恢复偏好，再补一次外观同步（无 hash 时 activateTab 不会被调用）
+  applyNavPrefs();
+  if (toggle) {
+    toggle.title = document.body.classList.contains('nav-compact') ? '展开侧栏' : '收起侧栏';
+  }
+  syncNav(location.hash.slice(1) || 'overview');
+  initTableLabels();
+  initThemeColor();
 })();

@@ -846,15 +846,19 @@ async function testNav() {
   const res = await fetch(BASE);
   const html = await res.text();
 
-  // 页签收进三个下拉里，一级只留四个
-  ok('导航: 有分组下拉', html.includes('data-group="data"') && html.includes('data-group="plugins"'));
+  // 2026-11-06 布局重构：导航改成 5 个分组（运行/诊断/管理/扩展/系统），
+  // 三档布局共用同一份 DOM。这里验结构语义，不再写死旧分组名 data/settings。
+  const groups = [...html.matchAll(/data-group="([^"]+)"/g)].map((m) => m[1]);
+  ok('导航: 有 5 个分组', groups.length === 5, groups.join(','));
+  ok('导航: 插件分组仍叫 plugins', groups.includes('plugins'));
   ok('导航: 插件页面有独立容器', html.includes('id="pluginPageItems"'));
   ok('导航: 分组按钮带 aria-expanded', /aria-haspopup="true"/.test(html));
 
-  // 原来的 8 个页签都还在，只是挪进了菜单里；新增「关于」「可达性」两页
-  const tabs = ['overview', 'stats', 'config', 'plugins', 'events', 'groups', 'roles', 'logs', 'about', 'reach'];
+  // 14 个页签一个不少，且每个都有对应 section（点了不能是空白）
+  const tabs = ['overview', 'stats', 'config', 'plugins', 'events', 'groups', 'roles',
+    'logs', 'about', 'reach', 'delivery', 'ledger', 'identity', 'notify'];
   const missing = tabs.filter((t) => !html.includes(`data-tab="${t}"`));
-  ok('导航: 10 个页面一个没少', missing.length === 0, missing.join(','));
+  ok('导航: 14 个页面一个没少', missing.length === 0, missing.join(','));
 
   // 页签和 section 必须成对，否则点了是空白
   const orphan = tabs.filter((t) => !html.includes(`id="tab-${t}"`));

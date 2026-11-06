@@ -2,7 +2,8 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f8f5f1">
 <title>栖 Roost · 控制台</title>
 <!-- 主题脚本必须外置：CSP 的 script-src 'self' 会拦掉内联脚本 -->
 <script src="/theme-boot.js"></script>
@@ -11,6 +12,11 @@
 <body>
 
 <header class="topbar">
+  <button class="nav-toggle" id="navToggle" aria-label="打开导航" aria-expanded="false">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+      <path d="M4 7h16M4 12h16M4 17h16"/>
+    </svg>
+  </button>
   <div class="brand" title="栖 Roost · 倦飞之鸟，终有一栖">
     <span class="logo" aria-hidden="true">栖</span>
     <div>
@@ -42,67 +48,132 @@
     </div>
   </div>
 
-  <nav class="tabs">
-    <button class="tab active" data-tab="overview">概览</button>
-
-    <div class="tab-group" data-group="data">
-      <button class="tab tab-parent" aria-haspopup="true" aria-expanded="false">
-        数据
-        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-             stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M6 9l6 6 6-6"/>
+  <!--
+    导航：三档布局共用这一份 DOM，靠 CSS 变形（侧栏 / 图标条 / 底部导航 + 抽屉）。
+    不要复制出第二套 [data-tab] 按钮 —— activateTab() 用 `b === btn` 高亮，
+    重复 data-tab 会导致只有第一处亮。
+    .tab-group / .tab-parent / .tab-menu 三件套和 #pluginPageItems 是
+    closeTabMenus()、loadPluginPages() 的硬依赖，类名与 id 一律不能改。
+  -->
+  <nav class="app-nav" id="mainNav" aria-label="主导航">
+    <div class="nav-head">
+      <span class="nav-brand">栖 <span>Roost</span></span>
+      <button class="nav-close" id="navClose" aria-label="收起导航">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <path d="M6 6l12 12M18 6L6 18"/>
         </svg>
       </button>
-      <div class="tab-menu" hidden>
-        <button class="tab-item" data-tab="stats">统计</button>
-        <button class="tab-item" data-tab="events">事件</button>
-        <button class="tab-item" data-tab="reach">可达性</button>
-        <button class="tab-item" data-tab="delivery">投递</button>
-        <button class="tab-item" data-tab="ledger">账本</button>
-        <button class="tab-item" data-tab="logs">日志</button>
+    </div>
+
+    <div class="nav-scroll">
+      <div class="tab-group" data-group="run">
+        <button class="tab tab-parent" data-icon="运" aria-label="运行" aria-haspopup="true" aria-expanded="false">
+          <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/>
+            <rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>
+          </svg>
+          <span class="nav-label">运行</span>
+          <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M6 9l6 6 6-6"/>
+          </svg>
+        </button>
+        <div class="tab-menu" hidden>
+          <button class="tab-item active" data-tab="overview" data-primary>概览</button>
+          <button class="tab-item" data-tab="stats">统计</button>
+          <button class="tab-item" data-tab="logs" data-primary>日志</button>
+        </div>
+      </div>
+
+      <div class="tab-group" data-group="diagnose">
+        <button class="tab tab-parent" data-icon="诊" aria-label="诊断" aria-haspopup="true" aria-expanded="false">
+          <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M2 12h4l3-7 4 14 3-7h6"/>
+          </svg>
+          <span class="nav-label">诊断</span>
+          <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M6 9l6 6 6-6"/>
+          </svg>
+        </button>
+        <div class="tab-menu" hidden>
+          <button class="tab-item" data-tab="events">事件</button>
+          <button class="tab-item" data-tab="reach">可达性</button>
+          <button class="tab-item" data-tab="delivery">投递</button>
+          <button class="tab-item" data-tab="ledger">账本</button>
+        </div>
+      </div>
+
+      <div class="tab-group" data-group="manage">
+        <button class="tab tab-parent" data-icon="管" aria-label="管理" aria-haspopup="true" aria-expanded="false">
+          <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h9M17 18h3"/>
+            <circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="15" cy="18" r="2"/>
+          </svg>
+          <span class="nav-label">管理</span>
+          <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M6 9l6 6 6-6"/>
+          </svg>
+        </button>
+        <div class="tab-menu" hidden>
+          <button class="tab-item" data-tab="config" data-primary>配置</button>
+          <!-- 身份：QQ号 / 群号 ↔ openid。常用页而不是设置项 -->
+          <button class="tab-item" data-tab="identity">身份</button>
+          <button class="tab-item" data-tab="groups">群组</button>
+          <button class="tab-item" data-tab="roles">权限</button>
+          <!-- 通知：SMTP 邮箱配置 + 普通成员自助绑定 -->
+          <button class="tab-item" data-tab="notify">通知</button>
+        </div>
+      </div>
+
+      <div class="tab-group" data-group="plugins">
+        <button class="tab tab-parent" data-icon="扩" aria-label="扩展" aria-haspopup="true" aria-expanded="false">
+          <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 4h6v2a2 2 0 1 0 4 0V4h6v6h-2a2 2 0 1 0 0 4h2v6h-6v-2a2 2 0 1 0-4 0v2H4v-6h2a2 2 0 1 0 0-4H4V4z"/>
+          </svg>
+          <span class="nav-label">扩展</span>
+          <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M6 9l6 6 6-6"/>
+          </svg>
+        </button>
+        <div class="tab-menu" hidden>
+          <button class="tab-item" data-tab="plugins" data-primary>插件管理</button>
+          <!-- 插件注册的页面挂到这里，见 loadPluginPages() -->
+          <div class="tab-menu-sep" id="pluginPageSep" hidden></div>
+          <div class="tab-menu-label" id="pluginPageLabel" hidden>插件页面</div>
+          <div class="tab-menu-sub" id="pluginPageItems"></div>
+        </div>
+      </div>
+
+      <div class="tab-group" data-group="system">
+        <button class="tab tab-parent" data-icon="系" aria-label="系统" aria-haspopup="true" aria-expanded="false">
+          <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5h.01"/>
+          </svg>
+          <span class="nav-label">系统</span>
+          <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M6 9l6 6 6-6"/>
+          </svg>
+        </button>
+        <div class="tab-menu" hidden>
+          <button class="tab-item" data-tab="about">关于</button>
+        </div>
       </div>
     </div>
 
-    <div class="tab-group" data-group="settings">
-      <button class="tab tab-parent" aria-haspopup="true" aria-expanded="false">
-        设置
-        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-             stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M6 9l6 6 6-6"/>
-        </svg>
-      </button>
-      <div class="tab-menu" hidden>
-        <button class="tab-item" data-tab="config">配置</button>
-        <button class="tab-item" data-tab="groups">群组</button>
-        <button class="tab-item" data-tab="roles">权限</button>
-      </div>
-    </div>
-
-    <div class="tab-group" data-group="plugins">
-      <button class="tab tab-parent" aria-haspopup="true" aria-expanded="false">
-        插件
-        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-             stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M6 9l6 6 6-6"/>
-        </svg>
-      </button>
-      <div class="tab-menu" hidden>
-        <button class="tab-item" data-tab="plugins">插件管理</button>
-        <!-- 插件注册的页面挂到这里，见 loadPluginPages() -->
-        <div class="tab-menu-sep" id="pluginPageSep" hidden></div>
-        <div class="tab-menu-label" id="pluginPageLabel" hidden>插件页面</div>
-        <div class="tab-menu-sub" id="pluginPageItems"></div>
-      </div>
-    </div>
-
-    <!-- 身份：QQ号 / 群号 ↔ openid。常用页而不是设置项 -->
-    <button class="tab" data-tab="identity">身份</button>
-
-    <!-- 通知：SMTP 邮箱配置 + 普通成员自助绑定。字段参考 BetterGI「设置 → 通知」 -->
-    <button class="tab" data-tab="notify">通知</button>
-
-    <button class="tab" data-tab="about">关于</button>
+    <button class="nav-more" id="navMore" aria-label="全部功能" aria-expanded="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/>
+      </svg>
+      <span>更多</span>
+    </button>
   </nav>
+
+  <div class="topbar-spacer"></div>
+  <div class="crumb" id="navCrumb">概览</div>
   <button class="icon-btn" id="btnTheme" title="切换日间 / 夜间" aria-label="切换主题">
     <svg class="ic-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
          stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">

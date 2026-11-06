@@ -1425,3 +1425,480 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
   white-space: nowrap;
   overflow-wrap: anywhere;
 }
+
+/* ============================================================
+   响应式布局重构（2026-11-06）
+   ------------------------------------------------------------
+   三档共用同一份导航 DOM，靠 CSS 变形：
+     ≥1024      固定分组侧栏
+     721–1023   60px 图标条（可展开）
+     ≤720       底部高频 4 项 + 全量抽屉
+   规则一律放文件末尾、用 .app-nav 提高特异性覆盖旧 .tabs 规则，
+   不改 :root 变量名 —— server.js 的 PAGE_THEME 镜像着同一套变量名，
+   改名会让插件页面深浅色失效。
+   ============================================================ */
+
+/* ---------- 顶栏新增件 ---------- */
+.topbar-spacer { flex: 1; min-width: 0; }
+.crumb { font-size: 13px; color: var(--muted); white-space: nowrap; }
+.crumb::before { content: '/'; margin-right: 8px; color: var(--faint); }
+.nav-toggle {
+  display: none; flex: none; place-items: center;
+  width: 40px; height: 40px; padding: 9px;
+  border: 1px solid var(--border); border-radius: 9px;
+  background: var(--panel); color: var(--muted); cursor: pointer;
+}
+.nav-toggle svg { width: 20px; height: 20px; display: block; }
+.nav-close {
+  display: none; place-items: center;
+  width: 40px; height: 40px; padding: 9px;
+  border: 0; background: none; color: var(--muted); cursor: pointer;
+}
+.nav-close svg { width: 20px; height: 20px; display: block; }
+
+/* ---------- 宽屏：固定分组侧栏 ---------- */
+.app-nav {
+  position: fixed; top: 60px; left: 0; bottom: 0; width: 240px; z-index: 30;
+  display: flex; flex-direction: column;
+  background: var(--panel); border-right: 1px solid var(--border);
+  overflow: hidden;
+  transition: width .26s var(--ease);
+}
+.app-nav .nav-head { display: none; }
+.app-nav .nav-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 10px 20px; }
+/* 滚动条藏起来但保留滚动能力：侧栏那条灰色粗条在窄窗口里很抢眼 */
+.app-nav .nav-scroll { scrollbar-width: none; -ms-overflow-style: none; }
+.app-nav .nav-scroll::-webkit-scrollbar { width: 0; height: 0; display: none; }
+.app-nav .tab-group { position: static; display: block; margin-bottom: 14px; }
+.app-nav .tab-parent {
+  width: 100%; height: auto; padding: 4px 12px 6px;
+  /* 分组全部折叠后侧栏只剩这 5 行标题，11px 太细、撑不住整列；
+     平板展开态共用这条规则。手机抽屉另有显式 11px 覆盖，不受影响。 */
+  font-size: 13px; font-weight: 600; letter-spacing: .02em;
+  /* 折叠后整列只剩这 5 行标题，--faint 太糊；提到 --muted，仍比菜单项 --text-2 弱一档 */
+  color: var(--muted); cursor: pointer; gap: 7px;
+  /* 必须显式左对齐：平板 / 收起态会把 justify-content 改成 center，
+     切回宽屏时若没覆盖，分组标题会飘到中间，和菜单项错位 */
+  justify-content: flex-start;
+}
+.app-nav .tab-parent::after { display: none; }
+/* 收起态用矢量图标，不再用分组首字 */
+.app-nav .tab-parent .nav-ico {
+  display: none; width: 18px; height: 18px; flex: none; opacity: 0;
+  transition: opacity .2s var(--ease);
+}
+.app-nav .tab-parent .nav-label {
+  flex: 0 1 auto; min-width: 0; max-width: 120px; opacity: 1;
+  white-space: nowrap; overflow: hidden;
+  transition: max-width .26s var(--ease), opacity .18s var(--ease);
+}
+
+/*
+ * 桌面分组常驻展开。closeTabMenus() 会给 .tab-menu 设 hidden=true，
+ * 这里用更高特异性覆盖，避免为了「常驻」去改业务侧的下拉开合逻辑。
+ * 代价仅是 aria-expanded 语义不准，不影响任何功能。
+ */
+.app-nav .tab-menu,
+.app-nav .tab-menu[hidden] {
+  display: block; position: static; min-width: 0; padding: 0;
+  border: 0; border-radius: 0; box-shadow: none; animation: none;
+  max-height: 1600px; opacity: 1; overflow: hidden;
+  transition: max-height .26s var(--ease), opacity .18s var(--ease);
+}
+/* 插件页面可能很多，给个上限，别让整个分组把侧栏撑到天上去 */
+.app-nav .tab-menu-sub { max-height: min(52vh, 420px); overflow-y: auto; }
+.app-nav .tab-item {
+  display: block; width: 100%; text-align: left;
+  min-height: 38px; padding: 8px 12px; margin: 1px 0;
+  border-radius: 8px; font-size: 13px; color: var(--text-2);
+}
+.app-nav .tab-item:hover { background: var(--panel-2); color: var(--text); }
+.app-nav .tab-item.active { background: var(--primary-soft); color: var(--primary); font-weight: 600; }
+.app-nav .tab-menu-label { padding: 6px 10px 2px; }
+.app-nav .nav-more { display: none; }
+
+main {
+  margin-left: 240px; max-width: none; padding: 24px 32px 48px;
+  transition: margin-left .26s var(--ease);
+}
+main > .panel { max-width: 1400px; margin-inline: auto; }
+
+/* ---------- 平板：60px 图标条，汉堡可展开 ---------- */
+@media (min-width: 721px) and (max-width: 1023px) {
+  .nav-toggle { display: grid; }
+  .app-nav { width: 60px; }
+  .app-nav .nav-scroll { padding: 10px 6px; }
+  .app-nav .tab-group { margin-bottom: 6px; }
+  .app-nav .tab-parent { height: 44px; padding: 0; justify-content: center; color: var(--muted); }
+  .app-nav .tab-parent .nav-ico { display: block; opacity: 1; }
+  .app-nav .tab-parent .nav-label { max-width: 0; opacity: 0; }
+  .app-nav .tab-parent .chev { display: none; }
+  .app-nav .tab-menu,
+  .app-nav .tab-menu[hidden] { max-height: 0; opacity: 0; pointer-events: none; }
+  main { margin-left: 60px; padding: 20px 20px 40px; }
+
+  .app-nav.expanded { width: 240px; box-shadow: var(--shadow-lg); }
+  .app-nav.expanded .tab-parent { height: auto; padding: 2px 10px 6px; justify-content: flex-start; }
+  .app-nav.expanded .tab-parent .nav-label { max-width: 120px; opacity: 1; }
+  .app-nav.expanded .tab-parent .chev { display: block; }
+  .app-nav.expanded .tab-menu,
+  .app-nav.expanded .tab-menu[hidden] { max-height: 1600px; opacity: 1; pointer-events: auto; }
+}
+
+/* ---------- 手机：底部导航 + 全量抽屉 ---------- */
+@media (max-width: 720px) {
+  .topbar { height: 54px; padding: 0 10px; gap: 8px; flex-wrap: nowrap; }
+  .nav-toggle { display: grid; width: 42px; height: 42px; padding: 10px; }
+  .brand { display: none; }
+  .bot-switch { flex: 1; min-width: 0; }
+  .bot-trigger { width: 100%; }
+  .bot-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .topbar-spacer, .crumb { display: none; }
+  .icon-btn { width: 40px; height: 40px; }
+  .status-pill { padding: 8px 10px; }
+  .status-pill #connText, .status-pill .pill-sep, .status-pill #connAction { display: none; }
+
+  .app-nav {
+    top: auto; bottom: 0; left: 0; right: 0; width: auto;
+    height: calc(58px + env(safe-area-inset-bottom));
+    flex-direction: row; align-items: stretch; z-index: 40;
+    border-right: 0; border-top: 1px solid var(--border);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .app-nav .nav-head { display: none; }
+  .app-nav .nav-scroll {
+    display: flex; flex: 1; min-width: 0; align-items: stretch;
+    padding: 0; overflow: visible;
+  }
+  /* display:contents 让分散在 5 个分组里的高频项直接参与底栏 flex */
+  .app-nav .tab-group,
+  .app-nav .tab-menu,
+  .app-nav .tab-menu[hidden] {
+    display: contents;
+    max-height: none; opacity: 1; overflow: visible; pointer-events: auto;
+  }
+  .app-nav .tab-parent,
+  .app-nav .tab-menu-sep,
+  .app-nav .tab-menu-label,
+  .app-nav .tab-menu-sub { display: none; }
+  .app-nav .tab-item:not([data-primary]) { display: none; }
+  .app-nav .tab-item[data-primary] {
+    display: flex; flex: 1 1 0; min-width: 0; min-height: 0; height: auto;
+    align-items: center; justify-content: center;
+    padding: 6px 2px; margin: 0; border-radius: 0;
+    font-size: 12px; text-align: center;
+    transition: color .18s var(--ease), box-shadow .18s var(--ease);
+  }
+  .app-nav .tab-item[data-primary].active {
+    background: transparent; color: var(--primary);
+    box-shadow: inset 0 2px 0 var(--primary);
+  }
+  .app-nav .nav-more {
+    display: flex; flex: 0 0 58px; flex-direction: column;
+    align-items: center; justify-content: center; gap: 2px;
+    border: 0; background: none; color: var(--muted);
+    font: inherit; font-size: 11px; cursor: pointer;
+  }
+  .app-nav .nav-more svg { width: 18px; height: 18px; }
+  main { margin-left: 0; padding: 14px 12px calc(74px + env(safe-area-inset-bottom)); }
+  main > .panel { max-width: none; }
+
+  /*
+   * .card .v 原本是 white-space:nowrap（宽屏好看），但手机 2 列网格里
+   * grid item 的 min-width:auto 会被「undefined MB」「凭证有效期」这类长值撑开，
+   * 整页 scrollWidth 变大，顶栏右侧按钮和底栏「更多」一起被挤出视口。
+   * 必须 minmax(0,1fr) + 允许换行，双管齐下。
+   */
+  .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cards > .card { min-width: 0; }
+  .card .v { white-space: normal; overflow-wrap: anywhere; font-size: 17px; }
+  .topbar, .app-nav { max-width: 100vw; }
+  .status-pill { flex: none; }
+  .app-nav .nav-scroll { min-width: 0; overflow: hidden; }
+
+  /* 抽屉：点「更多」后铺满全屏，列出全部分组 */
+  .app-nav.drawer-open {
+    top: 0; height: 100dvh; flex-direction: column;
+  }
+  .app-nav.drawer-open .nav-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 12px; border-bottom: 1px solid var(--border);
+  }
+  .nav-brand { font-family: var(--display); font-size: 16px; font-weight: 700; color: var(--text); }
+  .nav-brand span { font-family: var(--sans); font-size: 10px; letter-spacing: .16em; color: var(--muted); }
+  .app-nav.drawer-open .nav-scroll { display: block; overflow-y: auto; padding: 12px 12px 20px; }
+  .app-nav.drawer-open .tab-group,
+  .app-nav.drawer-open .tab-menu,
+  .app-nav.drawer-open .tab-menu[hidden] {
+    display: block; position: static;
+    max-height: none; opacity: 1; overflow: visible; pointer-events: auto;
+  }
+  .app-nav.drawer-open .tab-parent {
+    display: flex; height: auto; padding: 6px 10px;
+    font-size: 11px; color: var(--faint);
+  }
+  .app-nav.drawer-open .tab-parent .nav-ico {
+    display: block; opacity: 1; width: 16px; height: 16px;
+  }
+  .app-nav.drawer-open .tab-parent .nav-label { max-width: 120px; opacity: 1; }
+  .app-nav.drawer-open .tab-item:not([data-primary]),
+  .app-nav.drawer-open .tab-item[data-primary] {
+    display: block; width: 100%; min-height: 44px; padding: 10px 12px;
+    border-radius: 8px; font-size: 14px; text-align: left;
+  }
+  .app-nav.drawer-open .tab-item[data-primary].active { box-shadow: none; background: var(--primary-soft); }
+  .app-nav.drawer-open .tab-menu-sep,
+  .app-nav.drawer-open .tab-menu-label,
+  .app-nav.drawer-open .tab-menu-sub { display: block; }
+  .app-nav.drawer-open .nav-more { display: none; }
+  .nav-close { display: grid; }
+
+  /* ---------- 12 张表全部卡片化 ---------- */
+  .table-wrap { max-height: none; overflow: visible; }
+  table, #tab-ledger table { min-width: 0; width: 100%; table-layout: auto; }
+  thead { display: none; }
+  tbody, tbody tr { display: block; }
+  tbody tr {
+    margin-bottom: 10px; padding: 10px 12px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+  }
+  tbody td {
+    display: flex; gap: 10px; align-items: baseline;
+    padding: 4px 0; border: 0; text-align: left;
+  }
+  tbody td::before {
+    content: attr(data-label);
+    flex: 0 0 92px; color: var(--muted); font-size: 12px;
+  }
+  tbody td[colspan]:not(.empty)::before { content: none; }
+  tbody td[colspan] { display: block; text-align: center; padding: 18px 0; }
+  tbody td.num { text-align: left; }
+  /* 账本页原本写死列宽且 table-layout:fixed，窄屏必须一并复位 */
+  #tab-ledger .lg-chat, #tab-ledger .lg-kind, #tab-ledger .lg-num,
+  #tab-ledger .lg-range, #tab-ledger .lg-ops, #tab-ledger .lg-when,
+  #tab-ledger .lg-who {
+    width: auto; white-space: normal; overflow: visible; text-overflow: clip;
+  }
+
+  /* ---------- 弹窗改全屏 sheet ---------- */
+  .modal-mask { align-items: flex-end; }
+  .modal, .modal.wide {
+    width: 100%; max-width: none; max-height: 92dvh;
+    border-radius: 16px 16px 0 0;
+    padding: 18px 16px calc(18px + env(safe-area-inset-bottom));
+  }
+  .pp-body { max-height: none; flex: 1 1 auto; }
+  .modal-actions { flex-wrap: wrap; }
+  .modal-actions > .btn { min-width: 0; flex: 1 1 auto; }
+  .modal-actions > .act-left { margin-right: 0; }
+  .plugin-page { height: calc(100dvh - 170px); min-height: 320px; }
+  .sticky-actions { bottom: calc(58px + env(safe-area-inset-bottom)); }
+}
+
+/* ---------- 触摸设备：达标触控目标（参考 snowluma 的 pointer:coarse 分支） ---------- */
+@media (hover: none) and (pointer: coarse) {
+  .icon-btn, .nav-toggle { width: 44px; height: 44px; }
+  .app-nav .tab-item, .pp-tab, .btn.small { min-height: 44px; }
+  .chip-x { min-width: 36px; min-height: 44px; }
+  .status-pill { min-height: 40px; }
+}
+
+/* ---------- 减少动效 ---------- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ============================================================
+   侧栏交互（2026-11-07）：收起 / 分组折叠
+   ------------------------------------------------------------
+   顶栏汉堡在三档里的职责：
+     ≥1024      收起 / 展开侧栏（状态存 localStorage）
+     721–1023   展开 / 收回图标条
+     ≤720       打开全量抽屉
+   ============================================================ */
+
+/* 汉堡在桌面也常驻，作为「收起侧栏」开关 */
+.nav-toggle { display: grid; }
+
+/* 分组标题可点，chevron 指示折叠态 */
+.app-nav .tab-parent { cursor: pointer; }
+.app-nav .tab-group .tab-parent .chev {
+  display: block; width: 12px; height: 12px; opacity: .55;
+  margin-left: auto;
+  transform: rotate(180deg);
+  transition: transform .18s var(--ease);
+}
+.app-nav .tab-group.group-collapsed .tab-parent .chev { transform: rotate(0deg); }
+
+/*
+ * 折叠态只在侧栏形态生效；手机抽屉始终展开全部分组，
+ * 免得在抽屉里还要先点开分组才能找到页签。
+ */
+@media (min-width: 721px) {
+  .app-nav .tab-group.group-collapsed .tab-menu,
+  .app-nav .tab-group.group-collapsed .tab-menu[hidden] {
+    max-height: 0; opacity: 0; pointer-events: none;
+  }
+}
+
+/* 桌面收起：60px 图标条，复用平板那套 data-icon 首字 */
+@media (min-width: 1024px) {
+  body.nav-compact .app-nav { width: 60px; }
+  body.nav-compact main { margin-left: 60px; }
+  body.nav-compact .app-nav .nav-scroll { padding: 10px 6px; }
+  body.nav-compact .app-nav .tab-group { margin-bottom: 6px; }
+  body.nav-compact .app-nav .tab-parent {
+    height: 44px; padding: 0; justify-content: center; color: var(--muted);
+  }
+  body.nav-compact .app-nav .tab-parent .nav-ico { display: block; opacity: 1; }
+  body.nav-compact .app-nav .tab-parent .nav-label { max-width: 0; opacity: 0; }
+  body.nav-compact .app-nav .tab-parent .chev { display: none; }
+  body.nav-compact .app-nav .tab-menu,
+  body.nav-compact .app-nav .tab-menu[hidden] {
+    max-height: 0; opacity: 0; pointer-events: none;
+  }
+}
+
+/* ---------- 收起 / 折叠的收尾细节 ---------- */
+
+/* 图标条里没地方放折叠箭头，这两条要写在 chevron 通用规则之后才压得住 */
+@media (min-width: 721px) and (max-width: 1023px) {
+  .app-nav:not(.expanded) .tab-group .tab-parent .chev { display: none; }
+}
+@media (min-width: 1024px) {
+  body.nav-compact .app-nav .tab-group .tab-parent .chev { display: none; }
+}
+
+/* 抽屉上滑淡入，别硬邦邦地铺满 */
+@keyframes drawer-in {
+  from { opacity: .55; transform: translateY(14px); }
+  to { opacity: 1; transform: none; }
+}
+.app-nav.drawer-open { animation: drawer-in .24s var(--ease); }
+
+/* 分组标题暗示可点；折叠态不再压暗（整列只剩标题，压暗会糊成一片，
+   折叠状态由 chevron 的旋转方向指示，不靠变淡） */
+.app-nav .tab-parent:hover { color: var(--text-2); }
+
+/* ============================================================
+   过渡打磨（2026-11-07）：把「跳变」换成连续运动
+   ------------------------------------------------------------
+   只追加动效声明，不改任何尺寸 / 颜色 / 布局数值，也不新增 CSS 变量
+   （契约脚本对 cssVarDefs 做双向比对，多一个变量就会 FAIL）。
+
+   对标（§11 调研 + GitHub 动效规范实测 2026-11-07）：
+     · 时长阶梯：hover ≈150ms / 状态切换 200–300ms / drawer·modal·accordion 300–400ms
+       （better-react-web-ui「100/300/500」、skillmd animation.md、motionlint STANDARDS.md）
+     · 曲线只留两条：沿用本文件自带 --ease（强 ease-out，进入 / 展开），
+       drawer / bottom-sheet 用 cubic-bezier(.32,.72,0,1)（iOS 曲线）
+     · 只动 transform / opacity，不再给 height / width 增加动画（布局属性是性能反模式）
+     · 入场 scale 不从 0 起（健康区间 .95–.97），退场比入场快约 20%
+
+   现场三类「生硬」根因：
+     1. 切页是 display:none → block，内容凭空出现；
+     2. 分组折叠用 max-height:1600px → 0，前大半程看不出变化、最后一瞬收完；
+     3. 图标 / 箭头靠 display 切换「啪」地出现，颜色硬切，时长普遍只有 .12–.18s。
+   ============================================================ */
+
+/* 1. 切页：内容轻微上移淡入，不再瞬间闪现。
+      弹窗 DOM 在 </main> 之外、sticky-actions 是 position:sticky，
+      所以动画期间的 transform 不会把 fixed 元素锚到面板上。 */
+@keyframes panel-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: none; }
+}
+main > .panel.active {
+  animation: panel-in .3s var(--ease) both;
+}
+
+/* 2. 侧栏收起 / 主区让位：两者必须同一节奏，否则会一先一后地错开 */
+.app-nav { transition: width .34s var(--ease), box-shadow .3s ease; }
+main { transition: margin-left .34s var(--ease); }
+
+/* 3. 分组折叠：高度收拢的同时内容同步上移淡出，盖住 max-height 的空转段 */
+.app-nav .tab-menu,
+.app-nav .tab-menu[hidden] {
+  transition:
+    max-height .36s var(--ease),
+    opacity .24s ease,
+    transform .36s var(--ease);
+  transform-origin: top center;
+}
+@media (min-width: 721px) {
+  .app-nav .tab-group.group-collapsed .tab-menu,
+  .app-nav .tab-group.group-collapsed .tab-menu[hidden] {
+    transform: translateY(-8px);
+    /* 退场比入场快一档：用户已经决定收起，不必等动画慢慢同意 */
+    transition-duration: .28s, .2s, .28s;
+  }
+}
+
+/* 4. 文字 / 图标 / 箭头：颜色不硬切，出现时带一点缩放而不是凭空跳出 */
+@keyframes nav-ico-in {
+  from { opacity: 0; transform: scale(.92); }
+  to   { opacity: 1; transform: none; }
+}
+.app-nav .tab-parent { transition: color .18s ease, opacity .22s ease; }
+.app-nav .tab-item {
+  transition: background-color .2s ease, color .2s ease,
+    opacity .2s ease, box-shadow .2s ease;
+}
+.app-nav .tab-parent .nav-label {
+  transition: max-width .34s var(--ease), opacity .26s ease;
+}
+.app-nav .tab-parent .nav-ico { transition: opacity .26s ease; }
+.app-nav .tab-group .tab-parent .chev {
+  transition: transform .3s var(--ease), opacity .22s ease;
+}
+@media (min-width: 1024px) {
+  body.nav-compact .app-nav .tab-parent .nav-ico {
+    animation: nav-ico-in .3s var(--ease) both;
+  }
+}
+@media (min-width: 721px) and (max-width: 1023px) {
+  .app-nav.expanded .tab-parent .chev {
+    animation: nav-ico-in .3s var(--ease) both;
+  }
+}
+
+/* 5. 手机抽屉：容器淡入上滑，内容再分层入场，不再整块糊上来 */
+@keyframes drawer-in {
+  from { opacity: .35; transform: translateY(22px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes drawer-content-in {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: none; }
+}
+@media (max-width: 720px) {
+  .app-nav.drawer-open {
+    box-shadow: var(--shadow-lg);
+    animation: drawer-in .36s cubic-bezier(.32, .72, 0, 1) both;
+  }
+  .app-nav.drawer-open .nav-head {
+    animation: drawer-content-in .38s var(--ease) .04s both;
+  }
+  .app-nav.drawer-open .nav-scroll {
+    animation: drawer-content-in .42s var(--ease) .08s both;
+  }
+}
+
+/* 6. 弹窗：入场位移看得见；手机改成从底部滑上来的 sheet */
+@keyframes modal-fade { from { opacity: 0 } to { opacity: 1 } }
+@keyframes modal-pop {
+  from { opacity: 0; transform: translateY(14px) scale(.97); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes sheet-in {
+  from { opacity: .7; transform: translateY(100%); }
+  to   { opacity: 1; transform: none; }
+}
+.modal-mask { animation: modal-fade .24s ease both; }
+.modal { animation: modal-pop .28s var(--ease) both; }
+@media (max-width: 720px) {
+  .modal { animation: sheet-in .36s cubic-bezier(.32, .72, 0, 1) both; }
+}
