@@ -112,8 +112,7 @@ docs: 补充 intents 位表
 
 1. 在 `src/events.js` 的 `EVENTS` 里加一条（intent、分组、说明、是否消息类）
 2. 如果是消息类，补上 `message` 字段（`group` / `c2c` / `guild` / `dm`）
-3. 更新 `docs/事件与接口清单.md`
-4. 跑 `npm test`
+3. 跑 `npm test`
 
 `message.js`、分发器、面板都从这个表读，不需要改别处。
 

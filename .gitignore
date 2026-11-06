@@ -48,3 +48,23 @@ nul
 
 # 签名私钥：只在发版机上，永不入库（公钥内嵌在 src/trust.js，这个目录整个不要）
 keys/
+
+# 开发过程文档：自查记录、竞品调研、历史方案。留在本机，不进仓库——
+# 用户 clone 下来需要的是怎么用、怎么写插件，不是我们立项时怎么吵的。
+# 对应的说明性文档（插件开发规范 / 配置参考 / 常见问题 / 架构说明…）仍然入库。
+/docs/代码自查记录.md
+/docs/AstrBot对照与优化清单.md
+/docs/优化建议.md
+/docs/功能对比.md
+/docs/对标ElainaBot.md
+/docs/GitHub同类项目调研.md
+/docs/DSH-Aurabot适配方案.md
+/docs/DSH-Aurabot适配方案-v2.md
+/docs/地基三块方案.md
+/docs/官方接口核查与AI工具化方案.md
+/docs/事件与接口清单.md
+/docs/QQ号与群号绑定方案.md
+/docs/数值方案.md
+/docs/真机联调记录.md
+/docs/账本保留策略.md
+/docs/ai-chat.md
