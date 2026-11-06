@@ -8,9 +8,9 @@
 
 <img src="https://img.shields.io/badge/Node.js-22.13%2B-339933?logo=node.js&logoColor=white" alt="Node.js 22.13+">
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
-<img src="https://img.shields.io/badge/tests-807%20passed-brightgreen" alt="测试 807 项">
+<img src="https://img.shields.io/badge/tests-813%20passed-brightgreen" alt="测试 813 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
-<img src="https://img.shields.io/badge/version-1.0.6-blueviolet" alt="版本 1.0.6">
+<img src="https://img.shields.io/badge/version-1.0.7-blueviolet" alt="版本 1.0.7">
 <img src="https://img.shields.io/badge/license-Non--Commercial-red" alt="禁止商用">
 <a href="https://github.com/tdcq9594/qq-bot-roost/actions"><img src="https://img.shields.io/github/actions/workflow/status/tdcq9594/qq-bot-roost/ci.yml?branch=master" alt="CI"></a>
 
@@ -276,7 +276,7 @@ docker compose up -d
 | 页签 | 能做什么 |
 |------|----------|
 | 概览 | 连接状态、运行时长、凭证有效期、内存、收发统计、活跃会话 Top20、重连 / 刷新凭证、调试发消息 |
-| 配置 | 凭证、intents 勾选、命令前缀、白名单、限流、去重窗口、消息日志、日志级别、面板端口 / 密钥 |
+| 配置 | 凭证、intents 勾选、命令前缀、白名单、限流、去重窗口、消息日志、日志级别、面板端口 / 密钥；底部**实例锁**：哪个 AppID 被哪个进程占着、残留记录一键清 |
 | 插件 | 列表、启用 / 禁用 / 重载、加载错误提示 |
 | 事件 | **47 个官方事件的订阅状态与接收计数**，一眼看出哪个事件没收到 |
 | 群组 | 全局主人增删、群档案（邀请人 / 群主 / 状态）、手动登记群 |
