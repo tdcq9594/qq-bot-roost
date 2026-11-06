@@ -200,6 +200,9 @@ export class BotRuntime {
     // 群管内邀开关：api 层有自己的副本，配置变了由面板接口同步过来。
     // mock 的 api 也实现了同名方法，一起同步，方便本地验证插件的群管逻辑
     this.api.setGroupInvited?.(cfg.groupManage?.invited);
+    // 发图带空格：只影响真实 QQApi 的最终报文；mock api 不拼官方报文、
+    // 没实现这个 setter，?. 会直接跳过（演示模式下开关不适用）
+    this.api.setMediaPlaceholderSpace?.(cfg.media?.placeholderSpace);
 
     this.session = new SessionManager({
       stickyMs: Math.max(0, (cfg.session?.stickySec ?? 180) * 1000),

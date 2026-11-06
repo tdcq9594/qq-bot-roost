@@ -1483,6 +1483,7 @@ async function testConfigOwnership() {
   check('配置: logLevel 不落进机器人配置', raw.logLevel === undefined);
   // 该在的必须在
   check('配置: groupManage 会保存', raw.groupManage?.invited === false);
+  check('配置: media.placeholderSpace 会保存', raw.media?.placeholderSpace === false);
   check('配置: 基本字段会保存', raw.appId === '1' && raw.name === 'selftest');
 
   // 读回来的 cfg 也不该带上全局设置
@@ -1490,12 +1491,115 @@ async function testConfigOwnership() {
   if (back) {
     check('配置: 读回的 cfg 不含 webui', back.webui === undefined);
     check('配置: 读回的 cfg 有 groupManage 默认值', back.groupManage?.invited === false);
+    check('配置: 读回的 cfg 有 media 默认值', back.media?.placeholderSpace === false);
   }
+
+  // 脏值不能原样落盘：旧配置 / 面板异常请求可能把 media 写成字符串、数组
+  await saveBotConfig(tmpId, { ...dirty, media: 'true' });
+  let rawDirty = {};
+  try {
+    rawDirty = JSON.parse(await fsP.readFile(file, 'utf8'));
+  } catch {}
+  check('配置: media 脏值会规范化成默认关', rawDirty.media?.placeholderSpace === false);
 
   await fsP.unlink(file).catch(() => {});
 }
 
 await testConfigOwnership();
+
+/* ---------- 发图带空格：面板兼容开关（默认关） ---------- */
+
+async function testMediaPlaceholderSpace() {
+  const { QQApi, FILE_TYPE } = await import('../src/api.js');
+  const realFetch = globalThis.fetch;
+  const sentBodies = [];
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes('/files')) {
+      return new Response(JSON.stringify({ file_uuid: 'u', file_info: 'fi', ttl: 300 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    sentBodies.push(init?.body ? JSON.parse(init.body) : null);
+    return new Response(JSON.stringify({ id: 'ok' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  try {
+    const api = new QQApi({
+      tokenManager: { get: async () => 'tok', appId: 'app', refresh: async () => {} },
+      baseUrl: 'https://api.sgroup.qq.com',
+    });
+    const media = { msgType: 7, media: { file_info: 'fi' } };
+
+    // ① 默认关：报文 content 是空串，不是空格（v1.0.6 之后的干净图）
+    sentBodies.length = 0;
+    await api.sendGroup('g1', media);
+    check('发图空格: 默认关闭时 content 为空串', sentBodies[0]?.content === '',
+      JSON.stringify(sentBodies[0]));
+
+    // ② 打开开关：没有正文的富媒体补一个空格
+    api.setMediaPlaceholderSpace(true);
+    sentBodies.length = 0;
+    await api.sendGroup('g1', media);
+    check('发图空格: 开启后 content 是单个空格', sentBodies[0]?.content === ' ',
+      JSON.stringify(sentBodies[0]));
+
+    // ③ 带说明文字的图文混排不能被覆盖
+    sentBodies.length = 0;
+    await api.sendGroup('g1', { ...media, content: '横图 2290×1200' });
+    check('发图空格: 带 text 时不覆盖', sentBodies[0]?.content === '横图 2290×1200');
+
+    // ④ 只作用于 msg_type=7：纯文本 / markdown / 卡片都不该被塞空格
+    sentBodies.length = 0;
+    await api.sendGroup('g1', { content: '' });
+    await api.sendGroup('g1', { content: 'x', markdown: { content: '**md**' } });
+    await api.sendGroup('g1', { card: { type: 'tuwen', content: {} } });
+    check(
+      '发图空格: 只作用于 msg_type=7',
+      sentBodies[0]?.msg_type === 0 && sentBodies[0]?.content === '' &&
+        sentBodies[1]?.msg_type === 2 && sentBodies[1]?.content === '' &&
+        sentBodies[2]?.msg_type === 8 && sentBodies[2]?.content === '',
+      JSON.stringify(sentBodies.map((b) => [b?.msg_type, b?.content])),
+    );
+
+    // ⑤ api.sendMedia（插件 ctx.api.sendMedia 走这条）也要带上
+    sentBodies.length = 0;
+    await api.sendMedia('group', 'g1', { fileType: FILE_TYPE.IMAGE, url: 'https://x/1.png' });
+    check('发图空格: sendMedia 路径也补空格',
+      sentBodies[0]?.msg_type === 7 && sentBodies[0]?.content === ' ',
+      JSON.stringify(sentBodies[0]));
+
+    // ⑥ 关回去立即生效；字符串 / 数字不许被当成「开」
+    api.setMediaPlaceholderSpace(false);
+    sentBodies.length = 0;
+    await api.sendGroup('g1', media);
+    check('发图空格: 关回去立即生效', sentBodies[0]?.content === '');
+    api.setMediaPlaceholderSpace('false');
+    sentBodies.length = 0;
+    await api.sendGroup('g1', media);
+    check('发图空格: 字符串 "false" 不会误开', sentBodies[0]?.content === '');
+    api.setMediaPlaceholderSpace(1);
+    sentBodies.length = 0;
+    await api.sendGroup('g1', media);
+    check('发图空格: 数字 1 不会误开', sentBodies[0]?.content === '');
+    api.setMediaPlaceholderSpace(undefined);
+    sentBodies.length = 0;
+    await api.sendGroup('g1', media);
+    check('发图空格: undefined 保持关闭', sentBodies[0]?.content === '');
+    // 脏值折腾一圈之后，开关还得能正常打开
+    api.setMediaPlaceholderSpace(true);
+    sentBodies.length = 0;
+    await api.sendGroup('g1', media);
+    check('发图空格: 脏值之后仍可正常打开', sentBodies[0]?.content === ' ');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+await testMediaPlaceholderSpace();
 
 /* ---------- 插件热重载 ---------- */
 

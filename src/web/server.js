@@ -1605,6 +1605,24 @@ export async function startWebServer({
             cfg.groupManage = { invited: Boolean(body.groupManage.invited) };
             rt.api?.setGroupInvited?.(cfg.groupManage.invited);
           }
+          /**
+           * 「发图带空格」兼容开关（默认关）。
+           * 严格只认布尔 true：字符串 "false" 按真值判断会被当成「开」，
+           * 和 security.trust.enforce 踩过的是同一个坑。
+           * 同步给 api 实例，勾选后立即生效、不用重启。
+           *
+           * 还要求「对象 + 布尔字段」齐全才写：面板漏传字段、旧版前端、
+           * 或者 body.media 是 [] / {} 时，不该把已经打开的开关静默关掉。
+           */
+          if (
+            body.media &&
+            typeof body.media === 'object' &&
+            !Array.isArray(body.media) &&
+            typeof body.media.placeholderSpace === 'boolean'
+          ) {
+            cfg.media = { placeholderSpace: body.media.placeholderSpace };
+            rt.api?.setMediaPlaceholderSpace?.(cfg.media.placeholderSpace);
+          }
 
           await saveBotConfig(rt.id, cfg);
           log.info('配置已通过面板更新');

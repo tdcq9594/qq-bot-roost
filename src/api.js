@@ -147,6 +147,8 @@ export class QQApi {
     this.seqMap = new Map();
     // 群管内邀开关，由 BotRuntime 按配置同步；默认关
     this.groupInvited = false;
+    // 「发图带空格」兼容开关，由 BotRuntime 按 cfg.media.placeholderSpace 同步；默认关
+    this.mediaPlaceholderSpace = false;
     // 群角色查询缓存：groupOpenid -> { at, value }。bot_state 只有 30 QPM
     this.roleCache = new Map();
     /**
@@ -564,11 +566,15 @@ export class QQApi {
     const up = await this.uploadMedia(scene, target, { fileType, url, fileData });
     if (!up?.file_info) throw new Error('上传成功但未返回 file_info');
     /**
-     * **不要 content。**
+     * **不要在这里传 content。**
      *
      * 官方字段表：`msg_type=7` 时生效的是 `media`，`content` 只在
      * `msg_type=0` 时是全文。以前这里填了一个空格占位，客户端会把
      * 它当成正文，渲染出一块空的文字区（图被挤到一侧）。
+     *
+     * 那个空格现在做成面板「配置 → 发图兼容」的可选开关（默认关）：
+     * 打开后由 `#payload()` 在最终报文里补，这里依旧不带 content，
+     * 免得开关关着时又冒出空格、开着时补两遍。
      */
     const opts = {
       msgType: 7,
@@ -630,6 +636,19 @@ export class QQApi {
     // 角色缓存可能存着「查不到」的结果，开关切换后要重新试
     this.roleCache.clear();
     return this.groupInvited;
+  }
+
+  /**
+   * 「发图带空格」开关。由 BotRuntime 按 cfg.media.placeholderSpace 初始化，
+   * 面板改动时由 /api/config 同步进来，立即生效、不用重启。
+   *
+   * 只认布尔 true：`"false"` / `0` / `undefined` 一律当关。
+   * 面板配置走 HTTP，字符串 "false" 按真值判断会被读成「开」——
+   * security.trust.enforce 踩过这个坑，这里不重犯。
+   */
+  setMediaPlaceholderSpace(v) {
+    this.mediaPlaceholderSpace = v === true;
+    return this.mediaPlaceholderSpace;
   }
 
   /** 内邀接口的统一闸门。没开门就抛错，别把请求发出去刷一屏 11253 */
@@ -1260,7 +1279,24 @@ export class QQApi {
   }
 
   #payload(opts) {
-    return buildSendPayload(opts, (id) => this.#nextSeq(id));
+    const payload = buildSendPayload(opts, (id) => this.#nextSeq(id));
+    /**
+     * 「发图带空格」兼容开关（默认关，面板「配置 → 发图兼容」）。
+     *
+     * 放在最终报文这一层，是为了**一处覆盖所有发图路径**：
+     * msg.replyImage / replyImageBuffer、api.sendMedia、插件拿到的
+     * ctx.api.sendMedia、以及没有调度器时的 api.sendGroup 兜底，最后都过这里。
+     * 放在 outbound 或 message 层都会漏，还会污染投递账本的正文摘要
+     * （账本把纯空格当「没有正文」，测试也断言富媒体不带 content）。
+     *
+     * 只补「没有正文的富媒体」：
+     *   · msg_type=7 且 content 为空 —— 老版就是在这里塞 ' '
+     *   · 有 text 的图文混排不动，markdown(2) / ark(3) / 卡片(8) 也不动
+     */
+    if (this.mediaPlaceholderSpace && payload.msg_type === 7 && !payload.content) {
+      payload.content = ' ';
+    }
+    return payload;
   }
 
   /**

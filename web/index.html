@@ -518,6 +518,22 @@
       </div>
 
       <div class="box">
+        <div class="box-hd"><h3>发图兼容</h3><span class="hint">默认关闭</span></div>
+        <label class="switch">
+          <input type="checkbox" name="mediaPlaceholderSpace" id="mediaPlaceholderSpace">
+          发图片时带一个空格（v1.0.6 之前的行为）
+        </label>
+        <div class="hint" id="mediaSpaceMsg" style="margin-top:4px"></div>
+        <div class="hint" style="margin-top:8px">
+          只发一张图时，框架本来不带正文，QQ 里就是干净的一张图。打开后会在富媒体消息里
+          补一个空格当正文，回到旧版排版：图片被挤向一侧、外面多出一块空白文字区。<br>
+          可能有奇妙的作用（），<b>勾选后立即生效、不用点保存也不用重启</b>。
+          带说明文字的图片（<code>replyImage(..., { text })</code>）不受影响；
+          视频 / 语音 / 文件的 content 官方会忽略，勾上也没有副作用。
+        </div>
+      </div>
+
+      <div class="box">
         <div class="box-hd"><h3>群管能力</h3><span class="hint">禁言 / 撤回已开放；群成员与踢人需官方白名单</span></div>
         <label class="switch">
           <input type="checkbox" name="groupInvited">

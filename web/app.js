@@ -1070,6 +1070,8 @@ function fillForm(c) {
   f.logLevel.value = c.logLevel || 'info';
 
   f.groupInvited.checked = Boolean(c.groupManage?.invited);
+  // 严格只认 true：老配置文件里没这个字段时保持关闭
+  f.mediaPlaceholderSpace.checked = c.media?.placeholderSpace === true;
 
   /**
    * 插件来源校验开关。`pubkeySet: false` 时必须说清楚「开了也没用」——
@@ -1405,6 +1407,36 @@ document.addEventListener('click', async (e) => {
   }
 });
 
+/* ---------------- 发图兼容：勾选即生效 ---------------- */
+
+/**
+ * 「保存配置」按钮在表单顶部/底部，离这块设置很远，勾完还得滚过去点一下才生效。
+ * 这里跟 `autoSaveIntents` 一个套路：change 时局部 PUT 只提交 media 一个字段，
+ * 后端 `/api/config` 是合并语义，其它配置项不会被这次请求碰。
+ * 不需要防抖——勾一下就是一次，且不会像 intents 那样触发重连。
+ */
+$('#mediaPlaceholderSpace').addEventListener('change', async (e) => {
+  const on = e.target.checked;
+  const tip = $('#mediaSpaceMsg');
+  if (tip) tip.textContent = '正在应用…';
+  try {
+    await api('/api/config', {
+      method: 'PUT',
+      body: JSON.stringify({ media: { placeholderSpace: on } }),
+    });
+    if (tip) {
+      tip.textContent = on ? '已生效：发图会带空格' : '已生效：恢复干净图';
+      setTimeout(() => {
+        if (tip.textContent.startsWith('已生效')) tip.textContent = '';
+      }, 4000);
+    }
+  } catch (err) {
+    // 没保存成功就把勾选退回去，别让用户以为已经开了
+    e.target.checked = !on;
+    if (tip) tip.textContent = '应用失败: ' + err.message;
+  }
+});
+
 $('#cfgForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const f = e.target;
@@ -1443,6 +1475,10 @@ $('#cfgForm').addEventListener('submit', async (e) => {
     },
     groupManage: {
       invited: f.groupInvited.checked,
+    },
+    // 发图兼容：和 groupManage 一样是每台机器人一份，勾选后立即生效
+    media: {
+      placeholderSpace: f.mediaPlaceholderSpace.checked,
     },
     // 全局设置（config/bot.json），和 webui 一样不写进机器人配置
     security: {

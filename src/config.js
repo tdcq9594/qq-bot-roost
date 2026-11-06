@@ -335,6 +335,22 @@ const BOT_DEFAULTS = {
   groupManage: {
     invited: false,
   },
+
+  /**
+   * 富媒体（图片 / 视频 / 语音 / 文件）发送兼容选项。
+   *
+   * `placeholderSpace` 默认 false：只发一张图时，msg_type=7 的 content
+   * 保持空串，QQ 里是一张干净的图（v1.0.6 起的行为）。
+   * 打开后由 `QQApi.#payload()` 给没有正文的富媒体补一个空格，回到
+   * v1.0.6 之前的排版：客户端按图文混排渲染，图外面多一块空白文字区。
+   * 老客户端 / 旧插件依赖那个占位空格时才需要打开。
+   *
+   * 官方对非图片类型的 content 会忽略，所以实际只对图片有观感影响；
+   * 带说明文字的图片（replyImage 的 text）不受影响。
+   */
+  media: {
+    placeholderSpace: false,
+  },
 };
 
 function deepMerge(base, extra) {
@@ -529,6 +545,8 @@ export async function saveBotConfig(id, cfg) {
     gate: cfg.gate ?? { pauseOnStart: false },
     plugins: cfg.plugins,
     groupManage: cfg.groupManage ?? { invited: false },
+    // 脏值（字符串 / 数组 / 旧配置里混进来的东西）一律规范成默认关，别污染配置文件
+    media: { placeholderSpace: cfg.media?.placeholderSpace === true },
   });
 }
 
