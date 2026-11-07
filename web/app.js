@@ -1605,6 +1605,16 @@ async function loadPluginPages() {
 
   const wanted = new Set(list.map((p) => `page:${p.key}`));
 
+  /**
+   * 先记住当前停在哪一页，再去删失效的插件面板。
+   *
+   * 原实现是在函数末尾才读 $('.panel.active')，但那一页可能刚被下面的
+   * .panel[data-plugin-page] 清理删掉了 —— 读到 null，「插件卸载后回退概览」
+   * 就永远不成立；activateTab() 不跑，syncNav() 也不跑，面包屑还停在旧页名，
+   * 内容区则整个空着。这是 HEAD 就有的 bug，不是 2026-11-06 重构引入的。
+   */
+  const activeId = $('.panel.active')?.id?.replace(/^tab-/, '') ?? '';
+
   // 去掉已经不存在的
   $$('.tab-item[data-plugin-page]').forEach((b) => {
     if (!wanted.has(b.dataset.tab)) b.remove();
@@ -1677,7 +1687,6 @@ async function loadPluginPages() {
   if (label) label.hidden = !hasPages;
 
   // 正停在被删掉的那个插件页上（插件卸载了），退回概览，别让内容区空着
-  const activeId = $('.panel.active')?.id?.replace(/^tab-/, '') ?? '';
   if (activeId.startsWith('page:') && !tabButton(activeId)) activateTab('overview');
 }
 

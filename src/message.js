@@ -1,8 +1,18 @@
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import { createLogger } from './logger.js';
 import { FILE_TYPE, MEDIA_SOFT_LIMIT, MEDIA_HARD_LIMIT, DIRECT_UPLOAD_LIMIT } from './api.js';
 import { messageKindOf, EVENTS } from './events.js';
 import { renderMenuMd, mdToPlain } from './markdown.js';
+import {
+  parseReplyNodes,
+  decideReplyMode,
+  renderReplyMarkdown,
+  renderFallback,
+  hasLocalImageNode,
+  hintForReason,
+  classifyUploadFailure,
+} from './reply-auto.js';
 import { newTraceId } from './trace.js';
 
 const log = createLogger('message');
@@ -702,14 +712,36 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
         log.error('发送 Markdown 失败:', e.message);
         return null;
       }
+      /**
+       * 含**本地图片**的 Markdown 不能降级成纯文本。
+       *
+       * `mdToPlain` 的链接规则会把 `![笑](C:/stickers/笑.png)` 展开成
+       * `!笑（C:/stickers/笑.png）` —— 本地绝对路径直接漏给用户；换成
+       * `qqbot-media://` 引用也一样会变成一长串明文，而且图片本身消失。
+       * 宁可整条失败并记日志，也不能「说成功但图没了」。
+       *
+       * 但**公网图不在此列**：降级最多露出一条 URL，旧版本本来就会这样兜底。
+       * 早期实现用「有没有图片语法」判断，连半截的图片语法都算含图，
+       * 把纯文字菜单的兜底一起关掉了，用户点菜单什么都不发生。
+       */
+      if (hasLocalImageNode(typeof markdown === 'string' ? markdown : markdown?.content)) {
+        log.error(`含本地图片的 Markdown 被拒（${e.message}），不做纯文本降级（会泄漏路径 / 吞掉图片）`);
+        return null;
+      }
       const plain = mdToPlain(markdown);
       if (!plain) {
         log.error(`Markdown 被拒（${e.message}），且降不出纯文本`);
         return null;
       }
       /**
-       * 不带 keyboard：按钮挂在纯文本上平台不认，带上会连累整条消息再被拒一次。
-       * 按钮里的指令本来也会出现在正文里（ctx.menu 渲染时带上），信息不丢。
+       * 这条重发**不带 keyboard**：按钮里的指令本来也会出现在正文里
+       * （ctx.menu 渲染时带上），信息不丢。
+       *
+       * 口径要说准：不是「纯文本出口不支持 keyboard」——项目里没有验证过
+       * 首次发送 `msg_type=0 + keyboard` 会怎样，官方只是把按钮定位成
+       * 「在 markdown 消息的基础上」挂到消息底部。这里的依据是：markdown
+       * 刚被 4xx 拒过，同一条消息再挂按钮上去很可能又被拒一次，白烧一次重发。
+       * `replyAuto` 的全新纯文字出口不受此限，带按钮时会升成 markdown。
        */
       log.warn(`Markdown 被拒（${e.message}），降级为纯文本重发`);
       /**
@@ -854,7 +886,7 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
    * 发送前会先把攒着的文本 flush 掉，免得「缓冲中的回复」被这条
    * 富媒体消息挤成顺序错乱的两条。
    */
-  const replyMedia = async (fileType, source, { local = false, text = '' } = {}) => {
+  const replyMedia = async (fileType, source, { local = false, text = '', requestId, onError } = {}) => {
     if (!source) return null;
     await msg.flushReplies();
     try {
@@ -930,9 +962,15 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
         media: { file_info: up.file_info },
         /** 有效类型（可能因超过软限被降级成 FILE），账本占位按它来 */
         fileType: effectiveType,
+        /** 供 replyAuto 降级后的独立图各自绑定幂等键；老调用方不传，行为不变 */
+        ...(requestId ? { requestId: String(requestId) } : {}),
       }, true);
     } catch (e) {
       log.error(`发送富媒体(type=${fileType}) 失败:`, e.message);
+      /** 同样只给新入口：让调用方区分「明确失败」与「返回 null 但可能已送达」 */
+      if (typeof onError === 'function') {
+        try { onError(e); } catch { /* 诊断回调不许把主流程带崩 */ }
+      }
       return null;
     }
   };
@@ -948,6 +986,231 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
   msg.replyVideo = (src, opts) => replyMedia(FILE_TYPE.VIDEO, src, opts);
   msg.replyVoice = (src, opts) => replyMedia(FILE_TYPE.VOICE, src, opts);
   msg.replyFile = (src, opts) => replyMedia(FILE_TYPE.FILE, src, opts);
+
+  /**
+   * 通用图文自动出口 `msg.replyAuto()`（**新增入口，任何插件都能用；老调用方完全不受影响**）。
+   *
+   * 调用方不必是 AI 插件：把正文写成标准 markdown（图片用 `![alt](路径)`），
+   * 框架就按节点顺序自动选出口，不用声明消息类型：
+   *
+   *   · 纯文字                  → msg_type=0
+   *   · markdown / 公网图        → msg_type=2，原样引用
+   *   · 只有一张图 / 图在前 / 图在末尾 → 原路 msg_type=7(+content)，**不预上传**
+   *   · 文字 → 图 → 文字        → msg_type=2，本地图换 qqbot-media://，**唯一触发预上传**
+   *
+   * **模型侧用什么语法不归这里管**：AI 插件（ai-chat）把模型写的标记
+   * （`<<image: 路径>>` / `<<image-alone: 路径>>`）先转成上面这套形态：
+   * `<<image:>>` → `![](路径)` 交给本出口；`<<image-alone:>>` → 自己走
+   * `msg.replyImage()` 单独发。框架保持「只认 markdown」，不把模型协议
+   * 焊进通用能力里。
+   *
+   * 典型用法（任意插件）：
+   *
+   *   await msg.replyAuto(`抽到了！\n![卡面](${absPath})\n要不要再来一次？`, {
+   *     keyboard: ctx.menu(),
+   *   });
+   *
+   * **框架不校验图片路径**：调用方是可信的插件代码，模型输出的可信度由调用方把关。
+   * 预上传「自产自销、发完即删」：`try/finally` 只删本次上传的 image_id，
+   * 不碰素材库里其它插件的素材。上传不可用（大图 / 格式 / 配额 / 网络）时，
+   * 整条降级为「含原位提示的文本 1 条 + 独立图紧跟」，共 2 条，不拆三段。
+   *
+   * 按钮（keyboard）：官方把它定位成「在 markdown 消息的基础上」挂到消息底部。
+   * 纯文字带按钮会**升成 markdown 出口**（不多发一条、不预上传）；富媒体
+   * `msg_type=7` 出口不带按钮并记日志；降级纯文本是「markdown 刚被 4xx 拒过」
+   * 后的重发，也不再挂按钮，避免同一条消息被拒两次。
+   *
+   * @param {string} content 插件给出的正文（标准 markdown，可含本地/公网图片）
+   * @param {object} [opts]
+   * @param {string} [opts.requestId] 投递账本幂等键；降级后派生出各自独立的键
+   * @param {object} [opts.keyboard] 按钮组（见上方口径）
+   * @param {number} [opts.maxMedia=3] 单条最多允许的独立图数量
+   * @param {object} [opts.hints] 按 reason 覆盖降级提示文案
+   * @param {(info:object)=>void} [opts.onResult] 诊断回调（真实发送结果记这里）
+   */
+  msg.replyAuto = async (content, opts = {}) => {
+    // 先把攒着的文本发掉，否则缓冲里的回复会被富媒体/markdown 挤成顺序错乱的两条
+    await msg.flushReplies();
+    const raw = String(content ?? '');
+    if (!raw) return null;
+
+    const nodes = parseReplyNodes(raw);
+    const plan = decideReplyMode(nodes);
+    const rid = opts.requestId ? String(opts.requestId) : '';
+    const keyboard = opts.keyboard ?? null;
+    const hints = opts.hints ?? {};
+    const maxMedia = Math.max(1, Number(opts.maxMedia) || 3);
+    const report = (info) => {
+      if (typeof opts.onResult !== 'function') return;
+      try { opts.onResult(info); } catch { /* 诊断回调不许把发送流程带崩 */ }
+    };
+
+    /* 1) 纯文字 / 无本地图的 markdown（含公网图，原样引用，平台自动转存） */
+    if (plan.mode === 'plain' || (plan.mode === 'markdown' && plan.local.length === 0)) {
+      /**
+       * 官方「消息按钮」文档把按钮定位成「在 markdown 消息的基础上」挂到消息底部。
+       * 纯文本（msg_type=0）没有这个基础，所以带按钮时直接**升成 markdown 出口**：
+       * 不预上传、不多发一条，按钮也不用丢。
+       * 注意别把这条理解成「实测过 msg_type=0 + keyboard 会被拒」——项目里
+       * 唯一的依据是 replyMarkdown 降级重发那一处，那是消息刚被 4xx 拒过的场景。
+       */
+      const asMarkdown = plan.mode === 'markdown' || !!keyboard;
+      const payload = asMarkdown ? { markdown: { content: raw } } : { content: raw };
+      if (keyboard) payload.keyboard = keyboard;
+      try {
+        return await send({ ...payload, ...(rid ? { requestId: rid } : {}) }, true);
+      } catch (e) {
+        log.error(`replyAuto 发送失败(${plan.mode}):`, e.message);
+        return null;
+      }
+    }
+
+    /* 2) 独立图 / 图在前 / 图在末尾 —— 原路，一次预上传都不做 */
+    if (plan.mode === 'media' || plan.mode === 'media-text') {
+      if (keyboard) log.warn('replyAuto 富媒体(msg_type=7)出口按官方口径不挂载 keyboard，按钮已跳过');
+      // 框架不做路径白名单：调用方是插件代码，给什么路径就发什么图
+      const resolved = plan.local.map((n) => ({ ...n, path: path.resolve(n.src) }));
+      if (!resolved.length) return null;
+      const count = Math.min(resolved.length, maxMedia);
+      let last = null;
+      for (let i = 0; i < count; i++) {
+        last = await msg.replyImage(resolved[i].path, {
+          local: true,
+          /**
+           * `msg_type=7` 的 content 是**纯文本**，不渲染 markdown。
+           * 图在前 / 图在末尾走这条原路时，正文里的 `# 标题` / `**加粗**`
+           * 会原样露给用户，所以先过一遍 mdToPlain。
+           */
+          text: i === 0 ? mdToPlain(plan.text) : '',
+          ...(rid ? { requestId: `${rid}:img${i}` } : {}),
+        });
+      }
+      if (resolved.length > count) {
+        log.warn(`replyAuto 图片数 ${resolved.length} 超过 maxMedia=${maxMedia}，已截断 ${resolved.length - count} 张`);
+      }
+      report({ mode: plan.mode, images: resolved.length, sent: count });
+      return last;
+    }
+
+    /* 3) markdown 出口：按需预上传（框架不校验路径） */
+    const valid = plan.local.map((n) => ({ ...n, resolvedPath: path.resolve(n.src) }));
+    let failure = null;
+
+    const replacements = new Map();
+    const uploads = [];
+    const byPath = new Map(); // 同一条消息里同图复用一个上传结果
+    if (!failure) {
+      for (const n of valid) {
+        if (byPath.has(n.resolvedPath)) {
+          replacements.set(n.src, byPath.get(n.resolvedPath));
+          continue;
+        }
+        try {
+          const up = await api.uploadMarkdownImage(n.resolvedPath);
+          uploads.push(up);
+          byPath.set(n.resolvedPath, up.url);
+          replacements.set(n.src, up.url);
+        } catch (e) {
+          failure = { reason: classifyUploadFailure(e), error: e, path: n.resolvedPath };
+          log.warn(`replyAuto 预上传失败（${failure.reason}），整条降级：${e.message}`);
+          break;
+        }
+      }
+      // 一条消息不能混 msg_type：只要有一张本地图没换成引用，就会明文漏出路径
+      if (!failure && valid.some((n) => !replacements.has(n.src))) {
+        failure = { reason: 'internal' };
+      }
+    }
+
+    try {
+      if (!failure) {
+        const md = renderReplyMarkdown(nodes, replacements);
+        try {
+          const r = await send({
+            markdown: { content: md },
+            ...(keyboard ? { keyboard } : {}),
+            ...(rid ? { requestId: rid } : {}),
+          }, true);
+          report({ mode: 'markdown', uploads: uploads.length });
+          return r;
+        } catch (e) {
+          /**
+           * 硬边界：POST /messages 已发出之后的超时 / 5xx / 普通拒绝一律不降级。
+           * 可能已经送达，再补文本+独立图就是重复发送；账本按 unknown 处理、不重发。
+           */
+          log.error(`replyAuto markdown 发送失败，不降级（可能已送达）:`, e.message);
+          report({ mode: 'markdown', phase: 'send', error: String(e?.message ?? '') });
+          return null;
+        }
+      }
+    } finally {
+      // 发完即删：成功、失败、异常都清，只删本次自己创建的 image_id
+      for (const up of uploads) {
+        try { await api.deleteMediaImage(up.imageId); }
+        catch (e2) { log.warn(`replyAuto 清理素材失败 image_id=${up.imageId}: ${e2.message}`); }
+      }
+    }
+
+    /* 4) 降级：文本（图片位置换成提示）先发，独立图紧跟，共 2 条 */
+    const reason = failure.reason;
+    const hint = hintForReason(reason, hints);
+    const fb = renderFallback(nodes, () => hint);
+    const fbBase = rid || newTraceId();
+    if (fb.content) {
+      /**
+       * 降级文本是「markdown 刚被 4xx 拒过」之后的重发，纯文本那一条不再挂
+       * 按钮（理由同 replyMarkdown 的降级）。若降级文本里还留着公网图，
+       * `renderFallback` 会返回 msgType=2，那仍是 markdown，按钮照挂。
+       */
+      if (keyboard && fb.msgType !== 2) {
+        log.warn('replyAuto 降级纯文本是 markdown 被拒后的重发，按钮已跳过（避免再被拒一次）');
+      }
+      const payload = fb.msgType === 2
+        ? { markdown: { content: fb.content }, ...(keyboard ? { keyboard } : {}) }
+        : { content: fb.content };
+      try {
+        await send({ ...payload, requestId: `${fbBase}:fallback-text` }, true);
+      } catch (e) {
+        log.error('replyAuto 降级文本发送失败:', e.message);
+      }
+    }
+
+    /**
+     * 降级时要从补发队列里**剔除**的原因：这些是「这张图本身用不了」，
+     * 换一条消息再发一次必然还失败，只会白跑一次请求 + 一条失败日志。
+     *
+     *   · `outside`    —— 文件不存在 / 无权限，`replyImage` 连读都读不到
+     *   · `bad_format` —— 文件头不是受支持的图片，QQ 直接回
+     *                     `400 富媒体文件格式不支持`（2026-11-07 真机实测）
+     *
+     * 其余原因一律保留补发：`oversize` 能走分片上传（11MB 实测成功）、
+     * `quota` 是暂时性的、`network` 多是瞬时抖动、`internal` 属未归类异常，
+     * 换个通道还有机会成。降级文案写的是「下面会单独发这张图」，
+     * 能发就得真发。
+     */
+    const DEAD_REASONS = new Set(['outside', 'bad_format']);
+    const sendable = DEAD_REASONS.has(failure.reason)
+      ? valid.filter((n) => n.resolvedPath !== failure.path)
+      : valid;
+    const toSend = sendable.slice(0, maxMedia);
+    for (let i = 0; i < toSend.length; i++) {
+      const errs = [];
+      const sent = await msg.replyImage(toSend[i].resolvedPath, {
+        local: true,
+        requestId: `${fbBase}:fallback-img${i}`,
+        onError: (e) => errs.push(e),
+      });
+      // 真实结果只进日志/回调：文案在图片发出之前就已经发出去了，不能事后改口
+      const state = sent ? 'sent' : errs.length ? 'failed' : 'unknown';
+      log.info(`replyAuto 降级独立图 ${i + 1}/${toSend.length}: ${state}（原因 ${reason}）`);
+      report({ mode: 'fallback', reason, image: i, state });
+    }
+    if (sendable.length > toSend.length) {
+      log.warn(`replyAuto 降级图片数 ${sendable.length} 超过 maxMedia=${maxMedia}，已截断 ${sendable.length - toSend.length} 张`);
+    }
+    report({ mode: 'fallback', reason, uploads: uploads.length, images: toSend.length });
+    return null;
+  };
 
   /**
    * 发一张内存里的图片（Buffer）。

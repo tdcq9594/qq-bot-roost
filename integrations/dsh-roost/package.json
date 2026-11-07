@@ -29,7 +29,7 @@
     "node": "^22.19.0 || >=24.0.0",
     "dsh": ">=0.2.0"
   },
-  "license": "UNLICENSED",
+  "license": "AGPL-3.0-only",
   "repository": {
     "type": "git",
     "url": "https://github.com/tdcq9594/qq-bot-roost.git",

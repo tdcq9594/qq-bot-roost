@@ -58,7 +58,11 @@ data: {"botId":"main","kind":"group","chatId":"group:B2C3...","groupId":"B2C3...
 
 ## ② 能力上行：`POST /api/qq/call`
 
-一个端点覆盖官方全部 47 个接口。
+登记 50 个官方 HTTP 接口（原 47 个 + 3 个 Markdown 素材接口），
+其中 **47 个可从这里调用**。3 个素材接口（`prepare` / `complete` / `delete`）
+标了 `internal`、不对外开放：它们必须由框架在上传链路里按顺序调，
+外部直接调会绕过本地预检、并可能消耗机器人级素材配额（满了之后所有
+Markdown 插图都会降级）。要发图文混排，用 `msg.replyAuto()`，别手搓素材。
 
 ```jsonc
 POST /api/qq/call?key=<accessKey>

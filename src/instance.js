@@ -1,7 +1,8 @@
 import fs from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { DIRS } from './paths.js';
 
 /**
@@ -26,6 +27,135 @@ const inProcessClaims = new Set();
 const FILE = path.join(DIRS.data, 'instances.json');
 
 /**
+ * 心跳租约：让「僵尸锁」自己过期，而不是等人去面板清。
+ *
+ * 思路来自 moxystudio/node-proper-lockfile（GitHub, MIT）：锁文件靠**周期性
+ * 刷新 mtime** 表示「我还活着」，进程被 SIGKILL / 断电后 mtime 不再更新，
+ * 超过 stale 阈值就判定为死并移除。它特意指出用创建时间（我们记录里的
+ * `at`）判活不适合长驻进程——那正是以前只靠 pid + at 的毛病。
+ *
+ * 为什么不直接引包：框架是零依赖，而且我们要的是「同一个 AppID 一把锁」，
+ * 不是「一个文件一把锁」。所以照搬机制、自己实现：
+ *   · 每条记录配一个独立心跳文件（只存文件名，不存绝对路径）
+ *   · 进程每 UPDATE_MS 刷一次 mtime，定时器 unref，不拦退出
+ *   · 心跳新鲜 = 最强证据，直接判活，不再问 pid / 进程名 / wmic
+ *   · 心跳停跳 = 明确停止运行；即便 pid 被复用给别的 node、命令行也查不到，
+ *     照样判死并自动剪掉（这正是以前「关机后卡住上不了线」的死角）
+ *
+ * 心跳停跳但 pid 还在时，仍会用命令行再确认一次：万一进程活着只是事件循环
+ * 卡了 30 秒，命令行含本框架特征就继续判活——**判死会放行双开**，这条兜底
+ * 不能省。
+ */
+const BEAT_DIR = path.join(DIRS.data, 'instance-beats');
+const STALE_MS = 30_000;
+const UPDATE_MS = 10_000;
+const BEAT_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
+/** appId -> { timer, file }；同进程内每个 AppID 只有一颗心跳 */
+const beats = new Map();
+const BEAT_NAME = /^[a-f0-9]{20}\.beat$/;
+
+/** 用 appId 的哈希当文件名：AppID 里可能有路径分隔符，不能直接拼 */
+function beatPathOf(appId) {
+  const name = `${createHash('sha256').update(String(appId)).digest('hex').slice(0, 20)}.beat`;
+  return path.join(BEAT_DIR, name);
+}
+
+/** 记录里只认合法文件名，杜绝被塞进一个绝对路径去 stat */
+function beatFileOf(rec) {
+  if (!rec?.beat || typeof rec.beat !== 'string' || !BEAT_NAME.test(rec.beat)) return null;
+  return path.join(BEAT_DIR, rec.beat);
+}
+
+/**
+ * @returns {boolean|null} true=心跳新鲜（活）/ false=停跳或文件没了（死）/ null=旧记录没有心跳
+ */
+function beatAlive(rec) {
+  const file = beatFileOf(rec);
+  if (!file) return null;
+  try {
+    const age = Date.now() - statSync(file).mtimeMs;
+    /** mtime 在未来（时钟回拨 / 文件系统精度）也按活算：判死的代价是双开 */
+    return age <= STALE_MS;
+  } catch {
+    return false;
+  }
+}
+
+async function startBeat(appId) {
+  const key = String(appId);
+  await stopBeat(key);
+  const file = beatPathOf(key);
+  await fs.mkdir(BEAT_DIR, { recursive: true });
+  await fs.writeFile(file, JSON.stringify({ pid: process.pid, appId: key }), 'utf8');
+  const touch = () => {
+    const now = new Date();
+    fs.utimes(file, now, now).catch(async () => {
+      /** 文件被误删 / 一次 IO 抖动：重建一次，别让活实例因此被判死 */
+      try {
+        await fs.writeFile(file, JSON.stringify({ pid: process.pid, appId: key }), 'utf8');
+      } catch {}
+    });
+  };
+  const timer = setInterval(touch, UPDATE_MS);
+  timer.unref?.();
+  beats.set(key, { timer, file });
+  return path.basename(file);
+}
+
+async function stopBeat(appId) {
+  const key = String(appId);
+  const b = beats.get(key);
+  if (!b) return;
+  clearInterval(b.timer);
+  beats.delete(key);
+  await fs.unlink(b.file).catch(() => {});
+}
+
+/** 强杀留下的心跳文件会一直过期，攒久了清一下；活进程每 10s 刷新，不会被误删 */
+let lastBeatSweep = 0;
+async function sweepBeats() {
+  if (Date.now() - lastBeatSweep < 60 * 60 * 1000) return;
+  lastBeatSweep = Date.now();
+  let names;
+  try {
+    names = await fs.readdir(BEAT_DIR);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (!BEAT_NAME.test(name)) continue;
+    const file = path.join(BEAT_DIR, name);
+    try {
+      const st = await fs.stat(file);
+      if (Date.now() - st.mtimeMs > BEAT_KEEP_MS) await fs.unlink(file).catch(() => {});
+    } catch {}
+  }
+}
+
+/**
+ * 进程名看起来像不像一个「跑 JS 的运行时」。
+ *
+ * **只认 `node.exe` 会漏掉 GUI 包装**：本框架常被 Electron 打包的宿主
+ * （`DeepSeek Harness.exe`、各种 `*.exe` 启动器）以内嵌 node 拉起，此时
+ * pid 在系统里显示的是**宿主 exe 名**。旧判据把这种活实例判成死进程，
+ * 于是 `claimInstance()` 放行第二次认领 → 同一个 AppID 双开 → 服务端
+ * 4902 互踢、消息随机丢失（2026-11 外部实测：8 个活进程一个都没认出来）。
+ *
+ * 进程名这一步**只用来识别 PID 复用**（pid 被系统分给了别的程序），
+ * 不是「是不是本框架」的判据——后者由 `isOurRoost()` 里的命令行检查负责。
+ * 所以这里宁可放宽：认不出来就让它进第二层，别在第一层就把活实例杀掉。
+ *
+ * @param {string} name tasklist / ps 给出的进程名
+ */
+function looksLikeNodeRuntime(name) {
+  if (!name) return false;
+  const base = String(name).replace(/^.*[\\/]/, '');
+  if (/^node(js)?(\.exe)?$/i.test(base)) return true;
+  /** 宿主 / 打包程序：靠特征名判断，不做全量白名单，避免又变成「认不出来就不算」 */
+  return /\bnode\b|electron|.*harness.*/i.test(base);
+}
+
+/**
  * 这个 pid 现在是不是一个 node 进程。
  *
  * 光看「pid 存不存在」不够：Windows 会把回收的 PID 复用给别的程序。
@@ -33,7 +163,10 @@ const FILE = path.join(DIRS.data, 'instances.json');
  * SearchProtocolHost.exe 占用，于是 isAlive 误判「机器人还在跑」，
  * 启动被拒且删不掉（看起来是活的）。所以再确认一次进程名。
  *
- * 查不出来时（tasklist/ps 异常）保守返回 true，避免误删真实实例导致双开。
+ * **方向统一：拿不准就往「活着」倒。**
+ * 判死会删记录 → 放行第二次认领 → 同 AppID 双开 → 4902 互踢；
+ * 判活最多让用户手动清一条残留（面板「实例锁」有一键清理，也有 `--force`）。
+ * 两者代价不对称，所以工具缺失、输出为空、名字不认识，一律按活着处理。
  */
 function pidLooksLikeNode(pid) {
   try {
@@ -45,7 +178,7 @@ function pidLooksLikeNode(pid) {
       });
       const m = out.match(/^"([^"]+)"/);
       // 进程已消失时 tasklist 不给 CSV 行，m 为 null → 当作不在了
-      return m ? /(^|\\)node(\.exe)?$/i.test(m[1]) : false;
+      return m ? looksLikeNodeRuntime(m[1]) : false;
     }
     /**
      * Linux 直接读 `/proc/<pid>/comm`，不 fork `ps`。
@@ -74,15 +207,40 @@ function pidLooksLikeNode(pid) {
       encoding: 'utf8',
       timeout: 3000,
     }).trim();
-    return comm ? /node/i.test(comm) : false;
+    /**
+     * 读不到也按活着算，和 linux 分支、catch 分支保持一致。
+     *
+     * 以前这里是 `: false`——同一份文件里三种「拿不准」有两种方向，
+     * 恰好错的那一种会直接导致双开。
+     */
+    return comm ? /node/i.test(comm) : true;
   } catch {
     return true;
   }
 }
 
+/**
+ * pid 现在有没有进程占着——**只看存在，不看它是什么程序**。
+ * EPERM 说明进程存在但没权限，也算存在。
+ *
+ * 为什么要和 isAlive 分开：`looksLikeNodeRuntime` 认不出的宿主 exe
+ * （比如 `MyBot.exe` 内嵌 node）会被 isAlive 判死。对有心跳租约的记录，
+ * 进程名该交给冲突路径的命令行判据去细判，不能在 prune 这一层就剪掉。
+ */
+function pidExists(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  if (pid === process.pid) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === 'EPERM';
+  }
+}
+
 /** pid 是否还活着（且确实是 node 进程）。EPERM 说明进程存在但没权限，也算活着 */
 function isAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
+  if (!pidExists(pid)) return false;
   /**
    * 问「我自己还活着吗」恒为真，不用查进程名。
    *
@@ -92,11 +250,6 @@ function isAlive(pid) {
    * 本进程自己那条显示成「已退出」（自检里 635/636 就挂在这一条）。
    */
   if (pid === process.pid) return true;
-  try {
-    process.kill(pid, 0);
-  } catch (e) {
-    return e.code === 'EPERM';
-  }
   // PID 存在，但可能已被系统复用给别的程序；确认它是 node 才算活
   return pidLooksLikeNode(pid);
 }
@@ -177,10 +330,34 @@ const ROOST_HINT = /(qq-bot-roost|src[\\/]main\.js)/i;
  *
  * @returns {Promise<boolean>}
  */
-async function isOurRoost(pid) {
-  if (!isAlive(pid)) return false;
+async function isOurRoost(pid, rec = null) {
+  const beat = rec ? beatAlive(rec) : null;
+  /** 心跳新鲜：不用再问进程名 / wmic / PowerShell，直接判活 */
+  if (beat === true) return true;
+  /** 有租约的记录只看 pid 是否存在；升级前的旧记录沿用含进程名的 isAlive */
+  const exists = beat === null ? isAlive(pid) : pidExists(pid);
+  if (!exists) return false;
   const cmd = commandLineOf(pid);
-  if (cmd === null) return true; // 问不到 → 当成我们的
+  if (beat === false) {
+    /**
+     * 心跳停了但 pid 还在：只有**明确查到那是另一个 JS 程序**才敢判死。
+     *
+     * 命令行查不到（Win11 移除 wmic / PowerShell 被策略禁用）、或查到的是
+     * 宿主 exe 内嵌 node（bug #1 的教训），一律判活——原进程可能只是事件
+     * 循环卡了 30 秒没刷上心跳。判死会放行第二次认领 → 同 AppID 双开 →
+     * 4902 互踢，代价远大于留一条可手动清理的记录。
+     *
+     * 所以自愈分三档：关机后 pid 不存在 → prune 直接剪；pid 被复用且
+     * 命令行明确是别的 node 程序 → 这里自动剪；只有「工具全失效 + pid
+     * 复用」才需要面板一键清。这个残余是防双开的刻意取舍，不能省。
+     */
+    if (cmd === null) return true;
+    if (ROOST_HINT.test(cmd)) return true;
+    if (/\.[cm]?js\b/i.test(cmd)) return false;
+    return true;
+  }
+  /** 升级前写的旧记录没有心跳：完全沿用原来的保守判据 */
+  if (cmd === null) return true;
   if (ROOST_HINT.test(cmd)) return true;
   // 命令行里跑着某个 .js，却不含本框架特征 → 是别的 node 程序，占的是复用的 pid
   return !/\.[cm]?js\b/i.test(cmd);
@@ -219,7 +396,25 @@ async function writeAll(data) {
 function prune(data) {
   const out = {};
   for (const [key, rec] of Object.entries(data)) {
-    if (rec && isAlive(rec.pid)) out[key] = rec;
+    if (!rec) continue;
+    const beat = beatAlive(rec);
+    /** 心跳新鲜就是活，连 pid 都不用看——PID 被复用也挡得住 */
+    if (beat === true) {
+      out[key] = rec;
+      continue;
+    }
+    if (beat === false) {
+      /**
+       * 有租约但停跳：只要 pid 还占着就先保留，交给冲突路径按命令行细判。
+       * 这里**不能**用 isAlive（含进程名判据）：自定义宿主 exe 名不含
+       * node/electron/harness 时会被判死，绕过 isOurRoost 直接放行双开。
+       */
+      if (!pidExists(rec.pid)) continue;
+      out[key] = rec;
+      continue;
+    }
+    /** 升级前的旧记录没有心跳：沿用原来的 pid + 进程名判据 */
+    if (isAlive(rec.pid)) out[key] = rec;
   }
   return out;
 }
@@ -258,15 +453,26 @@ export async function claimInstance({ appId, force = false }) {
      * PID 拦着自己，而记录删不掉。这里多花一次命令行查询，
      * **只在这条冲突路径上花**，正常启动一次都不会走到。
      */
-    if (await isOurRoost(Number(existing.pid))) {
+    if (await isOurRoost(Number(existing.pid), existing)) {
       return { ok: false, conflict: { pid: existing.pid, at: existing.at } };
     }
-    // 命令行显示是别的程序占了复用的 pid → 当死记录，继续往下认领
+    // 心跳停了 / 命令行显示是别的程序占了复用的 pid → 当死记录，继续往下认领
   }
 
   inProcessClaims.add(key);
-  data[key] = { pid: process.pid, at: Date.now(), mock: key === 'mock' };
+  /**
+   * 心跳是增强项，写不进去不该拦住启动（和 writeAll 同一个原则）。
+   * 落不了盘就退回「无心跳的旧记录」，行为不比升级前差。
+   */
+  let beat = '';
+  try {
+    beat = await startBeat(key);
+  } catch (e) {
+    console.warn(`[instance] 心跳租约没建成（不影响运行）: ${e.message}`);
+  }
+  data[key] = { pid: process.pid, at: Date.now(), mock: key === 'mock', ...(beat ? { beat } : {}) };
   await writeAll(data);
+  void sweepBeats();
   return { ok: true };
 }
 
@@ -276,6 +482,7 @@ export async function releaseInstance(appId) {
   const data = prune(await readAll());
   inProcessClaims.delete(key);
   if (data[key]?.pid === process.pid) delete data[key];
+  await stopBeat(key);
   await writeAll(data);
 }
 
@@ -296,12 +503,21 @@ export async function listInstancesAll() {
     .filter(([, rec]) => rec && typeof rec === 'object')
     .map(([appId, rec]) => {
       const pid = Number(rec.pid) || 0;
+      const beat = beatAlive(rec);
       return {
         appId,
         pid,
         at: Number(rec.at) || 0,
         mock: Boolean(rec.mock),
-        alive: isAlive(pid),
+        /**
+         * 面板的「在世」要和互斥结论一致：停跳但 pid 还在时，互斥仍拦着，
+         * 不能显示成「已退出」让用户以为清一下就好了。
+         */
+        alive: beat === null ? isAlive(pid) : beat === true ? true : pidExists(pid),
+        /** 有没有心跳租约：排障时一眼看出这条是新版还是旧版写的 */
+        leased: beat !== null,
+        /** 租约已停跳（互斥仍可能因防双开判活） */
+        stale: beat === false,
         /** 是不是当前这个面板进程自己在用的（那条不能清） */
         self: pid === process.pid,
       };
@@ -329,6 +545,13 @@ export async function clearInstance(appId) {
   }
   delete data[key];
   await writeAll(data);
+  /**
+   * 顺手删掉它的心跳文件。活进程的 touch 会重建**文件**，但不会重建
+   * instances.json 里的记录——用户手动清过之后，那个 AppID 需要重新认领，
+   * 这是原有行为，不是这次改动引入的。
+   */
+  const beatFile = beatFileOf(rec);
+  if (beatFile) await fs.unlink(beatFile).catch(() => {});
   return { ok: true, pid: Number(rec.pid) || 0 };
 }
 
@@ -340,4 +563,38 @@ export async function _rawRead() {
 /** 测试用：看某个 pid 的命令行拿不拿得到（拿不到返回 null） */
 export function _commandLineOf(pid) {
   return commandLineOf(pid);
+}
+
+/**
+ * 测试用：进程名判据。
+ *
+ * 这条判据没法在 CI 里真跑出「宿主 exe 内嵌 node」——CI 的进程名就是
+ * `node`，旧实现也返回 true，测不出差别。所以把纯函数单独暴露出来
+ * 用表驱动断言（见 selftest「实例锁: 宿主 exe 名不能再被判死」）。
+ */
+export function _looksLikeNodeRuntime(name) {
+  return looksLikeNodeRuntime(name);
+}
+
+/** 测试用：心跳判活（true 新鲜 / false 停跳 / null 旧记录） */
+export function _beatAlive(rec) {
+  return beatAlive(rec);
+}
+
+/** 测试用：某个 AppID 的心跳文件路径，便于把 mtime 拨回过去模拟强杀 */
+export function _beatPathOf(appId) {
+  return beatPathOf(appId);
+}
+
+/** 测试用：租约阈值 */
+export const _STALE_MS = STALE_MS;
+
+/** 测试用：只看 pid 存不存在（不带进程名判据） */
+export function _pidExists(pid) {
+  return pidExists(pid);
+}
+
+/** 测试用：直接跑剪枝，便于构造「停跳租约 + 不像 node 的进程名」边界 */
+export function _pruneForTest(data) {
+  return prune(data);
 }

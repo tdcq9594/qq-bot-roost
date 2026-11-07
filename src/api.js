@@ -1,8 +1,13 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import { createLogger } from './logger.js';
+import { DIRS } from './paths.js';
 /** 路径里的 id 一律编码：openid / 群号是外部数据，含 / 会拼出别的路径 */
 const enc = (v) => encodeURIComponent(String(v ?? ''));
+
+/** 本进程创建、尚未删除的 Markdown 素材 id（崩溃后靠它认领孤儿） */
+const OWN_MEDIA_FILE = path.join(DIRS.data, 'media-images-own.json');
 
 
 const log = createLogger('api');
@@ -38,6 +43,56 @@ export const MEDIA_HARD_LIMIT = 200 * 1024 * 1024;
  * 所以超过这个值一律走分片上传，别再赌网关的脾气。
  */
 export const DIRECT_UPLOAD_LIMIT = 5 * 1024 * 1024;
+
+/**
+ * Markdown 素材图床（`/v2/media-images`，机器人级）的单图上限。
+ * 跟 `/files` 那套完全无关：那边图片软限 20MB、直传 5MB、分片 200MB。
+ */
+export const MEDIA_IMAGE_MAX = 10 * 1024 * 1024;
+
+/** 官方只认这四种图片 MIME，且文件名扩展名必须与之一致 */
+export const IMAGE_CONTENT_TYPES = Object.freeze({
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+});
+
+/**
+ * 上传前的本地预检：只看文件头 + 扩展名，**不发任何网络请求**。
+ *
+ * 官方注意事项写明「服务端只校验文件名扩展名与 content_type 是否匹配，
+ * 不校验文件实际内容」，坏图会一路成功到发消息才失败。这里提前挡掉，
+ * 也顺手满足「扩展名与 content_type 一致」的 40035001 约束。
+ *
+ * @param {Buffer} head 文件前 12+ 字节
+ * @param {string} fileName 含扩展名的文件名
+ */
+export function inspectImageFormat(head, fileName) {
+  const b = Buffer.isBuffer(head) ? head : Buffer.from(head ?? '');
+  const ext = path.extname(String(fileName ?? '')).toLowerCase();
+  const want = IMAGE_CONTENT_TYPES[ext];
+  if (!want) return { ok: false, reason: 'bad_format', detail: `扩展名 ${ext || '(无)'} 不在 png/jpeg/gif/webp 白名单` };
+  let actual = '';
+  if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) actual = 'image/png';
+  else if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) actual = 'image/jpeg';
+  else if (b.length >= 4 && b.toString('ascii', 0, 4) === 'GIF8') actual = 'image/gif';
+  else if (b.length >= 12 && b.toString('ascii', 0, 4) === 'RIFF' && b.toString('ascii', 8, 12) === 'WEBP') actual = 'image/webp';
+  else return { ok: false, reason: 'bad_format', detail: '文件头不是受支持的图片格式' };
+  if (actual !== want) return { ok: false, reason: 'bad_format', detail: `扩展名 ${ext} 与实际格式 ${actual} 不符` };
+  return { ok: true, contentType: want };
+}
+
+/**
+ * COS 的 ETag 即文件 MD5，可能带引号或弱校验前缀。
+ * 拿不到合法值时回退到本地算出的整文件 md5，complete 时服务端还会
+ * 与 COS 对象实际 ETag 比对，不一致返 40035003。
+ */
+export function etagToMd5(etag, fallback = '') {
+  const v = String(etag ?? '').replace(/^W\//i, '').replace(/^"|"$/g, '').toLowerCase();
+  return /^[0-9a-f]{32}$/.test(v) ? v : fallback;
+}
 
 /**
  * `md5_10m` 取的字节数：官方写死 10002432（约 9.54MB），不是整数 MB。
@@ -160,6 +215,16 @@ export class QQApi {
      * 换个群必须重新传，不能跨目标复用。
      */
     this.mediaCache = new Map();
+    /**
+     * Markdown 素材图床里**本进程自己上传**的 image_id。
+     *
+     * 素材库是机器人级共享的，删除时只认这个集合里的 id，避免误删其它插件的素材；
+     * 也不给「传个 force 就能删别人素材」的后门。发完即删，正常情况集合是空的。
+     * 这三个端点已标 `internal:true`，不再进 `/api/qq/call` 白名单。
+     */
+    this._ownMediaImages = new Set();
+    /** 孤儿素材认领，一个进程只做一次 */
+    this._mediaReclaimDone = false;
   }
 
   async #request(method, path, body, { retried = false, headers } = {}) {
@@ -402,14 +467,21 @@ export class QQApi {
    * @param {string} presignedUrl 预签名上传地址
    * @param {Buffer} buf 分片二进制
    * @param {number} [timeoutMs]
+   * @param {string} [contentType] 仅 Markdown 素材上传需要：必须与 prepare 声明的
+   *                               content_type 完全一致，否则 COS 返 403。
+   *                               分片上传**不传**，保持原来的裸 PUT 请求头不变。
+   * @returns {Promise<string>} 响应头 ETag（分片调用方忽略）
    */
-  async #putPart(presignedUrl, buf, timeoutMs = 60_000) {
+  async #putPart(presignedUrl, buf, timeoutMs = 60_000, contentType = '') {
     let res;
     try {
       res = await fetch(presignedUrl, {
         method: 'PUT',
         signal: AbortSignal.timeout(timeoutMs),
-        headers: { 'Content-Length': String(buf.length) },
+        headers: {
+          'Content-Length': String(buf.length),
+          ...(contentType ? { 'Content-Type': contentType } : {}),
+        },
         body: buf,
       });
     } catch (e) {
@@ -420,6 +492,7 @@ export class QQApi {
       const detail = await res.text().catch(() => '');
       throw new Error(`分片 PUT 失败 HTTP ${res.status}${detail ? `：${detail.slice(0, 200)}` : ''}`);
     }
+    return res.headers?.get('etag') ?? '';
   }
 
   /**
@@ -583,6 +656,204 @@ export class QQApi {
       messageReference,
     };
     return scene === 'group' ? this.sendGroup(target, opts) : this.sendC2C(target, opts);
+  }
+
+  /* ---------------- Markdown 素材图床（机器人级） ---------------- */
+
+  /**
+   * 与 `/v2/{groups,users}/{openid}/files` 是**两套体系**：
+   * 那边返回绑定会话的 `file_info`，只能喂 `msg_type=7` 的 `media`；
+   * 这边返回 `qqbot-media://` 引用，绑定机器人、跨群跨单聊可复用，
+   * 是 Markdown（`msg_type=2`）里插本地图的唯一方式。
+   *
+   * 官方流程：prepare → 裸 PUT 到预签名 URL → complete → 引用 → 删除。
+   * 本框架的策略是「自产自销、发完即删」：不建持久化缓存、不做 LRU 淘汰、
+   * 不列全量素材，配额常驻接近 0，代价是同一张图每次重传。
+   */
+
+  /**
+   * 把「本进程已创建、但还没删掉」的 image_id 落盘。
+   *
+   * 正常流程 complete → send → delete 之间只有几秒；但进程若恰好在这段
+   * 时间崩了，内存里的 `_ownMediaImages` 就没了，素材成了孤儿，攒满官方
+   * 100 张配额之后所有预上传都会失败。落一个极小的 JSON，下次进程第一次
+   * 上传时认领并删掉，配额就不会被崩溃残留慢慢吃掉。
+   */
+  async #persistOwnMedia() {
+    try {
+      await fs.mkdir(path.dirname(OWN_MEDIA_FILE), { recursive: true });
+      await fs.writeFile(OWN_MEDIA_FILE, JSON.stringify([...this._ownMediaImages]), 'utf8');
+    } catch (e) {
+      log.warn(`Markdown 素材归属记录写失败（不影响本次发送）: ${e.message}`);
+    }
+  }
+
+  /** 进程内只跑一次：认领上次崩溃留下的孤儿素材并删除。 */
+  async #reclaimOrphanMediaImages() {
+    if (this._mediaReclaimDone) return;
+    this._mediaReclaimDone = true;
+    let ids;
+    try {
+      ids = JSON.parse(await fs.readFile(OWN_MEDIA_FILE, 'utf8'));
+    } catch {
+      return; // 没有记录文件 / 内容损坏，都当没有孤儿
+    }
+    if (!Array.isArray(ids) || !ids.length) return;
+    for (const raw of ids) {
+      const id = String(raw ?? '');
+      if (!id) continue;
+      try {
+        await this.#request('DELETE', `/v2/media-images/${enc(id)}/delete`);
+      } catch (e) {
+        // 可能已被平台回收或已删过：留到下次再试，不阻断本次发送
+        log.warn(`孤儿素材清理失败 image_id=${id}: ${e.message}`);
+        this._ownMediaImages.add(id);
+      }
+    }
+    await this.#persistOwnMedia();
+  }
+
+  /** POST /v2/media-images/prepare */
+  prepareMediaImage({ fileName, fileSize, contentType, md5, sha1 } = {}) {
+    return this.#request('POST', '/v2/media-images/prepare', {
+      file_name: String(fileName ?? ''),
+      file_size: Number(fileSize) || 0,
+      content_type: String(contentType ?? ''),
+      md5: String(md5 ?? ''),
+      sha1: String(sha1 ?? ''),
+    });
+  }
+
+  /** POST /v2/media-images/complete；md5 取 COS 的 ETag（去引号） */
+  async completeMediaImage({ uploadId, md5 } = {}) {
+    const r = await this.#request('POST', '/v2/media-images/complete', {
+      upload_id: String(uploadId ?? ''),
+      md5: String(md5 ?? ''),
+    });
+    // 凡经本 QQApi 创建的素材都算「自己人」，记下来供 finally 清理
+    if (r?.image_id) {
+      this._ownMediaImages.add(String(r.image_id));
+      await this.#persistOwnMedia();
+    }
+    return r;
+  }
+
+  /**
+   * DELETE /v2/media-images/{image_id}/delete
+   *
+   * 删除后引用立即失效，但**已发出的消息不受影响**（平台发送时已转存副本）。
+   * 只接受本进程自己创建的 image_id —— 不给「传个 force 就能删别人素材」的后门。
+   * 端点已标 `internal:true`，外部经 WebUI 调不到。
+   */
+  async deleteMediaImage(imageId) {
+    const id = String(imageId ?? '');
+    if (!id) throw new Error('deleteMediaImage 需要 image_id');
+    if (!this._ownMediaImages.has(id)) {
+      throw new Error(`拒绝删除非本进程上传的素材 ${id}（素材库是机器人级共享，可能属于其它插件）`);
+    }
+    const r = await this.#request('DELETE', `/v2/media-images/${enc(id)}/delete`);
+    this._ownMediaImages.delete(id);
+    await this.#persistOwnMedia();
+    return r;
+  }
+
+  /**
+   * 把一张本地图上传成 Markdown 可用的 `qqbot-media://` 引用。
+   *
+   * **预检前置**：大小 >10MB / 扩展名不在白名单 / 文件头与扩展名不符，
+   * 都在本地判掉并带 `reason`，跳过 prepare/PUT/complete 三次网络请求。
+   * 这是「图片过大」这条最高频降级场景的专用快路径。
+   *
+   * 框架**不校验路径所属目录**：调用方是可信的插件代码，路径是否可信由它把关。
+   * 这里只做「能不能当图片上传」的本地预检（大小 / 扩展名 / 文件头）。
+   *
+   * @param {string} filePath 插件给出的本地文件路径（绝对路径或 cwd 相对路径）
+   * @returns {Promise<{imageId:string,url:string,ttl:number,fileName:string}>}
+   */
+  async uploadMarkdownImage(filePath) {
+    // 先认领上次进程崩溃留下的孤儿素材，避免 100 张配额被慢慢占满
+    await this.#reclaimOrphanMediaImages();
+    const p = String(filePath ?? '');
+    if (!p) {
+      const e = new Error('uploadMarkdownImage 需要本地文件路径');
+      e.reason = 'outside';
+      throw e;
+    }
+
+    let buf;
+    let contentType;
+    try {
+      const st = await fs.stat(p);
+      if (st.size > MEDIA_IMAGE_MAX) {
+        const e = new Error(`${p} 有 ${(st.size / 1024 / 1024).toFixed(1)}MB，超过 Markdown 素材 10MB 上限`);
+        e.reason = 'oversize';
+        throw e;
+      }
+      // 只读 16 字节判断真实格式，别为了预检把 10MB 整包读进来两遍
+      const fh = await fs.open(p, 'r');
+      let head;
+      try {
+        const b = Buffer.alloc(16);
+        const { bytesRead } = await fh.read(b, 0, 16, 0);
+        head = b.subarray(0, bytesRead);
+      } finally {
+        await fh.close();
+      }
+      const fmt = inspectImageFormat(head, p);
+      if (!fmt.ok) {
+        const e = new Error(fmt.detail);
+        e.reason = fmt.reason;
+        throw e;
+      }
+      contentType = fmt.contentType;
+      buf = await fs.readFile(p);
+      if (buf.length > MEDIA_IMAGE_MAX) {
+        const e = new Error(`${p} 读取后超过 10MB 上限`);
+        e.reason = 'oversize';
+        throw e;
+      }
+    } catch (e) {
+      if (!e.reason) {
+        e.reason = /ENOENT|EACCES|EPERM|ENOTDIR/.test(`${e?.code ?? ''} ${e?.message ?? ''}`)
+          ? 'outside'
+          : 'internal';
+      }
+      throw e;
+    }
+
+    const fileName = p.split(/[\\/]/).pop() || 'image.png';
+    const md5 = crypto.createHash('md5').update(buf).digest('hex');
+    const sha1 = crypto.createHash('sha1').update(buf).digest('hex');
+
+    const prep = await this.prepareMediaImage({
+      fileName,
+      fileSize: buf.length,
+      contentType,
+      md5,
+      sha1,
+    });
+    const uploadId = prep?.upload_id;
+    const presignedUrl = prep?.presigned_url;
+    if (!uploadId || !presignedUrl) {
+      const e = new Error('media-images/prepare 未返回 upload_id / presigned_url');
+      e.reason = 'internal';
+      throw e;
+    }
+
+    const etag = await this.#putPart(presignedUrl, buf, 60_000, contentType);
+    const done = await this.completeMediaImage({ uploadId, md5: etagToMd5(etag, md5) });
+    if (!done?.image_id || !done?.url) {
+      const e = new Error('media-images/complete 未返回 image_id / url');
+      e.reason = 'internal';
+      throw e;
+    }
+    this._ownMediaImages.add(String(done.image_id));
+    return {
+      imageId: String(done.image_id),
+      url: String(done.url),
+      ttl: done.ttl,
+      fileName,
+    };
   }
 
   /* ---------------- 撤回 ---------------- */

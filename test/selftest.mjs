@@ -693,6 +693,209 @@ const RUN = Date.now().toString(36);
   } catch {}
   await releaseInstance(K);
   await releaseInstance(R);
+
+  /**
+   * 宿主 exe 名不能再被判死（2026-11 外部实测：8 个活进程一个都没认出来）。
+   *
+   * 这条判据在 CI 里测不出差别——CI 的进程名就是 `node`，旧实现也返回 true。
+   * 真实事故只发生在「Electron 宿主以内嵌 node 拉起 Roost」的场景：进程名
+   * 显示成 `DeepSeek Harness.exe`，旧正则 `/(^|\\)node(\.exe)?$/i` 判 false
+   * → 活实例被当僵尸 → 第二次认领放行 → 同一个 AppID 双开 → 4902 互踢。
+   * 所以这里直接对纯函数做表驱动断言。
+   */
+  const { _looksLikeNodeRuntime } = mod;
+  const runtimeTable = [
+    ['node.exe', true],
+    ['node', true],
+    ['nodejs.exe', true],
+    ['DeepSeek Harness.exe', true],
+    ['electron.exe', true],
+    ['C:\\Program Files\\x\\node.exe', true],
+    ['SearchProtocolHost.exe', false],
+    ['python.exe', false],
+    ['chrome.exe', false],
+    ['', false],
+  ];
+  for (const [name, want] of runtimeTable) {
+    check(
+      `实例锁: 进程名判据 ${name || '(空)'} → ${want ? '像运行时' : '不是'}`,
+      _looksLikeNodeRuntime(name) === want,
+      `实际 ${_looksLikeNodeRuntime(name)}`,
+    );
+  }
+}
+
+/* ---------- 16c. 心跳租约（强杀 / 直接关机不留僵尸锁） ---------- */
+{
+  const mod = await import('../src/instance.js');
+  const {
+    claimInstance, releaseInstance, listInstancesAll,
+    _beatAlive, _beatPathOf, _STALE_MS, _pidExists, _pruneForTest,
+  } = mod;
+  const { DIRS } = await import('../src/paths.js');
+  const { spawn } = await import('node:child_process');
+  const lockFile = path.join(DIRS.data, 'instances.json');
+  const readLock = async () => {
+    try {
+      return JSON.parse(await fs.readFile(lockFile, 'utf8'));
+    } catch {
+      return {};
+    }
+  };
+  const writeLock = (o) => fs.writeFile(lockFile, JSON.stringify(o, null, 2));
+
+  const H = '__test_beat__';
+  const Z = '__test_beat_stale__';
+  const F = '__test_beat_fresh__';
+  const Q = '__test_beat_quiet__';
+  /** 上次跑崩可能留下记录 / 心跳文件，开始前先清干净 */
+  const clean = async () => {
+    const l = await readLock();
+    for (const k of [H, Z, F, Q]) delete l[k];
+    await writeLock(l);
+    for (const k of [H, Z, F, Q]) await fs.unlink(_beatPathOf(k)).catch(() => {});
+  };
+  await clean();
+
+  const r = await claimInstance({ appId: H });
+  const recH = (await readLock())[H];
+  check(
+    '实例锁: 登记成功会带上一份心跳租约',
+    r.ok === true && /^[a-f0-9]{20}\.beat$/.test(recH?.beat ?? ''),
+    recH?.beat ?? '(没有 beat)',
+  );
+  check('实例锁: 心跳新鲜 → 判活', _beatAlive(recH) === true);
+  const listed = (await listInstancesAll()).find((x) => x.appId === H);
+  check(
+    '实例锁: 面板能看到租约且在世',
+    Boolean(listed) && listed.leased === true && listed.alive === true,
+  );
+
+  /** 判死会放行第二次认领 → 双开 → 4902 互踢，所以活实例绝不能被误判 */
+  const again = await claimInstance({ appId: H });
+  check('实例锁: 心跳新鲜的活实例仍拦住重复认领', again.ok === false);
+
+  /**
+   * 造一份「停跳」的租约：一个独立的、没有定时器会去刷新的心跳文件，
+   * mtime 拨到 stale 之前。等价于进程被强杀 / 直接关机之后的状态。
+   */
+  const staleFile = _beatPathOf(Z);
+  const staleName = path.basename(staleFile);
+  const old = new Date(Date.now() - _STALE_MS - 5000);
+  await fs.writeFile(staleFile, JSON.stringify({ pid: 999999, appId: Z }), 'utf8');
+  await fs.utimes(staleFile, old, old);
+  const staleRec = { pid: 999999, at: Date.now() - _STALE_MS - 5000, beat: staleName };
+  check('实例锁: 心跳停跳后判死', _beatAlive(staleRec) === false);
+  check('实例锁: 升级前的旧记录（无 beat）退回 pid 判据', _beatAlive({ pid: 999999 }) === null);
+  check(
+    '实例锁: pidExists 只判存在、不判进程名',
+    _pidExists(process.pid) === true && _pidExists(999999) === false,
+  );
+  /**
+   * 停跳租约 + 活 pid 不能被 prune 里的进程名判据提前剪掉——
+   * 剪掉就等于绕过 isOurRoost 放行双开（自定义宿主 exe 名场景）。
+   */
+  const kept = _pruneForTest({ __probe__: { pid: process.pid, beat: staleName } });
+  check('实例锁: 停跳租约在 pid 存在时保留记录，交给命令行细判', Boolean(kept.__probe__));
+
+  /**
+   * 心跳新鲜是比 pid 更强的证据：记录里的 pid 就算查不到（被复用 /
+   * 判活工具异常），也绝不能判死——判死就是放行双开。
+   * 这条专门钉住「把心跳新鲜短路删掉后测试仍全绿」的覆盖缺口。
+   */
+  const freshFile = _beatPathOf(F);
+  await fs.writeFile(freshFile, '{}', 'utf8');
+  {
+    const l = await readLock();
+    l[F] = { pid: 999999, at: Date.now(), beat: path.basename(freshFile) };
+    await writeLock(l);
+  }
+  const f = await claimInstance({ appId: F });
+  check(
+    '实例锁: 心跳新鲜时即使 pid 查不到也判活（防双开）',
+    f.ok === false,
+    f.ok ? '被放行了（会双开）' : `拦住 PID ${f.conflict?.pid}`,
+  );
+
+  /**
+   * 「心跳停跳 + pid 还活着」的两条互补边界：
+   *   A. 命令行明确是**另一个 JS 程序** → 被复用的 pid，判死并自动清掉
+   *      （关机后僵尸锁自愈的关键路径）。
+   *   B. 命令行查不到 / 不像另一个 JS 程序 → 一律判活，绝不放行双开
+   *      （原进程可能只是事件循环卡了 30 秒没刷上心跳）。
+   * B 是对抗性测试抓到的 P0 的回归：以前这里判死会直接放行 4902 互踢。
+   */
+  const spawnChild = (extra = []) =>
+    spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)', ...extra], { stdio: 'ignore' });
+  const waitAlive = async (pid, ms = 5000) => {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        await new Promise((res) => setTimeout(res, 100));
+      }
+    }
+    return false;
+  };
+  const child = spawnChild(['not-roost.js']);
+  const quietChild = spawnChild();
+  const childAlive = child.pid ? await waitAlive(child.pid) : false;
+  const quietAlive = quietChild.pid ? await waitAlive(quietChild.pid) : false;
+
+  if (!childAlive || !quietAlive) {
+    skip('实例锁: 强杀留下的记录能自动清掉（pid 被复用）', '环境起不来子进程');
+    skip('实例锁: 命令行拿不准时不判死（防双开）', '环境起不来子进程');
+  } else {
+    const cmdOfChild = mod._commandLineOf?.(child.pid) ?? null;
+    if (!cmdOfChild || !/\.[cm]?js\b/i.test(cmdOfChild)) {
+      skip('实例锁: 强杀留下的记录能自动清掉（pid 被复用）', '本机拿不到命令行或命令行不含 .js');
+    } else {
+      const l = await readLock();
+      l[Z] = { ...staleRec, pid: child.pid };
+      await writeLock(l);
+      const panel = (await listInstancesAll()).find((x) => x.appId === Z);
+      check('实例锁: 停跳记录在面板里标成 stale（与互斥结论一致）', Boolean(panel) && panel.stale === true);
+
+      const z = await claimInstance({ appId: Z });
+      check(
+        '实例锁: 强杀留下的记录能自动清掉（pid 被复用）',
+        z.ok === true,
+        z.ok ? '' : `仍被拦住：PID ${z.conflict?.pid}`,
+      );
+      const after = await readLock();
+      check('实例锁: 自动清理后记录换成新进程', after[Z]?.pid === process.pid);
+    }
+
+    /** B 用独立的停跳心跳文件，别被 A 重建的那份带成「新鲜」 */
+    const quietFile = _beatPathOf(Q);
+    await fs.writeFile(quietFile, '{}', 'utf8');
+    await fs.utimes(quietFile, old, old);
+    const l2 = await readLock();
+    l2[Q] = {
+      pid: quietChild.pid,
+      at: Date.now() - _STALE_MS - 5000,
+      beat: path.basename(quietFile),
+    };
+    await writeLock(l2);
+    const q = await claimInstance({ appId: Q });
+    check(
+      '实例锁: 命令行拿不准时不判死（防双开）',
+      q.ok === false,
+      q.ok ? '被放行了（会双开）' : `拦住 PID ${q.conflict?.pid}`,
+    );
+  }
+  try {
+    child.kill();
+    quietChild.kill();
+  } catch {}
+
+  await releaseInstance(H);
+  await releaseInstance(Z);
+  await releaseInstance(Q);
+  check('实例锁: 正常注销会删掉心跳文件', !(await fs.stat(_beatPathOf(H)).then(() => true).catch(() => false)));
+  await clean();
 }
 
 /* ---------- 17. storage 原子更新（并发不丢数据） ---------- */
@@ -4380,6 +4583,141 @@ async function testPageTokenPatch() {
 }
 
 await testPageTokenPatch();
+
+/* ---------- Web 服务：重复 start 单例与定时器清理 ---------- */
+{
+  const net = await import('node:net');
+  const fsModule = await import('node:fs');
+  const { syncBuiltinESMExports } = await import('node:module');
+  const { ROOT } = await import('../src/paths.js');
+  const leaseFile = path.resolve(ROOT, 'data', 'ports.json');
+  const leaseTmp = `${leaseFile}.tmp`;
+  const nativeFs = fsModule.default;
+  const originalFs = {
+    readFileSync: nativeFs.readFileSync,
+    writeFileSync: nativeFs.writeFileSync,
+    renameSync: nativeFs.renameSync,
+  };
+  const originalTimers = {
+    setInterval: globalThis.setInterval,
+    clearInterval: globalThis.clearInterval,
+    setTimeout: globalThis.setTimeout,
+    clearTimeout: globalThis.clearTimeout,
+  };
+  const createdIntervals = [];
+  const createdTimeouts = [];
+  const clearedIntervals = new Set();
+  const clearedTimeouts = new Set();
+  const handles = [];
+
+  try {
+    /** 这项测试不碰开发实例的端口租约文件，只隔离 Web 服务的租约读写 */
+    nativeFs.readFileSync = function (file, ...args) {
+      return path.resolve(String(file)) === leaseFile
+        ? '{}'
+        : originalFs.readFileSync.call(this, file, ...args);
+    };
+    nativeFs.writeFileSync = function (file, ...args) {
+      return path.resolve(String(file)) === leaseTmp
+        ? undefined
+        : originalFs.writeFileSync.call(this, file, ...args);
+    };
+    nativeFs.renameSync = function (from, to, ...args) {
+      return path.resolve(String(from)) === leaseTmp && path.resolve(String(to)) === leaseFile
+        ? undefined
+        : originalFs.renameSync.call(this, from, to, ...args);
+    };
+    syncBuiltinESMExports();
+
+    globalThis.setInterval = (fn, ms, ...args) => {
+      const handle = originalTimers.setInterval(fn, ms, ...args);
+      createdIntervals.push({ handle, ms });
+      return handle;
+    };
+    globalThis.clearInterval = (handle) => {
+      clearedIntervals.add(handle);
+      return originalTimers.clearInterval(handle);
+    };
+    globalThis.setTimeout = (fn, ms, ...args) => {
+      const handle = originalTimers.setTimeout(fn, ms, ...args);
+      createdTimeouts.push({ handle, ms });
+      return handle;
+    };
+    globalThis.clearTimeout = (handle) => {
+      clearedTimeouts.add(handle);
+      return originalTimers.clearTimeout(handle);
+    };
+
+    const port = await new Promise((resolve, reject) => {
+      const probe = net.createServer();
+      probe.once('error', reject);
+      probe.listen(0, '127.0.0.1', () => {
+        const picked = probe.address().port;
+        probe.close((e) => (e ? reject(e) : resolve(picked)));
+      });
+    });
+    const { startWebServer } = await import('../src/web/server.js');
+    const options = {
+      globalCfg: { webui: { host: '127.0.0.1', port }, plugins: {} },
+      runtimes: [],
+      saveBotConfig: async () => {},
+      saveGlobalConfig: async () => {},
+      onBotAdd: async () => {},
+      onBotRemove: async () => {},
+      onShutdown: async () => {},
+      mock: true,
+    };
+
+    const [first, repeated] = await Promise.all([
+      startWebServer(options),
+      startWebServer(options),
+    ]);
+    handles.push(first, repeated);
+    check('Web 服务：并发重复 start 复用同一实例', Boolean(first) && first === repeated);
+    const firstIntervals = createdIntervals.slice();
+    const firstUpdateTimeout = createdTimeouts.find((t) => t.ms === 60_000);
+    check('Web 服务：单实例只创建 3 个 interval', firstIntervals.length === 3, String(firstIntervals.length));
+    check('Web 服务：延迟更新只建一个 timeout', Boolean(firstUpdateTimeout));
+
+    const firstClosed = new Promise((resolve) => first.server.once('close', resolve));
+    first.close();
+    first.close();
+    await firstClosed;
+    check('Web 服务：close 清理 3 个 interval',
+      firstIntervals.every(({ handle }) => clearedIntervals.has(handle)));
+    check('Web 服务：close 清理 60 秒更新 timeout',
+      Boolean(firstUpdateTimeout && clearedTimeouts.has(firstUpdateTimeout.handle)));
+
+    const restarted = await startWebServer(options);
+    handles.push(restarted);
+    check('Web 服务：close 后可重新启动新实例', Boolean(restarted) && restarted !== first);
+    const secondIntervals = createdIntervals.slice(firstIntervals.length);
+    check('Web 服务：重启只新增 3 个 interval', secondIntervals.length === 3, String(secondIntervals.length));
+    const restartedClosed = new Promise((resolve) => restarted.server.once('close', resolve));
+    restarted.close();
+    await restartedClosed;
+    check('Web 服务：重启实例 close 同样清理 interval',
+      secondIntervals.every(({ handle }) => clearedIntervals.has(handle)));
+  } catch (e) {
+    check('Web 服务生命周期：单例与计时器回收测试', false, e?.stack || e?.message || String(e));
+  } finally {
+    for (const handle of handles) {
+      if (!handle?.server?.listening) continue;
+      await new Promise((resolve) => {
+        handle.server.once('close', resolve);
+        handle.close();
+      }).catch(() => {});
+    }
+    globalThis.setInterval = originalTimers.setInterval;
+    globalThis.clearInterval = originalTimers.clearInterval;
+    globalThis.setTimeout = originalTimers.setTimeout;
+    globalThis.clearTimeout = originalTimers.clearTimeout;
+    nativeFs.readFileSync = originalFs.readFileSync;
+    nativeFs.writeFileSync = originalFs.writeFileSync;
+    nativeFs.renameSync = originalFs.renameSync;
+    syncBuiltinESMExports();
+  }
+}
 
 /* ---------- Gitee 拉不到的文件从 GitHub 补回 ---------- */
 

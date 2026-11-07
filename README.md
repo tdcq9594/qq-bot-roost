@@ -8,10 +8,10 @@
 
 <img src="https://img.shields.io/badge/Node.js-22.13%2B-339933?logo=node.js&logoColor=white" alt="Node.js 22.13+">
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
-<img src="https://img.shields.io/badge/tests-826%20passed-brightgreen" alt="测试 826 项">
+<img src="https://img.shields.io/badge/tests-891%20passed-brightgreen" alt="测试 891 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
-<img src="https://img.shields.io/badge/version-1.0.10-blueviolet" alt="版本 1.0.10">
-<img src="https://img.shields.io/badge/license-Non--Commercial-red" alt="禁止商用">
+<img src="https://img.shields.io/badge/version-1.0.11-blueviolet" alt="版本 1.0.11">
+<img src="https://img.shields.io/badge/license-AGPL--3.0--only-blue" alt="AGPL-3.0-only">
 <a href="https://github.com/tdcq9594/qq-bot-roost/actions"><img src="https://img.shields.io/github/actions/workflow/status/tdcq9594/qq-bot-roost/ci.yml?branch=master" alt="CI"></a>
 
 [快速开始](#3-分钟跑起来) ｜ [写插件](docs/插件开发规范.md) ｜ [外部插件协议](docs/插件协议.md) ｜ [配置参考](docs/配置参考.md) ｜ [常见问题](docs/常见问题.md) ｜ [贡献](CONTRIBUTING.md)
@@ -69,6 +69,7 @@
 - **流式回复**：`msg.replyStream()` 做 AI 打字机效果，自动维护分片序号；群聊自动降级成普通消息
 - **模板消息**：`msg.replyCard()` 一次带上 markdown 正文 + 按钮 + ark 模板，不会拆成三条碎片
 - **图文卡片**：`msg.replyTuwen({title, description, url, picUrl})` 发官方 2026-10-28 新增的 `msg_type=8` 卡片，字段长度和 https 在发之前就校验
+- **通用图文自动出口**：`msg.replyAuto()` 面向**所有插件**——正文写标准 `![alt](路径)`，框架按内容自动选纯文本 / markdown / 富媒体；只有图片夹在两段文字中间时才按需预上传素材，且发完即删，上传不了自动降级成「文本 + 独立图」。支持 `keyboard`（纯文字带按钮会升成 markdown，不多发一条）；框架**不校验图片路径**，调用方是可信的插件代码
 - **素材缓存**：同一个图片 url 两天内只上传一次，省富媒体频控和流量
 - **中间件管道**：去重、白名单、限流、命令冷却都可插拔
 
@@ -391,6 +392,7 @@ export default {
 | `ctx.tools()` / `ctx.callTool(名, 参数)` | 列出 / 调用别插件注册的工具 |
 | `ctx.mail.send(收件人, 内容)` / `ctx.mail.configured` | **邮件通知**：收件人填完整邮箱（任意服务商）或 QQ 号；SMTP 在面板「通知」页配，见[插件开发规范](docs/插件开发规范.md) |
 | `msg.reply` / `push` / `replyMarkdown` / `replyImage` / … | 各种发送方式 |
+| `msg.replyAuto(正文, opts)` | **通用图文自动出口**（所有插件可用）：按正文形态自动选出口，图片夹在文字中间时按需预上传，可带 `keyboard`；见[插件开发规范](docs/插件开发规范.md) |
 
 ---
 
@@ -424,7 +426,7 @@ bot/
 │   ├── paths.js                全项目路径的唯一来源（按机器人参数化）
 │   ├── config.js               全局配置 + 机器人配置 + 迁移
 │   ├── events.js               47 个官方事件的登记表
-│   ├── endpoints.js            47 个官方 HTTP 接口清单（测试校验覆盖率）
+│   ├── endpoints.js            50 个官方 HTTP 接口清单（测试校验覆盖率）
 │   ├── outbound.js             出站调度器：窗口 / 限速 / 额度 / 降级
 │   ├── pipeline.js             中间件管道
 │   ├── session.js              多轮对话 + 免@粘性
@@ -601,31 +603,22 @@ mock 模式下：直接输入文本 = 模拟一条群 @ 消息；`!as <openid>` 
 
 ## 许可
 
-**永久免费，禁止任何收费，禁止商业使用。** 完整条款见 [LICENSE](LICENSE)。
+本项目采用 **GNU Affero General Public License v3.0 only（AGPL-3.0-only）**，是 OSI 认证的开源许可证。完整条款见 [LICENSE](LICENSE)。
 
 | 场景 | 允许？ |
 |------|--------|
-| 个人使用、学习、研究 | ✅ 随便用、随便改 |
-| 非营利项目、公益用途 | ✅ 可以 |
-| 学校、慈善组织、政府机构使用 | ✅ 可以 |
-| 自己改了再免费分享出去 | ✅ 可以，但须沿用同一许可并保留声明 |
-| 卖这个软件，或收下载费 / 授权费 / 会员费 | ❌ 禁止 |
-| 以「技术支持 / 培训 / 定制」名义收费 | ❌ 禁止 |
-| 拿它做收费服务、集成进商业产品 | ❌ 禁止 |
-| 设置「先打赏才能用」之类的门槛 | ❌ 禁止 |
+| 个人使用、学习、研究、修改 | ✅ |
+| 商业使用、收费分发、集成进商业产品 | ✅ 允许，但受下列条件约束 |
+| 分发源码或二进制给他人 | ✅ 必须同样以 AGPL-3.0-only 授权、保留声明并提供完整对应源码 |
+| 修改后通过网络向用户提供服务 | ✅ 视为分发，须向使用者提供对应源码（AGPL 第 13 条） |
+| 改用更宽松许可、闭源再分发 | ❌ 不允许 |
 
-三点要说明白：
+两点要说明白：
 
-1. **任何人不得就本软件收费**，包括二次分发者。这个项目也不提供任何商业授权——
-   不存在「付钱就能商用」的途径。如果有人声称代表本项目出售授权，那不是我们。
-2. 严格说这**不属于 OSI 定义的开源**（开源许可证不允许限制使用领域），
-   准确说法是「源码公开、免费使用（source-available）」。
-3. 协议结构参考了 [PolyForm Noncommercial 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0)，
-   并按「禁止任何收费」做了加严——所以不能直接叫 PolyForm，是一份自写协议。
+1. **AGPL 不禁止商业使用，也不禁止收费**。它约束的是「不能把基于本项目的修改版闭源」：只要分发（含通过网络提供服务），就必须同样开源并给出对应源码。
+2. 选 AGPL 而不是普通 GPL，正是为了覆盖「拿去搭托管服务、用户只通过网页或接口使用」这种情形——GPL 只在分发二进制时触发源码义务，AGPL 把网络交互也算作分发。
 
-自愿捐赠可以接受，但**不能**把任何付费行为设成使用前提。
-
-一句话：**自己用、改了再免费分享都可以；任何形式的收费和商业使用都不行。**
+> 仓库里的第三方投稿插件可能保留各自许可，见对应目录的 README。
 
 ---
 

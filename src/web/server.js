@@ -331,7 +331,27 @@ function safeEqual(a, b) {
  * 默认只监听 127.0.0.1，不对外暴露。
  * 设置 webui.accessKey 后，所有 /api/* 请求需要带 X-Access-Key 头或 ?key=。
  */
-export async function startWebServer({
+let activeWebServer = null;
+let webServerStartPromise = null;
+
+/**
+ * Web 服务进程级单例：热重载或重复初始化只复用现有服务，不再重复注册监听器与定时器。
+ * 启动中的并发调用也共用同一个 Promise，避免两个 server 同时抢端口。
+ */
+export async function startWebServer(options) {
+  if (activeWebServer) return activeWebServer;
+  if (webServerStartPromise) return webServerStartPromise;
+
+  webServerStartPromise = startWebServerInstance(options);
+  try {
+    activeWebServer = await webServerStartPromise;
+    return activeWebServer;
+  } finally {
+    webServerStartPromise = null;
+  }
+}
+
+async function startWebServerInstance({
   globalCfg,
   runtimes,
   saveBotConfig,
@@ -910,9 +930,17 @@ export async function startWebServer({
   }, 60 * 60 * 1000);
   updateTimer.unref?.();
 
-  setTimeout(() => {
+  const initialUpdateTimer = setTimeout(() => {
     for (const r of runtimes) checkUpdates(r).catch(() => {});
-  }, 60000).unref?.();
+  }, 60000);
+  initialUpdateTimer.unref?.();
+
+  const clearWebTimers = () => {
+    clearInterval(statusTimer);
+    clearInterval(sessionTimer);
+    clearInterval(updateTimer);
+    clearTimeout(initialUpdateTimer);
+  };
 
   const server = http.createServer(async (req, res) => {
     /**
@@ -3507,7 +3535,7 @@ export async function startWebServer({
     log.error(
       `端口 ${port}${tries > 1 ? `~${port + tries - 1}` : ''} 都不可用，可视化面板未启动: ${e.message}`,
     );
-    clearInterval(statusTimer);
+    clearWebTimers();
     offLog();
     offMsg();
     return null;
@@ -3567,21 +3595,26 @@ export async function startWebServer({
     log.info('面板已开启访问密钥：浏览器会自动带上；手动访问时在地址后加 ?key=<你的密钥>（日志里不打印）');
   }
 
+  let closed = false;
   return {
     server,
     url,
     port: actualPort,
     close() {
-      clearInterval(statusTimer);
+      if (closed) return;
+      closed = true;
+      clearWebTimers();
       offLog();
-    offMsg();
+      offMsg();
       for (const c of sseClients.keys()) {
         try {
           c.end();
         } catch {}
       }
       sseClients.clear();
-      server.close();
+      server.close(() => {
+        if (activeWebServer?.server === server) activeWebServer = null;
+      });
     },
   };
 }

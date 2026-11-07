@@ -45,6 +45,11 @@ export const OFFICIAL_ENDPOINTS = [
   { method: 'POST', path: '/v2/groups/{group_id}/upload_prepare', api: 'uploadPrepare', group: '消息·富媒体', note: '分片上传第一步' },
   { method: 'POST', path: '/v2/groups/{group_id}/upload_part_finish', api: 'uploadPartFinish', group: '消息·富媒体', note: '分片上传第二步' },
 
+  /* ---------------- 消息 / Markdown 素材（机器人级图床，仅框架内部用） ---------------- */
+  { method: 'POST', path: '/v2/media-images/prepare', api: 'prepareMediaImage', group: '消息·Markdown 素材', note: '单图 ≤10MB，upload_id 4 小时', internal: true },
+  { method: 'POST', path: '/v2/media-images/complete', api: 'completeMediaImage', group: '消息·Markdown 素材', note: 'md5 取 COS ETag', internal: true },
+  { method: 'DELETE', path: '/v2/media-images/{image_id}/delete', api: 'deleteMediaImage', group: '消息·Markdown 素材', note: '删除后引用失效，已发消息不受影响', internal: true },
+
   /* ---------------- 互动 / 自定义菜单 ---------------- */
   { method: 'GET', path: '/v2/menu', api: 'getGlobalMenu', group: '互动·菜单', note: '仅 C2C' },
   { method: 'PUT', path: '/v2/menu', api: 'setGlobalMenu', group: '互动·菜单', note: '仅 C2C，最多 10 项' },
@@ -187,9 +192,14 @@ export function riskOf(ep) {
  *
  * 白名单来自这张表本身——**不在表里的一律拒绝**，
  * 免得以后有人往 QQApi 加了个内部方法，外部就能顺手调。
+ *
+ * `internal:true` 的端点仍登记在官方清单里（覆盖度测试要校验），但**不对外开放**：
+ * 素材三步上传必须经 `api.uploadMarkdownImage()` 串起来，外部直接 prepare/complete
+ * 会绕过本地预检（10MB / 文件头 / 扩展名），还能无节制消耗机器人 100 张配额。
  */
 export const CALLABLE_METHODS = new Set(
-  OFFICIAL_ENDPOINTS.map((e) => e.api).filter((v) => typeof v === 'string' && v),
+  OFFICIAL_ENDPOINTS.filter((e) => !e.internal)
+    .map((e) => e.api).filter((v) => typeof v === 'string' && v),
 );
 
 /**
@@ -199,7 +209,8 @@ export const CALLABLE_METHODS = new Set(
 export function capabilityList() {
   const byApi = new Map();
   for (const ep of OFFICIAL_ENDPOINTS) {
-    if (!ep.api) continue;
+    // 内部专用端点不给外部能力清单，免得 AI 以为可以自己拼素材上传流程
+    if (!ep.api || ep.internal) continue;
     const cur = byApi.get(ep.api);
     if (!cur) {
       byApi.set(ep.api, {
