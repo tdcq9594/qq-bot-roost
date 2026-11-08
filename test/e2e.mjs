@@ -145,7 +145,24 @@ async function boot() {
   server = spawn(NODE, [path.join(ROOT, 'src/main.js'), '--mock', '--serve', '--no-open'], {
     cwd: ROOT,
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, ROOST_TEST: '1', ROOST_HOME: HOME },
+    /**
+     * 子进程**不许碰开发机的代理**。
+     *
+     * 一来测试结果不该随「开发机今天开没开 Clash」变化；二来读系统代理要起
+     * `reg.exe`，在沙箱 / 受控环境里这一步会被安全策略直接掐掉，表现成
+     * 「服务没起来」——排查半天最后发现跟代码无关。
+     * 代理本身由 test/proxy.mjs 用本地假代理覆盖，这里只要保证不走真网。
+     */
+    env: {
+      ...process.env,
+      ROOST_TEST: '1',
+      ROOST_HOME: HOME,
+      ROOST_NO_SYSTEM_PROXY: '1',
+      HTTPS_PROXY: '',
+      HTTP_PROXY: '',
+      https_proxy: '',
+      http_proxy: '',
+    },
   });
   let out = '';
   server.stdout.on('data', (d) => (out += d));

@@ -30,6 +30,7 @@ const {
   parseProxyUrl,
   parseWindowsProxyReg,
   shouldBypass,
+  splitBypass,
   proxyInfo,
   resetProxyState,
 } = await import('../src/proxy.js');
@@ -185,6 +186,39 @@ test('no_proxy 例外匹配', () => {
   assert.equal(shouldBypass('nas', 80, list), true, '<local> 指不带点的主机名');
   assert.equal(shouldBypass('raw.githubusercontent.com', 443, []), false);
   assert.equal(shouldBypass('raw.githubusercontent.com', 443, ['*']), true);
+
+  // 尾部通配：Windows 例外列表里 `127.*` / `10.*` 那种写法
+  assert.equal(shouldBypass('127.0.0.1', 15210, ['127.*']), true);
+  assert.equal(shouldBypass('10.1.2.3', 80, ['10.*']), true);
+  assert.equal(shouldBypass('172.20.5.5', 80, ['172.2*']), true);
+  assert.equal(shouldBypass('172.30.5.5', 80, ['172.2*']), false, '前缀不对就不算');
+  assert.equal(shouldBypass('114.114.114.114', 53, ['127.*', '10.*']), false);
+});
+
+/**
+ * 回归：2026-11-09「配了代理还是连不上 GitHub」。
+ *
+ * `bypass.push(...sys.bypass)` 把一个字符串摊成了一百多个单字符，其中 `*`
+ * 让所有域名都算「例外」，代理等于没接上。这里钉住两点：
+ *   1. 字符串 / 数组两种输入都要切成完整条目
+ *   2. 被摊成字符数组时能拼回去（别让同一个坑再埋一次）
+ */
+test('例外列表摊平：字符串不会被拆成单字符', () => {
+  const raw = '*zhihu.com;localhost;<local>;127.*';
+  assert.deepEqual(splitBypass(raw), ['*zhihu.com', 'localhost', '<local>', '127.*']);
+  assert.deepEqual(splitBypass(['a.com;b.com', 'c.com']), ['a.com', 'b.com', 'c.com']);
+  assert.deepEqual(splitBypass(['', ' , ']), [], '空条目全部丢掉');
+
+  // 被展开过（每个元素都是单字符）→ 先拼回去
+  const exploded = [...raw];
+  assert.ok(exploded.length > 20);
+  assert.deepEqual(splitBypass(exploded), ['*zhihu.com', 'localhost', '<local>', '127.*']);
+
+  // 摊平后的列表里那个 `*` 不能单独成条，否则一切域名都算例外
+  assert.equal(splitBypass(exploded).includes('*'), false);
+  const list = splitBypass(raw);
+  assert.equal(shouldBypass('raw.githubusercontent.com', 443, list), false, 'GitHub 该走代理');
+  assert.equal(shouldBypass('www.zhihu.com', 443, list), true, '例外里写了 zhihu');
 });
 
 /* ---------------- 3/4. 真发请求 ---------------- */

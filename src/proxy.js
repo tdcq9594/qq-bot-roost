@@ -121,6 +121,34 @@ export function proxyInfo() {
 /* 解析：配置 → 系统 → 环境变量                                          */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 把「不走代理」的例外列表摊平成 host 数组。
+ *
+ * 来源有三种：注册表的 `ProxyOverride`（分号）、`NO_PROXY`（逗号或分号）、
+ * 以后可能有人传数组。统一在这里切开，别让调用方各自 `split`。
+ *
+ * **为什么单独成一个函数**：2026-11-09 那次「配了代理还是连不上 GitHub」，
+ * 根因就是 `bypass.push(...sys.bypass)` —— 展开字符串把
+ * `*zhihu.com;localhost;…` 摊成了一百多个单字符，其中那个 `*` 使
+ * `shouldBypass()` 对**任何**域名都返回 true，于是 netFetch 全部退回直连，
+ * 日志里连一句「代理不可用」都没有，只剩 `fetch failed`。
+ * 这里顺手兜一手：万一又被人摊成字符数组，先拼回去再切。
+ *
+ * @param {string|Array<string|string[]>} [input]
+ * @returns {string[]}
+ */
+export function splitBypass(input) {
+  let items = Array.isArray(input) ? input : [input];
+  if (items.length > 2 && items.every((s) => typeof s === 'string' && s.length <= 1)) {
+    items = [items.join('')];
+  }
+  return items
+    .flatMap((s) => (Array.isArray(s) ? s : [s]))
+    .flatMap((s) => String(s ?? '').split(/[,;]/))
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 function resolve() {
   if (cache) return cache;
 
@@ -160,7 +188,13 @@ function resolve() {
   const sys = readSystemProxy();
   if (sys) {
     push(sys.proxy, 'system');
-    bypass.push(...sys.bypass);
+    /**
+     * **必须是 push 这个字符串本身，不能展开。**
+     * `push(...sys.bypass)` 会把 `*zhihu.com;localhost;…` 摊成一百多个单字符，
+     * 其中那个 `*` 让 shouldBypass() 对**所有**域名都返回 true —— 代理彻底失效，
+     * 日志里只剩一句 `fetch failed`。2026-11-09 踩过，见 splitBypass 的注释。
+     */
+    bypass.push(sys.bypass);
   }
   push(parseProxyUrl(process.env.HTTPS_PROXY || process.env.https_proxy), 'env');
   push(parseProxyUrl(process.env.HTTP_PROXY || process.env.http_proxy), 'env');
@@ -169,10 +203,7 @@ function resolve() {
   cache = {
     list,
     primary: list[0] ?? null,
-    bypass: bypass
-      .flatMap((s) => String(s).split(/[,;]/))
-      .map((s) => s.trim())
-      .filter(Boolean),
+    bypass: splitBypass(bypass),
   };
   if (cache.primary) log.debug(`代理：${cache.primary.raw}（来自 ${cache.primary.source}）`);
   return cache;
@@ -306,6 +337,12 @@ export function shouldBypass(host, port, bypass = []) {
 
     e = e.replace(/^\*\.?/, '').replace(/^\./, '');
     if (!e) continue;
+    // 尾部通配：Windows 例外列表里 `10.*` / `127.*` / `172.16.*` 都是这个意思
+    if (e.endsWith('*')) {
+      const prefix = e.slice(0, -1);
+      if (prefix && h.startsWith(prefix)) return true;
+      continue;
+    }
     if (h === e || h.endsWith(`.${e}`)) return true;
   }
   return false;
