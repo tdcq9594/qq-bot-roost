@@ -772,6 +772,25 @@
         />
         <button class="btn small" id="btnMirrorTest" title="并发测一遍，按你这边实际网络选">测速</button>
         <span class="hint" id="mirrorTip"></span>
+
+        <!--
+          代理。Node 的 fetch 既不读系统代理也不读 HTTPS_PROXY，所以下载默认是
+          「直连」——浏览器能打开 GitHub、这里却报连不上，就是这一层没接上。
+        -->
+        <span class="hint">代理</span>
+        <select id="proxySelect" class="mini-select" aria-label="代理">
+          <option value="auto">自动（跟随系统）</option>
+          <option value="off">直连（不用代理）</option>
+          <option value="custom">手动填写</option>
+        </select>
+        <input
+          id="proxyCustom"
+          class="mini-input"
+          placeholder="http://127.0.0.1:7890"
+          aria-label="代理地址"
+          hidden
+        />
+        <span class="hint" id="proxyTip"></span>
       </div>
 
       <!-- 插件一多就得能找 -->

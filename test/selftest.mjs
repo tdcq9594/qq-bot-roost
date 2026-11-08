@@ -2842,6 +2842,16 @@ async function testMirror() {
     fetchViaMirror,
   } = await import('../src/mirror.js');
 
+  /**
+   * 代理必须关掉。
+   *
+   * 下面几个用例是 stub `globalThis.fetch` 来观察「换源顺序」的；而配了代理时
+   * `fetchViaMirror` 走的是 `netFetch`，请求由代理层直接发出，根本不经过这个
+   * stub——用例就会看到「试了 0 次」。这不是换源逻辑坏了，是测的对象变了。
+   */
+  const { configureProxy } = await import('../src/proxy.js');
+  configureProxy({ network: { proxy: 'off' } });
+
   const raw = 'https://raw.githubusercontent.com/a/b/main/index.json';
   const tar = 'https://github.com/a/b/archive/refs/heads/main.tar.gz';
 

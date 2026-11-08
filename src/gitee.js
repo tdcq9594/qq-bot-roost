@@ -27,6 +27,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createLogger } from './logger.js';
+import { netFetch } from './proxy.js';
 
 const log = createLogger('gitee');
 
@@ -82,7 +83,7 @@ async function fetchBlob(repo, sha, token = '', timeoutMs = 120000) {
   const q = new URLSearchParams();
   if (token) q.set('access_token', token);
   const url = `${giteeBlobUrl(repo, sha)}?${q}`;
-  const res = await fetch(url, {
+  const res = await netFetch(url, {
     headers: { 'User-Agent': UA, accept: 'application/json' },
     signal: AbortSignal.timeout(Math.min(timeoutMs, 30000)),
   });
@@ -135,7 +136,7 @@ export async function fetchGiteeTree({
   const apiUrl = `${API}/repos/${repo}/git/trees/${encodeURIComponent(ref)}?${q}`;
   let tree;
   try {
-    const res = await fetch(apiUrl, {
+    const res = await netFetch(apiUrl, {
       headers: { 'User-Agent': UA, accept: 'application/json' },
       signal: AbortSignal.timeout(Math.min(timeoutMs, 30000)),
     });
@@ -187,7 +188,7 @@ export async function fetchGiteeTree({
         let lastErr = null;
         for (let attempt = 1; attempt <= FILE_RETRIES; attempt++) {
           try {
-            res = await fetch(giteeRawUrl(repo, ref, f.path), {
+            res = await netFetch(giteeRawUrl(repo, ref, f.path), {
               headers: { 'User-Agent': UA },
               signal: AbortSignal.timeout(timeoutMs),
             });
@@ -273,7 +274,7 @@ export async function detectGiteeRef(repo, probe = 'package.json') {
   const errors = [];
   for (const ref of ['master', 'main']) {
     try {
-      const res = await fetch(giteeRawUrl(repo, ref, probe), {
+      const res = await netFetch(giteeRawUrl(repo, ref, probe), {
         headers: { 'User-Agent': UA },
         signal: AbortSignal.timeout(10000),
       });

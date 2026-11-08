@@ -24,6 +24,7 @@
  * 逐文件拉（见 src/gitee.js）。这里的 `gitee` 映射只处理 raw 文件地址。
  */
 import { createLogger } from './logger.js';
+import { netFetch } from './proxy.js';
 
 const log = createLogger('mirror');
 
@@ -264,7 +265,12 @@ export async function fetchViaMirror(url, init = {}) {
   for (let i = 0; i < candidates.length; i++) {
     const target = candidates[i];
     try {
-      const res = await fetch(target, init);
+      /**
+       * 走 netFetch 而不是原生 fetch：Node 的 fetch 永远直连，而浏览器走系统代理。
+       * 不接管这一层，就会出现「浏览器能打开 raw、框架说连不上」——
+       * 见 src/proxy.js 开头那段实测记录。
+       */
+      const res = await netFetch(target, init);
       // 3xx：调用方多半在等 Location，不能当失败
       const accepted =
         res.ok ||
@@ -317,7 +323,7 @@ export async function probeMirrors({ timeoutMs = 6000, custom = current.custom }
       for (const probe of PROBE_FALLBACKS) {
         const target = applyMirror(probe, p, custom);
         try {
-          const res = await fetch(target, {
+          const res = await netFetch(target, {
             signal: AbortSignal.timeout(timeoutMs),
             headers: { 'User-Agent': 'qq-bot-roost' },
           });

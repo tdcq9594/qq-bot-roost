@@ -17,6 +17,23 @@ const log = createLogger('market');
 /** 同一个索引地址同时只允许一个请求在飞 */
 const indexInFlight = new Map();
 
+/**
+ * 索引的内存缓存：`url -> { at, data }`。
+ *
+ * 为什么要有它：以前只有「并发去重 + 磁盘兜底」，等于**每次调用都真打一次网络**。
+ * 而面板上「插件列表」「检查更新」「市场页」是三个独立请求，各自都要索引；
+ * 国内直连 raw.githubusercontent.com 常常 8~11 秒才失败并切镜像（auto 模式），
+ * 于是进一次插件页就白等十几秒，页面整块空着。
+ *
+ * 60 秒是刻意的短：索引本身一天也变不了几次，但插件作者发完版会立刻开面板看，
+ * 等一分钟已经够难受了。
+ *
+ * **写路径（安装 / 更新 / 同步仓库）必须传 `maxAge: 0`**——否则刚发的新版本会被
+ * 这份缓存挡住，用户看到的是旧版本号，更新按钮显示「已是最新」。
+ */
+const INDEX_TTL_MS = 60_000;
+const indexCache = new Map();
+
 /** 官方插件仓库。改这里就能指向你自己的插件源 */
 export const DEFAULT_INDEX_URL =
   'https://raw.githubusercontent.com/tdcq9594/qq-bot-roost-plugins/main/index.json';
@@ -81,16 +98,25 @@ function assertSafeIndexUrl(raw) {
 
 /**
  * @param {string} [url]
- * @param {{trust?: object}} [opts] 信任策略；不传就按「没配公钥」处理（本版不验签）
+ * @param {{trust?: object, maxAge?: number}} [opts] 信任策略；`maxAge` 是内存缓存的新鲜期
+ *   （毫秒，默认 60 秒；传 0 表示强制重新拉取，写路径必须这么传）
  */
 export async function fetchIndex(url = DEFAULT_INDEX_URL, opts = {}) {
   const key = String(url || DEFAULT_INDEX_URL);
   assertSafeIndexUrl(key);
+
+  const maxAge = Number.isFinite(opts.maxAge) ? Number(opts.maxAge) : INDEX_TTL_MS;
+  if (maxAge > 0) {
+    const hit = indexCache.get(key);
+    if (hit && Date.now() - hit.at < maxAge) return hit.data;
+  }
+
   const running = indexInFlight.get(key);
   if (running) return running;
 
   const task = fetchIndexOnce(key, opts)
     .then(async (data) => {
+      indexCache.set(key, { at: Date.now(), data });
       await writeIndexCache(key, data).catch(() => {});
       return data;
     })
@@ -99,6 +125,11 @@ export async function fetchIndex(url = DEFAULT_INDEX_URL, opts = {}) {
       const cached = await readIndexCache(key).catch(() => null);
       if (cached) {
         log.warn(`拉取插件市场失败（${e.message}），改用本地缓存（${cached.age}）`);
+        /**
+         * **stale 结果不写进内存缓存。**
+         * 写进去的话，一次网络抖动就会让「离线数据」在 60 秒内被当成新鲜索引，
+         * 面板还可能据此说「已是最新」——而其实根本没连上。
+         */
         return { ...cached.data, stale: true, staleAge: cached.age };
       }
       throw e;
@@ -577,10 +608,17 @@ export function detectUpdates(indexPlugins, localVersions = {}) {
  * 否则某个插件在下载源上有个文件拉不动，整仓失败，更新其它插件也一起黄。
  *
  * @param {string[]} [only] 只拉这些路径前缀（目录以 `/` 结尾），透传给下载层
+ * @param {object} [index] 调用方已经拿到的索引（写路径刚 `fetchIndex(..., {maxAge:0})` 过），
+ *   传进来就不用再拉一次
  * @returns {Promise<{tmp:string, index:object}>}
  */
-export async function syncRepo({ repo, branch = 'main', indexUrl, only = null } = {}) {
-  const index = await fetchIndex(indexUrl);
+export async function syncRepo({ repo, branch = 'main', indexUrl, only = null, index: given = null } = {}) {
+  /**
+   * 这是**写路径**（装 / 更新），索引必须是新的：`maxAge: 0` 绕过内存缓存。
+   * 拿一份 60 秒前的索引去下仓库，会出现「索引说 4.4.6，下下来是 4.4.7」，
+   * 然后 sha256 对不上，用户以为仓库坏了。
+   */
+  const index = given ?? (await fetchIndex(indexUrl, { maxAge: 0 }));
   if (!repo) repo = index.repo;
   if (!repo) throw new Error('索引里缺少 repo 字段，无法同步');
 

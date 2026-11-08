@@ -48,6 +48,12 @@ import {
   currentMirror,
   probeMirrors,
 } from '../mirror.js';
+import {
+  configureProxy,
+  netFetch,
+  normalizeProxySetting,
+  proxyInfo,
+} from '../proxy.js';
 
 const log = createLogger('webui');
 const WEB_ROOT = path.join(ROOT, 'web');
@@ -879,14 +885,11 @@ async function startWebServerInstance({
   const UPDATE_CACHE_MS = 5 * 60 * 1000;
 
   /**
-   * 对照插件市场，看这个机器人有哪些插件能更新。
-   * 只检查不安装——安装会覆盖本地目录，必须用户点。
+   * 真正去比一次：拉索引（可能走网络）+ 读本地版本。
+   *
+   * 抽出来是因为下面要做「先给旧的、后台再刷新」——刷新必须能脱离请求单独跑。
    */
-  const checkUpdates = async (r, { force = false } = {}) => {
-    if (!r) return { at: 0, updates: [], error: '没有可用的机器人' };
-    const hit = updateCache.get(r.id);
-    if (hit && !force && Date.now() - hit.at < UPDATE_CACHE_MS) return hit;
-
+  const refreshUpdates = async (r) => {
     const out = { at: Date.now(), updates: [], error: '' };
     try {
       const idx = await fetchIndex(globalCfg.plugins?.marketUrl || undefined, { trust: resolveTrust(globalCfg) });
@@ -906,9 +909,59 @@ async function startWebServerInstance({
     } catch (e) {
       // 连不上市场是常事（离线、代理、限流），不该刷错误日志
       out.error = e.message;
+      /**
+       * **失败不要把上一次的结果清空。**
+       *
+       * 这段现在多半跑在后台（stale-while-revalidate），一旦网络抖一下就把
+       * `updates` 清成 `[]`，面板上「可更新」标记会无声消失，用户以为插件
+       * 自己更新了；而且 `at` 已被刷新，5 分钟内也不会再试。
+       *
+       * 保留旧列表、只标 `error`：更新按钮点下去仍然是真去拉最新索引的，
+       * 真更新掉了前端也会用 `forgetUpdates` 摘掉。
+       */
+      const prev = updateCache.get(r.id);
+      if (prev?.updates?.length) out.updates = prev.updates;
     }
     updateCache.set(r.id, out);
     return out;
+  };
+
+  /** 正在后台刷新的机器人，避免几个请求同时触发同一轮刷新 */
+  const updating = new Set();
+
+  /**
+   * 对照插件市场，看这个机器人有哪些插件能更新。
+   * 只检查不安装——安装会覆盖本地目录，必须用户点。
+   *
+   * **过期不再阻塞请求**：以前缓存一过期就同步等一次网络，而国内直连
+   * `raw.githubusercontent.com` 常常 8~11 秒才失败切镜像，于是「隔一阵第一次
+   * 进插件页」必然整块空白十几秒。现在改为 stale-while-revalidate——
+   * 有过期结果就先返回它（列表立刻能画出来），后台再刷新，
+   * 下一次请求 / 5 秒轮询自然拿到新值。
+   */
+  const checkUpdates = async (r, { force = false } = {}) => {
+    if (!r) return { at: 0, updates: [], error: '没有可用的机器人' };
+    const hit = updateCache.get(r.id);
+    const fresh = hit && Date.now() - hit.at < UPDATE_CACHE_MS;
+    if (hit && !force && fresh) return hit;
+
+    if (hit && !force) {
+      if (!updating.has(r.id)) {
+        updating.add(r.id);
+        refreshUpdates(r)
+          .catch(() => {})
+          .finally(() => updating.delete(r.id));
+      }
+      return { ...hit, stale: true };
+    }
+
+    // 没有旧结果可给（或用户明确要求强制刷新）：只能等这一轮
+    updating.add(r.id);
+    try {
+      return await refreshUpdates(r);
+    } finally {
+      updating.delete(r.id);
+    }
   };
 
   /**
@@ -1580,6 +1633,7 @@ async function startWebServerInstance({
             setLevel(body.logLevel);
             await saveGlobalConfig?.(globalCfg).catch(() => {});
             configureMirror(globalCfg);
+            configureProxy(globalCfg);
           }
           /**
            * 插件来源校验开关（全局，默认关）。
@@ -1644,6 +1698,7 @@ async function startWebServerInstance({
             globalCfg.webui = { ...globalCfg.webui, ...patch };
             await saveGlobalConfig?.(globalCfg).catch(() => {});
             configureMirror(globalCfg);
+            configureProxy(globalCfg);
           }
           // 群管内邀开关：同步给 api 层，否则要等重启才生效
           if (body.groupManage && typeof body.groupManage === 'object') {
@@ -1857,6 +1912,11 @@ async function startWebServerInstance({
             current: currentMirror(),
             presets: PRESETS,
             probeUrl: PROBE_URL,
+            /**
+             * 代理状态也一并返回：面板要能回答「现在到底走没走代理、走的哪个」。
+             * 这是排查「浏览器能打开、这里打不开」的第一手信息。
+             */
+            proxy: { ...proxyInfo(), setting: globalCfg.network?.proxy ?? 'auto' },
           });
         }
 
@@ -1870,23 +1930,44 @@ async function startWebServerInstance({
           return json(res, 200, { results });
         }
 
-        // 改下载源
+        // 改下载源 / 代理
         if (pathname === '/api/mirror' && req.method === 'PUT') {
           const body = await readBody(req);
-          const id = String(body?.mirror ?? '').trim();
+          // 没传 mirror 就沿用当前值：面板上只改代理时也会打这个接口
+          const id = String(body?.mirror ?? globalCfg.network?.mirror ?? 'auto').trim() || 'auto';
           if (!PRESETS.some((p) => p.id === id)) {
             return json(res, 400, { error: `没有这个下载源：${id}` });
           }
+
+          /**
+           * 代理地址先校验再落盘。
+           *
+           * 校验放在这里而不是 configureProxy 里：那是每个请求都会走的热路径，
+           * 解析失败只能记日志；面板需要的是当场看到「哪里填错了」。
+           */
+          let proxy = globalCfg.network?.proxy ?? 'auto';
+          if (body?.proxy !== undefined) {
+            const norm = normalizeProxySetting(body.proxy);
+            if (!norm.ok) return json(res, 400, { error: norm.error });
+            proxy = norm.value;
+          }
+
           globalCfg.network = {
             ...(globalCfg.network ?? {}),
             mirror: id,
             mirrorCustom: String(body?.mirrorCustom ?? '').trim(),
             giteeToken: String(body?.giteeToken ?? '').trim(),
+            proxy,
           };
           // 立刻生效：模块里缓存的那份要同步，不然要等重启
           configureMirror(globalCfg);
+          configureProxy(globalCfg);
           await saveGlobalConfig?.(globalCfg).catch(() => {});
-          return json(res, 200, { ok: true, current: currentMirror() });
+          return json(res, 200, {
+            ok: true,
+            current: currentMirror(),
+            proxy: { ...proxyInfo(), setting: proxy },
+          });
         }
 
 
@@ -2226,7 +2307,12 @@ async function startWebServerInstance({
           if (!id) return json(res, 400, { error: '缺少插件 id' });
           try {
             const src = globalCfg.plugins?.marketUrl || undefined;
-            const idx = await fetchIndex(src, { trust: resolveTrust(globalCfg) });
+            /**
+             * 写路径一律 `maxAge: 0`：索引的内存缓存只有 60 秒，而「刚装插件」
+             * 恰好最容易撞上那 60 秒——作者发完版立刻装自己那个。
+             * 用旧索引会 404（市场里还没有这个 id）或者装到上一个版本。
+             */
+            const idx = await fetchIndex(src, { trust: resolveTrust(globalCfg), maxAge: 0 });
             const entry = idx.plugins.find((p) => p.id === id);
             if (!entry) return json(res, 404, { error: `市场里没有 ${id}` });
 
@@ -3075,6 +3161,7 @@ async function startWebServerInstance({
           globalCfg.logLevel = body.level;
           await saveGlobalConfig?.(globalCfg).catch(() => {});
           configureMirror(globalCfg);
+          configureProxy(globalCfg);
           return json(res, 200, { ok: true, level: getLevel() });
         }
 
@@ -3348,7 +3435,8 @@ async function startWebServerInstance({
           let repo = null;
           try {
             const src = globalCfg.plugins?.marketUrl || undefined;
-            const idx = await fetchIndex(src, { trust: resolveTrust(globalCfg) });
+            // 更新是写路径：索引必须是最新的，不能吃 60 秒内存缓存
+            const idx = await fetchIndex(src, { trust: resolveTrust(globalCfg), maxAge: 0 });
             const entry = idx.plugins.find((p) => p.id === id);
             if (!entry) return json(res, 404, { error: `市场里没有 ${id}` });
 
@@ -3375,6 +3463,8 @@ async function startWebServerInstance({
               branch: idx.branch || 'main',
               indexUrl: src,
               only: [`plugins/${id}/`],
+              // 上面刚拿过最新索引，传进去复用，别再打一次网络
+              index: idx,
             });
             const r = await updatePlugins({
               tmp: repo.tmp,

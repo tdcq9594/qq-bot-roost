@@ -197,6 +197,9 @@
     "ppReset",
     "ppSave",
     "ppTitle",
+    "proxyCustom",
+    "proxySelect",
+    "proxyTip",
     "reachFriendSel",
     "reachGroupBody",
     "reachOpenidInput",
@@ -464,8 +467,8 @@
     "panels": 14,
     "tables": 12,
     "modals": 4,
-    "controls": 152,
-    "apiCalls": 85
+    "controls": 154,
+    "apiCalls": 84
   },
   "requiredIds": [
     {
@@ -565,6 +568,6 @@
     "tabItemClass": true,
     "cspScriptSelf": true,
     "pageThemeMirror": true,
-    "serverHash": "dff6dde5ce5df6730adc5b031ac22661aeedfd6015db6654249b0541a65b1c42"
+    "serverHash": "c349331d8ac777e78d01cbe3d83a697292a70d468e0e3826ded967713eeb50f4"
   }
 }

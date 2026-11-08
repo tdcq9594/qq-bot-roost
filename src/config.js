@@ -107,6 +107,18 @@ const GLOBAL_DEFAULTS = {
     mirror: 'auto',
     mirrorCustom: '',
     giteeToken: '',
+    /**
+     * 下载走不走代理。
+     *
+     *   auto    跟随系统（Windows 的「系统代理」设置，也就是 Clash 那个开关），
+     *           没配就再看 HTTPS_PROXY / HTTP_PROXY 环境变量
+     *   off     一律直连
+     *   http://127.0.0.1:7890   用这个代理（只支持 http / https 代理）
+     *
+     * **必须有这个开关**：Node 的 fetch 默认既不看系统代理也不看环境变量，
+     * 于是「浏览器能打开 GitHub、框架说连不上」。详见 src/proxy.js。
+     */
+    proxy: 'auto',
   },
 
   /**

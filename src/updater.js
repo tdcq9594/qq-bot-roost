@@ -18,6 +18,7 @@ import { compareVersion } from './semver.js';
 import path from 'node:path';
 import { createLogger } from './logger.js';
 import { fetchAndExtract } from './tarball.js';
+import { netFetch } from './proxy.js';
 import { fetchViaMirror, currentMirror } from './mirror.js';
 import { fetchGiteeTree, detectGiteeRef, giteeRawUrl } from './gitee.js';
 import { hashDir } from './hashdir.js';
@@ -304,7 +305,7 @@ async function fetchLatestTagViaApi() {
  */
 async function checkViaGitee(cur) {
   const ref = await detectGiteeRef(REPO);
-  const res = await fetch(giteeRawUrl(REPO, ref, 'package.json'), {
+  const res = await netFetch(giteeRawUrl(REPO, ref, 'package.json'), {
     headers: { 'User-Agent': 'qq-bot-roost-updater' },
     signal: AbortSignal.timeout(10000),
   });

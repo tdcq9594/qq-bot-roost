@@ -15,6 +15,7 @@ import {
 import { DIRS, PATHS, botPaths, listBotIds, ensureDirs, rel } from './paths.js';
 import { createLogger, setLevel, getLevel, attachLogFile, flushLogs } from './logger.js';
 import { configureMirror } from './mirror.js';
+import { configureProxy } from './proxy.js';
 import { BotRuntime, pluginAllowedIn } from './bot.js';
 import { toggleGroupPlugin, resetGroupPlugins, describeGroupScope } from './plugin/groupscope.js';
 import { runtime, sanitizePayload } from './runtime.js';
@@ -1021,6 +1022,8 @@ async function main() {
 
   // 下载源是全局的，模块里缓存一份，免得每个调用点都传配置
   configureMirror(globalCfg);
+  // 代理同理：Node 的 fetch 不认系统代理，得自己接管（见 src/proxy.js）
+  configureProxy(globalCfg);
   setLevel(globalCfg.logLevel);
   runtime.startedAt = Date.now();
 

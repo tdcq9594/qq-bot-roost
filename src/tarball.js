@@ -22,6 +22,7 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 import { createLogger } from './logger.js';
+import { netFetch } from './proxy.js';
 
 const log = createLogger('tarball');
 
@@ -161,8 +162,8 @@ export async function extractEntries(entries, destDir) {
  */
 export async function fetchAndExtract(url, destDir, opts = {}) {
   const { timeoutMs = 120000, retries = 1, onRetry, fetcher, expectSha256 = null } = opts;
-  // 默认裸 fetch；插件市场和框架更新会传一个带镜像兜底的实现
-  const doFetch = fetcher ?? fetch;
+  // 默认 netFetch（带代理支持）；插件市场和框架更新会传一个带镜像兜底的实现
+  const doFetch = fetcher ?? netFetch;
 
   let res = null;
   let lastErr = null;

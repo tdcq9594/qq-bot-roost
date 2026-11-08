@@ -1685,16 +1685,17 @@ async function loadPluginPages() {
     // 页面令牌：不是面板密钥，只对这一个插件自己的接口有效
     frame.dataset.token = p.token || '';
     /**
-     * **直接设上地址（预加载），不再等用户点开。**
+     * **不在建标签时设 src。**
      *
-     * 以前这里是懒加载：注释写「地址在点开的时候才算」，好处是不点就不请求。
-     * 但代价是第一次点插件标签要走完「下载 35KB HTML → 解析几百行内联脚本 →
-     * 拉数据 → 渲染」，主观上就是卡一下，用户容易以为坏了。
+     * 上一版是「建好就开始加载，点过去就是现成的」，出发点是好的，但代价是：
+     * 打开面板的瞬间把所有插件页一次性拉起来（斗罗后台那种 37KB HTML + 几百行
+     * 内联脚本 + 自己再拉数据），几个插件一起抢主线程，第一次打开明显卡。
      *
-     * 现在建标签时就开始加载，点过去就是现成的。切换机器人时这个函数会重跑，
-     * 地址里带上了新的 bot 参数，所以也不会串台。
+     * 现在改成空闲预载：`requestIdleCallback` 里补上 src，用户点过去时多半已经好了；
+     * 真没载完也不怕——`activateTab` 里本来就有「地址不一致就设上」的兜底。
+     * 顺带一个好处：切机器人后未打开过的页面不会拿旧 bot 的地址预载两次。
      */
-    frame.src = pluginPageUrl(p.key, p.token || '');
+    idlePreloadPage(frame);
     sec.appendChild(frame);
     main.appendChild(sec);
   }
@@ -1726,6 +1727,27 @@ function pluginPageUrl(key, token) {
   q.set('theme', document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
   const s = q.toString();
   return `/api/pages/${encodeURIComponent(key)}/html${s ? `?${s}` : ''}`;
+}
+
+/**
+ * 空闲时预载一个插件页。
+ *
+ * 为什么不是立刻设 src：打开面板那一瞬间所有插件页一起加载，会跟首屏的
+ * 状态、插件列表抢主线程和连接，表现为「第一次打开卡一下」。
+ * 放到空闲时段做，用户点过去时基本已经好了；`activateTab` 另有兜底。
+ */
+function idlePreloadPage(frame) {
+  const run = () => {
+    // 已经加载过（点开过 / 别处设过）就别打断它
+    if (!frame.isConnected || frame.getAttribute('src') || !frame.dataset.key) return;
+    frame.src = pluginPageUrl(frame.dataset.key, frame.dataset.token);
+  };
+  if (typeof requestIdleCallback === 'function') {
+    requestIdleCallback(run, { timeout: 4000 });
+  } else {
+    // Safari 到现在还不支持 requestIdleCallback，退化成「等首屏忙完」
+    setTimeout(run, 1500);
+  }
 }
 
 /**
@@ -2068,30 +2090,113 @@ function renderDecl(p) {
   ].join('');
 }
 
+/**
+ * 顶部「N 个插件有新版本」提示。
+ *
+ * 单独抽出来：更新检查是**异步补进来**的，画列表的时候还不知道结果。
+ */
+function renderUpdateTip(upd) {
+  const tip = $('#pluginUpdateTip');
+  if (!tip) return;
+  const n = (upd.updates || []).length;
+  tip.innerHTML = n
+    ? `<b>${n} 个插件有新版本</b>，去「插件市场」一键更新。` +
+      `<a href="javascript:void(0)" id="lnkUpdateAll">全部更新</a>`
+    : '';
+  const lnk = $('#lnkUpdateAll');
+  if (lnk) lnk.addEventListener('click', () => updateAllFromMarket());
+}
+
+/**
+ * 把「可更新」标记补到**已经画好的**卡片上——不重建卡片。
+ *
+ * 整块重绘会丢滚动位置、把用户正在点的按钮弄没（`refreshPluginDashboards` 同一个教训）。
+ * 而更新检查要走市场索引（秒级），列表是毫秒级的，所以两件事必须分开。
+ *
+ * 反方向也要处理：结果里**没有**的插件说明它已经是最新，旧标记和「更新」按钮要摘掉，
+ * 否则更新完还一直挂着「可更新 4.4.6」，看着像没成功。
+ */
+function applyUpdateMarks(upd) {
+  // 先刷顶部提示：列表可能是空的（插件全卸载了），提示也得跟着清掉
+  renderUpdateTip(upd);
+
+  const wrap = $('#pluginList');
+  if (!wrap || !wrap.querySelector('.plugin')) return;
+
+  const map = new Map((upd.updates || []).map((u) => [u.id, u]));
+
+  for (const card of wrap.querySelectorAll('.plugin')) {
+    const id = card.dataset.id;
+    const u = map.get(id);
+    const oldBtn = card.querySelector('[data-update-one]');
+
+    if (!u) {
+      card.querySelector('.upd-tag')?.remove();
+      oldBtn?.remove();
+      continue;
+    }
+
+    if (oldBtn) {
+      // 已经有按钮了：只同步版本号，别重建（按钮上可能正显示「更新中…」）
+      oldBtn.dataset.from = u.current;
+      oldBtn.dataset.to = u.latest;
+      if (u.name) oldBtn.dataset.name = u.name;
+      continue;
+    }
+
+    const name = card.querySelector('.name');
+    if (name && !name.querySelector('.upd-tag')) {
+      const tag = document.createElement('span');
+      tag.className = 'upd-tag';
+      tag.textContent = `可更新 ${u.latest}`;
+      name.appendChild(tag);
+    }
+
+    // 按钮插在状态徽章后面，和整块重绘时的位置一致
+    const badge = card.querySelector('.badge');
+    if (!badge) continue;
+    const btn = document.createElement('button');
+    btn.className = 'btn small primary';
+    btn.dataset.updateOne = id;
+    btn.dataset.from = u.current;
+    btn.dataset.to = u.latest;
+    btn.dataset.name = u.name || id;
+    btn.textContent = '更新';
+    btn.addEventListener('click', () => updateFromMarket(id, btn));
+    badge.insertAdjacentElement('afterend', btn);
+  }
+}
+
 async function loadPlugins() {
   const wrap = $('#pluginList');
   // 插件装了/卸了，它注册的面板页面也会变，顺带刷一下标签栏
   loadPluginPages();
   try {
-    // 运行数据单独一个接口，拿不到不影响列表显示
-    const [list, dash, upd] = await Promise.all([
+    /**
+     * 只等「列表 + 运行数据」——都是毫秒级。
+     *
+     * 「有没有新版」以前也塞在同一个 `Promise.all` 里，于是整页要陪它等一次市场索引
+     * （国内直连 GitHub 常要 8~11 秒才失败切镜像），表现就是进插件页后整块空白。
+     * 现在拆成两趟：这里先把卡片画出来，更新标记由 `applyUpdateMarks` 异步补。
+     */
+    const [list, dash] = await Promise.all([
       api('/api/plugins'),
       api('/api/plugins/dashboard').catch(() => ({})),
-      api('/api/plugins/updates').catch(() => ({ updates: [] })),
     ]);
-    const updMap = {};
-    for (const u of upd.updates || []) updMap[u.id] = u;
-
+    /**
+     * 首屏一律按「没有新版」画：卡片上不会出现「可更新」和「更新」按钮，
+     * 都由第二趟的 applyUpdateMarks 补。这样不会先画错再改，闪一下。
+     */
     if (!list.length) {
       wrap.innerHTML = '<div class="empty">还没有插件，把文件夹放进 plugins/ 即可</div>';
+      // 没有插件就不可能有更新，顺手把上次留下的「N 个有新版本」清掉
+      renderUpdateTip({ updates: [] });
       return;
     }
     wrap.innerHTML = list.map((p) => {
       // 插件自己上报的指标，卡片上最多露 3 个，详情在「设置 → 运行数据」
       const d = dash[p.id];
       const chips = renderDashChips(d?.metrics);
-
-      const u = updMap[p.id];
 
       return `
       <div class="plugin" data-id="${escapeHtml(p.id)}" data-name="${escapeHtml(p.name || p.id)}">
@@ -2101,7 +2206,6 @@ async function loadPlugins() {
               ? `<img class="plugin-icon" src="${escapeHtml(p.icon)}" alt="" loading="lazy">`
               : ''
           }${escapeHtml(p.name || p.id)} <span class="hint">v${escapeHtml(p.version || '0.0.0')}</span>
-            ${u ? `<span class="upd-tag">可更新 ${escapeHtml(u.latest)}</span>` : ''}
           </div>
           <div class="meta">
             ${escapeHtml(p.id)}
@@ -2144,7 +2248,6 @@ async function loadPlugins() {
         <span class="badge ${p.loaded ? 'on' : p.enabled ? '' : 'off'}">
           ${p.loaded ? '运行中' : p.enabled ? '未加载' : '已禁用'}
         </span>
-        ${u ? `<button class="btn small primary" data-update-one="${escapeHtml(p.id)}">更新</button>` : ''}
         <button class="btn small" data-act="${p.enabled ? 'disable' : 'enable'}">
           ${p.enabled ? '禁用' : '启用'}
         </button>
@@ -2154,17 +2257,7 @@ async function loadPlugins() {
       </div>`;
     }).join('');
 
-    // 顶部提示：有几个可更新
-    const n = (upd.updates || []).length;
-    const tip = $('#pluginUpdateTip');
-    if (tip) {
-      tip.innerHTML = n
-        ? `<b>${n} 个插件有新版本</b>，去「插件市场」一键更新。` +
-          `<a href="javascript:void(0)" id="lnkUpdateAll">全部更新</a>`
-        : '';
-      const lnk = $('#lnkUpdateAll');
-      if (lnk) lnk.addEventListener('click', () => updateAllFromMarket());
-    }
+    // 顶部「N 个有新版本」提示和卡片上的「更新」按钮由 applyUpdateMarks 补，见下
 
     wrap.querySelectorAll('button[data-act]').forEach((btn) => {
       btn.addEventListener('click', async () => {
@@ -2205,13 +2298,36 @@ async function loadPlugins() {
       });
     });
 
-    // 单个插件的「更新」按钮
-    wrap.querySelectorAll('[data-update-one]').forEach((btn) => {
-      btn.addEventListener('click', () => updateFromMarket(btn.dataset.updateOne, btn));
-    });
+    // 卡片上的「更新」按钮不再在这里批量绑：它由 applyUpdateMarks 创建并自带监听
   } catch (e) {
     wrap.innerHTML = `<div class="empty">加载失败: ${escapeHtml(e.message)}</div>`;
   }
+
+  /**
+   * 第二趟：更新检查（可能要走市场索引，秒级）。
+   *
+   * 刻意不 await —— 列表已经画出来了，没必要让调用方（比如更新完成后的刷新）干等。
+   * 失败就**保持现状**：不能因为一次网络抖动，把已经显示的「可更新」标记全摘掉。
+   *
+   * 那句「正在检查」是有必要的：冷启动第一次要真连一次市场索引，国内线路
+   * 会先直连 GitHub、十几秒失败后才切镜像。这段时间里卡片上没有任何标记，
+   * 看着和「全部是最新版」一模一样——那是**错的结论**，得让用户知道还在查。
+   * 延迟 800ms 才显示，是因为命中缓存时只要几毫秒，闪一下反而更吵。
+   */
+  const PENDING_TIP = '正在检查插件更新…';
+  const pendingTip = setTimeout(() => {
+    const tip = $('#pluginUpdateTip');
+    if (tip && !tip.textContent.trim()) tip.innerHTML = `<span class="hint">${PENDING_TIP}</span>`;
+  }, 800);
+
+  api('/api/plugins/updates')
+    .then((upd) => applyUpdateMarks(upd))
+    .catch(() => {
+      // 查不到就把「正在检查」收掉，别让它永远挂着
+      const tip = $('#pluginUpdateTip');
+      if (tip && tip.textContent.trim() === PENDING_TIP) tip.innerHTML = '';
+    })
+    .finally(() => clearTimeout(pendingTip));
 }
 
 /* ---------------- 事件账本 ---------------- */
@@ -2641,10 +2757,44 @@ async function loadMirrorBar() {
       )
       .join('');
     syncMirrorCustom();
+    syncProxy();
     const preset = (d.presets || []).find((p) => p.id === d.current?.id);
     $('#mirrorTip').textContent = preset?.note ?? '';
   } catch {
     sel.innerHTML = '<option value="auto">自动</option>';
+  }
+}
+
+/**
+ * 代理栏：`auto` / `off` 是开关，其它值是具体地址。
+ *
+ * 选「手动填写」时才露输入框；**不要**在切到手动时立刻保存——那时地址还是空的，
+ * 后端会（正确地）拒绝。等用户填完再提交。
+ */
+function syncProxy() {
+  const sel = $('#proxySelect');
+  const inp = $('#proxyCustom');
+  const tip = $('#proxyTip');
+  if (!sel) return;
+
+  const setting = String(MIRRORS?.proxy?.setting ?? 'auto');
+  const isUrl = setting !== 'auto' && setting !== 'off';
+  sel.value = isUrl ? 'custom' : setting;
+  if (inp) {
+    inp.hidden = !isUrl;
+    if (isUrl) inp.value = setting;
+  }
+
+  if (tip) {
+    const p = MIRRORS?.proxy;
+    if (isUrl) {
+      tip.textContent = `当前：${setting}（手动）`;
+    } else if (p?.active) {
+      const from = { system: '系统设置', env: '环境变量' }[p.source] ?? p.source;
+      tip.textContent = `当前：${p.active}（${from}）`;
+    } else {
+      tip.textContent = '当前：直连';
+    }
   }
 }
 
@@ -2668,8 +2818,13 @@ async function saveMirror() {
   const sel = $('#mirrorSelect');
   const inp = $('#mirrorCustom');
   const tok = $('#mirrorGiteeToken');
+  const psel = $('#proxySelect');
+  const pinp = $('#proxyCustom');
   const tip = $('#mirrorTip');
   if (!sel) return;
+
+  // 「手动填写」时取输入框，其余取下拉值（auto / off）
+  const proxy = psel?.value === 'custom' ? (pinp?.value ?? '').trim() : (psel?.value ?? 'auto');
 
   try {
     const r = await api('/api/mirror', {
@@ -2678,9 +2833,11 @@ async function saveMirror() {
         mirror: sel.value,
         mirrorCustom: inp?.value ?? '',
         giteeToken: tok?.value ?? '',
+        proxy,
       }),
     });
-    MIRRORS = { ...(MIRRORS ?? {}), current: r.current };
+    MIRRORS = { ...(MIRRORS ?? {}), current: r.current, proxy: r.proxy };
+    syncProxy();
     const preset = (MIRRORS.presets || []).find((p) => p.id === sel.value);
     if (tip) tip.textContent = `已切换：${preset?.name ?? sel.value}（立即生效）`;
   } catch (e) {
@@ -2825,7 +2982,7 @@ function renderMarketRows() {
         </div>
         ${
           u
-            ? `<button class="btn small primary" data-update="${escapeHtml(p.id)}">更新到 ${escapeHtml(u.latest)}</button>`
+            ? `<button class="btn small primary" data-update="${escapeHtml(p.id)}" data-name="${escapeHtml(p.name || p.id)}" data-from="${escapeHtml(u.current)}" data-to="${escapeHtml(u.latest)}">更新到 ${escapeHtml(u.latest)}</button>`
             : p.installed
               ? '<span class="badge on">已安装</span>'
               : `<button class="btn small primary" data-install="${escapeHtml(p.id)}">安装</button>`
@@ -2848,7 +3005,12 @@ async function updateAllFromMarket() {
   let count = 0;
   let names = '';
   try {
-    const d = await api('/api/plugins/updates?force=1');
+    /**
+     * 不带 `force=1`：这份结果进页面时刚拉过一次，缓存里就是最新的。
+     * 强制刷新意味着再走一趟市场索引（秒级），而我们只是要个列表文案。
+     * 真要重查，后端在缓存过期时也会先返回旧值、后台刷新。
+     */
+    const d = await api('/api/plugins/updates');
     count = (d.updates || []).length;
     names = (d.updates || []).map((u) => `${u.name || u.id} ${u.current}→${u.latest}`).join('\n');
   } catch {
@@ -2880,27 +3042,30 @@ async function updateAllFromMarket() {
     }
     alert(lines.join('\n'));
     await loadPlugins();
-    if (!$('#marketBox').hidden) await loadMarket();
+    // 市场页开着才刷，关着就别白等一次索引
+    if ($('#marketBox') && !$('#marketBox').hidden) await loadMarket();
   } catch (e) {
     alert('更新失败: ' + e.message);
   }
 }
 
-/** 更新插件。会覆盖本地目录，必须先跟用户说清楚 */
+/**
+ * 更新插件。会覆盖本地目录，必须先跟用户说清楚。
+ *
+ * 版本号直接用按钮上带的（`applyUpdateMarks` 写的 `data-from` / `data-to`），
+ * **不再为了弹窗去 `updates?force=1` 查一次**：那一下要么整轮拉市场索引（秒级），
+ * 要么命中缓存白等。用户点完按钮几秒没反应，只会以为没点上。
+ */
 async function updateFromMarket(id, btn) {
-  let info = null;
-  try {
-    const d = await api('/api/plugins/updates?force=1');
-    info = (d.updates || []).find((u) => u.id === id) || null;
-  } catch {
-    /* 拿不到详情就用通用文案 */
-  }
+  const from = btn?.dataset?.from || '';
+  const to = btn?.dataset?.to || '';
+  const name = btn?.dataset?.name || id;
 
   const ok = await confirmDialog({
-    title: `更新插件「${info?.name || id}」`,
+    title: `更新插件「${name}」`,
     message:
       `将把 <b>${escapeHtml(id)}</b> 从 ` +
-      `<b>v${escapeHtml(info?.current || '?')}</b> 更新到 <b>v${escapeHtml(info?.latest || '?')}</b>。<br><br>` +
+      `<b>v${escapeHtml(from || '?')}</b> 更新到 <b>v${escapeHtml(to || '?')}</b>。<br><br>` +
       '<b>插件目录会被整体覆盖</b>——如果你手动改过这个插件的代码，改动会丢失。' +
       '玩家存档在 <code>data/</code> 下，不受影响。<br><br>' +
       '更新后会自动重载插件。',
@@ -2908,21 +3073,28 @@ async function updateFromMarket(id, btn) {
   });
   if (!ok) return;
 
-  btn.disabled = true;
-  btn.textContent = '更新中…';
+  // 下载 + 解包要好几秒，点了就先给反馈，别让界面一动不动
+  const label = btn?.textContent;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '更新中…';
+  }
   try {
     const r = await api('/api/market/update', {
       method: 'POST',
       body: JSON.stringify({ id }),
     });
-    btn.textContent = '已更新';
-    await loadMarket();
+    if (btn) btn.textContent = '已更新';
     await loadPlugins();
+    // 市场页开着才刷：它=又一次索引拉取，关着就是白等
+    if ($('#marketBox') && !$('#marketBox').hidden) await loadMarket();
     if (r.error) alert(r.error);
   } catch (e) {
     alert('更新失败: ' + e.message);
-    btn.disabled = false;
-    btn.textContent = '重试';
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = label || '重试';
+    }
   }
 }
 
@@ -2992,6 +3164,26 @@ $('#mirrorSelect')?.addEventListener('change', () => {
 });
 $('#mirrorCustom')?.addEventListener('change', saveMirror);
 $('#mirrorGiteeToken')?.addEventListener('change', saveMirror);
+
+/**
+ * 代理：选「自动 / 直连」立即保存；选「手动填写」只露出输入框，等填完再保存。
+ *
+ * **不能在这里调 syncProxy()**：它是「按已保存的设置回填下拉」，
+ * 用户刚选的值还没保存，调一下就把选择弹回去（实测：选「自动」瞬间跳回「手动」）。
+ */
+$('#proxySelect')?.addEventListener('change', (e) => {
+  const v = e.target.value;
+  const inp = $('#proxyCustom');
+  if (v === 'custom') {
+    if (inp) {
+      inp.hidden = false;
+      inp.focus?.();
+    }
+    return;
+  }
+  saveMirror();
+});
+$('#proxyCustom')?.addEventListener('change', saveMirror);
 $('#btnLoadMarket')?.addEventListener('click', () => {
   const box = $('#marketBox');
   if (box.hidden) loadMarket();
