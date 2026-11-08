@@ -813,6 +813,11 @@ export class BotRuntime {
             bot: this,
           });
         } catch (e) {
+          /** 事件监听器也算运行期错误；以前只有消息 listener 留痕，这里会静默丢。
+           *  发送侧的已知限制不是插件写错，别刷运行期错误卡。 */
+          if (!['offline', 'expired', 'quota', 'rate'].includes(e?.code)) {
+            this.plugins?.noteRuntimeError?.(l.pluginId, e);
+          }
           this.metrics.bump('errors');
           this.log.error(`监听器 ${l.pluginId} 处理 ${eventName} 出错:`, e.stack || e.message);
         }
@@ -1005,6 +1010,8 @@ export class BotRuntime {
             this.log.warn(`命令 ${commandEntry.name} 回复失败: ${e.message}`);
             return;
           }
+          /** 命令 handler 抛错也要在面板留痕（已知发送限制不记，免得刷屏） */
+          this.plugins?.noteRuntimeError?.(commandEntry.pluginId, e);
           this.log.error(
             `命令 ${commandEntry.name}（插件 ${commandEntry.pluginId}）执行出错:`,
             e.stack || e.message,
@@ -1060,6 +1067,11 @@ export class BotRuntime {
             if (ret === true) msg.claim();
             if (ret === true || msg.replied) handled = true;
           } catch (e) {
+            // 运行期错误也要留痕：以前只进日志，面板上看不出插件在反复抛错。
+            // 发送侧的已知限制不算插件异常，跟命令 handler 保持同一口径。
+            if (!['offline', 'expired', 'quota', 'rate'].includes(e?.code)) {
+              this.plugins?.noteRuntimeError?.(l.pluginId, e);
+            }
             this.metrics.bump('errors');
             this.log.error(`监听器 ${l.pluginId} 处理 ${evt} 出错:`, e.stack || e.message);
           }

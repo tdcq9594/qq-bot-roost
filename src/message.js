@@ -1061,6 +1061,8 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
         return await send({ ...payload, ...(rid ? { requestId: rid } : {}) }, true);
       } catch (e) {
         log.error(`replyAuto 发送失败(${plan.mode}):`, e.message);
+        /** 失败也要给诊断回调一个终态：只返回 null，调用方分不清「空内容」和「没发出去」 */
+        report({ mode: plan.mode, ok: false, reason: 'send-failed', error: e.message });
         return null;
       }
     }

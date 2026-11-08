@@ -704,6 +704,26 @@ function renderStatus(s) {
     (s.counters.ignored ?? 0);
   $('#c-err').textContent = `${s.counters.errors} / ${blocked}`;
 
+  /**
+   * E3：dry 出站截获。开着时不真发、只记下本来会发什么，点一下切换。
+   * 只影响本进程内建插件；外部子进程插件走 NDJSON，不经过 outbound。
+   */
+  const dryEl = $('#c-dry');
+  if (dryEl) {
+    const on = Boolean(s.dry?.on);
+    dryEl.textContent = on ? `开 · ${s.dry?.recent?.length ?? 0} 条` : '关';
+    dryEl.style.cursor = 'pointer';
+    dryEl.onclick = async () => {
+      try {
+        const r = await api('/api/dry', { method: 'POST', body: JSON.stringify({ on: !on }) });
+        if (r?.ok) toast(r.on ? 'dry 模式已开：消息不会真发' : 'dry 模式已关');
+        else toast(r?.error || '切换失败');
+      } catch {
+        toast('切换失败：连不上面板接口');
+      }
+    };
+  }
+
   $('#i-botid').textContent = s.botId || '-';
   $('#i-gw').textContent = s.gatewayUrl || '-';
   $('#i-session').textContent = shortId(s.sessionId);
@@ -2109,6 +2129,16 @@ async function loadPlugins() {
                 }</div>`
               : ''
           }
+          ${
+            (p.runtimeErrors && p.runtimeErrors.length)
+              ? `<div class="err"><div>运行期错误（最近 ${p.runtimeErrors.length} 条，插件加载成功但每轮抛错）：</div>
+                  ${p.runtimeErrors.slice().reverse().map((e) =>
+                    `<details class="err-stack"><summary>${escapeHtml(
+                      new Date(e.at).toLocaleString('zh-CN'),
+                    )} · ${escapeHtml(e.message)}</summary><pre>${escapeHtml(e.stack || '')}</pre></details>`,
+                  ).join('')}</div>`
+              : ''
+          }
           ${p.menuMissing ? '<div class="err">未提供指令菜单，用户看不到它能做什么</div>' : ''}
         </div>
         <span class="badge ${p.loaded ? 'on' : p.enabled ? '' : 'off'}">
@@ -3140,7 +3170,18 @@ function renderPPConfig() {
        <div class="pp-hint pp-presets-tip" hidden></div>`
     : '';
 
-  box.innerHTML = presetBar + keys
+  /**
+   * 两个面板分属两个进程：想调「接话策略」的人常常跑去 DSH 能力页，
+   * 想调「记不记得」的人又跑来这里（调研报告 §16.4-1）。各留一行指路。
+   * 认插件用 schema 里的 `decide`（ai-chat 独有）兜底，光比 id 在改名后会失效。
+   */
+  const isAiChat = PP.id === 'ai-chat' || Object.hasOwn(PP.schema || {}, 'decide');
+  const crossHint = isAiChat
+    ? '<div class="pp-hint">记忆、心情、主动搭话、扩展不在这里，在 DSH 侧栏「能力」页；'
+      + '这一页只管什么时候接话、防吵、冷却和合并。</div>'
+    : '';
+
+  box.innerHTML = crossHint + presetBar + keys
     .map((k) => {
       const s = PP.schema[k];
       const v = PP.config?.[k] ?? s.default;

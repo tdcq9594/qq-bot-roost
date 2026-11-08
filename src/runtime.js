@@ -7,6 +7,20 @@
 export const SENSITIVE_KEY = /^(auth_token|token|access_token|secret|client_secret|cookie|password)$/i;
 
 /**
+ * 文本级脱敏。抽出来给面板 `/api/plugins` 下发错误栈用：handler 抛出的
+ * `Error.stack` 里可能带请求 URL / token，原样回浏览器会泄密。
+ * 事件报文仍走下面的 `redact()`（对象递归），这里只管一段文本。
+ */
+export function redactText(value) {
+  return String(value ?? '')
+    .replace(/auth_token=[^&"\s]*/g, 'auth_token=***')
+    .replace(/msg_idx=[^&"\s]*/g, 'msg_idx=***')
+    .replace(/(Authorization["']?\s*[:=]\s*["']?)(?:Bearer\s+)?[A-Za-z0-9._~+/=-]{8,}/gi, '$1***')
+    .replace(/((?:token|access_token|password|secret|api[_-]?key|cookie)["']?\s*[:=]\s*["']?)([^\s"',;&]{4,})/gi, '$1***')
+    .slice(0, 400);
+}
+
+/**
  * 事件报文脱敏。
  * 群消息的 message_scene.ext 里带 auth_token，属于敏感凭证，
  * 不能进日志、更不能通过 /api/status 暴露出去。
@@ -27,6 +41,10 @@ function redact(value, depth = 0) {
     }
     return out;
   }
+  /**
+   * 事件报文沿用原来的窄规则，**不调用 redactText**：那会把 token=/Authorization
+   * 也抹掉、改变既有 sanitizePayload 输出。面板错误栈才走 redactText（见 server.js）。
+   */
   if (typeof value === 'string') {
     return value
       .replace(/auth_token=[^&"\s]*/g, 'auth_token=***')

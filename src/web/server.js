@@ -4,6 +4,7 @@ import fsSync from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { ROOT } from '../config.js';
+import { redactText } from '../runtime.js';
 import { DIRS, botPaths, listBotIds, rel } from '../paths.js';
 import { createLogger, recentLogs, onLog, getLevel, setLevel } from '../logger.js';
 import { EVENT_NAMES, INTENT_META, describeIntents, groupEvents } from '../events.js';
@@ -576,6 +577,14 @@ async function startWebServerInstance({
      * 面板上只显示截断的 openid，用户认不出是哪个群、哪个人。
      * 群名从 rt.groupNames 拿（异步拉的缓存），私聊对象从 recentPeople 拿。
      */
+    /**
+     * E3：dry 出站截获状态 + 最近 20 条（只读）。
+     * 只能截**本进程内建插件**的出站；外部子进程插件走 NDJSON，不经过 outbound。
+     */
+    snap.dry = rt?.outbound
+      ? { on: Boolean(rt.outbound.dry), recent: (rt.outbound.dryLog ?? []).slice(-20) }
+      : null;
+
     if (Array.isArray(snap.chats)) {
       const people = rt?.listRecentPeople?.(200) ?? [];
       snap.chats = snap.chats.map((c) => ({
@@ -1473,6 +1482,14 @@ async function startWebServerInstance({
           return json(res, 200, statusPayload(rt));
         }
 
+        /** E3：dry 出站截获开关（只影响本进程内建插件；不落盘，重启回默认） */
+        if (pathname === '/api/dry' && req.method === 'POST') {
+          const body = await readBody(req);
+          if (!rt?.outbound) return json(res, 200, { ok: false, error: '出站调度器还没起' });
+          const on = rt.outbound.setDry(body?.on === true);
+          return json(res, 200, { ok: true, on });
+        }
+
         // 配置读取（隐藏密钥）
         if (pathname === '/api/config' && req.method === 'GET') {
           const trust = resolveTrust(globalCfg);
@@ -1714,7 +1731,21 @@ async function startWebServerInstance({
 
         // 插件
         if (pathname === '/api/plugins' && req.method === 'GET') {
-          return json(res, 200, plugins.list());
+          /**
+           * E1：运行期错误的堆栈里可能带请求 URL / token，原样下发等于泄密。
+           * 只脱敏错误相关字段，其余（名称、版本、开关）一个字节不动。
+           */
+          const items = plugins.list().map((p) => ({
+            ...p,
+            error: p.error ? redactText(p.error) : p.error,
+            errorStack: p.errorStack ? redactText(p.errorStack) : p.errorStack,
+            runtimeErrors: (p.runtimeErrors || []).map((e) => ({
+              ...e,
+              message: redactText(e.message),
+              stack: redactText(e.stack),
+            })),
+          }));
+          return json(res, 200, items);
         }
 
         /**

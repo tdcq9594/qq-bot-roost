@@ -14,6 +14,8 @@ import { satisfies, frameworkVersion } from '../semver.js';
 import { PageRegistry } from './pages.js';
 import { RouteRegistry } from './routes.js';
 import { Declarations, normalizeManifest, checkEngines } from './manifest.js';
+import { pushRuntimeError } from './runtime-errors.js';
+import { makeSnapshot, pruneSnapshots } from './snapshot.js';
 
 const log = createLogger('plugins');
 
@@ -73,6 +75,12 @@ export class PluginManager {
      * 完全看不出是哪一行，插件作者只能靠猜。面板上展开就能看到调用栈。
      */
     this.errorStacks = new Map();
+    /**
+     * id -> 最近 8 条**运行期**错误。
+     * 加载期错误看 errorStacks；这里是「装得上、面板显示成功，但 handler 每轮抛错」，
+     * 以前一点痕迹都没有，用户只看到机器人不回话。
+     */
+    this.runtimeErrors = new Map();
     /**
      * id -> 插件自己的内存状态对象。
      *
@@ -336,12 +344,11 @@ export class PluginManager {
       /**
        * 「热重载只对入口生效」是个容易踩的坑，报错里点名说清楚。
        *
-       * 原因：上面只给 `index.js` 加了 `?t=` 绕缓存，它 import 的子模块
-       * （`outbound.js` 之类）还在 Node 的模块缓存里。改了子模块再触发重载，
-       * 拿到的就是「新入口 + 旧子模块」，典型表现是
-       * `does not provide an export named 'xxx'`。
-       *
-       * ESM 没有清缓存的 API，所以只能提示重启——但至少要让人知道为什么。
+       * 历史坑：早年只给 `index.js` 加 `?t=`，子模块（`outbound.js` 之类）
+       * 还在 Node 的模块缓存里，改了子模块再重载就成了「新入口 + 旧子模块」，
+       * 表现为 `does not provide an export named 'xxx'`。
+       * 现在 `#loadInternal` 用快照法整目录换路径加载，这个坑已消；
+       * 这条提示留作其他原因导致同名报错时的解释。
        */
       const msg = String(e?.message ?? '');
       if (/does not provide an export named/.test(msg)) {
@@ -416,9 +423,15 @@ export class PluginManager {
       });
     }
 
-    // 加时间戳绕过 ESM 缓存，实现热重载
-    const url = `${pathToFileURL(entryFile).href}?t=${Date.now()}`;
-    const mod = await import(url);
+    /**
+     * 快照法热重载：整目录复制到 `.roost-cache/<stamp>/` 再 import。
+     * ESM 按路径缓存，只给入口加 `?t=` 重不了子模块；换整条路径才会连带重载。
+     * 外部插件走 `#loadExternal`，stop/start 本来就是干净重载，不需要这一步。
+     * 先清旧快照再 import：即使这次 import 失败，下次也不会越积越多。
+     */
+    const snap = await makeSnapshot(dir, entryFile);
+    await pruneSnapshots(snap.snapRoot, snap.stamp);
+    const mod = await import(pathToFileURL(snap.entry).href);
     const meta = mod.default ?? mod.plugin;
     if (!meta || typeof meta.setup !== 'function') {
       throw new Error('默认导出必须是 { id, setup(ctx) } 形式的对象');
@@ -674,8 +687,18 @@ export class PluginManager {
     return true;
   }
 
+  /** 记一条插件 handler 的运行期异常（环形 8 条，面板可见）。 */
+  noteRuntimeError(id, err) {
+    if (!id) return;
+    const ring = this.runtimeErrors.get(id) ?? [];
+    pushRuntimeError(ring, err);
+    this.runtimeErrors.set(id, ring);
+  }
+
   async reload(id) {
     await this.unload(id);
+    /** 新实例是干净的：旧 handler 抛过的错别留在面板上冒充「还在报错」 */
+    this.runtimeErrors.delete(id);
     return this.load(id);
   }
 
@@ -695,6 +718,7 @@ export class PluginManager {
     }
     this.errors.delete(id);
     this.errorStacks.delete(id);
+    this.runtimeErrors.delete(id);
     this.stateStore.delete(id);
     this.meta.delete(id);
     this.diskIds.delete(id);
@@ -704,7 +728,14 @@ export class PluginManager {
   async setEnabled(id, enabled) {
     this.state[id] = enabled;
     await this.#writeState();
-    if (enabled) return this.load(id);
+    if (enabled) {
+      /**
+       * 已经加载的插件再点「启用」不能二次 load：会重复注册路由并抛错，
+       * load() 的 catch 反而把 loaded/routes 清掉，插件被自己卸了（审查实测 1→0）。
+       */
+      if (this.loaded.has(id)) return true;
+      return this.load(id);
+    }
     return this.unload(id);
   }
 
@@ -1015,6 +1046,7 @@ export class PluginManager {
         menuMissing: Boolean(item?.menuMissing),
         error: this.errors.get(id) ?? ext?.error ?? '',
         errorStack: this.errorStacks.get(id) ?? '',
+        runtimeErrors: (this.runtimeErrors.get(id) ?? []).slice(),
       };
     });
   }

@@ -59,6 +59,7 @@
     "c-cmd",
     "c-conn",
     "c-cred",
+    "c-dry",
     "c-err",
     "c-mem",
     "c-recv",
@@ -140,6 +141,7 @@
     "logSearch",
     "logSourceFilter",
     "logView",
+    "mainNav",
     "marketBox",
     "marketCat",
     "marketList",
@@ -156,6 +158,10 @@
     "modalMask",
     "modalOk",
     "modalTitle",
+    "navClose",
+    "navCrumb",
+    "navMore",
+    "navToggle",
     "nbAppId",
     "nbCancel",
     "nbErr",
@@ -458,8 +464,8 @@
     "panels": 14,
     "tables": 12,
     "modals": 4,
-    "controls": 147,
-    "apiCalls": 84
+    "controls": 152,
+    "apiCalls": 85
   },
   "requiredIds": [
     {
@@ -559,6 +565,6 @@
     "tabItemClass": true,
     "cspScriptSelf": true,
     "pageThemeMirror": true,
-    "serverHash": "fd546160eb1b6c45fb3509c0882877e6c7bbc7c1670c08a5050022cc7660cb69"
+    "serverHash": "dff6dde5ce5df6730adc5b031ac22661aeedfd6015db6654249b0541a65b1c42"
   }
 }

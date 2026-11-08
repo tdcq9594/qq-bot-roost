@@ -293,6 +293,13 @@ export class Outbound {
     this.dailyActive = Math.max(0, o.dailyActive ?? 1000);
     this.activePerMin = Math.max(0, o.activePerMinute ?? 20);
     this.downgrade = o.downgradeToActive !== false;
+    /**
+     * E3：dry 出站截获。开着时 `send()` 不真发，只记下本来会发什么。
+     * **只能截本进程内建插件的出站**：外部子进程插件走 NDJSON，不经过这里。
+     */
+    this.dry = Boolean(o.dryRun);
+    /** 最近 50 条「本来会发出去」的消息，面板只读展示 */
+    this.dryLog = [];
 
     /** msgId -> 已用被动回复次数。官方：同一条消息最多 5 次 */
     this.passiveCount = new Map();
@@ -315,6 +322,36 @@ export class Outbound {
       audit: 0, // 进入审核的主动消息
       offline: 0,
     };
+  }
+
+  /* ---------------- E3：dry 出站截获 ---------------- */
+
+  /** 面板开关。返回切换后的状态 */
+  setDry(on) {
+    this.dry = on === true;
+    if (!this.dry) this.dryLog.length = 0;
+    return this.dry;
+  }
+
+  #drySend(opts) {
+    const p = opts?.payload ?? {};
+    const text = String(p.markdown?.content ?? p.content ?? '');
+    const row = {
+      at: Date.now(),
+      kind: String(opts?.kind || ''),
+      target: String(opts?.target || ''),
+      /** 有 msgId / receivedAt 就是被动回复，否则是主动推送 */
+      passive: Boolean(p.msgId || opts?.receivedAt),
+      text: text.slice(0, 200),
+      files: Array.isArray(p.files) ? p.files.length : 0,
+      keyboard: Boolean(p.keyboard),
+    };
+    this.dryLog.push(row);
+    if (this.dryLog.length > 50) this.dryLog.shift();
+    this.stats.dry = (this.stats.dry || 0) + 1;
+    log.info(`[dry] ${row.kind} ${row.target}：${row.text.slice(0, 40)}`);
+    /** 形状和真实发送一致，调用方不用分叉；`dry:true` 让它知道没真发 */
+    return { ok: true, dry: true, id: '', pending: false };
   }
 
   /* ---------------- 对外主入口 ---------------- */
@@ -340,6 +377,8 @@ export class Outbound {
    * 账本是**增强**不是主链路：`claim` 失败一律退回「照发」，不能让记账把消息堵死。
    */
   async send(opts) {
+    /** E3：dry 模式在**最顶层**截住，连投递账本和限速都不进——它本来就没发 */
+    if (this.dry) return this.#drySend(opts);
     const requestId = String(opts?.requestId ?? '').trim();
     if (!requestId || !this.delivery) {
       /**

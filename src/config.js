@@ -234,6 +234,12 @@ const BOT_DEFAULTS = {
     dailyActive: 1000,
     activePerMinute: 20,
     downgradeToActive: true,
+    /**
+     * E3：dry 出站截获。开着时**不真发**，只记下「本来会发什么」，
+     * 面板「概览」页可以看最近 50 条。默认关。
+     * 只能截到**本进程内建插件**的出站；外部子进程插件（NDJSON）不经过这里。
+     */
+    dryRun: false,
   },
 
   session: {
