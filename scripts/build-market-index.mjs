@@ -56,19 +56,28 @@ async function readInternal(file) {
   }
 }
 
-/** 外部插件：读 plugin.json */
+/**
+ * 外部条目：读 plugin.json。
+ *
+ * 这里和插件仓 `scripts/build-index.mjs` 的 `readMeta` 必须**同一套规则**：
+ * 两份脚本都能生成索引，规则不一致就会出现「仓库脚本生成的索引 47 与框架脚本
+ * 生成的不一样」这种最难查的偏差。
+ */
 async function readExternal(file) {
   try {
     const raw = JSON.parse(await fs.readFile(file, 'utf8'));
     if (!raw.id) return null;
+    /** `kind:'dsh-extension'` = DSH 扩展（MCP server），不是框架插件，见 build-index.mjs 的注释。 */
+    const isExt = raw.kind === 'dsh-extension';
     return {
       id: raw.id,
       name: raw.name ?? raw.id,
-      version: raw.version ?? '0.0.0',
+      /** 扩展没有 version 契约（更新看 sha256），不要凭空填 '0.0.0' 与插件仓不一致。 */
+      version: isExt ? '' : (raw.version ?? '0.0.0'),
       description: raw.shortDesc ?? raw.description ?? '',
       tags: raw.tags ?? [],
       frameworkVersion: raw.frameworkVersion ?? '',
-      runtime: raw.runtime ?? 'python',
+      ...(isExt ? { kind: 'dsh-extension', runtime: 'mcp' } : { runtime: raw.runtime ?? 'python' }),
     };
   } catch (e) {
     console.warn(`  跳过 ${path.basename(path.dirname(file))}：plugin.json 解析失败（${e.message}）`);
@@ -183,15 +192,23 @@ async function main() {
    * 以前的写法是整份覆盖，结果一次「更新索引」就把 tags 清空、
    * 把描述里的补充说明抹掉，看起来像升级，实际是数据丢失。
    */
-  const STRUCT_FIELDS = ['id', 'version', 'path', 'runtime', 'sha256', 'frameworkVersion'];
+  /** 与插件仓 `scripts/build-index.mjs` 的 `STRUCT_FIELDS` 保持一致（kind 决定下游怎么处理）。 */
+  const STRUCT_FIELDS = ['id', 'version', 'path', 'runtime', 'sha256', 'frameworkVersion', 'kind'];
 
   const merged = plugins.map((p) => {
     const old = prevById.get(p.id);
-    if (!old) return p; // 新插件：全量写入
-    const out = { ...old };
-    for (const k of STRUCT_FIELDS) {
-      if (p[k] !== undefined && p[k] !== '') out[k] = p[k];
+    const out = old ? { ...old } : { ...p }; // 新条目：全量写入
+    if (old) {
+      for (const k of STRUCT_FIELDS) {
+        if (p[k] !== undefined && p[k] !== '') out[k] = p[k];
+      }
     }
+    /**
+     * 清空判据看**磁盘实读的 `p`**，不是合并结果 `out`：
+     * `out` 是 `{...old}`，旧值还在，`if (!out.kind)` 恒假（上一版就错在这里）。
+     */
+    if (p.kind === undefined) delete out.kind;
+    if (!p.version) delete out.version;
     return out;
   });
 
@@ -209,7 +226,7 @@ async function main() {
   console.log(`\n已生成 ${target}`);
   console.log(`  ${merged.length} 个插件${out.repo ? `，repo=${out.repo}` : '（没有 repo，安装会失败）'}`);
   for (const p of merged) {
-    console.log(`  - ${p.id} v${p.version}（${p.runtime}）${p.sha256 ? '' : '  ⚠ 无 sha256'}`);
+    console.log(`  - ${p.id}${p.version ? ` v${p.version}` : ''}（${p.runtime}）${p.sha256 ? '' : '  ⚠ 无 sha256'}`);
   }
 }
 

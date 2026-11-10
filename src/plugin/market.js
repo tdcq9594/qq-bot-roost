@@ -485,8 +485,25 @@ async function downloadRepoContents({
   }
 }
 
+/**
+ * 索引里的 **DSH 扩展**条目。
+ *
+ * 扩展与框架插件共用 `index.json` / `plugin.json`，但运行形态完全不同：扩展是
+ * 标准 MCP server，由 DSH 按受管块 spawn，没有 `index.js`、没有 version 契约，
+ * 装在 `~/.dsh/dsh-roost/extensions/`，由 dsh-roost 自己的安装器管。
+ *
+ * 框架侧（这里）必须跳过它：装进 `plugins/` 后 loader 会按不认识的 runtime 处理，
+ * 旧逻辑还会回落成 `python` 去拉一个不存在的子进程，表现是「装上了但一点反应都没有」。
+ */
+export function isExtensionEntry(entry) {
+  return entry?.kind === 'dsh-extension';
+}
+
 export async function installPlugin({ entry, pluginsDir, repo, branch = 'main', exists, sha256 = null }) {
   const id = String(entry?.id ?? '').trim();
+  if (isExtensionEntry(entry)) {
+    throw new Error(`「${id}」是 DSH 扩展，不归框架插件市场；请在 dsh-roost 面板的「设置 → 扩展」里安装`);
+  }
   if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(id)) throw new Error(`插件 id 不合法：${id}`);
   if (!entry?.path) throw new Error('索引里缺少 path 字段');
   if (!repo) throw new Error('索引里缺少 repo 字段');
@@ -586,6 +603,7 @@ export { compareVersion } from '../semver.js';
 export function detectUpdates(indexPlugins, localVersions = {}) {
   const out = [];
   for (const entry of indexPlugins ?? []) {
+    if (isExtensionEntry(entry)) continue; // 扩展按目录哈希由 dsh-roost 更新
     const cur = localVersions[entry.id];
     // 没装、或本地版本号缺失/不合法 → 不提示，让用户自己决定
     if (!cur) continue;
@@ -684,6 +702,7 @@ export async function updatePlugins({ tmp, index, pluginsDir, ids, localVersions
   const result = { updated: [], skipped: [], failed: [] };
 
   for (const entry of index.plugins ?? []) {
+    if (isExtensionEntry(entry)) { result.skipped.push({ id: entry.id, reason: 'DSH 扩展，不归框架市场更新' }); continue; }
     if (want && !want.has(entry.id)) continue;
 
     const dest = path.join(pluginsDir, entry.id);

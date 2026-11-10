@@ -512,6 +512,14 @@ export class PluginManager {
 
   async #loadExternal(id, dir) {
     const raw = JSON.parse(await fs.readFile(path.join(dir, 'plugin.json'), 'utf8'));
+    /**
+     * DSH 扩展不归框架加载。它们没有 `index.js`、runtime 是 mcp，旧逻辑会回落成
+     * python 去拉一个不存在的子进程。明确跳过并留一句可查的 warn，比静默失败好。
+     */
+    if (raw?.kind === 'dsh-extension') {
+      log.warn(`目录 ${id} 是 DSH 扩展（kind=dsh-extension），不归框架插件加载；请用 dsh-roost 面板安装`);
+      return false;
+    }
     if (raw.id && raw.id !== id) {
       log.warn(`插件目录 ${id} 的 plugin.json 声明 id 为 ${raw.id}，与目录名不一致，以目录名为准`);
     }
@@ -796,6 +804,7 @@ export class PluginManager {
     // 外部插件：plugin.json 就是元信息
     try {
       const raw = JSON.parse(await fs.readFile(path.join(dir, 'plugin.json'), 'utf8'));
+      if (raw?.kind === 'dsh-extension') return; // 扩展不进框架插件列表
       this.#cacheMeta(id, raw, 'external', raw.runtime || 'python');
       return;
     } catch {
