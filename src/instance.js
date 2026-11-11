@@ -1,5 +1,5 @@
 import fs from 'node:fs/promises';
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync, readlinkSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -156,6 +156,37 @@ function looksLikeNodeRuntime(name) {
 }
 
 /**
+ * 纯函数：`/proc/<pid>` 的三处内容里，有没有证据表明它是 node 运行时。
+ *
+ * **为什么不能只看 `comm`**：Node 24 起会把主线程名设成 `MainThread`，
+ * `/proc/<pid>/comm` 读出来就是这四个字，不再含 `node`。只认 comm 会把一个
+ * **活着的**实例判成陈旧记录 → 删锁 → 放行第二次认领 → 同 AppID 双开 →
+ * 4902 互踢。CI 的 `ubuntu-latest / Node 24.x` 就是从这条断言红起的。
+ *
+ * 判定顺序（与文件头「拿不准往活着倒」一致）：
+ *   · `comm` 读不到（空串）→ 活（无法确认就不否定）
+ *   · comm / cmdline / exe 任一提及 node → 活
+ *   · **另两项一个都没读到**（传 `null`）→ 活
+ *   · 至少读到一项、且都没提 node → 死（这才真的是 PID 被别的程序复用）
+ *
+ * 倒数第二条是**跨用户 / 加固内核**的保命线：`/proc/<pid>/exe` 要 ptrace 权限，
+ * 读别人的进程会 EACCES；`cmdline` 在非 dumpable 进程上也可能读不到。
+ * 若这时只拿 comm 下结论，一个 `MainThread` 的活实例就会被判死——又绕回互踢。
+ * 「读不到」和「读到了但没有 node」必须分开，所以这里用 `null` 表示前者。
+ *
+ * 拆成纯函数是为了能在**任意平台**单测：真机上只有跑在对应系统上才能观测到
+ * `/proc` 的内容，而这段逻辑恰恰是跨平台行为分叉的地方。
+ */
+function looksLikeNodeProc({ comm = '', cmdline = null, exe = null } = {}) {
+  if (!comm) return true;
+  if (/node/i.test(comm)) return true;
+  if (cmdline && /node/i.test(cmdline)) return true;
+  if (exe && /node/i.test(exe)) return true;
+  if (cmdline === null && exe === null) return true;
+  return false;
+}
+
+/**
  * 这个 pid 现在是不是一个 node 进程。
  *
  * 光看「pid 存不存在」不够：Windows 会把回收的 PID 复用给别的程序。
@@ -193,15 +224,16 @@ function pidLooksLikeNode(pid) {
     if (process.platform === 'linux') {
       const comm = readFileSync(`/proc/${pid}/comm`, 'utf8').trim();
       /**
-       * 读到空字符串时**按活着算**，不是按死了算。
-       *
-       * 判断不出来的方向要选保守的那个：当成死 → 删记录 → 放行第二次认领
-       * → 同一个 AppID 双开 → 4902 互踢，正是这套机制存在的理由。
-       * 当成活 → 顶多让用户手动清一条残留记录（有 `--force`）。
-       *
-       * 真实的误判代价不对称，所以拿不准就往"活着"倒。
+       * Node 24 起主线程被改名成 `MainThread`，`comm` 不再含 `node`，
+       * 所以再核对 `cmdline`（完整命令行）与 `exe`（可执行文件链接）。
+       * **读不到的项传 `null`**（不是空串）：纯函数要区分「这一项没证据」和
+       * 「这一项读不到」，后者在跨用户 / 加固内核下很常见，不能单独导致判死。
        */
-      return comm ? /node/i.test(comm) : true;
+      let cmdline = null;
+      let exe = null;
+      try { cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' '); } catch { /* 读不到就看下一项 */ }
+      try { exe = readlinkSync(`/proc/${pid}/exe`); } catch { /* 权限或已退出 */ }
+      return looksLikeNodeProc({ comm, cmdline, exe });
     }
     const comm = execFileSync('ps', ['-p', String(pid), '-o', 'comm='], {
       encoding: 'utf8',
@@ -592,6 +624,16 @@ export const _STALE_MS = STALE_MS;
 /** 测试用：只看 pid 存不存在（不带进程名判据） */
 export function _pidExists(pid) {
   return pidExists(pid);
+}
+
+/**
+ * 测试用：`/proc/<pid>` 三处证据的合并判据。
+ *
+ * 这条逻辑跨平台分叉，真机上只有跑在对应系统才观测得到 `/proc` 的内容，
+ * 所以在 CI 里用表驱动直接喂 comm / cmdline / exe（见 `test/instance-proc.mjs`）。
+ */
+export function _looksLikeNodeProc(parts) {
+  return looksLikeNodeProc(parts);
 }
 
 /** 测试用：直接跑剪枝，便于构造「停跳租约 + 不像 node 的进程名」边界 */
