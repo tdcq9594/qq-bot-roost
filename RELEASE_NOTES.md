@@ -2,6 +2,27 @@
 
 ---
 
+## v1.0.14：插件市场认得「扩展」，实例锁不再被 Node 24 骗过
+
+### 市场索引分叉出「扩展」这一类
+
+扩展（给 DSH 用的 MCP server）和框架插件共用一份 `index.json` / `plugin.json`，但**框架这边不该装它**：扩展装在 `~/.dsh/dsh-roost/extensions/`，由 DSH 按受管块拉起。旧逻辑读到没有 `runtime` 的条目会缺省成 `python`，于是去拉一个不存在的子进程——表现就是「装上了，但一点反应都没有」，日志里也看不出所以然。
+
+- 索引条目现在可以带 `kind: "dsh-extension"`：解析时**显式**给 `runtime: "mcp"`，不再回落到 `python`；扩展也没有 `version` 契约，更新走内容指纹 `sha256`。
+- 框架侧三处收紧：`isExtensionEntry()` 单点判定；`installPlugin` **在下载之前**就明确拒绝（不是下完才发现不该装）；`detectUpdates` / `updatePlugins` 不把扩展当可更新插件，记成 `skipped` 且不去解析目录。
+- `loader.js` 两处外部插件入口都认 `kind`：目录里残留的扩展不会被当成坏插件塞进加载队列报错。
+- `test/market-kind.mjs` 覆盖上面四件事，另加一条源码级守卫（`loader.js` 的两处入口都必须认 `kind`，漏一处就红）。
+
+### 实例锁：Node 24 把主线程名改成了 `MainThread`
+
+CI 的 `ubuntu-latest / Node 24.x` 红在「同 AppID 已有活实例时拒绝启动」。这不是环境噪音，是真 bug，而且后果比一条红断言严重：**活着的实例被判成陈旧记录 → 锁被删 → 放行第二次认领 → 同一个 AppID 双开 → 4902 互踢**。
+
+- 根因：判活靠「`/proc/<pid>/comm` 里有没有 `node`」，而 Node 24 起主线程名是 `MainThread`，读出来一个字都不沾 `node`。
+- 修法：除了 `comm`，再核对 `cmdline`（完整命令行）与 `exe`（可执行文件链接），任一提及 `node` 就算活。判定抽成纯函数 `looksLikeNodeProc()`，才能在没有 `/proc` 的平台上单测——这段逻辑恰恰是跨平台分叉的地方。
+- **「读不到」和「读到了但没有 node」必须分开**：`/proc/<pid>/exe` 要 ptrace 权限，读别人的进程会 `EACCES`；`cmdline` 在非 dumpable 进程上也读不到。这时若只剩 `comm` 可看还按 `comm` 下结论，一个 `MainThread` 的活实例又会被判死——所以读不到传 `null`，另两项都读不到时按「拿不准往活着倒」处理。
+- `test/instance-proc.mjs` 9 条：`cmdline` 单独命中、`exe` 单独命中、两项都读不到、`comm` 为空、真 PID 复用（该判死）、大小写，外加接线守卫（linux 分支必须真读三处并把三项都传进去，正则带调用形式，注释满足不了）。
+- 自检项 682、`node --test` 231、端到端 245——共 **913** 项，全绿。
+
 ## v1.0.13：插件页秒开、下载走系统代理
 
 ### 插件管理页不再白屏
