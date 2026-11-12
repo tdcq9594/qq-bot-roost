@@ -109,7 +109,8 @@ export function createHostServer({
     if (req.method === 'GET' && url.pathname === '/') {
       return sendJson(res, 200, {
         app: 'roost-host', protocol: 1, ok: true,
-        endpoints: ['POST /rpc', 'GET /events', 'GET /ws', 'GET /health'],
+        endpoints: ['POST /rpc', 'GET /events', 'GET /health']
+          .concat(wss ? ['GET /ws'] : []),
       });
     }
 
@@ -181,8 +182,29 @@ export function createHostServer({
     sendJson(res, 404, { ok: false, error: { code: 'NOT_FOUND', message: '没有这个端点' } });
   });
 
-  /* ---------------- WebSocket ---------------- */
+  /* ---------------- WebSocket（可选） ---------------- */
   let wss = null;
+  /**
+   * 没有 `ws` 时**明确拒绝** upgrade，而不是什么都不挂。
+   *
+   * 不挂 handler 时 Node 会直接把 socket 丢掉，客户端只看到「连接被关闭」，
+   * 完全不知道原因（是没装依赖？token 错？端口错？）。这里回一条 426 并
+   * 指明改用 `/events`，让排障有据可依。
+   */
+  if (!wsMod?.WebSocketServer) {
+    server.on('upgrade', (_req, socket) => {
+      try {
+        socket.write(
+          'HTTP/1.1 426 Upgrade Required\r\n'
+          + 'Connection: close\r\n'
+          + 'Content-Type: text/plain; charset=utf-8\r\n'
+          + '\r\n'
+          + '这台 Roost 没装 ws 依赖，/ws 不可用；请改用 POST /rpc + GET /events（SSE）。\n',
+        );
+      } catch { /* socket 可能已断 */ }
+      socket.destroy();
+    });
+  }
   if (wsMod?.WebSocketServer) {
     wss = new wsMod.WebSocketServer({ noServer: true, maxPayload: MAX_PAYLOAD, perMessageDeflate: false });
     server.on('upgrade', (req, socket, head) => {

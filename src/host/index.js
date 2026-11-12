@@ -11,8 +11,11 @@
  *   onEvent(name, d)       非消息事件
  *   snapshot()/capability() 面板用
  *
- * 缺 `ws` 时 state = 'missing-deps' 且不监听。用户从 tar 包升级、没跑过
- * npm install 也不会因此起不来——这条是 2026-11-12 定下的兼容底线。
+ * **`ws` 是可选依赖**：协议有两条等价通道——`GET /ws`（双向帧）和
+ * `GET /events`（SSE，只推）+ `POST /rpc`。只读 SSE 的客户端（例如
+ * dsh-roost，它坚持零依赖、用 Node 自带 fetch 读 SSE）**完全不需要 ws**。
+ * 所以缺 ws 时照样监听，只是不开 `/ws`；`snapshot().transports` 会如实说明。
+ * 用户从 tar 包升级、没跑过 npm install 也不会因此起不来。
  */
 
 import crypto from 'node:crypto';
@@ -112,6 +115,8 @@ export class HostBridge {
   async #startNow() {
     await this.#stopNow();
     this.error = '';
+    /** 每轮重置：上一轮有 ws 不代表这一轮还加载得到 */
+    this.wsMissing = true;
     this.scopes = effectiveScopes(this.cfg);
 
     if (!this.cfg.enabled) {
@@ -119,21 +124,10 @@ export class HostBridge {
       return this;
     }
 
-    /** `ws` 是可选依赖：和 OneBot 兼容层共用同一份按需安装 */
-    let st;
-    try {
-      st = await deps.status();
-    } catch (e) {
-      st = null;
-      log.warn(`读依赖状态失败：${e.message}`);
-    }
-    if (!st?.packages?.ws?.resolvable) {
-      this.state = 'missing-deps';
-      this.error = '缺依赖 ws：到面板「外接 → 依赖」点『一键安装』';
-      log.info(`宿主协议未就绪：${this.error}`);
-      return this;
-    }
-
+    /**
+     * `ws` 是**可选**依赖（和 OneBot 兼容层共用同一份按需安装）。
+     * 缺了不影响 HTTP / SSE 通道，只是没有 `/ws`——所以这里不拦启动。
+     */
     /** 空 token 拒绝监听：不监听比「不校验」安全得多 */
     if (!String(this.cfg.token ?? '').trim()) {
       this.state = 'error';
@@ -149,12 +143,15 @@ export class HostBridge {
       return this;
     }
 
-    const wsMod = await deps.load('ws');
-    if (!wsMod?.WebSocketServer) {
-      this.state = 'missing-deps';
-      this.error = 'ws 加载失败（面板「外接」页可重装）';
-      return this;
+    let wsMod = null;
+    try {
+      const m = await deps.load('ws');
+      if (m?.WebSocketServer) wsMod = m;
+    } catch (e) {
+      log.warn(`ws 加载失败，只开 HTTP + SSE：${e.message}`);
     }
+    /** 没 ws 也要记住原因，面板据此显示「只有 SSE」而不是「坏了」 */
+    this.wsMissing = !wsMod;
 
     await this.#version();
     /** 端口写在构造参数里，被占只能重建实例；每次只建一个，别让失败的实例堆着计时器 */
@@ -363,6 +360,11 @@ export class HostBridge {
     return {
       state: this.state,
       error: this.error,
+      /**
+       * 实际开出来的通道。`ws:false` 只表示没有双向帧，
+       * `/rpc` + `/events` 仍在——客户端不该据此判定「协议不可用」。
+       */
+      transports: { http: true, sse: true, ws: Boolean(this.wsMissing === false) },
       host: this.cfg.host || '127.0.0.1',
       port: this.port || 0,
       connections: this.server?.connections ?? 0,

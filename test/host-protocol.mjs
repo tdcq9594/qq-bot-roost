@@ -797,10 +797,11 @@ test('HostBridge 端到端：start → 原生消息旁路推送 → RPC → stop
   assert.equal(bridge.port, 0);
 });
 
-test('缺 token 时拒绝监听，不让空 token 变成后门', {
-  /** deps 校验排在 token 前面：没装 ws 时先报 missing-deps，走不到这条分支 */
-  skip: !wsMod && '需要 ws 就绪才能走到 token 校验',
-}, async (t) => {
+test('缺 token 时拒绝监听，不让空 token 变成后门', async (t) => {
+  /**
+   * ws 缺失**不再**挡在 token 校验前面：缺 ws 只是没有 `/ws`，
+   * HTTP + SSE 照常开，所以这条校验在任何环境下都该跑到。
+   */
   const bridge = new HostBridge({
     runtime: makeRuntime(),
     cfg: { enabled: true, token: '', host: '127.0.0.1', port: 0 },
