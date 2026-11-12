@@ -2476,15 +2476,24 @@ async function startWebServerInstance({
         if (pathname === '/api/host' && req.method === 'GET') {
           const st = await onebotDeps.status();
           const c = rt?.cfg?.host ?? {};
-          const peer = String(req.socket?.remoteAddress ?? '');
-          const local = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(peer);
           return json(res, 200, {
             cfg: {
               enabled: Boolean(c.enabled),
               host: c.host ?? '127.0.0.1',
               port: Number(c.port) || 0,
+              /**
+               * **只报「有没有」，不报明文。**
+               *
+               * 以前这里对本机请求会把 token 原样回出去（`local ? c.token : ''`）。
+               * 问题是：面板没设 `accessKey` 时 `authorized()` 无条件放行，
+               * 于是**本机任何进程**一条 GET 就能把这个 token 抄走——而它足以
+               * 以机器人身份在群里说话。
+               *
+               * token 是可复制的 bearer 凭证，「本机管理权限」不该降维成它。
+               * 现在明文只在两种时刻出现：面板上手填时、`PUT ... token:'auto'`
+               * 生成的那一刻（一次性回传，见下）。
+               */
               tokenSet: Boolean(c.token),
-              token: local ? String(c.token ?? '') : '',
               scopes: Array.isArray(c.scopes) ? c.scopes : ['read', 'message'],
               allowManage: Boolean(c.allowManage),
               forwardAll: c.forwardAll !== false,
@@ -2506,11 +2515,25 @@ async function startWebServerInstance({
           if (!rt) return json(res, 400, { error: '还没有机器人' });
           const body = await readBody(req);
           const c = (rt.cfg.host ??= {});
+          /** 本次若由服务端生成 token，这里存着，响应里一次性回传 */
+          let issuedToken = '';
 
           if (body.token !== undefined) {
             const t = String(body.token ?? '').trim();
             // 空串 = 不改；null = 清除（同时必须关监听，空 token 不能留着 enabled）
-            if (t) {
+            if (t === 'auto') {
+              /**
+               * **服务端生成**，明文只在本次响应里出现一次。
+               *
+               * 为什么需要这条路：`GET /api/host` 已经不回传明文了（那是个
+               * 本机任意进程可读的口子），但第一次配对总得有人知道 token。
+               * 让服务端生成、只回传一次，就把「随时可读」缩成「配对那一瞬间」。
+               *
+               * 生成规则和客户端那边保持一致：UUID 去横线 = 32 位十六进制。
+               */
+              c.token = crypto.randomUUID().replace(/-/g, '');
+              issuedToken = c.token;
+            } else if (t) {
               if (t.length < 16) return json(res, 400, { error: 'token 至少 16 个字符' });
               c.token = t;
             } else if (body.token === null) {
@@ -2584,6 +2607,13 @@ async function startWebServerInstance({
             ok: true,
             ...(warning ? { warning } : {}),
             state: rt.host?.snapshot?.() ?? null,
+            /**
+             * **只在这次是服务端生成的时候才回传明文。**
+             *
+             * 客户端存下之后，`GET /api/host` 再也拿不到它——真要重拿只能
+             * 再生成一个（rotate），旧的立刻失效。
+             */
+            ...(issuedToken ? { token: issuedToken } : {}),
           });
         }
 
@@ -2603,23 +2633,23 @@ async function startWebServerInstance({
           const st = await onebotDeps.status();
           const c = rt?.cfg?.onebot ?? {};
           const ready = st.required.every((n) => st.packages[n]?.resolvable);
-          /**
-           * token 只对**真正从回环发起的连接**回明文。
-           *
-           * 不能用 `clientIp()`：它是给限速用的，开了 trustProxy 会读
-           * `X-Forwarded-For`，反代没配好时恒为 127.0.0.1——那等于公网
-           * 打开面板就能拿到明文 token。这里只信 TCP 对端地址。
-           */
-          const peer = String(req.socket?.remoteAddress ?? '');
-          const local = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(peer);
           return json(res, 200, {
             cfg: {
               enabled: Boolean(c.enabled),
               host: c.host ?? '127.0.0.1',
               port: Number(c.port) || 0,
+              /**
+               * **只报「有没有设置」，不回传明文**（和 `/api/host` 同一口径）。
+               *
+               * 以前这里对回环请求会回明文，理由写的是「好让用户复制到客户端」。
+               * 但面板没设 `accessKey` 时 `authorized()` 是无条件放行的，
+               * 于是**本机任何进程**一条 GET 就能抄走这个 token——它足以往
+               * OneBot 客户端那边冒充框架。token 是可复制的 bearer 凭证，
+               * 「本机管理权限」不该降维成它。
+               *
+               * 要复制给别人就点「生成」换一个新的，旧的立刻失效。
+               */
               tokenSet: Boolean(c.token),
-              /** 仅本机：给明文好让用户复制到客户端 */
-              token: local ? String(c.token ?? '') : '',
               selfUin: c.selfUin ?? '',
               mode: c.mode ?? 'exclusive',
               forwardAll: c.forwardAll !== false,

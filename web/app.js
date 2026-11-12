@@ -4347,15 +4347,16 @@ function renderHost(d) {
     el.placeholder = auto ? `自动（当前 ${st.port || '未监听'}）` : '端口（留空=自动）';
   });
   set('#hostMaxConnections', (el) => { el.value = String(Number(cfg.maxConnections) || 4); });
+  /** 后端不回显明文，输入框恒为空：「留空=不改」 */
   set('#hostToken', (el) => {
-    el.value = cfg.token ?? '';
+    el.value = '';
     el.type = 'password';
     el.placeholder = cfg.tokenSet
       ? 'access token（已设置，留空=不改）'
       : 'access token（至少 16 位）';
   });
-  set('#btnHostRevealToken', (el) => { el.textContent = '显示'; });
-
+  // 保存/切页签后重新渲染：明文没了，复制按钮必须跟着消失（程序赋值不触发 input 事件）
+  syncTokenCopy('#hostToken', '#btnHostCopyToken');
   const scopes = Array.isArray(cfg.scopes) ? cfg.scopes : [];
   set('#hostScopeMessage', (el) => { el.checked = scopes.includes('message'); });
   set('#hostForwardAll', (el) => { el.checked = cfg.forwardAll !== false; });
@@ -4393,8 +4394,12 @@ function renderHost(d) {
         row('WebSocket', `ws://${h}:${st.port}/`) +
         row('HTTP RPC', `${base}/rpc`) +
         row('事件流', `${base}/events`) +
-        '<div class="hint" style="margin-top:6px">令牌填上面输入框里那个（点「复制」）' +
-        '——<b>不要拼进地址</b>，用 Authorization 头或 access_token 参数</div>' +
+        (cfg.tokenSet
+          ? '<div class="hint" style="margin-top:6px">令牌<b>已设置、不回显</b>'
+            + '（避免本机任意进程一条 GET 就抄走）：要给新客户端配就点「生成」，'
+            + '生成时会出现「复制」按钮，保存后自动消失；旧的保存后立即失效。'
+            + '<b>不要拼进地址</b>，用 Authorization 头或 access_token 参数</div>'
+          : '<div class="hint" style="margin-top:6px"><b>还没设 token</b>：客户端会被拒。点「生成」</div>') +
         `<div class="hint" style="margin-top:6px">生效权限：${escapeHtml(granted)}` +
         `　缓冲 ${Number(st.buffered ?? 0)} 条` +
         `　调用 成功 ${Number(st.actions?.ok ?? 0)} / 失败 ${Number(st.actions?.fail ?? 0)}</div>` +
@@ -4457,17 +4462,19 @@ function renderOnebot(d) {
   if ($('#onebotMode')) $('#onebotMode').value = cfg.mode ?? 'exclusive';
   if ($('#onebotToken')) {
     /**
-     * 本机访问时后端会给明文（要能复制到客户端），非本机只给「设过没有」。
-     * 有明文就回填成掩码显示，用户点「显示」才看得见。
+     * **不回显**：后端只给「设过没有」（`tokenSet`）。
+     *
+     * 以前本机请求会给明文（为了复制到客户端），但面板没设 `accessKey` 时
+     * 本机任何进程一条 GET 都能抄走它——那等于把「管理权限」降维成一个
+     * 可复制的凭证。要复制给客户端就点「生成」换一个新的，旧的立刻失效。
      */
-    $('#onebotToken').value = cfg.token ?? '';
+    $('#onebotToken').value = '';
     $('#onebotToken').type = 'password';
     $('#onebotToken').placeholder = cfg.tokenSet
       ? 'access token（已设置，留空=不改）'
       : 'access token（至少 16 位）';
-    const reveal = $('#btnOnebotRevealToken');
-    if (reveal) reveal.textContent = '显示';
   }
+  syncTokenCopy('#onebotToken', '#btnOnebotCopyToken');
 
   /* ---------- 状态 ---------- */
   const stateHint = $('#onebotStateHint');
@@ -4496,11 +4503,10 @@ function renderOnebot(d) {
        *
        * 客户端（aurobot / NoneBot）都有独立的「令牌」输入框，令牌塞进 URL 会
        * 被截屏、被复制到聊天里、被日志记下来，泄漏面反而更大。
-       * 这里只给干净的地址；令牌用上面那个输入框的「复制」。
+       * 这里只给干净的地址；token 本身**不回显**（见下面），要用就点「生成」换一个。
        */
       const wsUrl = `ws://${host}:${st.port}/`;
       const httpUrl = `http://${host}:${st.port}`;
-      const token = String(cfg.token ?? '');
       const row = (label, value) => `
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">
           <span class="hint" style="min-width:74px">${label}</span>
@@ -4511,9 +4517,10 @@ function renderOnebot(d) {
       connHint.innerHTML =
         row('WebSocket', wsUrl) +
         row('HTTP', httpUrl) +
-        (token
-          ? '<div class="hint" style="margin-top:6px">令牌填上面输入框里那个（点「复制」）——<b>不要拼进地址</b>，客户端都有单独的令牌字段</div>'
-          : '<div class="hint" style="margin-top:6px"><b>还没设 token</b>：客户端会被拒</div>') +
+        (cfg.tokenSet
+          ? '<div class="hint" style="margin-top:6px">令牌<b>已设置、不回显</b>（避免本机任意进程一条 GET 就抄走）：'
+            + '要给新客户端配就点「生成」，生成时会出现「复制」按钮，保存后自动消失——旧的保存后立即失效</div>'
+          : '<div class="hint" style="margin-top:6px"><b>还没设 token</b>：客户端会被拒。点「生成」</div>') +
         `<div class="hint" style="margin-top:6px">合成号：${Number(ids.synthUsers ?? 0)} 人 / ${Number(ids.synthGroups ?? 0)} 群` +
         `　动作：成功 ${Number(st.actions?.ok ?? 0)} / 失败 ${Number(st.actions?.fail ?? 0)}</div>` +
         (st.online === false
@@ -4661,52 +4668,63 @@ bindCopyHint('#hostConnHint');
 
 const onebotTokenInput = () => $('#onebotToken');
 
+/**
+ * 「复制」按钮只在**输入框里真的有明文**时存在。
+ *
+ * 后端不回显（面板没设 accessKey 时，本机任意进程一条 GET 就能抄走），
+ * 所以输入框平时恒为空，常驻一个「复制」只会是永远点不动的死按钮。
+ * 点「生成」是唯一拿到明文的时刻：那一刻按钮出现，用户复制、保存；
+ * 保存后 `loadOnebot()` 重新渲染把输入框清空，按钮随之消失。
+ * 显隐由输入框内容驱动，不另存状态，就不会出现「按钮还在但没东西可复制」。
+ */
+function syncTokenCopy(inputId, btnId) {
+  const input = $(inputId);
+  const btn = $(btnId);
+  if (input && btn) btn.hidden = !input.value;
+}
+
+/** 一组 token 输入框的复制按钮：点击复制，写不进剪贴板就退化成 Ctrl+C */
+function bindTokenCopy(inputId, btnId, hintId) {
+  const input = $(inputId);
+  const btn = $(btnId);
+  if (!input || !btn) return;
+  input.addEventListener('input', () => syncTokenCopy(inputId, btnId));
+  btn.addEventListener('click', async () => {
+    const val = input.value;
+    if (!val) return;
+    const hint = $(hintId);
+    try {
+      await navigator.clipboard.writeText(val);
+      if (hint) hint.innerHTML = 'token 已复制到剪贴板，<b>填到客户端</b>后记得点「保存并应用」。';
+    } catch {
+      // 非安全上下文 / 权限被拒：明文已经在输入框里，选中让用户自己按 Ctrl+C
+      input.type = 'text';
+      input.select();
+      if (hint) hint.innerHTML = '浏览器不允许写剪贴板，已选中，<b>按 Ctrl+C 复制</b>。';
+    }
+  });
+  syncTokenCopy(inputId, btnId);
+}
+
+bindTokenCopy('#onebotToken', '#btnOnebotCopyToken', '#onebotConnHint');
+bindTokenCopy('#hostToken', '#btnHostCopyToken', '#hostConnHint');
+
 /** 生成 token：48 位十六进制，够长且没有 URL 特殊字符 */
 $('#btnOnebotGenToken')?.addEventListener('click', () => {
   const bytes = new Uint8Array(24);
   crypto.getRandomValues(bytes);
   const token = [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
   const input = onebotTokenInput();
+  const hint = $('#onebotConnHint');
   if (input) {
     input.value = token;
-    // 刚生成的一定要看得见，否则用户没法确认自己生成成功了
-    input.type = 'text';
+    input.type = 'text';   // 刚生成的一定要看得见
+    input.select();        // 剪贴板不可用时，供用户按 Ctrl+C
   }
-  const reveal = $('#btnOnebotRevealToken');
-  if (reveal) reveal.textContent = '隐藏';
-  const hint = $('#onebotConnHint');
-  if (hint) hint.innerHTML = '已生成，<b>记得点「保存并应用」</b>，再复制到客户端。';
-});
-
-/** 复制：本机访问时输入框里有明文；非本机看不到，只能重新生成 */
-$('#btnOnebotCopyToken')?.addEventListener('click', async () => {
-  const hint = $('#onebotConnHint');
-  const val = onebotTokenInput()?.value ?? '';
-  if (!val) {
-    if (hint) hint.innerHTML = '没有可复制的 token：非本机访问看不到明文，点「生成」重来一次。';
-    return;
+  syncTokenCopy('#onebotToken', '#btnOnebotCopyToken');
+  if (hint) {
+    hint.innerHTML = '已生成，<b>点「复制」</b>填到客户端，再点「保存并应用」；旧 token 保存后立即失效。';
   }
-  try {
-    await navigator.clipboard.writeText(val);
-    if (hint) hint.innerHTML = 'token 已复制到剪贴板。';
-  } catch {
-    // 剪贴板被拒（非安全上下文/权限）：退化成选中，让用户自己按 Ctrl+C
-    const input = onebotTokenInput();
-    if (input) {
-      input.type = 'text';
-      input.select();
-    }
-    if (hint) hint.innerHTML = '浏览器不允许直接写剪贴板，已选中，按 Ctrl+C 复制。';
-  }
-});
-
-$('#btnOnebotRevealToken')?.addEventListener('click', () => {
-  const input = onebotTokenInput();
-  const btn = $('#btnOnebotRevealToken');
-  if (!input) return;
-  const show = input.type === 'password';
-  input.type = show ? 'text' : 'password';
-  if (btn) btn.textContent = show ? '隐藏' : '显示';
 });
 
 /** 清除：等于把门拆了，必须同时关掉监听（后端也会这么做） */
@@ -4785,49 +4803,22 @@ $('#onebotDepsBody')?.addEventListener('click', (e) => {
 
 const hostTokenInput = () => $('#hostToken');
 
-/** 和 OneBot 一样：48 位十六进制，前端生成、保存后才落盘 */
+/** 同 OneBot：生成时明文显示 + 选中，复制按钮随之出现 */
 $('#btnHostGenToken')?.addEventListener('click', () => {
   const bytes = new Uint8Array(24);
   crypto.getRandomValues(bytes);
   const token = [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
   const input = hostTokenInput();
+  const hint = $('#hostConnHint');
   if (input) {
     input.value = token;
     input.type = 'text';
+    input.select();
   }
-  const reveal = $('#btnHostRevealToken');
-  if (reveal) reveal.textContent = '隐藏';
-  const hint = $('#hostConnHint');
-  if (hint) hint.innerHTML = '已生成，<b>记得点「保存并应用」</b>，再复制到客户端。';
-});
-
-$('#btnHostCopyToken')?.addEventListener('click', async () => {
-  const hint = $('#hostConnHint');
-  const val = hostTokenInput()?.value ?? '';
-  if (!val) {
-    if (hint) hint.innerHTML = '没有可复制的 token：非本机访问看不到明文，点「生成」重来一次。';
-    return;
+  syncTokenCopy('#hostToken', '#btnHostCopyToken');
+  if (hint) {
+    hint.innerHTML = '已生成，<b>点「复制」</b>填到客户端，再点「保存并应用」；旧 token 保存后立即失效。';
   }
-  try {
-    await navigator.clipboard.writeText(val);
-    if (hint) hint.innerHTML = 'token 已复制到剪贴板。';
-  } catch {
-    const input = hostTokenInput();
-    if (input) {
-      input.type = 'text';
-      input.select();
-    }
-    if (hint) hint.innerHTML = '浏览器不允许直接写剪贴板，已选中，按 Ctrl+C 复制。';
-  }
-});
-
-$('#btnHostRevealToken')?.addEventListener('click', () => {
-  const input = hostTokenInput();
-  const btn = $('#btnHostRevealToken');
-  if (!input) return;
-  const show = input.type === 'password';
-  input.type = show ? 'text' : 'password';
-  if (btn) btn.textContent = show ? '隐藏' : '显示';
 });
 
 $('#btnHostClearToken')?.addEventListener('click', async () => {
