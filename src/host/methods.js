@@ -132,6 +132,16 @@ export function createMethods({ runtime: R, getState, log = () => {} }) {
   const table = new Map();
   const def = (name, scope, desc, run) => table.set(name, { name, scope, desc, run });
 
+  /**
+   * 插件注册的工具投影成一等协议方法的前缀。
+   *
+   * 工具名本身全局唯一（重名插件加载时就会报错），加上前缀后也不可能和
+   * 内置的 70 个方法撞名。**这张表不缓存**：插件热重载 / 启停之后，下一次
+   * `names()` / `describe()` / `call()` 立刻反映真实状态，卸载的工具调用会
+   * 返回 404，而不是打到一个已经不存在的闭包上。
+   */
+  const TOOL_PREFIX = 'tool.';
+
   /** 被动回复 / 主动消息的幂等键：5 分钟内同一个 key 返回同一结果，不重复发 */
   const sent = new Map();
   const IDEMPOTENT_MS = 5 * 60 * 1000;
@@ -192,7 +202,9 @@ export function createMethods({ runtime: R, getState, log = () => {} }) {
       },
       seq: st.seq,
       scopes: [...(ctx.scopes ?? [])],
-      features: [...table.keys()],
+      /** `dynamicTools:true` 告诉老客户端：features 里可能多出 tool.* 方法 */
+      dynamicTools: true,
+      features: names(),
     };
   });
 
@@ -517,20 +529,9 @@ export function createMethods({ runtime: R, getState, log = () => {} }) {
   }));
 
   def('plugin.tool.call', 'manage', '以宿主身份调用插件注册的工具', async (p) => {
-    if (!R.registry) throw notReady('工具注册表未就绪');
     const name = str(p.name).trim();
     if (!name) throw bad('要给工具名 name');
-    const caller = createToolCaller({
-      registry: R.registry,
-      /** 能拿到 manage scope 的客户端已经等同管理员，别再要求它伪造一个用户 */
-      isOwner: () => true,
-      can: async () => true,
-      scopeOf: () => 'host',
-      log: (m) => log(`plugin.tool.call: ${m}`),
-    });
-    const given = p.msg && typeof p.msg === 'object' && !Array.isArray(p.msg) ? p.msg : {};
-    const msg = { userId: '', chatId: '', kind: 'c2c', userName: 'host', ...given };
-    return await caller(name, p.args ?? {}, { msg, stack: [] });
+    return await callPluginTool(name, p.args ?? {}, p.msg ?? {});
   });
 
   def('plugin.panel', 'read', '插件面板元数据', async (p) => {
@@ -630,15 +631,104 @@ export function createMethods({ runtime: R, getState, log = () => {} }) {
   registerMedia(def, { R, err, log });
   registerOps(def, { R, err, log });
 
+  /* ---------------- 插件工具 → 一等协议方法（方案 A） ---------------- */
+
+  /**
+   * 以宿主身份执行一个插件工具。`plugin.tool.call` 与动态投影共用这一条，
+   * 免得两处权限/超时/重入语义慢慢分叉。
+   *
+   * 注意：能拿到 manage / message scope 的本来就是受信任的宿主客户端，
+   * 这里不要求它伪造用户身份；`ownerOnly` / `admin` 工具在投影层已经被
+   * 提到 manage scope，见 `dynamicMethods()`。
+   */
+  async function callPluginTool(name, args, given = {}) {
+    if (!R.registry) throw notReady('工具注册表未就绪');
+    const caller = createToolCaller({
+      registry: R.registry,
+      isOwner: () => true,
+      can: async () => true,
+      scopeOf: () => 'host',
+      log: (m) => log(`host.tool: ${m}`),
+    });
+    const msg = given && typeof given === 'object' && !Array.isArray(given)
+      ? { userId: '', chatId: '', kind: 'c2c', userName: 'host', ...given }
+      : { userId: '', chatId: '', kind: 'c2c', userName: 'host' };
+    return await caller(name, args ?? {}, { msg, stack: [] });
+  }
+
+  /** 只做顶层 required / type 校验；完整 JSON Schema 由插件自己在 execute 里把关 */
+  function validateToolArgs(schema, args) {
+    if (!schema || typeof schema !== 'object') return;
+    for (const k of Array.isArray(schema.required) ? schema.required : []) {
+      if (args?.[k] === undefined || args?.[k] === null) throw bad(`工具缺参数 ${k}`);
+    }
+    const props = schema.properties && typeof schema.properties === 'object' ? schema.properties : {};
+    const checks = {
+      string: (x) => typeof x === 'string',
+      number: (x) => typeof x === 'number' && Number.isFinite(x),
+      integer: (x) => Number.isInteger(x),
+      boolean: (x) => typeof x === 'boolean',
+      object: (x) => Boolean(x) && typeof x === 'object' && !Array.isArray(x),
+      array: Array.isArray,
+    };
+    for (const [k, v] of Object.entries(args ?? {})) {
+      const type = props[k]?.type;
+      if (type && checks[type] && !checks[type](v)) throw bad(`参数 ${k} 应该是 ${type}`);
+    }
+  }
+
+  /**
+   * 现读注册表，把工具投影成方法。**不缓存**：插件卸载后同名调用立刻 404，
+   * 能力表也立刻不再列出它。
+   */
+  function dynamicMethods() {
+    const out = new Map();
+    const tools = R.registry?.listTools?.({ includeHidden: false }) ?? [];
+    for (const t of tools) {
+      const name = str(t?.name).trim();
+      if (!name) continue;
+      /** 有身份要求的工具要 manage；普通工具用 message（默认宿主令牌就有） */
+      const scope = (t.ownerOnly || t.admin) ? 'manage' : 'message';
+      out.set(TOOL_PREFIX + name, {
+        name: TOOL_PREFIX + name,
+        scope,
+        desc: `[插件工具·${str(t.pluginName || t.pluginId)}] ${str(t.description || name).slice(0, 200)}`,
+        parameters: t.parameters ?? null,
+        dynamic: true,
+        run: async (p) => {
+          const args = p?.args && typeof p.args === 'object' && !Array.isArray(p.args) ? p.args : p;
+          validateToolArgs(t.parameters, args);
+          const result = await callPluginTool(name, args, p?.msg ?? {});
+          return { tool: name, pluginId: str(t.pluginId), result: result ?? null };
+        },
+      });
+    }
+    return out;
+  }
+
+  /** 能力签名：插件启停导致工具集变化时，用它触发 `capabilities.changed` 事件 */
+  function toolSignature() {
+    return [...dynamicMethods().values()].map((m) => `${m.name}:${m.scope}`).sort().join('|');
+  }
+
   /* ---------------- 分发 ---------------- */
 
+  function names() {
+    return [...table.keys(), ...dynamicMethods().keys()];
+  }
+
   function describe() {
-    return [...table.values()].map(({ name, scope, desc }) => ({ name, scope, desc }));
+    return [...table.values(), ...dynamicMethods().values()]
+      .map(({ name, scope, desc, parameters }) => ({
+        name, scope, desc,
+        ...(parameters ? { parameters } : {}),
+      }));
   }
 
   return {
-    names: () => [...table.keys()],
+    names,
     describe,
+    toolSignature,
     /**
      * @param {string} name
      * @param {object} params
@@ -646,7 +736,8 @@ export function createMethods({ runtime: R, getState, log = () => {} }) {
      */
     async call(name, params = {}, ctx = {}) {
       const key = str(name).trim();
-      const m = table.get(key);
+      const m = table.get(key)
+        ?? (key.startsWith(TOOL_PREFIX) ? dynamicMethods().get(key) : null);
       if (!m) throw notFound(`没有这个方法：${key || '(空)'}`);
       if (ctx.scopes && !ctx.scopes.has(m.scope)) {
         throw new HostError('NO_SCOPE', `方法 ${key} 需要 ${m.scope} 权限，当前 token 没有`, 403);

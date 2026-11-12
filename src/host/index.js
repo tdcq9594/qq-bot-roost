@@ -75,6 +75,8 @@ export class HostBridge {
       getState: () => this.#state(),
       log: (m) => log.info(m),
     });
+    /** 插件工具集签名：变了就往事件流推一条 capabilities.changed */
+    this.toolSig = this.methods?.toolSignature?.() ?? '';
     this.heartbeat = null;
     /** start/stop/reconfigure 串行化：面板连点保存不能起两个监听 */
     this.chain = Promise.resolve();
@@ -254,6 +256,7 @@ export class HostBridge {
         },
         seq: this.seq,
         scopes: [...this.scopes],
+        dynamicTools: true,
         features: this.methods?.names() ?? [],
       },
       frames: this.replaySince(since),
@@ -291,6 +294,18 @@ export class HostBridge {
         client: ctx?.via ?? '',
       });
       this.counters.ok += 1;
+      /**
+       * 插件启停 / 热重载会让工具集变化。客户端不该把 `features` 当静态清单：
+       * 变了就推一条事件，让它重新拉 `system.capabilities`。
+       */
+      const sig = this.methods.toolSignature?.() ?? '';
+      if (sig !== this.toolSig) {
+        this.toolSig = sig;
+        this.#push('capabilities.changed', {
+          features: this.methods.names(),
+          tools: this.methods.describe().filter((m) => m.name.startsWith('tool.')),
+        });
+      }
       return { id, ok: true, data: data ?? null, http: 200 };
     } catch (e) {
       this.counters.fail += 1;
