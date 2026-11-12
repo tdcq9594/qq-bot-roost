@@ -16,9 +16,9 @@
 1. roost 作为 **OneBot v11 服务端**：正向 WebSocket（首选）+ HTTP API，反向 WS / HTTP POST 后补
 2. 把官方事件翻译成 OneBot 事件，把 OneBot action 翻译成官方接口调用
 3. 每个机器人独立开关、独立端口、独立 token
-4. 面板新增「兼容」页：开关、连接信息、运行状态、能力矩阵、身份检查、调试
+4. 面板新增「外接」页：开关、连接信息、运行状态、能力矩阵、身份检查、调试
 5. **依赖按需安装**：`ws`（必需）、`silk-wasm`（可选，发语音用）都不进 `package.json`，  
-   由用户在兼容页点「一键安装」才装到 `data/deps/onebot/`
+   由用户在外接页点「一键安装」才装到 `data/deps/onebot/`
 6. 明确「做不到」的部分，并在协议层如实返回，不静默失败
 
 ### 不做
@@ -610,7 +610,7 @@ dsh-roost 是 DSH 插件（`integrations/dsh-roost`），aurobot 也是 DSH 插�
 
 ---
 
-## 10. 面板「兼容」页
+## 10. 面板「外接」页
 
 ### 信息架构（新 tab `onebot`，挂在「配置」组）
 
@@ -870,7 +870,7 @@ port = 6700 + (sha1(botId) 前 2 字节 % 100)      // 6700–6799
   （自己的 Map **和** Node 的 `require.cache`，只清前者会出现「卸载了还能加载」）、冒烟
 - `src/config.js`：`onebot.*` 默认块（14 个字段）
 - `src/web/server.js`：`GET/PUT /api/onebot`、`POST /api/onebot/deps/{install,remove}`
-- `web/index.html` + `web/app.js`：新 tab「兼容」+ 依赖卡（安装/卸载/刷新/手动命令）
+- `web/index.html` + `web/app.js`：新 tab「外接」+ 依赖卡（安装/卸载/刷新/手动命令）
 - `test/onebot-deps.mjs`：8 项，**不联网**（伪造本地 `ws` 包验证 status/load/verify）
 
 真机验证（临时 `ROOST_HOME`，不碰真实数据）：安装 `ws@8.22.2` 成功、

@@ -2463,6 +2463,131 @@ async function startWebServerInstance({
         }
 
         /**
+         * 宿主协议 v1（roost-host/1）
+         * ==========================
+         *
+         * 框架自己的能力总线：事件原生结构、方法表能调官方 API / 插件 / 设置。
+         * 和 OneBot 共用同一份按需安装的 `ws`，所以依赖卡片也共用，
+         * 这里只回状态、不重复做一套安装接口。详见 `docs/宿主协议v1.md`。
+         *
+         * token 只对**真正从回环发起的连接**回明文，理由同 /api/onebot：
+         * `clientIp()` 开了 trustProxy 会读 X-Forwarded-For，不能用来判本机。
+         */
+        if (pathname === '/api/host' && req.method === 'GET') {
+          const st = await onebotDeps.status();
+          const c = rt?.cfg?.host ?? {};
+          const peer = String(req.socket?.remoteAddress ?? '');
+          const local = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(peer);
+          return json(res, 200, {
+            cfg: {
+              enabled: Boolean(c.enabled),
+              host: c.host ?? '127.0.0.1',
+              port: Number(c.port) || 0,
+              tokenSet: Boolean(c.token),
+              token: local ? String(c.token ?? '') : '',
+              scopes: Array.isArray(c.scopes) ? c.scopes : ['read', 'message'],
+              allowManage: Boolean(c.allowManage),
+              forwardAll: c.forwardAll !== false,
+              allowRemote: Boolean(c.allowRemote),
+              maxConnections: Number(c.maxConnections) || 4,
+              historyLimit: Number(c.historyLimit ?? 200),
+              historyTtlMs: Number(c.historyTtlMs ?? 3_600_000),
+            },
+            deps: {
+              dir: st.dir, packages: st.packages, missing: st.missing,
+              ready: st.required.every((n) => st.packages[n]?.resolvable),
+            },
+            state: rt?.host?.snapshot?.() ?? null,
+            capability: rt?.host?.capability?.() ?? null,
+          });
+        }
+
+        if (pathname === '/api/host' && req.method === 'PUT') {
+          if (!rt) return json(res, 400, { error: '还没有机器人' });
+          const body = await readBody(req);
+          const c = (rt.cfg.host ??= {});
+
+          if (body.token !== undefined) {
+            const t = String(body.token ?? '').trim();
+            // 空串 = 不改；null = 清除（同时必须关监听，空 token 不能留着 enabled）
+            if (t) {
+              if (t.length < 16) return json(res, 400, { error: 'token 至少 16 个字符' });
+              c.token = t;
+            } else if (body.token === null) {
+              c.token = '';
+              c.enabled = false;
+            }
+          }
+          if (body.host !== undefined) {
+            const h = String(body.host ?? '').trim();
+            if (!h) return json(res, 400, { error: '监听地址不能为空' });
+            const loop = ['127.0.0.1', 'localhost', '::1'].includes(h.toLowerCase());
+            const allow = body.allowRemote !== undefined ? Boolean(body.allowRemote) : Boolean(c.allowRemote);
+            if (!loop && !allow) {
+              return json(res, 400, {
+                error: `监听 ${h} 会把「能管理框架」的端口摆到局域网/公网上，确认后再打开 allowRemote`,
+              });
+            }
+            c.host = h;
+          }
+          if (body.port !== undefined) {
+            const p = Number(body.port);
+            if (!Number.isInteger(p) || p < 0 || p > 65535) {
+              return json(res, 400, { error: '端口要是 0–65535 的整数（0 = 自动分配 6800+）' });
+            }
+            c.port = p;
+          }
+          if (body.scopes !== undefined) {
+            if (!Array.isArray(body.scopes)) return json(res, 400, { error: 'scopes 要是数组' });
+            const allowed = ['read', 'message', 'manage'];
+            if (body.scopes.some((s) => !allowed.includes(s))) {
+              return json(res, 400, { error: 'scopes 只能包含 read / message / manage' });
+            }
+            c.scopes = [...new Set(['read', ...body.scopes])];
+          }
+          if (body.allowManage !== undefined) c.allowManage = Boolean(body.allowManage);
+          if (body.forwardAll !== undefined) c.forwardAll = Boolean(body.forwardAll);
+          if (body.allowRemote !== undefined) c.allowRemote = Boolean(body.allowRemote);
+          for (const [k, min, max] of [
+            ['maxConnections', 1, 32], ['historyLimit', 0, 1000], ['historyTtlMs', 0, 86_400_000],
+          ]) {
+            if (body[k] === undefined) continue;
+            const n = Number(body[k]);
+            if (!Number.isFinite(n)) return json(res, 400, { error: `${k} 要是数字` });
+            c[k] = Math.min(max, Math.max(min, Math.trunc(n)));
+          }
+          if (body.enabled !== undefined) {
+            const want = Boolean(body.enabled);
+            /** 和 OneBot 一样：缺 ws 就明说该点哪个按钮，而不是报一句「依赖缺失」 */
+            if (want && !(await onebotDeps.ready())) {
+              const st = await onebotDeps.status();
+              return json(res, 400, {
+                error: '宿主协议需要 ws 依赖。先在「外接 → 依赖」点『一键安装 ws』',
+                missing: st.required.filter((n) => !st.packages[n]?.resolvable),
+              });
+            }
+            if (want && !String(c.token ?? '').trim()) {
+              return json(res, 400, { error: '开启前先设置 access token（点『生成』，然后保存）' });
+            }
+            c.enabled = want;
+          }
+
+          await saveBotConfig(rt.id, rt.cfg);
+          /** 端口 / 开关 / scope 改完立刻生效，不要求重启进程 */
+          let warning = '';
+          try {
+            await rt.host?.reconfigure(rt.cfg.host);
+          } catch (e) {
+            warning = `配置已保存，但宿主协议没起来：${e.message}`;
+          }
+          return json(res, 200, {
+            ok: true,
+            ...(warning ? { warning } : {}),
+            state: rt.host?.snapshot?.() ?? null,
+          });
+        }
+
+        /**
          * OneBot v11 兼容层
          * ==================
          *
@@ -2600,7 +2725,7 @@ async function startWebServerInstance({
             if (want && !(await onebotDeps.ready())) {
               const st = await onebotDeps.status();
               return json(res, 400, {
-                error: '兼容模式需要 ws 依赖。先在「兼容」页点『一键安装 ws』',
+                error: '兼容模式需要 ws 依赖。先在「外接」页点『一键安装 ws』',
                 // 只报「必需」的缺项：可选依赖没装不该拦住启用
                 missing: st.required.filter((n) => !st.packages[n]?.resolvable),
               });
@@ -2647,6 +2772,10 @@ async function startWebServerInstance({
             const r = await onebotDeps.install(packages);
             // 装完立刻重配：开关早就打开的用户不用再点一次「保存」
             await rt?.onebot?.reconfigure(rt.cfg.onebot).catch(() => {});
+            /** 宿主协议共用这份 ws，每只鸟都要重配，别只顾当前选中的那只 */
+            for (const b of runtimes) {
+              await b.host?.reconfigure(b.cfg.host).catch(() => {});
+            }
             return json(res, 200, {
               ok: r.ok,
               installed: r.installed,
@@ -2673,6 +2802,9 @@ async function startWebServerInstance({
             const st = await onebotDeps.remove(packages);
             // 卸了必需依赖 → 兼容层必须停下来，别留一个「监听中但发不出」的状态
             await rt?.onebot?.reconfigure(rt.cfg.onebot).catch(() => {});
+            for (const b of runtimes) {
+              await b.host?.reconfigure(b.cfg.host).catch(() => {});
+            }
             return json(res, 200, {
               ok: true,
               deps: { dir: st.dir, packages: st.packages, missing: st.missing },

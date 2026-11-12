@@ -22,6 +22,7 @@ import { createGate } from './gate.js';
 import { createDeliveryLedger } from './delivery.js';
 import { sharedIdentity } from './identity.js';
 import { OneBotBridge } from './onebot/index.js';
+import { HostBridge } from './host/index.js';
 
 /**
  * 一个机器人的完整运行时。
@@ -146,6 +147,15 @@ export class BotRuntime {
       botId: this.id,
       identity: this.identity,
     });
+    /**
+     * 宿主协议 v1（roost-host/1）：框架自己的能力总线，和 OneBot 并列。
+     * 同样只构造不启动，缺 `ws` / 没 token 都只是这一层不可用。
+     */
+    this.host = new HostBridge({
+      runtime: this,
+      cfg: cfg.host ?? {},
+      botId: this.id,
+    });
 
     this.state = 'idle'; // idle | starting | online | offline | stopped | error
     this.lastError = '';
@@ -219,6 +229,10 @@ export class BotRuntime {
      */
     await this.onebot.start().catch((e) => {
       this.log.warn(`OneBot 兼容层启动失败（不影响机器人本体）：${e.message}`);
+    });
+    /** 同理：外接协议失败不许拖垮机器人本体，错误挂在 host.error 上面板能看见 */
+    await this.host.start().catch((e) => {
+      this.log.warn(`宿主协议启动失败（不影响机器人本体）：${e.message}`);
     });
 
     // 群管内邀开关：api 层有自己的副本，配置变了由面板接口同步过来。
@@ -688,7 +702,8 @@ export class BotRuntime {
       this.webhook?.unregister(this.cfg.appId);
     } catch {}
     this.session?.clear();
-    // 先关兼容层：端口要尽快释放，客户端重连时不该打到一个正在退出的进程上
+    // 先关两个对外出口：端口要尽快释放，客户端重连时不该打到一个正在退出的进程上
+    await this.host?.stop().catch(() => {});
     await this.onebot?.stop().catch(() => {});
     await this.plugins?.shutdown().catch(() => {});
     await this.outbound?.flush().catch(() => {});
@@ -835,6 +850,8 @@ export class BotRuntime {
        * 同一条理由。它自己吞异常，不会影响插件。
        */
       this.onebot?.onEvent(eventName, d);
+      /** 宿主协议：事件名与 data 原样带出去，不猜结构、不翻译 */
+      this.host?.onEvent(eventName, d);
       for (const l of registry.listeners.get(eventName) ?? []) {
         // 事件里的群：有 group_openid 就按群开关过滤，没有（如私聊事件）就放行
         if (d?.group_openid && !pluginAllowedIn(cfg.plugins, d.group_openid, l.pluginId)) continue;
@@ -929,6 +946,8 @@ export class BotRuntime {
        * 那条通道的 payload 是对外契约，故意脱敏过，拿不到 ID 映射要的东西。
        */
       this.onebot?.onMessage(msg);
+      /** 宿主协议：传完整 msg（原生结构），它自己挑字段 */
+      this.host?.onMessage(msg);
     } catch (e) {
       this.log.warn(`消息广播失败: ${e.message}`);
     }

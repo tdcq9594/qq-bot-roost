@@ -45,7 +45,8 @@ export const OFFICIAL_ENDPOINTS = [
   { method: 'POST', path: '/v2/groups/{group_id}/upload_prepare', api: 'uploadPrepare', group: '消息·富媒体', note: '分片上传第一步' },
   { method: 'POST', path: '/v2/groups/{group_id}/upload_part_finish', api: 'uploadPartFinish', group: '消息·富媒体', note: '分片上传第二步' },
 
-  /* ---------------- 消息 / Markdown 素材（机器人级图床，仅框架内部用） ---------------- */
+  /* ---------------- 消息 / Markdown 素材（机器人级图床） ---------------- */
+  { method: 'GET', path: '/v2/media-images', api: 'listMediaImages', group: '消息·Markdown 素材', note: '按 cursor 翻页；total 与单机器人 100 张配额同口径' },
   { method: 'POST', path: '/v2/media-images/prepare', api: 'prepareMediaImage', group: '消息·Markdown 素材', note: '单图 ≤10MB，upload_id 4 小时', internal: true },
   { method: 'POST', path: '/v2/media-images/complete', api: 'completeMediaImage', group: '消息·Markdown 素材', note: 'md5 取 COS ETag', internal: true },
   { method: 'DELETE', path: '/v2/media-images/{image_id}/delete', api: 'deleteMediaImage', group: '消息·Markdown 素材', note: '删除后引用失效，已发消息不受影响', internal: true },
@@ -194,8 +195,9 @@ export function riskOf(ep) {
  * 免得以后有人往 QQApi 加了个内部方法，外部就能顺手调。
  *
  * `internal:true` 的端点仍登记在官方清单里（覆盖度测试要校验），但**不对外开放**：
- * 素材三步上传必须经 `api.uploadMarkdownImage()` 串起来，外部直接 prepare/complete
- * 会绕过本地预检（10MB / 文件头 / 扩展名），还能无节制消耗机器人 100 张配额。
+ * 素材三步上传必须经 `api.uploadMarkdownImage()` / `uploadMarkdownImageBytes()` 串起来，
+ * 外部直接 prepare/complete 会绕过本地预检（10MB / 文件头 / 扩展名），
+ * 还能无节制消耗机器人 100 张配额。查询接口 `listMediaImages` 是只读的，正常开放。
  */
 export const CALLABLE_METHODS = new Set(
   OFFICIAL_ENDPOINTS.filter((e) => !e.internal)

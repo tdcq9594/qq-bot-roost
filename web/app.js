@@ -4293,22 +4293,138 @@ $('#btnAddRole')?.addEventListener('click', async () => {
   }
 });
 
-/* ---------------- OneBot 兼容（M0：只有依赖） ---------------- */
+/* ---------------- 外接页：宿主协议（上）+ OneBot v11（下） ---------------- */
 
 /**
- * 兼容页的依赖卡。
+ * 一次切页把两半都刷出来。
  *
- * 这里**只做依赖**，协议层（监听地址、连接串、能力矩阵）等 M1 接上再画——
- * 提前画一个「开关」但背后没有监听，比不画更糟：用户会以为开了。
+ * **分开取数、各自兜错**：OneBot 那半边挂了（比如依赖目录读不到），
+ * 不能连累宿主协议的状态也白屏；反过来也一样。依赖卡是两边共用的，
+ * 随便哪半边成功都能把它渲染出来。
  */
 async function loadOnebot() {
   const body = $('#onebotDepsBody');
-  if (!body) return;
   try {
     renderOnebot(await api('/api/onebot'));
   } catch (e) {
-    body.innerHTML = `<tr><td colspan="5" class="empty">加载失败: ${escapeHtml(e.message)}</td></tr>`;
+    if (body) {
+      body.innerHTML = `<tr><td colspan="5" class="empty">加载失败: ${escapeHtml(e.message)}</td></tr>`;
+    }
   }
+  try {
+    renderHost(await api('/api/host'));
+  } catch (e) {
+    const st = $('#hostStateHint');
+    if (st) st.textContent = '读取失败';
+    const hint = $('#hostConnHint');
+    if (hint) hint.innerHTML = `<b>${escapeHtml(e.message)}</b>`;
+  }
+}
+
+const HOST_STATE_TEXT = {
+  running: '运行中',
+  disabled: '未开启',
+  stopped: '已停止',
+  'missing-deps': '缺依赖',
+  error: '启动失败',
+};
+
+/** 宿主协议那半边：配置表单 + 运行状态 + 方法表 */
+function renderHost(d) {
+  const cfg = d?.cfg ?? {};
+  const st = d?.state ?? {};
+  const cap = d?.capability ?? {};
+  const set = (sel, fn) => {
+    const el = $(sel);
+    if (el) fn(el);
+  };
+
+  set('#hostEnabled', (el) => { el.checked = Boolean(cfg.enabled); });
+  set('#hostListenHost', (el) => { el.value = cfg.host ?? '127.0.0.1'; });
+  set('#hostPort', (el) => {
+    const auto = !Number(cfg.port);
+    el.value = auto ? '' : String(cfg.port);
+    el.placeholder = auto ? `自动（当前 ${st.port || '未监听'}）` : '端口（留空=自动）';
+  });
+  set('#hostMaxConnections', (el) => { el.value = String(Number(cfg.maxConnections) || 4); });
+  set('#hostToken', (el) => {
+    el.value = cfg.token ?? '';
+    el.type = 'password';
+    el.placeholder = cfg.tokenSet
+      ? 'access token（已设置，留空=不改）'
+      : 'access token（至少 16 位）';
+  });
+  set('#btnHostRevealToken', (el) => { el.textContent = '显示'; });
+
+  const scopes = Array.isArray(cfg.scopes) ? cfg.scopes : [];
+  set('#hostScopeMessage', (el) => { el.checked = scopes.includes('message'); });
+  set('#hostForwardAll', (el) => { el.checked = cfg.forwardAll !== false; });
+  set('#hostAllowRemote', (el) => { el.checked = Boolean(cfg.allowRemote); });
+  set('#hostAllowManage', (el) => { el.checked = Boolean(cfg.allowManage); });
+  /**
+   * 总闸关着时「申请管理权限」不可勾：勾了也不会生效，
+   * 让它可点只会让人以为权限已经开了。两层关系要在控件上看得出来。
+   */
+  set('#hostScopeManage', (el) => {
+    el.disabled = !cfg.allowManage;
+    el.checked = Boolean(cfg.allowManage) && scopes.includes('manage');
+  });
+
+  const label = HOST_STATE_TEXT[st.state] ?? st.state ?? '未知';
+  set('#hostStateHint', (el) => {
+    el.textContent = st.state === 'running'
+      ? `${label} · 端口 ${st.port} · ${st.connections ?? 0} 个连接 · seq ${st.seq ?? 0}`
+      : label;
+  });
+
+  const hint = $('#hostConnHint');
+  if (hint) {
+    if (st.state === 'running') {
+      const h = st.host ?? '127.0.0.1';
+      const base = `http://${h}:${st.port}`;
+      const row = (k, v) => `
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">
+          <span class="hint" style="min-width:74px">${k}</span>
+          <code style="word-break:break-all">${escapeHtml(v)}</code>
+          <button class="btn small" data-copy="${escapeHtml(v)}">复制</button>
+        </div>`;
+      const granted = (st.scopes ?? []).join(' + ') || '—';
+      hint.innerHTML =
+        row('WebSocket', `ws://${h}:${st.port}/`) +
+        row('HTTP RPC', `${base}/rpc`) +
+        row('事件流', `${base}/events`) +
+        '<div class="hint" style="margin-top:6px">令牌填上面输入框里那个（点「复制」）' +
+        '——<b>不要拼进地址</b>，用 Authorization 头或 access_token 参数</div>' +
+        `<div class="hint" style="margin-top:6px">生效权限：${escapeHtml(granted)}` +
+        `　缓冲 ${Number(st.buffered ?? 0)} 条` +
+        `　调用 成功 ${Number(st.actions?.ok ?? 0)} / 失败 ${Number(st.actions?.fail ?? 0)}</div>` +
+        (st.online === false
+          ? '<div class="hint" style="margin-top:6px;color:var(--err)"><b>机器人本体没上线</b>：' +
+            '客户端能连上，但发消息、调官方接口会失败——先到「运行」页让它上线</div>'
+          : '');
+    } else if (st.state === 'missing-deps' || st.state === 'error') {
+      hint.innerHTML = `<b>${escapeHtml(st.error || '没起来')}</b>` +
+        '。缺依赖就到下面「依赖」卡装，装完会自动重连。';
+    } else {
+      hint.textContent = '开启后这里会显示连接串和运行状态。';
+    }
+  }
+
+  const capBody = $('#hostCapBody');
+  const methods = Array.isArray(cap.methods) ? cap.methods : [];
+  if (capBody) {
+    capBody.innerHTML = methods.length
+      ? methods.map((m) => `<tr>
+          <td class="mono">${escapeHtml(m.name ?? '')}</td>
+          <td><span class="badge${m.scope === 'manage' ? ' off' : m.scope === 'message' ? '' : ' on'}">${escapeHtml(m.scope ?? '')}</span></td>
+          <td class="hint">${escapeHtml(m.desc ?? '')}</td>
+        </tr>`).join('')
+      : '<tr><td colspan="3" class="empty">协议还没就绪，开启后可见</td></tr>';
+  }
+  set('#hostCapHint', (el) => {
+    el.textContent = `共 ${methods.length} 个方法 · roost-host/${cap.protocol ?? 1}` +
+      ` · 已授权限 ${(cap.scopes ?? []).join('+') || '—'}`;
+  });
 }
 
 function renderOnebot(d) {
@@ -4513,31 +4629,35 @@ $('#btnOnebotCapToggle')?.addEventListener('click', () => {
   btn.textContent = wrap.hidden ? '展开' : '收起';
 });
 
-/** 连接串一键复制（整条 URL 带 token，省得用户自己拼） */
-$('#onebotConnHint')?.addEventListener('click', async (e) => {
-  const btn = e.target.closest('[data-copy]');
-  if (!btn) return;
-  const text = btn.dataset.copy ?? '';
-  const old = btn.textContent;
-  try {
-    await navigator.clipboard.writeText(text);
-    btn.textContent = '已复制';
-  } catch {
-    // 剪贴板被拒：选中那段 code，让用户 Ctrl+C
-    const code = btn.parentElement?.querySelector('code');
-    if (code) {
-      const range = document.createRange();
-      range.selectNodeContents(code);
-      const sel = window.getSelection();
-      sel.removeAllRanges();
-      sel.addRange(range);
+/** 连接串一键复制：外接页上下两半都有连接串，共用一份逻辑 */
+function bindCopyHint(selector) {
+  $(selector)?.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-copy]');
+    if (!btn) return;
+    const text = btn.dataset.copy ?? '';
+    const old = btn.textContent;
+    try {
+      await navigator.clipboard.writeText(text);
+      btn.textContent = '已复制';
+    } catch {
+      // 剪贴板被拒：选中那段 code，让用户 Ctrl+C
+      const code = btn.parentElement?.querySelector('code');
+      if (code) {
+        const range = document.createRange();
+        range.selectNodeContents(code);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+      btn.textContent = '按 Ctrl+C';
     }
-    btn.textContent = '按 Ctrl+C';
-  }
-  setTimeout(() => {
-    btn.textContent = old;
-  }, 1400);
-});
+    setTimeout(() => {
+      btn.textContent = old;
+    }, 1400);
+  });
+}
+bindCopyHint('#onebotConnHint');
+bindCopyHint('#hostConnHint');
 
 const onebotTokenInput = () => $('#onebotToken');
 
@@ -4659,6 +4779,126 @@ $('#onebotDepsBody')?.addEventListener('click', (e) => {
   const rem = e.target.closest('[data-remove]');
   if (ins) onebotDepsAction('install', ins.dataset.install, ins);
   else if (rem) onebotDepsAction('remove', rem.dataset.remove, rem);
+});
+
+/* ---------------- 宿主协议：表单与按钮 ---------------- */
+
+const hostTokenInput = () => $('#hostToken');
+
+/** 和 OneBot 一样：48 位十六进制，前端生成、保存后才落盘 */
+$('#btnHostGenToken')?.addEventListener('click', () => {
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  const token = [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+  const input = hostTokenInput();
+  if (input) {
+    input.value = token;
+    input.type = 'text';
+  }
+  const reveal = $('#btnHostRevealToken');
+  if (reveal) reveal.textContent = '隐藏';
+  const hint = $('#hostConnHint');
+  if (hint) hint.innerHTML = '已生成，<b>记得点「保存并应用」</b>，再复制到客户端。';
+});
+
+$('#btnHostCopyToken')?.addEventListener('click', async () => {
+  const hint = $('#hostConnHint');
+  const val = hostTokenInput()?.value ?? '';
+  if (!val) {
+    if (hint) hint.innerHTML = '没有可复制的 token：非本机访问看不到明文，点「生成」重来一次。';
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(val);
+    if (hint) hint.innerHTML = 'token 已复制到剪贴板。';
+  } catch {
+    const input = hostTokenInput();
+    if (input) {
+      input.type = 'text';
+      input.select();
+    }
+    if (hint) hint.innerHTML = '浏览器不允许直接写剪贴板，已选中，按 Ctrl+C 复制。';
+  }
+});
+
+$('#btnHostRevealToken')?.addEventListener('click', () => {
+  const input = hostTokenInput();
+  const btn = $('#btnHostRevealToken');
+  if (!input) return;
+  const show = input.type === 'password';
+  input.type = show ? 'text' : 'password';
+  if (btn) btn.textContent = show ? '隐藏' : '显示';
+});
+
+$('#btnHostClearToken')?.addEventListener('click', async () => {
+  const ok = await confirmDialog({
+    title: '清除宿主协议 token',
+    message: '清除后宿主协议会<b>自动关闭</b>，已连接的客户端会断开。要重新用就再生成一个。',
+    okText: '清除',
+    danger: true,
+  });
+  if (!ok) return;
+  const hint = $('#hostConnHint');
+  try {
+    await api('/api/host', { method: 'PUT', body: JSON.stringify({ token: null }) });
+    await loadOnebot();
+    if (hint) hint.innerHTML = 'token 已清除，宿主协议已关闭。';
+  } catch (e) {
+    if (hint) hint.innerHTML = `<b>${escapeHtml(e.message)}</b>`;
+  }
+});
+
+/**
+ * 总闸与 scope 联动：打开总闸就顺手勾上 manage scope，关掉就取消。
+ * 让用户勾两次才能开一个权限，只会造成「明明开了却还是 403」的困惑。
+ */
+$('#hostAllowManage')?.addEventListener('change', () => {
+  const on = Boolean($('#hostAllowManage')?.checked);
+  const scope = $('#hostScopeManage');
+  if (!scope) return;
+  scope.disabled = !on;
+  scope.checked = on;
+});
+
+$('#btnHostCapToggle')?.addEventListener('click', () => {
+  const wrap = $('#hostCapWrap');
+  const btn = $('#btnHostCapToggle');
+  if (!wrap || !btn) return;
+  wrap.hidden = !wrap.hidden;
+  btn.textContent = wrap.hidden ? '展开' : '收起';
+});
+
+$('#btnHostReload')?.addEventListener('click', loadOnebot);
+
+$('#btnHostSave')?.addEventListener('click', async () => {
+  const btn = $('#btnHostSave');
+  const hint = $('#hostConnHint');
+  const scopes = ['read'];
+  if ($('#hostScopeMessage')?.checked) scopes.push('message');
+  if ($('#hostScopeManage')?.checked && $('#hostAllowManage')?.checked) scopes.push('manage');
+  const body = {
+    enabled: Boolean($('#hostEnabled')?.checked),
+    host: ($('#hostListenHost')?.value ?? '').trim() || '127.0.0.1',
+    port: Number($('#hostPort')?.value) || 0,
+    scopes,
+    allowManage: Boolean($('#hostAllowManage')?.checked),
+    forwardAll: Boolean($('#hostForwardAll')?.checked),
+    allowRemote: Boolean($('#hostAllowRemote')?.checked),
+    maxConnections: Number($('#hostMaxConnections')?.value) || 4,
+  };
+  const token = (hostTokenInput()?.value ?? '').trim();
+  if (token) body.token = token;
+
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api('/api/host', { method: 'PUT', body: JSON.stringify(body) });
+    await loadOnebot();
+    if (r?.warning && hint) hint.innerHTML = `<b>${escapeHtml(r.warning)}</b>`;
+  } catch (e) {
+    if (hint) hint.innerHTML = `<b>${escapeHtml(e.message)}</b>`;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 });
 
 /* ---------------- 身份（QQ号 / 群号 ↔ openid） ---------------- */

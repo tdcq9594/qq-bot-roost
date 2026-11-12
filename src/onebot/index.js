@@ -143,7 +143,7 @@ export class OneBotBridge {
     const missing = await this.#requireWs();
     if (missing) {
       this.state = 'missing-deps';
-      this.error = `${missing}：到面板「兼容」页点『一键安装 ws』`;
+      this.error = `${missing}：到面板「外接」页点『一键安装 ws』`;
       log.info(`兼容模式未就绪：${this.error}`);
       return this;
     }
@@ -160,7 +160,7 @@ export class OneBotBridge {
      */
     if (!String(this.cfg.token ?? '').trim()) {
       this.state = 'error';
-      this.error = '没设 access token（面板「兼容」页点『生成』）';
+      this.error = '没设 access token（面板「外接」页点『生成』）';
       return this;
     }
     this.selfOpenid = this.identity?.openidOf?.(this.botId, String(this.selfUin)) ?? '';
@@ -177,7 +177,7 @@ export class OneBotBridge {
     const wsMod = await deps.load('ws');
     if (!wsMod?.WebSocketServer) {
       this.state = 'missing-deps';
-      this.error = 'ws 加载失败（面板「兼容」页可重装）';
+      this.error = 'ws 加载失败（面板「外接」页可重装）';
       return this;
     }
     const depState = await deps.status();

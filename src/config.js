@@ -263,7 +263,7 @@ const BOT_DEFAULTS = {
    * OneBot v11 兼容层（对外协议，后端仍是官方接口）。
    *
    * `enabled` 只是「想开」，真正能不能监听还看 `ws` 依赖装没装
-   * （面板「兼容」页一键安装，装到 `data/deps/onebot/`）。
+   * （面板「外接」页一键安装，装到 `data/deps/onebot/`）。
    * 没装时状态是 `missing-deps`，不阻塞机器人本体。
    *
    * `port: 0` 表示自动分配：`6700 + sha1(botId)%100`（同一只鸟永远同一个端口，
@@ -294,6 +294,38 @@ const BOT_DEFAULTS = {
     /** host 非回环时必须显式打开 */
     allowRemote: false,
     maxConnections: 4,
+  },
+
+  /**
+   * 宿主协议 v1（roost-host/1）——框架自己的对外通道。
+   *
+   * 和 `onebot` 并列、互不依赖，共用同一份按需安装的 `ws`。事件是框架原生
+   * Message，不翻译成 OneBot；方法表能调官方 API、插件与框架设置。
+   * 详见 `docs/宿主协议v1.md`。
+   *
+   * `port: 0` 表示自动分配：`6800 + sha1(botId)%100`，与 OneBot 的
+   * 6700–6799 不重叠。
+   *
+   * `allowManage` 是总闸：关着时哪怕 `scopes` 里写了 manage 也不放行。
+   * 一个 token 泄漏不该等于框架被接管——配置写、插件启停、任意 qq.call
+   * 都归 manage。
+   */
+  host: {
+    enabled: false,
+    host: '127.0.0.1',
+    port: 0,
+    /** 空 = 拒绝监听（见宿主协议文档的鉴权段） */
+    token: '',
+    scopes: ['read', 'message'],
+    allowManage: false,
+    /** 全量群消息也推给客户端 */
+    forwardAll: true,
+    /** 非回环监听必须显式打开 */
+    allowRemote: false,
+    maxConnections: 4,
+    /** 断线补拉的环形缓冲：条数与保留时长 */
+    historyLimit: 200,
+    historyTtlMs: 3_600_000,
   },
 
   /**
@@ -425,7 +457,7 @@ function cloneDeep(v) {
  * **默认值必须深拷贝**。以前是 `const out = {...base}`，`extra` 里没有的键
  * 直接沿用 `BOT_DEFAULTS` 的**同一个对象引用**——于是所有机器人共享一份
  * `onebot` / `whitelist` / `rateLimit`。表现极其隐蔽：
- * 在 A 鸟的兼容页填 token，B 鸟保存任何设置时会把 A 的 token 写进 B 的配置，
+ * 在 A 鸟的外接页填 token，B 鸟保存任何设置时会把 A 的 token 写进 B 的配置，
  * 重启后 B 用 A 的 token 另起一个监听。谁也不会往「配置串号」上想。
  */
 function deepMerge(base, extra) {
@@ -601,6 +633,39 @@ export async function loadBotConfig(id) {
   return cfg;
 }
 
+/**
+ * 宿主协议配置落盘前规范化。
+ *
+ * `saveBotConfig` 是白名单式写盘，漏一个键的后果不是「少存一项」，而是
+ * 「面板点了保存、重启全丢」。OneBot 的 token / selfUin 踩过这个坑，
+ * 这里把 `host` 段整体收口，顺便把脏值挡在配置文件外面：
+ * `allowManage` 只认真布尔 true，别人往配置文件里塞字符串 "false"
+ * 也不会把管理权限悄悄打开。
+ */
+function normalizeHostConfig(v) {
+  const d = BOT_DEFAULTS.host;
+  const o = v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+  const num = (x, fallback, min, max) => {
+    const n = Number(x);
+    return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.trunc(n))) : fallback;
+  };
+  return {
+    enabled: o.enabled === true,
+    host: typeof o.host === 'string' && o.host.trim() ? o.host.trim() : d.host,
+    port: num(o.port, 0, 0, 65535),
+    token: typeof o.token === 'string' ? o.token : '',
+    scopes: Array.isArray(o.scopes)
+      ? o.scopes.filter((s) => ['read', 'message', 'manage'].includes(s))
+      : [...d.scopes],
+    allowManage: o.allowManage === true,
+    forwardAll: o.forwardAll !== false,
+    allowRemote: o.allowRemote === true,
+    maxConnections: num(o.maxConnections, d.maxConnections, 1, 32),
+    historyLimit: num(o.historyLimit, d.historyLimit, 0, 1000),
+    historyTtlMs: num(o.historyTtlMs, d.historyTtlMs, 0, 24 * 3600 * 1000),
+  };
+}
+
 export async function saveBotConfig(id, cfg) {
   const p = botPaths(id);
   await writeJson(p.config, {
@@ -632,6 +697,11 @@ export async function saveBotConfig(id, cfg) {
      * token 和 selfUin 都会没，看起来就像兼容模式自己坏了。
      */
     onebot: cfg.onebot,
+    /**
+     * 宿主协议。和 onebot 一样必须显式列出，否则面板保存一次、重启就丢 token。
+     * 旧版配置文件没有这一段时 `normalizeHostConfig` 会补成「默认关」。
+     */
+    host: normalizeHostConfig(cfg.host),
     // 脏值（字符串 / 数组 / 旧配置里混进来的东西）一律规范成默认关，别污染配置文件
     media: { placeholderSpace: cfg.media?.placeholderSpace === true },
   });

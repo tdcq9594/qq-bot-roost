@@ -124,8 +124,8 @@
           <button class="tab-item" data-tab="roles">权限</button>
           <!-- 通知：SMTP 邮箱配置 + 普通成员自助绑定 -->
           <button class="tab-item" data-tab="notify">通知</button>
-          <!-- 兼容：OneBot v11 对外协议 + 按需依赖 -->
-          <button class="tab-item" data-tab="onebot">兼容</button>
+          <!-- 外接：上=自有宿主协议，下=OneBot v11，共用按需依赖 -->
+          <button class="tab-item" data-tab="onebot">外接</button>
         </div>
       </div>
 
@@ -939,8 +939,121 @@
     </div>
   </section>
 
-  <!-- 可达性 -->
+  <!-- 外接页：上=自有宿主协议（主推），下=OneBot v11（第三方客户端） -->
   <section id="tab-onebot" class="panel" hidden>
+    <div class="box">
+      <div class="box-hd">
+        <h3>宿主协议 roost-host/1</h3>
+        <span class="hint">框架自己的协议 · 主推</span>
+      </div>
+      <ul class="tips">
+        <li><b>不翻译</b>：事件直接用框架原生结构，openid / 身份 / 群号 / 附件 / @ 原样给，
+          没有 OneBot 的合成号，也没有一长串「不支持」</li>
+        <li><b>全能力</b>：方法表能调官方接口全部方法（<code>qq.call</code>，按读/写/危险分级授权）、
+          启停与配置插件、调用插件注册的工具、更改框架设置、查暂停闸与消息账本，
+          还能跨进程传图/文件/语音、管理官方 Markdown 素材图床</li>
+        <li>客户端连 <code>ws://host:port/</code>；也能用 <code>POST /rpc</code> 直接调方法、
+          <code>GET /events</code> 收 SSE 事件流，<code>GET /health</code> 探活</li>
+        <li>依赖<b>按需安装</b>，和下面的 OneBot 共用同一份，装一次两边都能用</li>
+      </ul>
+    </div>
+
+    <div class="box">
+      <div class="box-hd">
+        <h3>宿主协议设置</h3>
+        <span class="hint" id="hostStateHint">未开启</span>
+      </div>
+      <div class="form-inline">
+        <label class="switch-slider">
+          <input type="checkbox" id="hostEnabled">
+          <span class="track"></span>
+          <span class="label">开启宿主协议（<b>并行</b>：只旁路推事件，不影响插件回话）</span>
+        </label>
+      </div>
+      <div class="form-inline" style="margin-top:12px">
+        <input id="hostListenHost" placeholder="127.0.0.1" style="width:150px">
+        <input id="hostPort" inputmode="numeric" placeholder="端口（留空=自动 6800+）" style="width:190px">
+        <input id="hostMaxConnections" inputmode="numeric" placeholder="最大连接数" style="width:130px">
+      </div>
+      <div class="form-inline" style="margin-top:12px">
+        <input id="hostToken" type="password" placeholder="access token（留空=不改）" style="width:220px">
+        <button class="btn small" id="btnHostGenToken">生成</button>
+        <button class="btn small" id="btnHostCopyToken">复制</button>
+        <button class="btn small" id="btnHostRevealToken">显示</button>
+        <button class="btn small" id="btnHostClearToken">清除</button>
+      </div>
+      <div class="form-inline" style="margin-top:12px">
+        <label class="hint" style="display:flex;flex-direction:row;align-items:center;gap:6px">
+          <input type="checkbox" id="hostScopeMessage" style="flex:0 0 auto;min-width:0;width:auto"> 允许发消息
+        </label>
+        <label class="hint" style="display:flex;flex-direction:row;align-items:center;gap:6px">
+          <input type="checkbox" id="hostScopeManage" style="flex:0 0 auto;min-width:0;width:auto"> 申请管理权限
+        </label>
+        <label class="hint" style="display:flex;flex-direction:row;align-items:center;gap:6px">
+          <input type="checkbox" id="hostForwardAll" style="flex:0 0 auto;min-width:0;width:auto"> 推送全量群消息
+        </label>
+        <label class="hint" style="display:flex;flex-direction:row;align-items:center;gap:6px">
+          <input type="checkbox" id="hostAllowRemote" style="flex:0 0 auto;min-width:0;width:auto"> 允许非回环监听
+        </label>
+      </div>
+      <div class="form-inline" style="margin-top:12px">
+        <label class="hint" style="display:flex;flex-direction:row;align-items:center;gap:6px">
+          <input type="checkbox" id="hostAllowManage" style="flex:0 0 auto;min-width:0;width:auto">
+          <b style="color:var(--err)">打开管理总闸</b>
+        </label>
+        <span class="hint">不开时，改配置 / 启停插件 / 写级与危险级官方接口一律拒绝；只读接口仍可用，token 泄漏也不等于框架被接管</span>
+      </div>
+      <div class="form-inline" style="margin-top:12px">
+        <button class="btn primary" id="btnHostSave">保存并应用</button>
+        <button class="btn small" id="btnHostReload">刷新状态</button>
+      </div>
+      <div class="hint" id="hostConnHint" style="margin-top:8px"></div>
+    </div>
+
+    <div class="box">
+      <div class="box-hd">
+        <h3>宿主协议方法表</h3>
+        <div style="display:flex;align-items:center;gap:10px">
+          <span class="hint" id="hostCapHint">—</span>
+          <button class="btn small" id="btnHostCapToggle">展开</button>
+        </div>
+      </div>
+      <div class="table-wrap" id="hostCapWrap" style="margin-top:10px" hidden>
+        <table>
+          <thead><tr><th>方法</th><th>所需权限</th><th>说明</th></tr></thead>
+          <tbody id="hostCapBody"><tr><td colspan="3" class="empty">正在读取…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 两条出口共用一份 ws：这张卡放在中间，谁都不用重复装 -->
+    <div class="box">
+      <div class="box-hd">
+        <h3>依赖（两条出口共用）</h3>
+        <div class="btn-row" style="margin:0">
+          <button class="btn small" id="btnOnebotReloadDeps">刷新</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>包</th><th>用途</th><th>状态</th><th>版本</th><th>操作</th></tr>
+          </thead>
+          <tbody id="onebotDepsBody">
+            <tr><td colspan="5" class="empty">正在读取…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="hint" id="onebotDepsHint" style="margin-top:8px"></div>
+    </div>
+
+    <div class="box" style="border-style:dashed">
+      <div class="box-hd">
+        <h3>下面这一段是 OneBot v11 兼容层</h3>
+        <span class="hint">给 aurobot / NoneBot 这类第三方客户端；不是主推通道</span>
+      </div>
+    </div>
+
     <div class="box">
       <div class="box-hd">
         <h3>OneBot v11 兼容</h3>
@@ -995,33 +1108,7 @@
 
     <div class="box">
       <div class="box-hd">
-        <h3>依赖</h3>
-        <div class="btn-row" style="margin:0">
-          <button class="btn small" id="btnOnebotReloadDeps">刷新</button>
-        </div>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>包</th>
-              <th>用途</th>
-              <th>状态</th>
-              <th>版本</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody id="onebotDepsBody">
-            <tr><td colspan="5" class="empty">正在读取…</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <div class="hint" id="onebotDepsHint" style="margin-top:8px"></div>
-    </div>
-
-    <div class="box">
-      <div class="box-hd">
-        <h3>能力</h3>
+        <h3>OneBot 动作能力</h3>
         <div style="display:flex;align-items:center;gap:10px">
           <span class="hint" id="onebotCapHint">—</span>
           <button class="btn small" id="btnOnebotCapToggle">展开</button>

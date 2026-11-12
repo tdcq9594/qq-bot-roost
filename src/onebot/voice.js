@@ -108,7 +108,7 @@ export async function fetchAudio(file) {
  */
 export async function toSilk(buf, silk) {
   if (!silk) {
-    const e = new Error('没装可选依赖 silk-wasm，发不了语音（面板「兼容」页可一键安装）');
+    const e = new Error('没装可选依赖 silk-wasm，发不了语音（面板「外接」页可一键安装）');
     e.retcode = 1400;
     throw e;
   }
