@@ -197,7 +197,11 @@ function registerCoreCommands(rt) {
       return out;
     };
 
-    const pluginMenus = [...registry.menus.values()].filter((m) => m.id !== '__core');
+    /**
+     * 独占模式（OneBot 兼容）下插件不回话，菜单里也就别再列它们——
+     * 列出来点了没反应，比不显示更让人困惑。内核命令照常列（绑定就在这里）。
+     */
+    const pluginMenus = msg.coreOnly ? [] : [...registry.menus.values()].filter((m) => m.id !== '__core');
 
     /* ---------- 有参数：进下级 ---------- */
     if (arg) {

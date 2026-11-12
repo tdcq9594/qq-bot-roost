@@ -37,6 +37,7 @@ import { toggleGroupPlugin } from '../plugin/groupscope.js';
 import { suspendPluginWatch } from '../services/plugin-watch.js';
 import { onMessage as onBusMessage } from '../message-bus.js';
 import { handleQqCall, capabilityPayload } from './qq-call.js';
+import * as onebotDeps from '../onebot/deps.js';
 import { runDoctor, summarize } from '../doctor.js';
 import { createBindTask, pollBindResult } from '../qq/qrlogin.js';
 import { resolveTrust, blockReason, pubkeyUsable } from '../trust.js';
@@ -2459,6 +2460,227 @@ async function startWebServerInstance({
           }
           await rt.reach.noteManual({ openid, friend, c2cPush });
           return json(res, 200, { ok: true, ...(await snapshot()) });
+        }
+
+        /**
+         * OneBot v11 兼容层
+         * ==================
+         *
+         * 后端仍然是官方接口，OneBot 只是**对外协议**。这里只做配置与依赖，
+         * 协议层（WS / HTTP / 事件翻译）在 `src/onebot/`，M1 接上。
+         *
+         * 依赖为什么要单独一条路由：`ws` 不进 `package.json`，得由用户在这里
+         * 显式点「一键安装」，装到 `data/deps/onebot/`。**白名单校验在
+         * `onebot/deps.js` 里**，前端传什么都不能越界——这条不做，
+         * 面板弱口令就等于远程代码执行。
+         */
+        if (pathname === '/api/onebot' && req.method === 'GET') {
+          const st = await onebotDeps.status();
+          const c = rt?.cfg?.onebot ?? {};
+          const ready = st.required.every((n) => st.packages[n]?.resolvable);
+          /**
+           * token 只对**真正从回环发起的连接**回明文。
+           *
+           * 不能用 `clientIp()`：它是给限速用的，开了 trustProxy 会读
+           * `X-Forwarded-For`，反代没配好时恒为 127.0.0.1——那等于公网
+           * 打开面板就能拿到明文 token。这里只信 TCP 对端地址。
+           */
+          const peer = String(req.socket?.remoteAddress ?? '');
+          const local = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(peer);
+          return json(res, 200, {
+            cfg: {
+              enabled: Boolean(c.enabled),
+              host: c.host ?? '127.0.0.1',
+              port: Number(c.port) || 0,
+              tokenSet: Boolean(c.token),
+              /** 仅本机：给明文好让用户复制到客户端 */
+              token: local ? String(c.token ?? '') : '',
+              selfUin: c.selfUin ?? '',
+              mode: c.mode ?? 'exclusive',
+              forwardAll: c.forwardAll !== false,
+              http: c.http !== false,
+              voice: c.voice ?? 'auto',
+              unboundPolicy: c.unboundPolicy ?? 'warn',
+              historyCache: Number(c.historyCache ?? 100),
+              allowRemote: Boolean(c.allowRemote),
+            },
+            deps: { dir: st.dir, packages: st.packages, missing: st.missing, ready },
+            state: rt?.onebot?.snapshot?.() ?? null,
+            capability: rt?.onebot?.capability?.() ?? null,
+            whitelist: onebotDeps.WHITELIST,
+            manual: onebotDeps.manualCommand(['ws']),
+          });
+        }
+
+        if (pathname === '/api/onebot' && req.method === 'PUT') {
+          const body = await readBody(req);
+          const c = (rt.cfg.onebot ??= {});
+
+          if (body.token !== undefined) {
+            const t = String(body.token ?? '').trim();
+            // 空串表示「不改」；要清空传 null。前端不会拿到原 token，所以不能靠回填
+            if (t) {
+              if (t.length < 16) return json(res, 400, { error: 'token 至少 16 个字符' });
+              c.token = t;
+            } else if (body.token === null) {
+              c.token = '';
+              /**
+               * 清 token 等于把门拆了：必须同时关掉监听。
+               * 留着 `enabled:true` 的话，`ws-server` 的空 token 会放行任何人。
+               */
+              c.enabled = false;
+            }
+          }
+          if (body.selfUin !== undefined) {
+            const u = String(body.selfUin ?? '').trim();
+            if (u && !/^[1-9]\d{4,11}$/.test(u)) {
+              return json(res, 400, { error: '机器人 QQ 号要 5–12 位数字，且不能以 0 开头' });
+            }
+            c.selfUin = u;
+          }
+          if (body.host !== undefined) {
+            const h = String(body.host ?? '').trim();
+            if (!h) return json(res, 400, { error: '监听地址不能为空' });
+            /**
+             * 非回环地址必须显式 `allowRemote`。
+             *
+             * 监听 `0.0.0.0` 等于把「能控制机器人的端口」摆到局域网/公网上，
+             * 而这里的唯一防线就是那个 token。默认不许，要开就明确开。
+             */
+            const loop = ['127.0.0.1', 'localhost', '::1'].includes(h.toLowerCase());
+            const allow = body.allowRemote !== undefined ? Boolean(body.allowRemote) : Boolean(c.allowRemote);
+            if (!loop && !allow) {
+              return json(res, 400, {
+                error: `监听 ${h} 会让局域网/公网直接访问兼容端口，确认后再打开 allowRemote`,
+              });
+            }
+            c.host = h;
+          }
+          if (body.port !== undefined) {
+            const p = Number(body.port);
+            if (!Number.isInteger(p) || p < 0 || p > 65535) {
+              return json(res, 400, { error: '端口要是 0–65535 的整数（0 = 自动分配）' });
+            }
+            c.port = p;
+          }
+          if (body.mode !== undefined) {
+            const m = String(body.mode);
+            if (!['exclusive', 'parallel', 'mirror'].includes(m)) {
+              return json(res, 400, { error: 'mode 只能是 exclusive / parallel / mirror' });
+            }
+            c.mode = m;
+          }
+          if (body.voice !== undefined) {
+            const v = String(body.voice);
+            if (!['auto', 'reject'].includes(v)) {
+              return json(res, 400, { error: 'voice 只能是 auto / reject' });
+            }
+            c.voice = v;
+          }
+          if (body.unboundPolicy !== undefined) {
+            const u = String(body.unboundPolicy);
+            if (!['warn', 'block'].includes(u)) {
+              return json(res, 400, { error: 'unboundPolicy 只能是 warn / block' });
+            }
+            c.unboundPolicy = u;
+          }
+          if (body.historyCache !== undefined) {
+            const n = Number(body.historyCache);
+            c.historyCache = Number.isFinite(n) ? Math.min(Math.max(Math.trunc(n), 0), 1000) : 100;
+          }
+          for (const k of ['forwardAll', 'http', 'allowRemote']) {
+            if (body[k] !== undefined) c[k] = Boolean(body[k]);
+          }
+          if (body.enabled !== undefined) {
+            const want = Boolean(body.enabled);
+            /**
+             * 缺 `ws` 不许开：不是配置错误，是「还没装依赖」。
+             * 说清楚该点哪个按钮，比一句「依赖缺失」有用。
+             */
+            if (want && !(await onebotDeps.ready())) {
+              const st = await onebotDeps.status();
+              return json(res, 400, {
+                error: '兼容模式需要 ws 依赖。先在「兼容」页点『一键安装 ws』',
+                // 只报「必需」的缺项：可选依赖没装不该拦住启用
+                missing: st.required.filter((n) => !st.packages[n]?.resolvable),
+              });
+            }
+            /**
+             * 没 token 不许开。
+             *
+             * 这不是形式主义：`ws-server` 里 token 为空时 `tokenOk` 直接放行，
+             * 等于本机任何一个进程都能接管机器人。空 token + 开监听 = 后门。
+             */
+            if (want && !String(c.token ?? '').trim()) {
+              return json(res, 400, {
+                error: '开启前先设置 access token（点『生成』，然后保存）',
+              });
+            }
+            c.enabled = want;
+          }
+
+          await saveBotConfig(rt.id, rt.cfg);
+
+          /**
+           * 立刻应用：改端口 / 开关 / token 都不该要求重启进程。
+           * 失败不回滚配置（用户的选择要留住），但把原因带回去。
+           */
+          let warning = '';
+          try {
+            await rt.onebot?.reconfigure(rt.cfg.onebot);
+          } catch (e) {
+            warning = `配置已保存，但兼容层没起来：${e.message}`;
+          }
+          return json(res, 200, {
+            ok: true,
+            ...(warning ? { warning } : {}),
+            state: rt.onebot?.snapshot?.() ?? null,
+          });
+        }
+
+        if (pathname === '/api/onebot/deps/install' && req.method === 'POST') {
+          const body = await readBody(req);
+          const packages = Array.isArray(body?.packages) && body.packages.length
+            ? body.packages
+            : ['ws'];
+          try {
+            const r = await onebotDeps.install(packages);
+            // 装完立刻重配：开关早就打开的用户不用再点一次「保存」
+            await rt?.onebot?.reconfigure(rt.cfg.onebot).catch(() => {});
+            return json(res, 200, {
+              ok: r.ok,
+              installed: r.installed,
+              error: r.error,
+              deps: { dir: r.status.dir, packages: r.status.packages, missing: r.status.missing },
+              state: rt?.onebot?.snapshot?.() ?? null,
+            });
+          } catch (e) {
+            // 装不上是常态（无网、没有 npm、镜像坏了）：把原因和手动命令一起给出去
+            const allowed = (Array.isArray(packages) ? packages : []).filter((p) =>
+              Object.hasOwn(onebotDeps.WHITELIST, p),
+            );
+            return json(res, 400, {
+              error: e.message,
+              ...(allowed.length ? { manual: onebotDeps.manualCommand(allowed) } : {}),
+            });
+          }
+        }
+
+        if (pathname === '/api/onebot/deps/remove' && req.method === 'POST') {
+          const body = await readBody(req);
+          const packages = Array.isArray(body?.packages) ? body.packages : [];
+          try {
+            const st = await onebotDeps.remove(packages);
+            // 卸了必需依赖 → 兼容层必须停下来，别留一个「监听中但发不出」的状态
+            await rt?.onebot?.reconfigure(rt.cfg.onebot).catch(() => {});
+            return json(res, 200, {
+              ok: true,
+              deps: { dir: st.dir, packages: st.packages, missing: st.missing },
+              state: rt?.onebot?.snapshot?.() ?? null,
+            });
+          } catch (e) {
+            return json(res, 400, { error: e.message });
+          }
         }
 
         /**

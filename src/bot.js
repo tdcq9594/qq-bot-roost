@@ -21,6 +21,7 @@ import { createLedger } from './ledger.js';
 import { createGate } from './gate.js';
 import { createDeliveryLedger } from './delivery.js';
 import { sharedIdentity } from './identity.js';
+import { OneBotBridge } from './onebot/index.js';
 
 /**
  * 一个机器人的完整运行时。
@@ -132,6 +133,19 @@ export class BotRuntime {
     this.session = null;
     this.pipeline = null;
     this.plugins = null;
+    /**
+     * OneBot v11 兼容层（对外协议，后端仍是官方接口）。
+     *
+     * 这里只**构造**，不启动——`start()` 里等 api / outbound / identity 都就绪
+     * 再 `onebot.start()`。缺 `ws` 依赖时它自己是 `missing-deps` 状态，
+     * 不影响机器人本体。
+     */
+    this.onebot = new OneBotBridge({
+      runtime: this,
+      cfg: cfg.onebot ?? {},
+      botId: this.id,
+      identity: this.identity,
+    });
 
     this.state = 'idle'; // idle | starting | online | offline | stopped | error
     this.lastError = '';
@@ -195,6 +209,16 @@ export class BotRuntime {
       cfg,
       isOnline: () => this.mock || this.online,
       quotaFile: this.paths.quota,
+    });
+
+    /**
+     * OneBot 兼容层在这里起（api / outbound / identity 都就绪了）。
+     *
+     * 失败**不拦启动**：缺 `ws` 依赖、端口被占、token 没填，都只是这一层不可用，
+     * 机器人本体和插件照常跑。错误挂在 `onebot.error` 上，面板能看见。
+     */
+    await this.onebot.start().catch((e) => {
+      this.log.warn(`OneBot 兼容层启动失败（不影响机器人本体）：${e.message}`);
     });
 
     // 群管内邀开关：api 层有自己的副本，配置变了由面板接口同步过来。
@@ -664,6 +688,8 @@ export class BotRuntime {
       this.webhook?.unregister(this.cfg.appId);
     } catch {}
     this.session?.clear();
+    // 先关兼容层：端口要尽快释放，客户端重连时不该打到一个正在退出的进程上
+    await this.onebot?.stop().catch(() => {});
     await this.plugins?.shutdown().catch(() => {});
     await this.outbound?.flush().catch(() => {});
     await this.groups?.flush().catch(() => {});
@@ -801,6 +827,14 @@ export class BotRuntime {
       });
 
       const meta = EVENTS[eventName] ?? null;
+
+      /**
+       * OneBot 兼容层：非消息事件（入群、退群、加好友…）。
+       *
+       * 放在插件监听器之前——客户端看到的状态应该是最新的，和可达性更新
+       * 同一条理由。它自己吞异常，不会影响插件。
+       */
+      this.onebot?.onEvent(eventName, d);
       for (const l of registry.listeners.get(eventName) ?? []) {
         // 事件里的群：有 group_openid 就按群开关过滤，没有（如私聊事件）就放行
         if (d?.group_openid && !pluginAllowedIn(cfg.plugins, d.group_openid, l.pluginId)) continue;
@@ -887,6 +921,14 @@ export class BotRuntime {
      */
     try {
       this.onMessage?.(msg);
+
+      /**
+       * OneBot 兼容层收消息。
+       *
+       * 传的是**完整 msg**（含 uin / msgIdx / attachments），不走 message-bus——
+       * 那条通道的 payload 是对外契约，故意脱敏过，拿不到 ID 映射要的东西。
+       */
+      this.onebot?.onMessage(msg);
     } catch (e) {
       this.log.warn(`消息广播失败: ${e.message}`);
     }
@@ -914,6 +956,23 @@ export class BotRuntime {
 
       if (msg.mentioned || msg.isCommand) session.markAddressed(msg.chatId);
 
+      /**
+       * 兼容模式「独占」：**插件**不再回话，但**内核命令照常工作**。
+       *
+       * 为什么不能直接 `return`（第一版就是这么写的，被主人指出来）：
+       * `绑定qq` / `绑定群号` / `绑定成员` 这些是**内核命令**（pluginId `__core`），
+       * 而 OneBot 的 ID 映射要靠绑定表才能给真 QQ 号。独占模式一刀切掉管线，
+       * 用户就再也绑不了号——于是所有人在客户端里永远是一串 13 位合成号，
+       * 主人权限、群号都对不上。这是个死循环，必须在管线里解决而不是绕过它。
+       *
+       * 所以这里**不提前 return**，只打一个标记：
+       *   - 管线照跑（去重 / 白名单 / 限流 / 暂停闸都还在，别的地方也别想绕过）
+       *   - 命令只放 `__core`，插件命令静默忽略
+       *   - 插件监听器整段跳过
+       */
+      const coreOnly = Boolean(this.onebot?.exclusive);
+      if (coreOnly) msg.coreOnly = true;
+
       const commandEntry = msg.isCommand ? registry.commands.get(msg.command) ?? null : null;
       const passed = await pipeline.run({ msg, cfg, commandEntry });
       if (!passed) return;
@@ -939,6 +998,16 @@ export class BotRuntime {
       this.#rememberPerson(msg);
 
       if (msg.isCommand && commandEntry) {
+        /**
+         * 独占模式下插件命令一律静默忽略（不提示「没有这个命令」）：
+         * 客户端已经接管了这些能力，群里再冒一句提示只是噪音。
+         * `__core` 是内核命令（绑定 / 管理 / help），必须留着——
+         * 否则 OneBot 的 ID 映射永远拿不到真 QQ 号。
+         */
+        if (coreOnly && commandEntry.pluginId !== '__core') {
+          this.metrics.bump('ignored');
+          return;
+        }
         /**
          * 分群插件开关：这个群没启用这个插件就不执行。
          *
@@ -1021,12 +1090,15 @@ export class BotRuntime {
         return;
       }
 
-      if (session.deliver(msg)) return;
+      if (!coreOnly && session.deliver(msg)) return;
 
-      if (msg.isCommand) {
+      if (msg.isCommand && !coreOnly) {
         const P = cfg.commandPrefix || '/';
         return msg.reply(`没有这个命令：${P}${msg.command}\n发 ${P}help 查看全部命令`).catch(() => {});
       }
+
+      /** 独占模式：插件监听器整段跳过（内核命令上面已经处理完） */
+      if (coreOnly) return;
 
       let handled = false;
       for (const evt of ['message', eventName]) {

@@ -260,6 +260,43 @@ const BOT_DEFAULTS = {
   },
 
   /**
+   * OneBot v11 兼容层（对外协议，后端仍是官方接口）。
+   *
+   * `enabled` 只是「想开」，真正能不能监听还看 `ws` 依赖装没装
+   * （面板「兼容」页一键安装，装到 `data/deps/onebot/`）。
+   * 没装时状态是 `missing-deps`，不阻塞机器人本体。
+   *
+   * `port: 0` 表示自动分配：`6700 + sha1(botId)%100`（同一只鸟永远同一个端口，
+   * 加一只鸟不会让别的鸟换端口），被占用就顺延。面板上留空即自动，
+   * 想写死就填具体端口或点「固定为当前端口」。
+   * 一个 OneBot 端点只能有一个 `self_id`，所以**每只鸟一个端口**。
+   */
+  onebot: {
+    enabled: false,
+    host: '127.0.0.1',
+    port: 0,
+    /** 空 = 拒绝启用（见 docs/OneBot兼容层设计.md 的校验表） */
+    token: '',
+    /** 机器人 QQ 号。官方接口拿不到，只能填；未绑定身份时 ID 映射会降级成合成号 */
+    selfUin: '',
+    /** exclusive 独占（跳过插件管线）| parallel 并行 | mirror 只观测 */
+    mode: 'exclusive',
+    /** 全量群消息也推给客户端 */
+    forwardAll: true,
+    /** 同一端口上是否也接受 HTTP API */
+    http: true,
+    /** 未绑定 openid 的策略：warn（合成号+告警）| block（丢事件） */
+    unboundPolicy: 'warn',
+    /** auto（装了 silk-wasm 就转）| reject（一律拒） */
+    voice: 'auto',
+    /** 用账本模拟历史消息的条数，0 = 关 */
+    historyCache: 100,
+    /** host 非回环时必须显式打开 */
+    allowRemote: false,
+    maxConnections: 4,
+  },
+
+  /**
    * 统计：消息量、活跃人数、命令排行。
    * 只记数量与时间，**不记消息正文**——正文落库会让人不敢用。
    * 需要 Node 22.5+ 的内置 SQLite，没有就自动降级为不统计。
@@ -371,19 +408,43 @@ const BOT_DEFAULTS = {
   },
 };
 
+/** 深拷贝：默认值里的对象/数组必须复制，见 `deepMerge` 的注释 */
+function cloneDeep(v) {
+  if (Array.isArray(v)) return v.map(cloneDeep);
+  if (v && typeof v === 'object') {
+    const out = {};
+    for (const [k, x] of Object.entries(v)) out[k] = cloneDeep(x);
+    return out;
+  }
+  return v;
+}
+
+/**
+ * 深合并：`extra` 覆盖 `base`。
+ *
+ * **默认值必须深拷贝**。以前是 `const out = {...base}`，`extra` 里没有的键
+ * 直接沿用 `BOT_DEFAULTS` 的**同一个对象引用**——于是所有机器人共享一份
+ * `onebot` / `whitelist` / `rateLimit`。表现极其隐蔽：
+ * 在 A 鸟的兼容页填 token，B 鸟保存任何设置时会把 A 的 token 写进 B 的配置，
+ * 重启后 B 用 A 的 token 另起一个监听。谁也不会往「配置串号」上想。
+ */
 function deepMerge(base, extra) {
-  const out = { ...base };
+  const out = {};
+  for (const [k, v] of Object.entries(base ?? {})) out[k] = cloneDeep(v);
   for (const [k, v] of Object.entries(extra ?? {})) {
+    if (v === undefined) continue;
+    const cur = out[k];
     if (
       v &&
       typeof v === 'object' &&
       !Array.isArray(v) &&
-      typeof base[k] === 'object' &&
-      !Array.isArray(base[k])
+      cur &&
+      typeof cur === 'object' &&
+      !Array.isArray(cur)
     ) {
-      out[k] = deepMerge(base[k], v);
-    } else if (v !== undefined) {
-      out[k] = v;
+      out[k] = deepMerge(cur, v);
+    } else {
+      out[k] = cloneDeep(v);
     }
   }
   return out;
@@ -563,6 +624,14 @@ export async function saveBotConfig(id, cfg) {
     gate: cfg.gate ?? { pauseOnStart: false },
     plugins: cfg.plugins,
     groupManage: cfg.groupManage ?? { invited: false },
+    /**
+     * OneBot 兼容层。
+     *
+     * **必须显式列出来**：这个函数是「白名单式」写盘（只写下面这些键），
+     * 漏一个的后果不是「少存一项」，而是「面板点了保存、重启全丢」——
+     * token 和 selfUin 都会没，看起来就像兼容模式自己坏了。
+     */
+    onebot: cfg.onebot,
     // 脏值（字符串 / 数组 / 旧配置里混进来的东西）一律规范成默认关，别污染配置文件
     media: { placeholderSpace: cfg.media?.placeholderSpace === true },
   });

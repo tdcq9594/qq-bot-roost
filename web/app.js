@@ -234,6 +234,7 @@ async function selectBot(id) {
   if (tab === 'events') loadEvents();
   if (tab === 'ledger') loadLedger();
   if (tab === 'reach') loadReach();
+  if (tab === 'onebot') loadOnebot();
   if (tab === 'delivery') loadDelivery();
   if (tab === 'groups') loadGroups();
   if (tab === 'roles') { loadRoles(); loadPeople(); }
@@ -606,6 +607,7 @@ function activateTab(name) {
   if (name === 'roles') { loadRoles(); loadPeople(); }
   if (name === 'identity') loadIdentity();
   if (name === 'notify') loadNotify();
+  if (name === 'onebot') loadOnebot();
   // 纯展示同步：侧栏 / 底栏高亮、面包屑、抽屉收起。不碰任何数据加载。
   syncNav(name);
 }
@@ -4289,6 +4291,374 @@ $('#btnAddRole')?.addEventListener('click', async () => {
   } catch (e) {
     alert('保存失败: ' + e.message);
   }
+});
+
+/* ---------------- OneBot 兼容（M0：只有依赖） ---------------- */
+
+/**
+ * 兼容页的依赖卡。
+ *
+ * 这里**只做依赖**，协议层（监听地址、连接串、能力矩阵）等 M1 接上再画——
+ * 提前画一个「开关」但背后没有监听，比不画更糟：用户会以为开了。
+ */
+async function loadOnebot() {
+  const body = $('#onebotDepsBody');
+  if (!body) return;
+  try {
+    renderOnebot(await api('/api/onebot'));
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="5" class="empty">加载失败: ${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+function renderOnebot(d) {
+  const body = $('#onebotDepsBody');
+  const hint = $('#onebotDepsHint');
+  if (!body) return;
+
+  /* ---------- 配置表单 ---------- */
+  const cfg = d?.cfg ?? {};
+  const st = d?.state ?? {};
+  if ($('#onebotEnabled')) $('#onebotEnabled').checked = Boolean(cfg.enabled);
+  if ($('#onebotHost')) $('#onebotHost').value = cfg.host ?? '127.0.0.1';
+  if ($('#onebotPort')) {
+    /**
+     * 0 表示「自动分配」，但输入框里显示一个 0 会让人以为配错了。
+     * 留空 + 占位符显示实际端口，比让人去猜 0 的含义好。
+     */
+    const auto = !Number(cfg.port);
+    $('#onebotPort').value = auto ? '' : String(cfg.port);
+    $('#onebotPort').placeholder = auto
+      ? `自动（当前 ${st.port || '未监听'}）`
+      : '端口（留空=自动）';
+  }
+  const pinBtn = $('#btnOnebotPinPort');
+  if (pinBtn) {
+    pinBtn.hidden = !(st.state === 'running' && !Number(cfg.port) && Number(st.port) > 0);
+    pinBtn.dataset.port = String(st.port ?? '');
+  }
+  if ($('#onebotSelfUin')) $('#onebotSelfUin').value = cfg.selfUin ?? '';
+  if ($('#onebotMode')) $('#onebotMode').value = cfg.mode ?? 'exclusive';
+  if ($('#onebotToken')) {
+    /**
+     * 本机访问时后端会给明文（要能复制到客户端），非本机只给「设过没有」。
+     * 有明文就回填成掩码显示，用户点「显示」才看得见。
+     */
+    $('#onebotToken').value = cfg.token ?? '';
+    $('#onebotToken').type = 'password';
+    $('#onebotToken').placeholder = cfg.tokenSet
+      ? 'access token（已设置，留空=不改）'
+      : 'access token（至少 16 位）';
+    const reveal = $('#btnOnebotRevealToken');
+    if (reveal) reveal.textContent = '显示';
+  }
+
+  /* ---------- 状态 ---------- */
+  const stateHint = $('#onebotStateHint');
+  const connHint = $('#onebotConnHint');
+  const STATE_TEXT = {
+    running: '运行中',
+    disabled: '未开启',
+    stopped: '已停止',
+    'missing-deps': '缺依赖',
+    error: '启动失败',
+  };
+  if (stateHint) {
+    const label = STATE_TEXT[st.state] ?? st.state ?? '未知';
+    const extra =
+      st.state === 'running'
+        ? ` · 端口 ${st.port}${Number(cfg.port) ? '' : '（自动分配）'} · ${st.connections ?? 0} 个连接`
+        : '';
+    stateHint.textContent = label + extra;
+  }
+
+  if (connHint) {
+    if (st.state === 'running') {
+      const host = st.host ?? '127.0.0.1';
+      /**
+       * **地址里不带 token**。
+       *
+       * 客户端（aurobot / NoneBot）都有独立的「令牌」输入框，令牌塞进 URL 会
+       * 被截屏、被复制到聊天里、被日志记下来，泄漏面反而更大。
+       * 这里只给干净的地址；令牌用上面那个输入框的「复制」。
+       */
+      const wsUrl = `ws://${host}:${st.port}/`;
+      const httpUrl = `http://${host}:${st.port}`;
+      const token = String(cfg.token ?? '');
+      const row = (label, value) => `
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">
+          <span class="hint" style="min-width:74px">${label}</span>
+          <code style="word-break:break-all">${escapeHtml(value)}</code>
+          <button class="btn small" data-copy="${escapeHtml(value)}">复制</button>
+        </div>`;
+      const ids = st.ids ?? {};
+      connHint.innerHTML =
+        row('WebSocket', wsUrl) +
+        row('HTTP', httpUrl) +
+        (token
+          ? '<div class="hint" style="margin-top:6px">令牌填上面输入框里那个（点「复制」）——<b>不要拼进地址</b>，客户端都有单独的令牌字段</div>'
+          : '<div class="hint" style="margin-top:6px"><b>还没设 token</b>：客户端会被拒</div>') +
+        `<div class="hint" style="margin-top:6px">合成号：${Number(ids.synthUsers ?? 0)} 人 / ${Number(ids.synthGroups ?? 0)} 群` +
+        `　动作：成功 ${Number(st.actions?.ok ?? 0)} / 失败 ${Number(st.actions?.fail ?? 0)}</div>` +
+        (st.online === false
+          ? `<div class="hint" style="margin-top:6px;color:var(--err)"><b>机器人本体没上线</b>` +
+            `${st.botError ? `（${escapeHtml(st.botError)}）` : ''}：客户端能连上，但发消息会失败——先到「运行」页让它上线</div>`
+          : '') +
+        (st.selfOpenidBound ? '' : '<div class="hint" style="margin-top:6px"><b>机器人自己的 openid 没绑</b>：已按「过滤所有机器人消息」处理，避免自激</div>');
+    } else if (st.state === 'missing-deps' || st.state === 'error') {
+      connHint.innerHTML = `<b>${escapeHtml(st.error || '没起来')}</b>`;
+    } else {
+      connHint.textContent = '开启后这里会显示连接串和运行状态。';
+    }
+  }
+
+  /* ---------- 依赖 ---------- */
+  const pkgs = d?.deps?.packages ?? {};
+  const rows = Object.entries(pkgs).map(([name, p]) => {
+    const ok = Boolean(p.resolvable);
+    const badge = ok
+      ? '<span class="badge on">已安装</span>'
+      : p.required
+        ? '<span class="badge off">未安装·必需</span>'
+        : '<span class="badge">未安装·可选</span>';
+    const action = ok
+      ? `<button class="btn small" data-remove="${escapeHtml(name)}">卸载</button>`
+      : `<button class="btn small primary" data-install="${escapeHtml(name)}">一键安装</button>`;
+    return `<tr>
+      <td class="mono">${escapeHtml(name)}</td>
+      <td>${escapeHtml(p.desc ?? '')}<div class="hint">${escapeHtml(p.size ?? '')}</div></td>
+      <td>${badge}</td>
+      <td class="mono">${escapeHtml(p.version || '—')}</td>
+      <td>${action}</td>
+    </tr>`;
+  });
+  body.innerHTML = rows.join('') || '<tr><td colspan="5" class="empty">没有依赖声明</td></tr>';
+
+  if (!hint) return;
+  if (d?.deps?.ready) {
+    hint.innerHTML = `依赖已就绪，装在 <code>${escapeHtml(d?.deps?.dir ?? '')}</code>`;
+  } else {
+    const missing = (d?.deps?.missing ?? []).join('、') || '—';
+    hint.innerHTML =
+      `还缺：<b>${escapeHtml(missing)}</b>。装不上时可以手动执行：` +
+      `<code>${escapeHtml(d?.manual ?? '')}</code>`;
+  }
+
+  /* ---------- 能力矩阵 ---------- */
+  const capBody = $('#onebotCapBody');
+  const capHint = $('#onebotCapHint');
+  const cap = d?.capability;
+  if (capBody && Array.isArray(cap?.list)) {
+    const LEVEL = {
+      support: ['badge on', '支持'],
+      degrade: ['badge', '降级'],
+      unsupported: ['badge off', '不支持'],
+    };
+    capBody.innerHTML = cap.list
+      .map((c) => {
+        const [cls, text] = LEVEL[c.level] ?? ['badge', c.level];
+        const why = c.why || c.note || '';
+        return `<tr>
+          <td class="mono">${escapeHtml(c.name)}</td>
+          <td><span class="${cls}">${text}</span></td>
+          <td class="hint">${escapeHtml(why)}</td>
+        </tr>`;
+      })
+      .join('');
+  }
+  if (capHint && cap?.summary) {
+    capHint.textContent =
+      `共 ${cap.list.length} 项：支持 ${cap.summary.support} · 降级 ${cap.summary.degrade}` +
+      ` · 不支持 ${cap.summary.unsupported}`;
+  }
+}
+
+async function onebotDepsAction(kind, name, btn) {
+  const label = btn?.textContent;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = kind === 'install' ? '安装中…' : '卸载中…';
+  }
+  try {
+    await api(`/api/onebot/deps/${kind}`, {
+      method: 'POST',
+      body: JSON.stringify({ packages: [name] }),
+    });
+  } catch (e) {
+    const hint = $('#onebotDepsHint');
+    if (hint) hint.innerHTML = `失败：${escapeHtml(e.message)}`;
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = label;
+    }
+    await loadOnebot();
+  }
+}
+
+$('#btnOnebotReloadDeps')?.addEventListener('click', loadOnebot);
+$('#btnOnebotReload')?.addEventListener('click', loadOnebot);
+
+/**
+ * 能力表展开/收起。
+ *
+ * 之前用原生 `<details>` + `list-style:none`，箭头被隐藏后整块看着像纯文本，
+ * 点了没反应——不是没实现，是**看不出来能点**。换成显式按钮，行为一眼可见。
+ */
+$('#btnOnebotCapToggle')?.addEventListener('click', () => {
+  const wrap = $('#onebotCapWrap');
+  const btn = $('#btnOnebotCapToggle');
+  if (!wrap || !btn) return;
+  wrap.hidden = !wrap.hidden;
+  btn.textContent = wrap.hidden ? '展开' : '收起';
+});
+
+/** 连接串一键复制（整条 URL 带 token，省得用户自己拼） */
+$('#onebotConnHint')?.addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-copy]');
+  if (!btn) return;
+  const text = btn.dataset.copy ?? '';
+  const old = btn.textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+    btn.textContent = '已复制';
+  } catch {
+    // 剪贴板被拒：选中那段 code，让用户 Ctrl+C
+    const code = btn.parentElement?.querySelector('code');
+    if (code) {
+      const range = document.createRange();
+      range.selectNodeContents(code);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+    btn.textContent = '按 Ctrl+C';
+  }
+  setTimeout(() => {
+    btn.textContent = old;
+  }, 1400);
+});
+
+const onebotTokenInput = () => $('#onebotToken');
+
+/** 生成 token：48 位十六进制，够长且没有 URL 特殊字符 */
+$('#btnOnebotGenToken')?.addEventListener('click', () => {
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  const token = [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+  const input = onebotTokenInput();
+  if (input) {
+    input.value = token;
+    // 刚生成的一定要看得见，否则用户没法确认自己生成成功了
+    input.type = 'text';
+  }
+  const reveal = $('#btnOnebotRevealToken');
+  if (reveal) reveal.textContent = '隐藏';
+  const hint = $('#onebotConnHint');
+  if (hint) hint.innerHTML = '已生成，<b>记得点「保存并应用」</b>，再复制到客户端。';
+});
+
+/** 复制：本机访问时输入框里有明文；非本机看不到，只能重新生成 */
+$('#btnOnebotCopyToken')?.addEventListener('click', async () => {
+  const hint = $('#onebotConnHint');
+  const val = onebotTokenInput()?.value ?? '';
+  if (!val) {
+    if (hint) hint.innerHTML = '没有可复制的 token：非本机访问看不到明文，点「生成」重来一次。';
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(val);
+    if (hint) hint.innerHTML = 'token 已复制到剪贴板。';
+  } catch {
+    // 剪贴板被拒（非安全上下文/权限）：退化成选中，让用户自己按 Ctrl+C
+    const input = onebotTokenInput();
+    if (input) {
+      input.type = 'text';
+      input.select();
+    }
+    if (hint) hint.innerHTML = '浏览器不允许直接写剪贴板，已选中，按 Ctrl+C 复制。';
+  }
+});
+
+$('#btnOnebotRevealToken')?.addEventListener('click', () => {
+  const input = onebotTokenInput();
+  const btn = $('#btnOnebotRevealToken');
+  if (!input) return;
+  const show = input.type === 'password';
+  input.type = show ? 'text' : 'password';
+  if (btn) btn.textContent = show ? '隐藏' : '显示';
+});
+
+/** 清除：等于把门拆了，必须同时关掉监听（后端也会这么做） */
+$('#btnOnebotClearToken')?.addEventListener('click', async () => {
+  const ok = await confirmDialog({
+    title: '清除 access token',
+    message: '清除后兼容模式会<b>自动关闭</b>，已连接的客户端会断开。要重新用就再生成一个。',
+    okText: '清除',
+    danger: true,
+  });
+  if (!ok) return;
+  const hint = $('#onebotConnHint');
+  try {
+    await api('/api/onebot', { method: 'PUT', body: JSON.stringify({ token: null }) });
+    await loadOnebot();
+    if (hint) hint.innerHTML = 'token 已清除，兼容模式已关闭。';
+  } catch (e) {
+    if (hint) hint.innerHTML = `<b>${escapeHtml(e.message)}</b>`;
+  }
+});
+
+$('#btnOnebotSave')?.addEventListener('click', async () => {
+  const btn = $('#btnOnebotSave');
+  const hint = $('#onebotConnHint');
+  const body = {
+    enabled: Boolean($('#onebotEnabled')?.checked),
+    host: ($('#onebotHost')?.value ?? '').trim() || '127.0.0.1',
+    port: Number($('#onebotPort')?.value) || 0,
+    selfUin: ($('#onebotSelfUin')?.value ?? '').trim(),
+    mode: $('#onebotMode')?.value ?? 'exclusive',
+  };
+  const token = ($('#onebotToken')?.value ?? '').trim();
+  if (token) body.token = token;
+
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api('/api/onebot', { method: 'PUT', body: JSON.stringify(body) });
+    await loadOnebot();
+    if (r?.warning && hint) hint.innerHTML = `<b>${escapeHtml(r.warning)}</b>`;
+  } catch (e) {
+    if (hint) hint.innerHTML = `<b>${escapeHtml(e.message)}</b>`;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+});
+
+/**
+ * 「固定为当前端口」：自动分配是按 botId 哈希算的，本来就稳定，
+ * 但有人就是想要一个写死的端口（反代、防火墙放行）。点一下写回配置即可。
+ */
+$('#btnOnebotPinPort')?.addEventListener('click', async () => {
+  const btn = $('#btnOnebotPinPort');
+  const hint = $('#onebotConnHint');
+  const port = Number(btn?.dataset.port) || 0;
+  if (!port) return;
+  if (btn) btn.disabled = true;
+  try {
+    await api('/api/onebot', { method: 'PUT', body: JSON.stringify({ port }) });
+    await loadOnebot();
+    if (hint) hint.innerHTML = `端口已固定为 <b>${port}</b>`;
+  } catch (e) {
+    if (hint) hint.innerHTML = `<b>${escapeHtml(e.message)}</b>`;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+});
+
+$('#onebotDepsBody')?.addEventListener('click', (e) => {
+  const ins = e.target.closest('[data-install]');
+  const rem = e.target.closest('[data-remove]');
+  if (ins) onebotDepsAction('install', ins.dataset.install, ins);
+  else if (rem) onebotDepsAction('remove', rem.dataset.remove, rem);
 });
 
 /* ---------------- 身份（QQ号 / 群号 ↔ openid） ---------------- */

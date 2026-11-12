@@ -471,6 +471,51 @@ export class EventLedger {
   }
 
   /**
+   * 某会话的最近 N 条**带原始报文**的历史。
+   *
+   * 和 `recent()` 的区别：这个把 `payload` 也取出来，用于「模拟历史消息接口」——
+   * OneBot 的 `get_group_msg_history` 要还原消息段（图片、语音、引用），
+   * 只靠 `content` 会把图片全丢掉。
+   *
+   * 只给内部用（OneBot 兼容层），面板仍然走 `recent()`——那边不需要 payload，
+   * 少传一份大字段。
+   *
+   * @param {object} p
+   * @param {string} p.chatId
+   * @param {number} [p.limit]
+   * @param {number} [p.beforeSeq]
+   */
+  history({ chatId, limit = 20, beforeSeq } = {}) {
+    if (!this.available || this.closed || !chatId) return [];
+    const lim = Math.min(Math.max(Number(limit) || 20, 1), 200);
+    const rows = beforeSeq
+      ? this.db
+          .prepare(
+            `SELECT seq, id, kind, chat_id, user_id, user_name, content, at, msg_idx, quoted, payload
+               FROM events WHERE bot_id = ? AND chat_id = ? AND seq < ?
+              ORDER BY seq DESC LIMIT ?`,
+          )
+          .all(this.botId, String(chatId), Number(beforeSeq), lim)
+      : this.db
+          .prepare(
+            `SELECT seq, id, kind, chat_id, user_id, user_name, content, at, msg_idx, quoted, payload
+               FROM events WHERE bot_id = ? AND chat_id = ?
+              ORDER BY seq DESC LIMIT ?`,
+          )
+          .all(this.botId, String(chatId), lim);
+
+    return rows.reverse().map((r) => {
+      let payload = null;
+      try {
+        payload = JSON.parse(r.payload ?? '{}');
+      } catch {
+        payload = null;
+      }
+      return { ...mapRow(r), payload };
+    });
+  }
+
+  /**
    * 某个人说过的话（跨会话）。
    *
    * 面板「身份」页要用它：管理员看到一串 openid 时，得先知道「这人是谁、
