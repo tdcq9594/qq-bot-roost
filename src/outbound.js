@@ -604,15 +604,23 @@ export class Outbound {
       }
 
       // 2b) 主动消息额度：日额度 + 分钟额度，两个都要过
+      //     互动召回（is_wakeup）走官方独立额度：用户主动对话后 30 天内
+      //     当天 / 1–3 天 / 3–7 天 / 7–30 天四个窗口各 1 条。
+      //     上游 dsh-roost 已按窗口严格记账（最多 4 条 / 30 天），
+      //     这里再扣本地日额度会让「7–30 天」那档永远发不出去；
+      //     但分钟限流仍要过，防刷屏是另一回事。
+      const isWakeup = body.isWakeup === true;
       if (active) {
-        const used = await this.quota.used(chatKey);
-        if (used >= this.dailyActive) {
-          this.stats.quotaBlocked += 1;
-          throw new SendError(
-            `这个会话今天的主动消息额度已用完（${this.dailyActive} 条/天），QQ 不再允许主动推送。\n` +
-              `等用户 @ 一次机器人，就能继续用被动回复。`,
-            'quota',
-          );
+        if (!isWakeup) {
+          const used = await this.quota.used(chatKey);
+          if (used >= this.dailyActive) {
+            this.stats.quotaBlocked += 1;
+            throw new SendError(
+              `这个会话今天的主动消息额度已用完（${this.dailyActive} 条/天），QQ 不再允许主动推送。\n` +
+                `等用户 @ 一次机器人，就能继续用被动回复。`,
+              'quota',
+            );
+          }
         }
         /**
          * 分钟限流单独一个 code（`rate`），**不能和日额度共用 `quota`**。
@@ -629,7 +637,7 @@ export class Outbound {
             'rate',
           );
         }
-        await this.quota.consume(chatKey);
+        if (!isWakeup) await this.quota.consume(chatKey);
       }
 
       try {
@@ -644,8 +652,8 @@ export class Outbound {
           const n = this.passiveCount.get(body.msgId) ?? 0;
           if (n > 0) this.passiveCount.set(body.msgId, n - 1);
         }
-        // 主动消息是「先扣后发」，发失败要把额度退回去
-        if (active) await this.quota.refund(chatKey).catch(() => {});
+        // 主动消息是「先扣后发」，发失败要把额度退回去（互动召回没扣，不退）
+        if (active && !isWakeup) await this.quota.refund(chatKey).catch(() => {});
         // 被动回复被服务端判定过期（本地时钟差或排队等太久），再降级试一次
         const canRetry =
           wantPassive && !active && this.downgrade && this.#looksExpired(e);

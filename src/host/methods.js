@@ -325,6 +325,8 @@ export function createMethods({ runtime: R, getState, log = () => {} }) {
     if (p.msgId) body.msgId = str(p.msgId);
     if (p.eventId) body.eventId = str(p.eventId);
     if (p.msgSeq !== undefined) body.msgSeq = Number(p.msgSeq);
+    /** 4.6 互动召回：必须 camelCase，buildSendPayload 才认得 */
+    if (p.isWakeup === true) body.isWakeup = true;
     for (const k of ['markdown', 'keyboard', 'media', 'card', 'ark', 'messageReference']) {
       if (p[k] !== undefined) body[k] = p[k];
     }

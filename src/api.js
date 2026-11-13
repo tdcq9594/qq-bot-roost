@@ -122,7 +122,8 @@ const PASSIVE_MAX_SEQ = 5;
  * 构造发送报文。抽成纯函数是为了能单测——`#payload` 是私有方法，测试摸不到。
  *
  * @param {object} opts 驼峰字段：content / msgType / msgId / msgSeq / eventId /
- *                      markdown / keyboard / media / card / ark / messageReference
+ *                      markdown / keyboard / media / card / ark / messageReference /
+ *                      isWakeup（互动召回，官方独立额度）
  * @param {(msgId:string)=>number} nextSeq 取下一个 msg_seq
  * @returns {object} 官方要的 snake_case 报文
  */
@@ -133,6 +134,7 @@ export function buildSendPayload(opts = {}, nextSeq = () => 1) {
     msgId,
     msgSeq,
     eventId,
+    isWakeup,
     markdown,
     keyboard,
     media,
@@ -153,6 +155,13 @@ export function buildSendPayload(opts = {}, nextSeq = () => 1) {
    * 与 msg_id 二选一。
    */
   if (eventId) payload.event_id = eventId;
+  /**
+   * 4.6 互动召回（官方口径）：用户主动对话后 30 天内，当天 / 1–3 天 /
+   * 3–7 天 / 7–30 天四个窗口各 1 条。带上它服务端不校验
+   * msg_id / event_id 有效期，也不算普通主动推送的额度。
+   * 上游（dsh-roost）按窗口记账，这里只负责把声明透传出去。
+   */
+  if (isWakeup === true) payload.is_wakeup = true;
   if (markdown) {
     // 官方：填了 markdown 后 content 必须为空，否则 40034008 / 304061
     payload.content = '';
