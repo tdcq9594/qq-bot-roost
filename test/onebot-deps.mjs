@@ -38,21 +38,52 @@ async function fakeWs(version = '8.18.0') {
   deps.resetCache();
 }
 
-test('白名单：只认 ws / silk-wasm，别的一律拒', () => {
+/**
+ * 伪造 `@ffmpeg-installer/ffmpeg`：主包只有胶水代码，`.path` 指向平台子包里的
+ * 可执行文件。`binary: false` 模拟「主包在、62MB 的 exe 没了」这种半坏状态。
+ *
+ * 那个 fake exe 是纯文本，**只给 status / 路径断言用**：真跑 `verify()`
+ * 会去执行它，那是另一条用例的事。
+ */
+const FF_DIR = () => path.join(deps.depsDir(), 'node_modules', '@ffmpeg-installer');
+const FF_BIN = () => path.join(FF_DIR(), 'win32-x64', 'ffmpeg.exe');
+
+async function fakeFfmpeg({ binary = true } = {}) {
+  const dir = path.join(FF_DIR(), 'ffmpeg');
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(
+    path.join(dir, 'package.json'),
+    JSON.stringify({ name: '@ffmpeg-installer/ffmpeg', version: '1.1.0', main: 'index.js' }),
+  );
+  await fs.writeFile(path.join(dir, 'index.js'), `module.exports={path:${JSON.stringify(FF_BIN())}};\n`);
+  if (binary) {
+    await fs.mkdir(path.dirname(FF_BIN()), { recursive: true });
+    await fs.writeFile(FF_BIN(), 'not-a-real-exe');
+  } else {
+    await fs.rm(FF_BIN(), { force: true });
+  }
+  deps.resetCache();
+}
+
+test('白名单：只认 ws / silk-wasm / ffmpeg，别的一律拒', () => {
   assert.deepEqual(deps.pickPackages(['ws']), ['ws']);
   assert.deepEqual(deps.pickPackages(['silk-wasm', 'ws', 'ws']), ['silk-wasm', 'ws']);
+  assert.deepEqual(deps.pickPackages(['@ffmpeg-installer/ffmpeg']), ['@ffmpeg-installer/ffmpeg']);
   assert.deepEqual(deps.pickPackages(['']), []);
   // 这条是安全边界：面板传任意包名 = 远程代码执行
   assert.throws(() => deps.pickPackages(['lodash']), /不认识的依赖/);
   assert.throws(() => deps.pickPackages(['ws', 'left-pad']), /left-pad/);
+  // 只认这个 scope 下的**主包**：平台子包是它的 optional 依赖，不该被单独点名
+  assert.throws(() => deps.pickPackages(['@ffmpeg-installer/win32-x64']), /不认识的依赖/);
 });
 
 test('status：空目录就是「都没装」', async () => {
   const s = await deps.status();
   assert.equal(s.dir, path.join(home, 'data', 'deps', 'ext'));
   assert.deepEqual(s.required, ['ws']);
-  assert.deepEqual([...s.missing].sort(), ['silk-wasm', 'ws']);
+  assert.deepEqual([...s.missing].sort(), ['@ffmpeg-installer/ffmpeg', 'silk-wasm', 'ws']);
   assert.equal(s.packages.ws.resolvable, false);
+  assert.equal(s.packages['@ffmpeg-installer/ffmpeg'].resolvable, false);
   assert.equal(await deps.ready(), false);
 });
 
@@ -67,7 +98,7 @@ test('装好之后：status 认得出、load 拿得到、verify 通过', async (
   const s = await deps.status();
   assert.equal(s.packages.ws.version, '8.18.0');
   assert.equal(s.packages.ws.resolvable, true);
-  assert.deepEqual(s.missing, ['silk-wasm']);
+  assert.deepEqual([...s.missing].sort(), ['@ffmpeg-installer/ffmpeg', 'silk-wasm']);
   assert.equal(await deps.ready(), true);
 
   const mod = await deps.load('ws');
@@ -110,4 +141,33 @@ test('manualCommand：给的是能直接粘贴的命令', () => {
 
 test('install：空名单直接拒，不碰 npm', async () => {
   await assert.rejects(() => deps.install([]), /没有要安装的依赖/);
+});
+
+test('ffmpeg：主包在、二进制没了，就不算装好', async () => {
+  await fakeFfmpeg({ binary: false });
+  const s = await deps.status();
+  const p = s.packages['@ffmpeg-installer/ffmpeg'];
+  assert.equal(p.version, '1.1.0', '胶水包的 version 还在');
+  assert.equal(p.resolvable, false, 'resolve 只证明胶水代码在，62MB 的 exe 不在就不算装好');
+  assert.equal(p.binary, '');
+  assert.ok(s.missing.includes('@ffmpeg-installer/ffmpeg'));
+  assert.equal(await deps.ffmpegBinary(), '');
+
+  // 二进制补回来就恢复：面板上「重装」要能修好这种半坏状态
+  await fakeFfmpeg({ binary: true });
+  const s2 = await deps.status();
+  const p2 = s2.packages['@ffmpeg-installer/ffmpeg'];
+  assert.equal(p2.resolvable, true);
+  assert.equal(p2.binary, FF_BIN());
+});
+
+test('remove：ffmpeg 连平台子包一起删，不留 62MB 垃圾', async () => {
+  await fakeFfmpeg({ binary: true });
+  const s = await deps.remove(['@ffmpeg-installer/ffmpeg']);
+  assert.equal(s.packages['@ffmpeg-installer/ffmpeg'].version, '');
+  assert.equal(
+    await fs.stat(FF_DIR()).then(() => true).catch(() => false),
+    false,
+    '主包和平台子包在同一个 scope 下，卸载要整个删掉',
+  );
 });

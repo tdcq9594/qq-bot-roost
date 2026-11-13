@@ -52,7 +52,7 @@ test('迁移：老目录整体搬到 deps/ext，已装的包不用重下', async
   assert.equal(s.packages.ws.version, '8.18.0', '版本要跟着文件一起过来');
   assert.equal(s.packages.ws.resolvable, true, '搬完必须还能 require');
   assert.equal(await deps.ready(), true);
-  assert.deepEqual(s.missing, ['silk-wasm'], '只有真正没装的那个才算缺');
+  assert.deepEqual([...s.missing].sort(), ['@ffmpeg-installer/ffmpeg', 'silk-wasm'], '只有真正没装的那个才算缺');
 
   const mod = await deps.load('ws');
   assert.equal(typeof mod.WebSocketServer, 'function');

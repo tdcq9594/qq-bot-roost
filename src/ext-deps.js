@@ -2,11 +2,12 @@
  * 外接依赖（OneBot 兼容层 + 宿主协议共用）
  * ==========================================
  *
- * 两条出口都要 `ws`（WS 服务端），语音都要 `silk-wasm`（WAV → SILK）。
- * 所以这是一份**共用依赖**，不是 OneBot 专属——2026-11-13 之前它叫
- * `onebot/deps.js`、装在 `data/deps/onebot/`，现在目录和命名都改回中性。
+ * 两条出口都要 `ws`（WS 服务端），语音都要 `silk-wasm`（WAV → SILK），
+ * 非 WAV 语音（mp3/ogg）还要 `ffmpeg` 转一道。所以这是一份**共用依赖**，
+ * 不是 OneBot 专属——2026-11-13 之前它叫 `onebot/deps.js`、装在
+ * `data/deps/onebot/`，现在目录和命名都改回中性。
  *
- * 两者都**不进** `package.json`——框架本体保持零依赖这条不变，
+ * 三者都**不进**根 `package.json`——框架本体保持零依赖这条不变，
  * 用户在面板「外接 → 依赖」点「一键安装」才真正装到 `data/deps/ext/`。
  *
  * 三条硬原则：
@@ -15,8 +16,9 @@
  *      把「面板弱口令」升级成「远程代码执行」——这条不能让步。
  *   2. **装到数据目录**，不碰项目根 `node_modules`。否则「零依赖」变成假话，
  *      `npm ci` 会把它们清掉，用户 `git pull` 后行为还会变。
- *   3. **不在启动时自动装**。启动/后台只读状态；唯一的自动安装是
- *      **第一次真的要发语音**时补 `silk-wasm`（用户动作触发，见 `ensureSilk`）。
+ *   3. **不在启动时自动装**。启动/后台只读状态；自动安装只发生在
+ *      **第一次真的要发语音**时（用户动作触发）：先补 `silk-wasm`（`ensureSilk`），
+ *      要转码再补 `ffmpeg`（`ensureFfmpeg`）。
  *
  * 安装本身复用 `src/plugin/deps.js` 的 `ensurePluginDeps`：npm / pnpm 探测、
  * DSH 自带运行时、`--ignore-scripts`、超时、失败原因都已经在里面了，
@@ -25,6 +27,7 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { DIRS } from './paths.js';
@@ -52,7 +55,25 @@ export const WHITELIST = {
     size: '~1.5MB',
     desc: '语音转 SILK（可选，发语音才需要）',
   },
+  /**
+   * ffmpeg 走 npm 包而不是让用户自己装：官方只收 SILK，而 mp3/ogg 语音
+   * 必须先转 WAV 才能进 `silk-wasm`。这个包的**平台子包**（win32-x64 等）
+   * 把静态二进制直接打进 tarball，没有 postinstall 脚本——所以
+   * `--ignore-scripts` 下也能装，不必为用户网盘/系统 PATH 操心。
+   *
+   * 代价是 62MB（解压后）。所以它是**最后才动**的那一个：只有真遇到
+   * 非 WAV 语音才会自动补装，见 `ensureFfmpeg`。
+   */
+  '@ffmpeg-installer/ffmpeg': {
+    range: '^1.1.0',
+    required: false,
+    size: '~62MB',
+    desc: '音频转码（可选，mp3/ogg 语音才需要）',
+  },
 };
+
+/** 单独拎出来：判定「能不能用」的逻辑和别的包不一样（见 `ffmpegBinary`） */
+const FFMPEG_PKG = '@ffmpeg-installer/ffmpeg';
 
 /** 装在哪：`data/deps/ext/`。两条出口共用，跟着数据走，升级不丢，也不污染仓库 */
 export function depsDir() {
@@ -154,6 +175,41 @@ async function installedVersion(name) {
 }
 
 /**
+ * 包内 ffmpeg 的绝对路径；没装 / 二进制缺失返回空串。
+ *
+ * 为什么不能只看 `require.resolve`：`@ffmpeg-installer/ffmpeg` 本身只有
+ * 24KB 胶水代码，62MB 的 `ffmpeg.exe` 在同版本的**平台子包**
+ * （`@ffmpeg-installer/win32-x64`）里。`--omit=optional`、清理磁盘、
+ * 杀毒软件隔离，都会留下「主包在、二进制没了」的半坏状态——只 resolve
+ * 主包会报「已安装」，然后用户发语音时才炸。
+ *
+ * 这里**不 spawn**：面板随时可能调 `status()`，每次起进程太贵。
+ * 「能不能跑」由 `verify()` 的冒烟负责。
+ *
+ * @param {{fresh?: boolean}} [o] `fresh` 丢掉缓存重新看磁盘（刚装/刚删之后用）
+ * @returns {Promise<string>} 可执行文件路径，或 ''
+ */
+let ffmpegCache; // undefined=没查过；''=没有；string=路径
+export async function ffmpegBinary({ fresh = false } = {}) {
+  if (fresh) {
+    ffmpegCache = undefined;
+    /**
+     * **连 `loaded` 一起清**：上次 `load()` 失败时缓存的是 `null`，只清
+     * `ffmpegCache` 的话，装好之后仍然读到那个 `null`——表现是「面板点了
+     * 重装、也装成功了，但还是判定缺」，于是每次都往下重下 62MB。
+     */
+    loaded.delete(FFMPEG_PKG);
+  }
+  if (ffmpegCache !== undefined) return ffmpegCache;
+  const mod = await load(FFMPEG_PKG);
+  const p = String(mod?.path ?? '');
+  const exists = p ? await fs.access(p).then(() => true).catch(() => false) : false;
+  ffmpegCache = exists ? p : '';
+  if (!ffmpegCache) log.debug('包内 ffmpeg 不可用（没装，或平台子包/二进制缺失）');
+  return ffmpegCache;
+}
+
+/**
  * 当前状态。
  *
  * 只读文件，不装任何东西，也不 `require`——面板每秒都可能调它。
@@ -169,6 +225,7 @@ export async function status() {
   for (const [name, meta] of Object.entries(WHITELIST)) {
     const version = await installedVersion(name);
     let resolvable = false;
+    let binary = '';
     if (version) {
       try {
         r.resolve(name);
@@ -177,9 +234,18 @@ export async function status() {
         resolvable = false;
       }
     }
+    /**
+     * ffmpeg 的「装了」不是 resolve 能判的：主包只有 24KB 胶水代码，
+     * 真正的二进制在同版本的平台子包里。以二进制在不在为准（见 `ffmpegBinary`）。
+     */
+    if (name === FFMPEG_PKG && resolvable) {
+      binary = await ffmpegBinary();
+      resolvable = Boolean(binary);
+    }
     out.packages[name] = {
       version,
       resolvable,
+      binary,
       required: meta.required,
       desc: meta.desc,
       size: meta.size,
@@ -218,6 +284,33 @@ export async function verify(names = Object.keys(WHITELIST)) {
   return out;
 }
 
+/** 跑一次命令，8 秒内必须有结果：冒烟不能把面板自检挂住 */
+function runOnce(cmd, args, timeout = 8000) {
+  return new Promise((resolve) => {
+    let done = false;
+    const child = spawn(cmd, args, { windowsHide: true });
+    const finish = (v) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(v);
+    };
+    const timer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL');
+      } catch {}
+      finish(`超时（${Math.round(timeout / 1000)} 秒没响应）`);
+    }, timeout);
+    timer.unref?.();
+    let err = '';
+    child.stderr?.on('data', (d) => (err += d));
+    child.on('error', (e) => finish(`跑不起来：${e.message}`));
+    child.on('exit', (code) =>
+      finish(code === 0 ? '' : `exit ${code}${err ? `：${String(err).trim().slice(0, 200)}` : ''}`),
+    );
+  });
+}
+
 /** 冒烟：真 require 一次，能实例化才算装好 */
 async function smoke(name) {
   if (name === 'ws') {
@@ -236,6 +329,15 @@ async function smoke(name) {
     if (!mod) return '加载失败';
     if (typeof mod.encode !== 'function') return '模块里没有 encode()';
     return '';
+  }
+  if (name === FFMPEG_PKG) {
+    /**
+     * 文件在 ≠ 能跑。平台子包放错架构（x64 机器上装了 ia32）、
+     * 只下了一半、被杀毒隔离成 0 字节，都只有真执行一次才发现。
+     */
+    const bin = await ffmpegBinary();
+    if (!bin) return '二进制缺失（主包在，但平台子包/ffmpeg 可执行文件没装上）';
+    return runOnce(bin, ['-version']);
   }
   return '';
 }
@@ -316,6 +418,55 @@ export async function ensureSilk({ reason = '发语音' } = {}) {
   return await silkInflight;
 }
 
+/** ffmpeg 自动安装的单飞与冷却 */
+let ffmpegInflight = null;
+let ffmpegFailedAt = 0;
+/** 62MB 的一次性下载：失败后别每条语音都重试，半小时后再给一次机会 */
+const FFMPEG_RETRY_MS = 30 * 60_000;
+
+/**
+ * 第一次遇到「必须转码」的语音时把 ffmpeg 装上。
+ *
+ * 和 `ensureSilk` 同构（单飞 + 冷却 + 不抛），只有两点不同：
+ *   · 它 62MB，是 silk 的 40 倍——所以只在**真要转码**时才动手，
+ *     纯 WAV / SILK 语音永远不会触发；
+ *   · 失败冷却 30 分钟而不是 10 分钟：重下一次 62MB 的代价太大，
+ *     每条消息都试一遍会把网络和磁盘拖死。
+ *
+ * 返回值是**二进制路径**（给 `findFfmpeg` 直接用），拿不到就是 `''`。
+ *
+ * @param {{reason?: string}} [o]
+ * @returns {Promise<string>}
+ */
+export async function ensureFfmpeg({ reason = '转码语音' } = {}) {
+  const bin = await ffmpegBinary();
+  if (bin) return bin;
+  if (ffmpegInflight) return await ffmpegInflight;
+  if (Date.now() - ffmpegFailedAt < FFMPEG_RETRY_MS) return '';
+
+  ffmpegInflight = (async () => {
+    try {
+      log.info(`第一次${reason}，自动安装 ffmpeg（约 62MB，只装这一次，可能要等一两分钟）…`);
+      const r = await install([FFMPEG_PKG]);
+      const p = await ffmpegBinary();
+      if (!r.ok || !p) {
+        ffmpegFailedAt = Date.now();
+        log.warn(`ffmpeg 自动安装失败：${r.error || '装上了但二进制不可用'}`);
+        return '';
+      }
+      log.info(`ffmpeg 已就绪（${p}），接下来转码语音不用再等`);
+      return p;
+    } catch (e) {
+      ffmpegFailedAt = Date.now();
+      log.warn(`ffmpeg 自动安装失败：${e?.message ?? e}`);
+      return '';
+    } finally {
+      ffmpegInflight = null;
+    }
+  })();
+  return await ffmpegInflight;
+}
+
 /**
  * 加载一个依赖。装不上/没装都返回 null（调用方按「缺依赖」处理，别抛）。
  *
@@ -358,6 +509,8 @@ export async function load(name) {
  */
 export function resetCache() {
   loaded.clear();
+  /** 二进制路径也跟着重探：装/卸/重装之后不能还指着旧路径 */
+  ffmpegCache = undefined;
   const r = req();
   for (const name of Object.keys(WHITELIST)) {
     try {
@@ -397,6 +550,12 @@ export function install(names) {
     for (const name of picked) {
       try {
         req().resolve(name);
+        /**
+         * ffmpeg 主包能 resolve ≠ 能用：平台子包/二进制可能不在
+         * （见 `ffmpegBinary`）。这时要当成「缺」继续往下走，
+         * 让 npm 重装，而不是返回 skipped 骗调用方。
+         */
+        if (name === FFMPEG_PKG && !(await ffmpegBinary({ fresh: true }))) continue;
         already.push(name);
       } catch {
         /* 真缺 */
@@ -500,7 +659,15 @@ export function remove(names) {
     const picked = pickPackages(names);
     await migrateLegacy();
     for (const name of picked) {
-      await fs.rm(path.join(depsDir(), 'node_modules', name), { recursive: true, force: true });
+      /**
+       * ffmpeg 的 62MB 二进制在**平台子包**里（`@ffmpeg-installer/win32-x64`），
+       * 只删主包目录会留下「已卸载但盘上还压着 62MB」。整个 scope 一起删。
+       */
+      const target =
+        name === FFMPEG_PKG
+          ? path.join(depsDir(), 'node_modules', '@ffmpeg-installer')
+          : path.join(depsDir(), 'node_modules', name);
+      await fs.rm(target, { recursive: true, force: true });
     }
     /**
      * **必须删掉哈希标记**。
