@@ -19,7 +19,7 @@ import path from 'node:path';
 const home = await fs.mkdtemp(path.join(os.tmpdir(), 'roost-onebot-'));
 process.env.ROOST_HOME = home;
 
-const deps = await import('../src/onebot/deps.js');
+const deps = await import('../src/ext-deps.js');
 
 const WS_DIR = () => path.join(deps.depsDir(), 'node_modules', 'ws');
 
@@ -49,7 +49,7 @@ test('白名单：只认 ws / silk-wasm，别的一律拒', () => {
 
 test('status：空目录就是「都没装」', async () => {
   const s = await deps.status();
-  assert.equal(s.dir, path.join(home, 'data', 'deps', 'onebot'));
+  assert.equal(s.dir, path.join(home, 'data', 'deps', 'ext'));
   assert.deepEqual(s.required, ['ws']);
   assert.deepEqual([...s.missing].sort(), ['silk-wasm', 'ws']);
   assert.equal(s.packages.ws.resolvable, false);
@@ -103,7 +103,7 @@ test('remove：删掉包之后回到「没装」', async () => {
 
 test('manualCommand：给的是能直接粘贴的命令', () => {
   const cmd = deps.manualCommand(['ws']);
-  assert.match(cmd, /^npm i ws --prefix data\/deps\/onebot /);
+  assert.match(cmd, /^npm i ws --prefix data\/deps\/ext /);
   // 非白名单名字不该出现在命令里
   assert.throws(() => deps.manualCommand(['lodash']), /不认识的依赖/);
 });

@@ -22,7 +22,7 @@ import path from 'node:path';
 const home = process.env.ROOST_HOME || (await fs.mkdtemp(path.join(os.tmpdir(), 'roost-onebot-loop-')));
 process.env.ROOST_HOME = home;
 
-const deps = await import('../src/onebot/deps.js');
+const deps = await import('../src/ext-deps.js');
 const { OneBotBridge } = await import('../src/onebot/index.js');
 
 const depState = await deps.status();

@@ -25,7 +25,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { FILE_TYPE, IMAGE_CONTENT_TYPES } from '../api.js';
 import { netFetch } from '../proxy.js';
-import * as deps from '../onebot/deps.js';
+import * as deps from '../ext-deps.js';
 import { toSilk, uploadVoice, MAX_VOICE_BYTES } from '../onebot/voice.js';
 import { sendOut, receivedAtOf } from './dispatch.js';
 
@@ -159,14 +159,16 @@ export function registerMedia(def, { R, err, log = () => {} }) {
       if (buf.length > MAX_VOICE_BYTES) {
         throw err.bad(`语音 ${(buf.length / 1024 / 1024).toFixed(1)}MB 超过 20MB 上限`);
       }
-      let silkMod = null;
-      try {
-        silkMod = await deps.load('silk-wasm');
-      } catch {
-        silkMod = null;
-      }
+      /**
+       * 第一次发语音时才装 `silk-wasm`（这份依赖 OneBot 兼容层也在用）。
+       * 装不上不抛 500：NOT_READY + 可执行提示，调用方还能改发文字。
+       */
+      const silkMod = await deps.ensureSilk({ reason: '发语音' }).catch(() => null);
       if (!silkMod) {
-        throw err.notReady('缺可选依赖 silk-wasm：到面板「外接 → 依赖」点『一键安装』');
+        throw err.notReady(
+          'silk-wasm 没装上也自动装不上（原因见框架日志）：'
+            + '到面板「外接 → 依赖」手动点『一键安装』，或者先发文字',
+        );
       }
       const { silk: silkBuf, via } = await toSilk(buf, silkMod);
       const fileInfo = await uploadVoice(api(), scene, target, silkBuf);

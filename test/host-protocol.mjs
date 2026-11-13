@@ -13,7 +13,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHostServer } from '../src/host/server.js';
 import { HostBridge } from '../src/host/index.js';
-import * as onebotDeps from '../src/onebot/deps.js';
+import * as extDeps from '../src/ext-deps.js';
 import {
   createMethods, effectiveScopes, HostError, HOST_PROTOCOL,
 } from '../src/host/methods.js';
@@ -657,7 +657,7 @@ test('补拉语义：差太多发 gap、恰好接上补事件、首次连接不�
 /* ------------------------------------------------------------------ */
 
 /** 顶层 await：load 在没装时返回 null，不抛 */
-const wsMod = typeof WebSocket === 'undefined' ? null : await onebotDeps.load('ws');
+const wsMod = typeof WebSocket === 'undefined' ? null : await extDeps.load('ws');
 
 test('WS 主通道：hello/welcome → req/res → 事件推送', { skip: !wsMod && '没装 ws 或 Node 没有内置 WebSocket' }, async (t) => {
   const { methods } = makeMethods();

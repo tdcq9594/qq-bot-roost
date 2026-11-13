@@ -4559,7 +4559,9 @@ function renderOnebot(d) {
 
   if (!hint) return;
   if (d?.deps?.ready) {
-    hint.innerHTML = `依赖已就绪，装在 <code>${escapeHtml(d?.deps?.dir ?? '')}</code>`;
+    hint.innerHTML =
+      `依赖已就绪，装在 <code>${escapeHtml(d?.deps?.dir ?? '')}</code>` +
+      '（宿主协议与 OneBot 共用这一份）';
   } else {
     const missing = (d?.deps?.missing ?? []).join('、') || '—';
     hint.innerHTML =
@@ -4603,7 +4605,7 @@ async function onebotDepsAction(kind, name, btn) {
     btn.textContent = kind === 'install' ? '安装中…' : '卸载中…';
   }
   try {
-    await api(`/api/onebot/deps/${kind}`, {
+    await api(`/api/ext/deps/${kind}`, {
       method: 'POST',
       body: JSON.stringify({ packages: [name] }),
     });

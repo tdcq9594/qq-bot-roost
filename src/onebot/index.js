@@ -22,7 +22,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { ROOT, DIRS } from '../paths.js';
 import { createLogger } from '../logger.js';
-import * as deps from './deps.js';
+import * as deps from '../ext-deps.js';
 import { OneBotIds } from './ids.js';
 import { createActions } from './actions.js';
 import { buildCapability, summarize } from './capability.js';
@@ -200,7 +200,8 @@ export class OneBotBridge {
       getPassive: (chatId) => this.#passive(chatId),
       emit: (evt) => this.server?.broadcast(evt),
       // `voice: 'reject'` 是「装了也不发」，面板上那个开关得真生效
-      silkReady: () => Boolean(silkMod) && this.cfg.voice !== 'reject',
+      /** 首次发语音会自动装 silk-wasm，所以这个判断要能看到「刚装上」的模块 */
+      silkReady: () => Boolean(silkMod || deps.cached('silk-wasm')) && this.cfg.voice !== 'reject',
       silk: silkMod,
       historyLimit: Math.min(Math.max(Number(this.cfg.historyCache) || 0, 0), 200),
     });
@@ -349,7 +350,7 @@ export class OneBotBridge {
   capability() {
     const list = buildCapability({
       implemented: this.actions?.names ?? [],
-      hasSilk: this.silkOk,
+      hasSilk: this.silkOk || Boolean(deps.cached('silk-wasm')),
     });
     return { list, summary: summarize(list) };
   }

@@ -37,7 +37,7 @@ import { toggleGroupPlugin } from '../plugin/groupscope.js';
 import { suspendPluginWatch } from '../services/plugin-watch.js';
 import { onMessage as onBusMessage } from '../message-bus.js';
 import { handleQqCall, capabilityPayload } from './qq-call.js';
-import * as onebotDeps from '../onebot/deps.js';
+import * as extDeps from '../ext-deps.js';
 import { runDoctor, summarize } from '../doctor.js';
 import { createBindTask, pollBindResult } from '../qq/qrlogin.js';
 import { resolveTrust, blockReason, pubkeyUsable } from '../trust.js';
@@ -2486,7 +2486,7 @@ async function startWebServerInstance({
          * `clientIp()` 开了 trustProxy 会读 X-Forwarded-For，不能用来判本机。
          */
         if (pathname === '/api/host' && req.method === 'GET') {
-          const st = await onebotDeps.status();
+          const st = await extDeps.status();
           const c = rt?.cfg?.host ?? {};
           return json(res, 200, {
             cfg: {
@@ -2594,8 +2594,8 @@ async function startWebServerInstance({
           if (body.enabled !== undefined) {
             const want = Boolean(body.enabled);
             /** 和 OneBot 一样：缺 ws 就明说该点哪个按钮，而不是报一句「依赖缺失」 */
-            if (want && !(await onebotDeps.ready())) {
-              const st = await onebotDeps.status();
+            if (want && !(await extDeps.ready())) {
+              const st = await extDeps.status();
               return json(res, 400, {
                 error: '宿主协议需要 ws 依赖。先在「外接 → 依赖」点『一键安装 ws』',
                 missing: st.required.filter((n) => !st.packages[n]?.resolvable),
@@ -2637,12 +2637,12 @@ async function startWebServerInstance({
          * 协议层（WS / HTTP / 事件翻译）在 `src/onebot/`，M1 接上。
          *
          * 依赖为什么要单独一条路由：`ws` 不进 `package.json`，得由用户在这里
-         * 显式点「一键安装」，装到 `data/deps/onebot/`。**白名单校验在
-         * `onebot/deps.js` 里**，前端传什么都不能越界——这条不做，
+         * 显式点「一键安装」，装到 `data/deps/ext/`（宿主协议与 OneBot 共用）。**白名单校验在
+         * `ext-deps.js` 里**，前端传什么都不能越界——这条不做，
          * 面板弱口令就等于远程代码执行。
          */
         if (pathname === '/api/onebot' && req.method === 'GET') {
-          const st = await onebotDeps.status();
+          const st = await extDeps.status();
           const c = rt?.cfg?.onebot ?? {};
           const ready = st.required.every((n) => st.packages[n]?.resolvable);
           return json(res, 200, {
@@ -2674,8 +2674,8 @@ async function startWebServerInstance({
             deps: { dir: st.dir, packages: st.packages, missing: st.missing, ready },
             state: rt?.onebot?.snapshot?.() ?? null,
             capability: rt?.onebot?.capability?.() ?? null,
-            whitelist: onebotDeps.WHITELIST,
-            manual: onebotDeps.manualCommand(['ws']),
+            whitelist: extDeps.WHITELIST,
+            manual: extDeps.manualCommand(['ws']),
           });
         }
 
@@ -2764,8 +2764,8 @@ async function startWebServerInstance({
              * 缺 `ws` 不许开：不是配置错误，是「还没装依赖」。
              * 说清楚该点哪个按钮，比一句「依赖缺失」有用。
              */
-            if (want && !(await onebotDeps.ready())) {
-              const st = await onebotDeps.status();
+            if (want && !(await extDeps.ready())) {
+              const st = await extDeps.status();
               return json(res, 400, {
                 error: '兼容模式需要 ws 依赖。先在「外接」页点『一键安装 ws』',
                 // 只报「必需」的缺项：可选依赖没装不该拦住启用
@@ -2805,13 +2805,24 @@ async function startWebServerInstance({
           });
         }
 
-        if (pathname === '/api/onebot/deps/install' && req.method === 'POST') {
+        /**
+         * 依赖安装 / 卸载。
+         *
+         * 路径两条都认：新的是 `/api/ext/deps/*`（依赖已经不只给 OneBot 用了，
+         * 宿主协议的 `/ws` 也吃这份 `ws`），旧的是 `/api/onebot/deps/*`
+         * （老面板缓存的 app.js、用户脚本、以及旧版 dsh-roost 都还在调）。
+         * 新代码只发新路径，旧路径只为升级期不 404。
+         */
+        const depsAction = (name) =>
+          pathname === `/api/ext/deps/${name}` || pathname === `/api/onebot/deps/${name}`;
+
+        if (depsAction('install') && req.method === 'POST') {
           const body = await readBody(req);
           const packages = Array.isArray(body?.packages) && body.packages.length
             ? body.packages
             : ['ws'];
           try {
-            const r = await onebotDeps.install(packages);
+            const r = await extDeps.install(packages);
             // 装完立刻重配：开关早就打开的用户不用再点一次「保存」
             await rt?.onebot?.reconfigure(rt.cfg.onebot).catch(() => {});
             /** 宿主协议共用这份 ws，每只鸟都要重配，别只顾当前选中的那只 */
@@ -2828,20 +2839,20 @@ async function startWebServerInstance({
           } catch (e) {
             // 装不上是常态（无网、没有 npm、镜像坏了）：把原因和手动命令一起给出去
             const allowed = (Array.isArray(packages) ? packages : []).filter((p) =>
-              Object.hasOwn(onebotDeps.WHITELIST, p),
+              Object.hasOwn(extDeps.WHITELIST, p),
             );
             return json(res, 400, {
               error: e.message,
-              ...(allowed.length ? { manual: onebotDeps.manualCommand(allowed) } : {}),
+              ...(allowed.length ? { manual: extDeps.manualCommand(allowed) } : {}),
             });
           }
         }
 
-        if (pathname === '/api/onebot/deps/remove' && req.method === 'POST') {
+        if (depsAction('remove') && req.method === 'POST') {
           const body = await readBody(req);
           const packages = Array.isArray(body?.packages) ? body.packages : [];
           try {
-            const st = await onebotDeps.remove(packages);
+            const st = await extDeps.remove(packages);
             // 卸了必需依赖 → 兼容层必须停下来，别留一个「监听中但发不出」的状态
             await rt?.onebot?.reconfigure(rt.cfg.onebot).catch(() => {});
             for (const b of runtimes) {

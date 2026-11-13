@@ -21,6 +21,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 import { createLogger } from '../logger.js';
+import { ensureSilk } from '../ext-deps.js';
 
 const log = createLogger('onebot-voice');
 
@@ -90,13 +91,28 @@ export async function fetchAudio(file) {
     return buf;
   }
   if (/^https?:\/\//i.test(s)) {
-    const r = await fetch(s);
+    /**
+     * 这个 URL 是**客户端给的**（OneBot 的 `record.file`）。没有超时 +
+     * 没有大小上限时，一个挂住的地址能把这条动作拖到天荒地老，一个大文件
+     * 能把内存吃干。宿主协议那边的 `fetchBytes` 早就有这两道闸，这里补齐。
+     */
+    const r = await fetch(s, { signal: AbortSignal.timeout(20_000) });
     if (!r.ok) throw new Error(`下载语音失败：HTTP ${r.status}`);
-    return Buffer.from(await r.arrayBuffer());
+    const len = Number(r.headers.get('content-length') || 0);
+    if (len > MAX_VOICE_BYTES) {
+      throw new Error(`远端语音 ${(len / 1024 / 1024).toFixed(1)}MB，超过 20MB 上限`);
+    }
+    const buf = Buffer.from(await r.arrayBuffer());
+    if (buf.length > MAX_VOICE_BYTES) throw new Error('下载的语音超过 20MB 上限');
+    return buf;
   }
   // Windows 上 `file:///C:/a.wav` 直接切前缀会变成 `/C:/a.wav`，必须走标准转换
-  if (/^file:\/\//i.test(s)) return fs.readFile(fileURLToPath(s));
-  return fs.readFile(s);
+  const p = /^file:\/\//i.test(s) ? fileURLToPath(s) : s;
+  const st = await fs.stat(p);
+  if (st.size > MAX_VOICE_BYTES) {
+    throw new Error(`本地语音 ${(st.size / 1024 / 1024).toFixed(1)}MB，超过 20MB 上限`);
+  }
+  return fs.readFile(p);
 }
 
 /**
@@ -107,17 +123,30 @@ export async function fetchAudio(file) {
  * @returns {Promise<{silk:Buffer, via:'silk'|'wav'|'ffmpeg'}>}
  */
 export async function toSilk(buf, silk) {
-  if (!silk) {
-    const e = new Error('没装可选依赖 silk-wasm，发不了语音（面板「外接」页可一键安装）');
-    e.retcode = 1400;
-    throw e;
-  }
+  /**
+   * 先看大小：超了官方 20MB 上限就没必要去装依赖了。
+   */
   if (buf.length > MAX_VOICE_BYTES) {
     const e = new Error(`语音 ${(buf.length / 1024 / 1024).toFixed(1)}MB，超过官方 20MB 上限`);
     e.retcode = 1400;
     throw e;
   }
-
+  /**
+   * 第一次发语音时**才**把 `silk-wasm` 装上。
+   *
+   * 以前这里直接抛「没装可选依赖，去面板点一键安装」——用户是在聊天窗口里
+   * 收到这条错误的，还得自己跑去面板找。现在由 `ensureSilk()` 单飞安装一次：
+   * 装上了这条消息就能发出去；装不上（没网 / 没有 npm）再给可执行的提示。
+   */
+  if (!silk) silk = await ensureSilk({ reason: '发语音' });
+  if (!silk) {
+    const e = new Error(
+      '没装可选依赖 silk-wasm，自动安装也没成功（原因见日志）。' +
+        '到面板「外接 → 依赖」点『一键安装』，或者先发文字；装好后下一条语音就能发。',
+    );
+    e.retcode = 1400;
+    throw e;
+  }
   if (silk.isSilk?.(buf)) return { silk: buf, via: 'silk' };
 
   let wav = buf;

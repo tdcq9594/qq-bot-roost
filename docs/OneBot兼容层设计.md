@@ -18,7 +18,7 @@
 3. 每个机器人独立开关、独立端口、独立 token
 4. 面板新增「外接」页：开关、连接信息、运行状态、能力矩阵、身份检查、调试
 5. **依赖按需安装**：`ws`（必需）、`silk-wasm`（可选，发语音用）都不进 `package.json`，  
-   由用户在外接页点「一键安装」才装到 `data/deps/onebot/`
+   由用户在外接页点「一键安装」才装到 `data/deps/ext/`
 6. 明确「做不到」的部分，并在协议层如实返回，不静默失败
 
 ### 不做
@@ -84,7 +84,7 @@ QQ 官方网关 ──WS/Webhook──> gateway.js ──> bot.js dispatch()
 ```
 src/onebot/
   index.js        OneBotBridge：装配、生命周期、热应用、状态快照
-  deps.js         依赖白名单 / 状态 / 一键安装 / 加载（复用 plugin/deps.js）
+  ext-deps.js     外接依赖白名单 / 状态 / 一键安装 / 加载（src/ 下，宿主协议共用）
   ws-server.js    基于 ws 的连接管理（鉴权 / 心跳 / 优雅关闭）
   http-api.js     POST /<action>，Bearer 鉴权，与 WS 共用 dispatchAction
   actions.js      action 实现表 + 统一响应/错误码
@@ -132,7 +132,7 @@ onebot: {
 | `mode`         | 枚举                          | 回落 `exclusive`                               |
 | `voice`        | 枚举                          | 回落 `auto`                                    |
 | `historyCache` | 0–1000 整数                   | 夹到边界，不报错                                     |
-| `enabled`      | 必须已装 `ws`                   | 「先在上面点『一键安装 ws』」（这是状态检查，不是配置错误）              |
+| `enabled`      | 必须已装 `ws`（两条出口共用）    | 「先在上面点『一键安装 ws』」（这是状态检查，不是配置错误）              |
 
 ### 热应用
 
@@ -156,7 +156,7 @@ onebot: {
 ### 装在哪
 
 ```
-data/deps/onebot/
+data/deps/ext/
   package.json      ← 我们写，只含白名单里的包
   node_modules/
   .deps.json        ← 哈希标记，内容没变就不重装（deps.js 已有）
@@ -210,8 +210,8 @@ const ws = requireFrom('ws');   // ws 与 silk-wasm 都是 CJS（silk-wasm main 
 面板永远显示一行可复制命令，装不上时用户能自己来：
 
 ```bash
-npm i ws --prefix data/deps/onebot --omit=dev --no-audit --no-fund
-npm i silk-wasm --prefix data/deps/onebot --omit=dev --no-audit --no-fund
+npm i ws --prefix data/deps/ext --omit=dev --no-audit --no-fund
+npm i silk-wasm --prefix data/deps/ext --omit=dev --no-audit --no-fund
 ```
 
 镜像走 `config.network.mirror`（`plugin/env.js:48` 已经放行 `npm_config_registry`），  
@@ -622,8 +622,8 @@ dsh-roost 是 DSH 插件（`integrations/dsh-roost`），aurobot 也是 DSH 插�
 依赖    ws         8.18.0 已安装          [重装]
         silk-wasm  — 未安装（可选，发语音）  [一键安装]   1.5MB
         ffmpeg     — 未找到（可选，mp3 转语音）          装法见说明
-        ┌ 黄条：兼容模式需要 ws。装到 data/deps/onebot/，不动系统环境 ┐
-        └ 手动：npm i ws --prefix data/deps/onebot --omit=dev      ┘
+        ┌ 黄条：兼容模式需要 ws。装到 data/deps/ext/，不动系统环境 ┐
+        └ 手动：npm i ws --prefix data/deps/ext --omit=dev      ┘
 
 连接    监听 [127.0.0.1] : [6700]    Token [••••••] [生成]
         机器人 QQ 号 [1427835822]（从身份页选）
@@ -658,7 +658,7 @@ dsh-roost 是 DSH 插件（`integrations/dsh-roost`），aurobot 也是 DSH 插�
 | POST | `/api/onebot/test`         | 自检：端口可绑？token 长度？selfUin 在身份表里？身份覆盖率？依赖可加载？                                                                                                                                               |
 | GET  | `/api/onebot/events`       | 最近 50 条（脱敏：不含 token、openid 只留前 6 位）                                                                                                                                                       |
 | POST | `/api/onebot/deps/install` | body `{packages:['ws']}`（**只接受白名单**）→ 同步等安装完成，返回新状态；耗时 10–60s                                                                                                                             |
-| POST | `/api/onebot/deps/remove`  | 可选：删 `data/deps/onebot/node_modules` 下对应包，用于「装坏了重装」                                                                                                                                       |
+| POST | `/api/ext/deps/remove`（旧 `/api/onebot/deps/remove` 仍认） | 可选：删 `data/deps/ext/node_modules` 下对应包，用于「装坏了重装」                                                                                                                                       |
 
 
 **鉴权复用面板那套**（`authorized()` / CSRF / 同源），不新开口子。
@@ -720,7 +720,7 @@ dsh-roost 是 DSH 插件（`integrations/dsh-roost`），aurobot 也是 DSH 插�
 
 - `src/onebot/deps.js`：白名单、状态查询、安装（复用 `ensurePluginDeps`）、加载、冒烟
 - `POST /api/onebot/deps/install` + 面板依赖卡（先只有按钮和状态，不做整页）
-- **验收**：全新机器点「一键安装」→ `data/deps/onebot/node_modules/ws` 出现 →
+- **验收**：全新机器点「一键安装」→ `data/deps/ext/node_modules/ws` 出现 →
   面板显示版本 → 重启 roost 后仍认得（不用重装）；断网点安装 → 给出可读失败原因 + 手动命令
 - **不通过就停**：安装污染了项目根 `node_modules`，或面板能装白名单以外的包
 
@@ -758,7 +758,7 @@ dsh-roost 是 DSH 插件（`integrations/dsh-roost`），aurobot 也是 DSH 插�
    语音三条分支、at 未绑定）、translate（每个官方事件一条断言 + 「不产生」的 3 条负断言 +
    「自己撤回补发 `group_recall`」一条正断言）、
    capability（表里每个 action 都能被 `dispatchAction` 认领，不漏不重）、
-   deps（白名单拒绝任意包名、安装目录是 `data/deps/onebot`、加载失败降级为「未安装」）
+   deps（白名单拒绝任意包名、安装目录是 `data/deps/ext`、加载失败降级为「未安装」）
 2. **回环**：`test/onebot-loopback.mjs` 起真 WS 服务端 + 真客户端（复用 `scripts/live-test.mjs`
    的 `call()` 思路），配一个假 `api`（`makeMockApi`），跑 12 个场景
 3. **真机**：aurobot 连真机器人，跑 7 个场景（私聊、群 @、群全量接话、发图、发语音、引用、撤回）

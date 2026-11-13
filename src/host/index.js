@@ -23,7 +23,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { ROOT } from '../paths.js';
 import { createLogger } from '../logger.js';
-import * as deps from '../onebot/deps.js';
+import * as deps from '../ext-deps.js';
 import { createHostServer } from './server.js';
 import { createMethods, effectiveScopes, HostError, HOST_PROTOCOL } from './methods.js';
 import { serializeMessage, serializeNotice } from './serialize.js';
