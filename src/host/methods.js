@@ -412,6 +412,147 @@ export function createMethods({ runtime: R, getState, log = () => {} }) {
     return (await R.ledger?.get?.(id)) ?? null;
   });
 
+  /* ---------------- 群管 ----------------
+   *
+   * 为什么单开方法、不放开 `qq.call`：AI 工具对协议是外部输入，通用写面一暴露
+   * 就等于把管理面交给模型（改配置、装插件、随便调官方接口）。这里每个动作
+   * 一条方法、各自 scope，调用方只能看到「禁言」这一个能力，看不到「任意调用」。
+   *
+   * 返回值统一成 `{ ok, reason, ... }` 而不是抛错：官方错误码得翻译成
+   * `not_admin` / `need_invite` / `rate_limited` 这种调用方能判断的原因，
+   * 让面板和模型都不去猜中文。
+   *
+   * 审计不在这里做：bot 只写一行日志，操作记录由 roost 侧落盘（它才有 UI）。
+   */
+
+  const MAX_MUTE_SEC = 30 * 24 * 3600;
+  const MAX_BATCH = 20;
+
+  /** 官方错误 → 可判断的原因。只认确定的几种，其余原样带出 */
+  const groupFail = (e, extra = {}) => {
+    const raw = String(e?.message ?? e ?? '');
+    if (raw.includes('11253') || raw.includes('内邀')) {
+      return { ok: false, reason: 'need_invite', msg: '群管内邀没开：踢人、群成员列表、群黑名单都要官方白名单', ...extra };
+    }
+    if (raw.includes('40062003')) return { ok: false, reason: 'not_admin', msg: '机器人在这个群不是管理员', ...extra };
+    if (raw.includes('40054')) return { ok: false, reason: 'protected', msg: '目标是群主或管理员，官方不允许动他们', ...extra };
+    if (/频繁|too many|429|频率/.test(raw)) return { ok: false, reason: 'rate_limited', msg: '太频繁了，等一会儿再试', ...extra };
+    return { ok: false, reason: 'unknown', msg: raw || '官方接口出错', ...extra };
+  };
+
+  /** openid 数组归一化：去空、去重、保序；也接受单个字符串 */
+  const openidList = (v) => {
+    const src = Array.isArray(v) ? v : v ? [v] : [];
+    const out = [];
+    for (const x of src) {
+      const s = str(x).trim();
+      if (s && !out.includes(s)) out.push(s);
+    }
+    return out;
+  };
+
+  def('group.info', 'read', '群信息 + 机器人在群里的角色 + 能不能管（没内邀也能读公开信息）', async (p) => {
+    if (!R.api) throw notReady('官方接口未就绪');
+    const groupOpenid = str(p.groupOpenid).trim();
+    if (!groupOpenid) throw bad('要给 groupOpenid');
+    let info = null;
+    let infoError = '';
+    try {
+      info = await R.api.getGroupInfo?.(groupOpenid);
+    } catch (e) {
+      infoError = String(e?.message ?? e);
+    }
+    // canManageGroup 内部带 60 秒缓存、自己吞掉内邀失败，不会抛
+    const manage = (await R.api.canManageGroup?.(groupOpenid)) ?? { ok: false, role: null, reason: '状态未知' };
+    return {
+      groupOpenid,
+      name: str(info?.group_name ?? info?.name),
+      memberCount: Number(info?.member_count ?? info?.max_member_count) || 0,
+      role: manage.role ?? null,
+      canManage: manage.ok === true,
+      manageReason: str(manage.reason),
+      invited: R.api.groupInvited === true,
+      infoError,
+    };
+  });
+
+  def('group.mute', 'manage', '禁言 / 解禁（seconds=0 解禁；最长 30 天，一次最多 20 人）', async (p) => {
+    if (!R.api) throw notReady('官方接口未就绪');
+    const groupOpenid = str(p.groupOpenid).trim();
+    const targets = openidList(p.memberOpenids);
+    if (!groupOpenid) throw bad('要给 groupOpenid');
+    if (!targets.length) throw bad('要给 memberOpenids');
+    if (targets.length > MAX_BATCH) return { ok: false, reason: 'too_many', msg: `一次最多 ${MAX_BATCH} 人` };
+    const seconds = Math.max(0, Math.floor(Number(p.seconds) || 0));
+    if (seconds > MAX_MUTE_SEC) return { ok: false, reason: 'too_long', msg: '禁言最长 30 天' };
+    // 官方要的是到期时间，不是时长：这里做一次转换，调用方只管传秒
+    const expire = seconds ? new Date(Date.now() + seconds * 1000).toISOString() : '';
+    const members = targets.map((o) => ({
+      op: seconds ? 'add' : 'del',
+      member_openid: o,
+      mute_expire_at: expire,
+    }));
+    try {
+      await R.api.muteMembers(groupOpenid, members);
+      log(`group.mute ${groupOpenid} ${targets.length} 人 ${seconds ? `${seconds}s` : '解禁'}`);
+      return { ok: true, reason: '', seconds, targets };
+    } catch (e) {
+      return groupFail(e, { targets });
+    }
+  });
+
+  def('group.kick', 'manage', '把成员移出群（需要群管内邀；可选加黑名单）', async (p) => {
+    if (!R.api) throw notReady('官方接口未就绪');
+    const groupOpenid = str(p.groupOpenid).trim();
+    const targets = openidList(p.memberOpenids);
+    if (!groupOpenid) throw bad('要给 groupOpenid');
+    if (!targets.length) throw bad('要给 memberOpenids');
+    if (targets.length > MAX_BATCH) return { ok: false, reason: 'too_many', msg: `一次最多 ${MAX_BATCH} 人` };
+    try {
+      await R.api.removeMembers(groupOpenid, targets, { addToBlacklist: p.addToBlacklist === true });
+      log(`group.kick ${groupOpenid} ${targets.length} 人`);
+      return { ok: true, reason: '', targets };
+    } catch (e) {
+      return groupFail(e, { targets });
+    }
+  });
+
+  def('group.join', 'manage', '入群申请：list 列表 / approve 通过 / decline 拒绝', async (p) => {
+    if (!R.api) throw notReady('官方接口未就绪');
+    const groupOpenid = str(p.groupOpenid).trim();
+    if (!groupOpenid) throw bad('要给 groupOpenid');
+    const action = p.action === 'approve' || p.action === 'decline' ? p.action : 'list';
+    if (action === 'list') {
+      try {
+        const r = await R.api.getJoinRequests(groupOpenid, {
+          cursor: str(p.cursor),
+          limit: Math.min(100, Math.max(1, Number(p.limit) || 20)),
+        });
+        return { ok: true, reason: '', ...(r ?? {}) };
+      } catch (e) {
+        return groupFail(e);
+      }
+    }
+    const memberOpenid = str(p.memberOpenid).trim();
+    const joinRequestId = str(p.joinRequestId).trim();
+    if (!memberOpenid || !joinRequestId) throw bad('approve / decline 要给 memberOpenid 和 joinRequestId');
+    try {
+      if (action === 'approve') {
+        await R.api.approveJoinRequest(groupOpenid, memberOpenid, joinRequestId);
+      } else {
+        await R.api.declineJoinRequest(groupOpenid, memberOpenid, {
+          joinRequestId,
+          rejectReason: str(p.reason),
+          addToBlacklist: p.addToBlacklist === true,
+        });
+      }
+      log(`group.join ${action} ${groupOpenid} ${memberOpenid}`);
+      return { ok: true, reason: '', action, memberOpenid, joinRequestId };
+    } catch (e) {
+      return groupFail(e);
+    }
+  });
+
   /* ---------------- 身份 ---------------- */
 
   def('identity.resolve', 'read', 'openid ↔ QQ号 / 群号互查', async (p) => {
