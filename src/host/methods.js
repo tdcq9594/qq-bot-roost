@@ -299,6 +299,26 @@ export function createMethods({ runtime: R, getState, log = () => {} }) {
 
   /* ---------------- 消息 ---------------- */
 
+  /**
+   * 5.13 单聊「正在输入」（官方 msg_type=6）。
+   *
+   * **不是消息**：不进聊天记录、不占被动回复次数、也不该占主动额度，
+   * 所以直连 `R.api`，不经过 `sendOut`/outbound。失败一律吞成 ok:false，
+   * 提示发不出去不能影响正常回复。
+   */
+  def('msg.typing', 'message', '单聊「正在输入」提示（msg_type=6，不占额度、不进账本）', async (p) => {
+    if (!R.api) throw notReady('官方接口未就绪（机器人还没连上）');
+    if (p.kind === 'group') throw bad('群聊没有「正在输入」');
+    const chatId = str(p.chatId);
+    if (!chatId) throw bad('要给 chatId');
+    try {
+      const r = await R.api.sendC2C(chatId, { msgType: 6, content: '' });
+      return { ok: true, id: String(r?.id ?? '') };
+    } catch (e) {
+      return { ok: false, message: String(e?.message || e) };
+    }
+  });
+
   def('msg.send', 'message', '发文本/富媒体；带 clientMsgId 时 5 分钟内幂等', async (p) => {
     if (!R.api) throw notReady('官方接口未就绪（机器人还没连上）');
     const kind = p.kind === 'group' ? 'group' : p.kind === 'c2c' ? 'c2c' : '';
