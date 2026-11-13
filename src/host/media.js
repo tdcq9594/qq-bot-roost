@@ -26,7 +26,7 @@ import path from 'node:path';
 import { FILE_TYPE, IMAGE_CONTENT_TYPES } from '../api.js';
 import { netFetch } from '../proxy.js';
 import * as deps from '../ext-deps.js';
-import { toSilk, uploadVoice, MAX_VOICE_BYTES } from '../onebot/voice.js';
+import { toSilk, toSilkDry, uploadVoice, MAX_VOICE_BYTES } from '../onebot/voice.js';
 import { sendOut, receivedAtOf } from './dispatch.js';
 
 /** 官方所有富媒体类型的硬上限；会话累计超过就拒，别等 API 报 850031 */
@@ -286,6 +286,30 @@ export function registerMedia(def, { R, err, log = () => {} }) {
       fileType: fileTypeOf(p, err),
     });
     return { id: data.id, msgId: data.id, ...(data.pending ? { pending: true } : {}), ...(data.requestId ? { requestId: data.requestId } : {}), upload: { via: up.via, size: up.size } };
+  });
+
+  /**
+   * 5.3 语音试听：把「即将发出的那一份字节」过一遍 SILK 编码校验。
+   *
+   * 与 `media.send` 用同一个 `onebot/voice.js` 的编码实现，但**到编码为止**：
+   * 不 `uploadVoice`、不 `sendOut`、不进投递账本、不占主动额度、不写任何盘。
+   * 也刻意不调 `ensureSilk()`：试听是「听一下」，不该偷偷开始装 62MB 依赖。
+   *
+   * 老框架（没有这个方法）时宿主侧会拿到 NOT_FOUND，按「未校验」处理，
+   * 试听本身照样能播——不因为框架没升级就把试听按钮弄成灰的。
+   */
+  def('media.convert', 'message', '只校验语音能否转成 QQ 的 SILK（不上传、不发送、不装依赖、不落盘）', async (p) => {
+    const buf = decodeB64(p.dataBase64, err);
+    /** `cached()` / `load()` 都只取已装好的模块，不触发安装 */
+    const silkMod = deps.cached('silk-wasm') || await deps.load('silk-wasm');
+    if (!silkMod) {
+      return { ok: false, reason: 'silk_missing', message: '没装 silk-wasm：真正发语音时框架会自动安装，试听不装' };
+    }
+    try {
+      return await toSilkDry(buf, silkMod);
+    } catch (e) {
+      return { ok: false, reason: 'convert_failed', message: String(e?.message || e) };
+    }
   });
 
   def('media.markdownImage', 'message', '上传 Markdown 素材图，返回可复用的 qqbot-media:// 引用（默认保留）', async (p) => {

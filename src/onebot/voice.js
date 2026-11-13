@@ -388,6 +388,59 @@ function pcmRms16(buf, maxBytes = 1 << 20) {
  * 导出给测试用：`test/onebot-voice.mjs` 拿 22050 的 WAV 直接喂它，
  * 断言它必须拦下来——这是「能发不能播」那道 bug 的回归护栏。
  */
+/**
+ * 5.3 试听：**纯内存**的 SILK 编码校验，和真发语音共用 `encodeChecked`。
+ *
+ * 真发那条路（`toSilk`）在格式不合时会 `ensureSilk` / `ensureFfmpeg`
+ * 自动装依赖，`ffmpegToWav` 还会落临时文件——试听若照跑一遍，等于
+ * 「点一下试听，后台开始下 62MB、写一堆盘」，直接违背 5.3 的验收。
+ *
+ * 所以这里只覆盖**不需要转码**的两种输入：本来就是 SILK，或已经是
+ * QQ 要的 24kHz / 单声道 / 16bit / ≤60s 的 WAV。这两种走的编码函数
+ * 与 `toSilk` 的 `alreadyQqVoice` 分支是同一个 `encodeChecked`，
+ * 因此「试听校验通过」等价于「这份字节发出去能播」。
+ * 其它格式明确回 `needs_transcode`，让面板说清「发送时框架会转码」，
+ * 而不是假装验过了。
+ *
+ * @returns {Promise<{ok:boolean, reason?:string, message?:string, size?:number, via?:string, ms?:number, rms?:number}>}
+ */
+export async function toSilkDry(buf, silk) {
+  if (buf.length > MAX_VOICE_BYTES) {
+    return { ok: false, reason: 'too_large', message: `语音 ${(buf.length / 1048576).toFixed(1)}MB 超过 20MB 上限` };
+  }
+  if (!silk) {
+    return { ok: false, reason: 'silk_missing', message: '没装 silk-wasm；真正发语音时框架会自动安装，试听不装' };
+  }
+  if (silk.isSilk?.(buf)) {
+    return { ok: true, size: buf.length, via: 'silk', ms: Math.round(Number(silk.getDuration?.(buf)) || 0) };
+  }
+  const info = wavInfoOf(silk, buf);
+  const fmt = info?.fmt ?? null;
+  const seconds = secondsOf(info);
+  const direct = Boolean(fmt)
+    && Number(fmt.sampleRate) === QQ_VOICE_RATE
+    && Number(fmt.numberOfChannels) === 1
+    && Number(fmt.bitsPerSample) === 16
+    && seconds <= MAX_VOICE_SEC;
+  if (!direct) {
+    return {
+      ok: false,
+      reason: 'needs_transcode',
+      message: fmt
+        ? `这段 WAV 是 ${fmt.sampleRate}Hz / ${fmt.numberOfChannels} 声道 / ${fmt.bitsPerSample}bit，发送前要 ffmpeg 重采样；试听不跑转码以免写盘`
+        : '这段音频不是 WAV/SILK，发送前要 ffmpeg 转码；试听不跑转码以免写盘',
+    };
+  }
+  const out = await encodeChecked(silk, buf);
+  return {
+    ok: true,
+    size: out.data.length,
+    via: 'wav',
+    ms: Math.round(Number(silk.getDuration?.(out.data)) || 0),
+    rms: Math.round(out.rms),
+  };
+}
+
 export async function encodeChecked(silk, wav) {
   const data = encodeOrThrow(await silk.encode(wav, 0));
   const src = wavParts(wav);
