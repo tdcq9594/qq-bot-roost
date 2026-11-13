@@ -1092,7 +1092,7 @@ export class QQApi {
     if (!this.groupInvited) {
       throw new Error(
         '群管内邀功能未开启。群成员列表 / 踢人 / 群黑名单需要官方白名单，' +
-          '申请通过后到面板「配置 → 群管能力」打开',
+          '申请通过后到 Roost 面板（浏览器打开的那个）「配置 → 群管能力」打开',
       );
     }
   }
