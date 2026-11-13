@@ -201,6 +201,61 @@ const MEDIA_TTL = 2 * 86400_000;
  * QQ 开放平台 HTTP API 封装。
  * 鉴权头固定为 "QQBot {access_token}"。
  */
+/**
+ * 哪些网络错误可以**安全重试**：连接根本没建起来的那几种。
+ *
+ * `fetch` 失败时只给一句 `fetch failed`，真原因在 `e.cause.code` 里。分类的
+ * 依据是「请求有没有可能已经到服务端」：
+ *
+ *   · 连不上（ECONNREFUSED / ENOTFOUND / EAI_AGAIN / 连接超时 / 网络不可达）
+ *     → 一定没发出去，重试不会造成第二条消息。
+ *   · 连接被重置（ECONNRESET/EPIPE）、读超时 → **可能已经发出去了**，重试就是
+ *     双发。官方被动回复每发一次占一个新的 `msg_seq`，群里会真的出现两条。
+ *
+ * 抽成纯函数是为了能单测：这条规则错了后果是群里刷重复消息，比少发一条更糟。
+ *
+ * @param {string} code
+ */
+export function isSafeToRetryNetworkError(code) {
+  return new Set([
+    'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN',
+    'UND_ERR_CONNECT_TIMEOUT', 'EHOSTUNREACH', 'ENETUNREACH',
+  ]).has(String(code ?? ''));
+}
+
+/**
+ * 取网络错误的机器码（`ECONNRESET` 这类）。取不到返回空串。
+ *
+ * `cause` 可能是 `AggregateError`（多地址并发连接失败时的常见形状），
+ * 那时候真正的码在 `cause.errors[]` 里。
+ *
+ * @param {any} e
+ */
+export function networkCodeOf(e) {
+  const cause = e?.cause;
+  return String(
+    cause?.code
+    || cause?.errno
+    || (Array.isArray(cause?.errors) ? cause.errors.find((x) => x?.code)?.code : '')
+    || '',
+  );
+}
+
+/**
+ * 把网络错误变成一句能排障的话。
+ *
+ * 以前只留 `e.message`，日志里全是「网络错误 POST /v2/...: fetch failed」——
+ * 断连、DNS、超时看起来一模一样，只能猜。现在带上 `cause.code`。
+ *
+ * @param {any} e
+ */
+export function networkReasonOf(e) {
+  if (e?.name === 'TimeoutError') return '请求超时（15s）';
+  const code = networkCodeOf(e);
+  const msg = String(e?.message ?? e ?? '未知错误');
+  return code ? `${msg}（${code}）` : msg;
+}
+
 export class QQApi {
   constructor({ tokenManager, baseUrl, metrics = null }) {
     this.tokens = tokenManager;
@@ -258,7 +313,27 @@ export class QQApi {
       });
     } catch (e) {
       this.metrics?.bump('errors');
-      const reason = e?.name === 'TimeoutError' ? '请求超时（15s）' : e.message;
+      /**
+       * 网络错误要带上**根因**。`fetch` 抛出来的永远是一句 `fetch failed`，
+       * 真正的原因藏在 `e.cause` 里（`ECONNRESET` / `ENOTFOUND` /
+       * `UND_ERR_CONNECT_TIMEOUT`…）。只记 message 的话，日志里全是
+       * 「网络错误 POST /v2/...: fetch failed」，看不出是断连、DNS 还是超时，
+       * 只能靠猜——2026-11-13 排查「发不出去」时就被这一行卡住过。
+       */
+      const code = networkCodeOf(e);
+      const reason = networkReasonOf(e);
+      /**
+       * 只有「连接根本没建起来」才敢重试：那时请求一定没到服务端，重试不可能
+       * 变成两条消息。`ECONNRESET` / `EPIPE` 属于「可能已经发出去、响应丢了」，
+       * 一律不重试——官方被动回复每次都会占一个新的 `msg_seq`，重发就是双发。
+       *
+       * 这类失败最常见的原因是本机代理 / TUN 抖了一下：连上失败、下一次就好了，
+       * 所以补一次重试的收益很高。
+       */
+      if (!retried && isSafeToRetryNetworkError(code)) {
+        log.warn(`连接没建起来，重试一次：${method} ${path}（${code}）`);
+        return this.#request(method, path, body, { retried: true, headers });
+      }
       throw new Error(`网络错误 ${method} ${path}: ${reason}`);
     }
 

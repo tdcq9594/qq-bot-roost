@@ -196,3 +196,43 @@ test('边界：api 不是对象时原样返回（老宿主 / 假宿主兼容）'
   assert.equal(wrapApiForLedger(null), null);
   assert.equal(wrapApiForLedger(undefined), undefined);
 });
+
+/* ---------------- 网络错误的分类与文案（2026-11-13） ---------------- */
+
+{
+  const { isSafeToRetryNetworkError, networkReasonOf, networkCodeOf } = await import('../src/api.js');
+
+  /**
+   * 只许重试「连接根本没建起来」的那几种。分类错了的代价不对称：
+   * 少重试 → 少回一条；多重试 → 群里出现两条一样的消息（每次发送占一个新
+   * 的 `msg_seq`，服务端不会去重）。
+   */
+  test('网络错误：连不上可以重试，连接被重置/超时不行', () => {
+    for (const code of ['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT', 'EHOSTUNREACH', 'ENETUNREACH']) {
+      assert.equal(isSafeToRetryNetworkError(code), true, `${code} 应当可重试`);
+    }
+    for (const code of ['ECONNRESET', 'EPIPE', 'UND_ERR_SOCKET', 'ETIMEDOUT', '']) {
+      assert.equal(isSafeToRetryNetworkError(code), false, `${code} 不能重试（可能已经发出去了）`);
+    }
+  });
+
+  /**
+   * `fetch failed` 不带原因的话，日志里断连 / DNS / 超时长一个样。
+   * 2026-11-13「发不出去」就是被这一行卡住的。
+   */
+  test('网络错误：文案要带上 cause.code（含 AggregateError 形状）', () => {
+    const plain = Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } });
+    assert.equal(networkReasonOf(plain), 'fetch failed（ECONNRESET）');
+
+    const agg = Object.assign(new TypeError('fetch failed'), {
+      cause: { errors: [{ code: 'ENOTFOUND' }, { code: 'EAI_AGAIN' }] },
+    });
+    assert.equal(networkCodeOf(agg), 'ENOTFOUND');
+    assert.match(networkReasonOf(agg), /fetch failed（ENOTFOUND）/);
+
+    const timeout = Object.assign(new Error('The operation was aborted'), { name: 'TimeoutError' });
+    assert.equal(networkReasonOf(timeout), '请求超时（15s）');
+
+    assert.equal(networkReasonOf(new TypeError('fetch failed')), 'fetch failed');
+  });
+}
