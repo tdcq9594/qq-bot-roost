@@ -9,7 +9,7 @@
  * 投递账本都在那里，绕过去等于把这套保护全部作废。
  */
 
-import { parseOutgoing, MAX_PARTS } from './segments.js';
+import { parseOutgoing, renderPlainText, renderMarkdownText, MAX_PARTS } from './segments.js';
 import { recallNotice } from './translate.js';
 import { fetchAudio, toSilk, uploadVoice } from './voice.js';
 import { fileURLToPath } from 'node:url';
@@ -59,6 +59,18 @@ export function createActions({
   const { api, outbound, gate, groups } = runtime;
   const log = runtime.log;
 
+  /**
+   * 官方**明确拒绝**（4xx）才值得降级重发。
+   *
+   * 401 / 429 与网络错误不算：401 是凭据（api 层已重试过一次），
+   * 429 是限频，网络超时则**消息可能已经发出去了**——这三种再发一遍
+   * 只会让群里出现两条一样的消息。
+   */
+  const isRejected = (e) => {
+    const st = Number(e?.status ?? 0);
+    return st >= 400 && st < 500 && st !== 401 && st !== 429;
+  };
+
   /** 统一的发送：先过暂停闸，再拆条，最后逐条走 outbound */
   async function sendMessage({ kind, targetOpenid, chatId, parsed }) {
     if (!targetOpenid) throw obError(1404, '找不到这个号码对应的 openid，先去面板「身份」页绑一下');
@@ -85,8 +97,21 @@ export function createActions({
       throw obError(1501, `本会话已暂停（${why}），先到面板放开再发`);
     }
 
+    /**
+     * 出站正文要按出口渲染两版：
+     *   · 纯文本：`<@openid>` → `@昵称`（没有昵称就删掉）
+     *   · markdown：`<@openid>` → `<qqbot-at-user id="openid" />`（唯一能让 @ 生效的写法）
+     *
+     * 官方「文本交互」文档：@用户 只在 **markdown 消息**里生效，群聊还要求
+     * id 是 member_openid。纯文本里这串会被当字面量，用户看到的就是
+     * `<@8C7419D4B8…> 咋啦`（2026-11-13 实机截图）。
+     */
+    const ats = parsed.ats ?? [];
+    const text = renderPlainText(parsed.text, ats, identityName);
+    const mdText = ats.length ? renderMarkdownText(parsed.text, ats) : '';
+
     const parts =
-      (parsed.text || parsed.reference || (parsed.images.length === 0 && parsed.records.length === 0) ? 1 : 0) +
+      (text || parsed.reference || (parsed.images.length === 0 && parsed.records.length === 0) ? 1 : 0) +
       parsed.images.length +
       parsed.records.length;
     if (parts > MAX_PARTS) {
@@ -116,10 +141,44 @@ export function createActions({
 
     let last = null;
     // 文本（或纯引用、或没有任何媒体）：第一条
-    if (parsed.text || parsed.reference || (parsed.images.length === 0 && parsed.records.length === 0)) {
-      const payload = withPassive({ content: parsed.text || '' });
-      if (parsed.reference) payload.messageReference = { message_id: parsed.reference };
-      last = await outbound.send({ ...base, requestId: rid(), payload });
+    if (text || parsed.reference || (parsed.images.length === 0 && parsed.records.length === 0)) {
+      const plain = withPassive({ content: text });
+      if (parsed.reference) plain.messageReference = { message_id: parsed.reference };
+
+      /**
+       * 群聊里带 @ → **自动升级成 markdown 发送**。
+       *
+       * 官方「文本交互」文档：@用户 只在 markdown 消息里生效（群聊 id 要
+       * member_openid，identity 里存的就是它）。纯文本出口只能把
+       * `<@openid>` 变成 `@昵称` 或者删掉——对方收不到提醒。
+       *
+       * 代价是整条消息按 markdown 渲染，正好对上「自动识别 markdown」：
+       * 模型写的 `**粗体**`、`- 列表` 会正常显示。单聊不发 markdown：
+       * 两个人之间 @ 没有意义，官方也只写了群聊 / 文字子频道。
+       *
+       * 被官方明确拒（4xx：群没开 markdown 权限、内容判违规、超长）就
+       * 降级纯文本——丢一个 @，但话一定送到。
+       */
+      let viaMarkdown = false;
+      if (kind === 'group' && mdText) {
+        try {
+          last = await outbound.send({
+            ...base,
+            requestId: rid(),
+            payload: withPassive({
+              markdown: { content: mdText },
+              ...(parsed.reference ? { messageReference: { message_id: parsed.reference } } : {}),
+            }),
+          });
+          viaMarkdown = true;
+        } catch (e) {
+          if (!isRejected(e)) throw e;
+          log.warn(`群里发 markdown（带 @）被官方拒了，降级纯文本：${e.message}`);
+        }
+      }
+      if (!viaMarkdown) {
+        last = await outbound.send({ ...base, requestId: rid(), payload: plain });
+      }
     }
 
     // 图片：一张一条，msg_type=7

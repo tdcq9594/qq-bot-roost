@@ -8,7 +8,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseOutgoing, MAX_PARTS } from '../src/onebot/segments.js';
+import { parseOutgoing, renderPlainText, renderMarkdownText, MAX_PARTS } from '../src/onebot/segments.js';
 
 /** 最小 ids 桩：真号映射表 */
 function fakeIds({ users = {}, msgs = {} } = {}) {
@@ -97,4 +97,51 @@ test('face 段退化成文字（官方没有表情码）', () => {
 
 test('拆条上限常量是 5（群聊被动回复次数）', () => {
   assert.equal(MAX_PARTS, 5);
+});
+
+/* ---------------- at 的两种出口 ---------------- */
+
+const LONG_OPENID = '8C7419D4B8500528C2248E85360A719D';
+
+test('at 段：正文里自写的 32 位 openid 直接清掉，不漏进聊天', () => {
+  const r = parseOutgoing(
+    [{ type: 'text', data: { text: `看 <@${LONG_OPENID}> 这个` } }],
+    { ids, selfUin: 1 },
+  );
+  assert.equal(r.text, '看  这个', '纯文本出口发不出真 @，留着就是一串乱码');
+  assert.equal(r.ats.length, 0, '不是 at 段，不该算真 @');
+});
+
+test('at 段：markdown 出口换成 qqbot-at-user，纯文本出口换成 @昵称', () => {
+  const r = parseOutgoing(
+    [
+      { type: 'at', data: { qq: '2014433751', name: '倦飞之鸟' } },
+      { type: 'text', data: { text: ` 咋啦 <@${LONG_OPENID}>` } },
+    ],
+    { ids, selfUin: 1 },
+  );
+  assert.deepEqual(r.ats, [{ openid: 'U1', qq: '2014433751', name: '倦飞之鸟' }]);
+  // at 段拼的那串保留给出口用；正文里自写的那串已经清掉
+  assert.equal(r.text, '<@U1> 咋啦');
+  assert.equal(renderPlainText(r.text, r.ats, () => ''), '@倦飞之鸟 咋啦');
+  assert.equal(renderMarkdownText(r.text, r.ats), '<qqbot-at-user id="U1" /> 咋啦');
+});
+
+test('at 段：没有昵称时纯文本整段去掉，绝不留 openid', () => {
+  const r = parseOutgoing(
+    [{ type: 'at', data: { qq: '2014433751' } }, { type: 'text', data: { text: ' 咋啦' } }],
+    { ids, selfUin: 1 },
+  );
+  assert.equal(renderPlainText(r.text, r.ats, () => ''), '咋啦');
+  // markdown 出口不需要昵称：官方自己会渲染成 @那个人
+  assert.equal(renderMarkdownText(r.text, r.ats), '<qqbot-at-user id="U1" /> 咋啦');
+});
+
+test('at 段：昵称只有身份表里有（客户端没传 name）也能用上', () => {
+  const r = parseOutgoing(
+    [{ type: 'at', data: { qq: '2014433751' } }, { type: 'text', data: { text: ' 在吗' } }],
+    { ids, selfUin: 1 },
+  );
+  const nameOf = (openid) => (openid === 'U1' ? '倦飞之鸟' : '');
+  assert.equal(renderPlainText(r.text, r.ats, nameOf), '@倦飞之鸟 在吗');
 });
