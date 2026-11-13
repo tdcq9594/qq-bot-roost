@@ -404,14 +404,22 @@ selfOpenid = identity.openidOf(botId, selfUin)     // 这也是 selfUin 必填�
 
 | 段                              | 处理                                     | 限制                                                |
 | ------------------------------ | -------------------------------------- | ------------------------------------------------- |
-| `text`                         | 拼进 `content`；转义裸 `<`（避免被当 mention 语法）  |                                                   |
-| `at`                           | 拼 `<@openid>`；`qq == self_id` 直接丢弃（被动回复本身已指向机器人） | 其他人未绑定时**降级为文本 `@昵称`** 并在 `data.warning` 里说明，不整条失败 |
+| `text`                         | 拼进 `content`；正文里**合法 openid 形态**的 `<@xxxx…>` 直接删掉，其余裸 `<@` 转全角 | 纯文本出口发不出真 @，留着只会变成一串乱码 |
+| `at`                           | **群聊自动升级成 markdown**：`<qqbot-at-user id="openid" />`（官方唯一让 @ 生效的写法）；单聊、或 markdown 被 4xx 拒时降级文本 `@昵称`（没昵称就删掉）；`qq == self_id` 直接丢弃 | 其他人未绑定时降级为文本 `@号码` 并在 `data.warning` 里说明，不整条失败 |
 | `reply`                        | `messageReference.message_id = msgIdx` | 挂在**拆条后的第一条**上（第一条是图片也行）；单独一条 `reply` 无效，忽略 |
 | `image`                        | `uploadMedia()` → 单独一条 `msgType=7`     | **与文本拆条**；>5MB 走分片                                |
 | `record`                       | 转 SILK 后单独发（见下）                        | 官方只收 SILK；没装 `silk-wasm` 就 1400                   |
 | `face` / `mface`               | 降级为文本 `[表情]`（可配 `faceText: true`）      | 官方没有 QQ 表情码                                       |
 | `forward` / `node`             | 拒绝 1404                                | 官方只能收不能发                                          |
 | `share` / `music` / `location` | 降级为文本（标题 + 链接）                         |                                                   |
+
+**为什么群聊的 at 必须走 markdown**：官方「文本交互」文档写明 @用户 **只在 markdown
+消息里生效**（群聊 id 填 member_openid），纯文本里的 `<@openid>` 会被当字面量原样贴出来。
+2026-11-13 群里实际收到的就是 `<@8C7419D4B8500528C2248E85360A719D> 咋啦`。
+所以带 at 的群消息整条走 markdown 出口：@ 换 `<qqbot-at-user>`，模型写的
+`**加粗**` / 列表也顺带正常渲染。被官方明确拒（4xx：群没开 markdown 权限、内容判违规、
+超长）就降级纯文本——丢一个 @，但话一定送到；429 / 网络错误**不降级**，那种情况
+消息可能已经发出去了，重发会变成两条。
 
 **语音**：官方只收 SILK（`file_type=3`）。`silk-wasm` 是**可选依赖**，装了才转，  
 不装就退化成「发不了语音」——框架本体不因为这条功能破零依赖。
@@ -421,19 +429,24 @@ selfOpenid = identity.openidOf(botId, selfUin)     // 这也是 selfUin 必填�
 ```
 record.file（base64:// / http url / file://）
   ├─ isSilk(buf)        → 直接 uploadMedia(fileType=3)
-  ├─ isWav(buf)         → silk-wasm.encode(buf, 0)  → uploadMedia    ← 零转码，最优路径
-  ├─ mp3 / ogg / 其它    → 有 ffmpeg？→ 转 24kHz 单声道 WAV → encode → upload
-  │                        没 ffmpeg？→ 1400「让 TTS 直接出 WAV，或装 ffmpeg」
+  ├─ WAV 且 24k/单声道/16bit/≤60s → silk-wasm.encode(buf, 0) → uploadMedia   ← 零转码，最优路径
+  ├─ 其它 WAV（22050 / 32k / 双声道 / 超 60s…）
+  │                     → ffmpeg 转 24kHz 单声道（超 60s 截断）→ encode → upload
+  ├─ mp3 / ogg / 其它    → 同上；没 ffmpeg 就当场自动补装（62MB），装不上才 1400
   └─ 超过 20MB          → 1400（官方语音上限）
 ```
 
 三个要说清的点：
 
-- `silk-wasm` 的 `encode()` **直接吃 WAV**（`sampleRate` 传 0 时自己读头），所以 WAV → SILK 不需要 ffmpeg；  
-  只有 mp3 这类才要外部解码。aurobot 的 edge-tts 出 mp3、CosyVoice / GPT-SoVITS 出 wav，覆盖一半
-- ffmpeg 只做 PATH 探测，**不打包**（80MB 起步，且是原生二进制）。面板依赖卡里显示「ffmpeg：未找到」  
-  |  |  |  
-  | --- | --- |
+- `silk-wasm` 的 `encode()` 直接吃 WAV，但它**只认 8000 / 12000 / 16000 / 24000 四档采样率**。
+  其它档位它**不报错**，而是把码流编成静音——最典型的是 **22050**（Windows 系统语音 SAPI
+  的默认输出）。2026-11-13 实测 5 条真实语音：SILK 体积膨胀 18–29 倍、解码 RMS 全是 1，
+  QQ 侧表现就是「语音条发得出去、点开没声音」。所以不是 24k/单声道/16bit 的 WAV
+  一律先过 ffmpeg 重新打包；编完还会解码量一次电平（`encodeChecked`），静音就报错不发。
+- ffmpeg **也是可选依赖**（`@ffmpeg-installer/ffmpeg`，62MB）：它的平台子包把静态二进制
+  直接打进 tarball，没有 postinstall 脚本，所以 `--ignore-scripts` 下也能装。只在**真需要
+  转码**时自动补装（单飞 + 30 分钟冷却），面板依赖卡里能手动装/卸；
+  用户自己装了 ffmpeg 的（PATH 上、或 `ROOST_FFMPEG` 指定）优先用他那一份
 - aurobot 对语音失败有兜底（`isDefiniteFailure` 里认 `highway|upload`），会改发文字，所以拒掉不会让整轮对话消失
 
 ### 拆条规则（一条官方消息只能一种富文本）
@@ -621,7 +634,7 @@ dsh-roost 是 DSH 插件（`integrations/dsh-roost`），aurobot 也是 DSH 插�
 
 依赖    ws         8.18.0 已安装          [重装]
         silk-wasm  — 未安装（可选，发语音）  [一键安装]   1.5MB
-        ffmpeg     — 未找到（可选，mp3 转语音）          装法见说明
+        @ffmpeg-installer/ffmpeg  — 未安装（可选，mp3 语音）  [一键安装]  62MB
         ┌ 黄条：兼容模式需要 ws。装到 data/deps/ext/，不动系统环境 ┐
         └ 手动：npm i ws --prefix data/deps/ext --omit=dev      ┘
 

@@ -8,7 +8,7 @@
 
 <img src="https://img.shields.io/badge/Node.js-22.13%2B-339933?logo=node.js&logoColor=white" alt="Node.js 22.13+">
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
-<img src="https://img.shields.io/badge/tests-1009%20passed-brightgreen" alt="测试 1009 项">
+<img src="https://img.shields.io/badge/tests-1034%20passed-brightgreen" alt="测试 1034 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
 <img src="https://img.shields.io/badge/version-1.0.15-blueviolet" alt="版本 1.0.15">
 <img src="https://img.shields.io/badge/license-AGPL--3.0--only-blue" alt="AGPL-3.0-only">
@@ -456,7 +456,7 @@ bot/
 │   └── plugin/                 插件加载、配置、依赖、子进程宿主、面板页面注册
 ├── test/
 │   ├── selftest.mjs            框架自检（622 项）
-│   ├── e2e.mjs                 端到端测试（243 项，起真实服务打接口）
+│   ├── e2e.mjs                 端到端测试（245 项，起真实服务打接口）
 │   ├── qrlogin.mjs             扫码建机器人（8 项）
 │   └── deps.mjs                插件依赖安装（11 项）
 ├── web/                        面板前端（原生 JS/CSS，无构建）
