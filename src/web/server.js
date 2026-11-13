@@ -1107,7 +1107,19 @@ async function startWebServerInstance({
        * （重启只由 restart 策略在进程退出时触发），所以不会变成重启循环。
        */
       if (pathname === '/healthz') {
-        const bots = runtimes.map((r) => ({ id: r?.id ?? '', state: r?.state ?? 'offline' }));
+        /**
+         * 每只鸟带上掉线原因（只在 `error` 且确有原因时）。
+         *
+         * 探活是外部客户端（dsh-roost 的启动判据）唯一**免密钥**能看到的口径。
+         * 以前它只给 state，外部只能报「一只都没连上——去面板看日志」，
+         * 用户还得自己翻；而真实原因（实例锁被占、凭据过期）本来就是一句
+         * 可以直说的话。AppID 不算秘密，凭据只在 AppSecret 里，不会从这里出去。
+         */
+        const bots = runtimes.map((r) => {
+          const state = r?.state ?? 'offline';
+          const why = state === 'error' ? String(r?.lastError ?? '').trim() : '';
+          return { id: r?.id ?? '', state, ...(why ? { error: why } : {}) };
+        });
         const online = bots.filter((b) => b.state === 'online').length;
         const ok = bots.length === 0 ? true : online > 0;
         res.writeHead(ok ? 200 : 503, {

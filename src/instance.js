@@ -364,8 +364,20 @@ const ROOST_HINT = /(qq-bot-roost|src[\\/]main\.js)/i;
  */
 async function isOurRoost(pid, rec = null) {
   const beat = rec ? beatAlive(rec) : null;
-  /** 心跳新鲜：不用再问进程名 / wmic / PowerShell，直接判活 */
-  if (beat === true) return true;
+  /**
+   * 心跳新鲜：不用再问进程名 / wmic / PowerShell，**但仍要问 pid 在不在**。
+   *
+   * 心跳文件是「最后一个活着的那次心跳」——进程被强杀（关 DSH、任务管理器、
+   * 断点调试）时它不会自己消失，mtime 就停在死的那一刻。30 秒租约内重启，
+   * 新进程会撞上自己**前一条**记录：心跳还新鲜 → 判活 → 拒绝认领 →
+   * 机器人直接 `error`。2026-11-13 实机踩到：心跳停在 08:52:15，08:52:34
+   * 认领被判「AppID 被 PID 28256 占用」，而 28256 早就没了。
+   *
+   * pid 不存在 ⇒ 进程一定没了（进程退出时 pid 就被释放，系统不会把「不存在」
+   * 复用出去），所以这一眼不算贵、也不破坏「拿不准往活着倒」：
+   * `pidExists` 遇到 EPERM（跨用户、权限不足）返回 true，仍然保守判活。
+   */
+  if (beat === true) return pidExists(pid);
   /** 有租约的记录只看 pid 是否存在；升级前的旧记录沿用含进程名的 isAlive */
   const exists = beat === null ? isAlive(pid) : pidExists(pid);
   if (!exists) return false;
@@ -430,9 +442,17 @@ function prune(data) {
   for (const [key, rec] of Object.entries(data)) {
     if (!rec) continue;
     const beat = beatAlive(rec);
-    /** 心跳新鲜就是活，连 pid 都不用看——PID 被复用也挡得住 */
+    /**
+     * 心跳新鲜 + pid 还在才算活。
+     *
+     * 光看心跳会被**残留心跳**骗：进程被强杀后心跳文件留在原地，mtime 停在
+     * 死亡时刻，30 秒内看起来「刚刚还在跳」。那段时间里重启必然撞上自己这条
+     * 记录（详见 `isOurRoost` 里的同日实测），所以这里多问一眼 pid。
+     * PID 被复用挡不住也没关系——复用意味着 pid 存在，这里只负责剪掉
+     * 「pid 根本不存在」的确定性死记录，细判仍交给冲突路径。
+     */
     if (beat === true) {
-      out[key] = rec;
+      if (pidExists(rec.pid)) out[key] = rec;
       continue;
     }
     if (beat === false) {

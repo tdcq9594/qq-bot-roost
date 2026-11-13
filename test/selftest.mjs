@@ -799,9 +799,16 @@ const RUN = Date.now().toString(36);
   check('实例锁: 停跳租约在 pid 存在时保留记录，交给命令行细判', Boolean(kept.__probe__));
 
   /**
-   * 心跳新鲜是比 pid 更强的证据：记录里的 pid 就算查不到（被复用 /
-   * 判活工具异常），也绝不能判死——判死就是放行双开。
-   * 这条专门钉住「把心跳新鲜短路删掉后测试仍全绿」的覆盖缺口。
+   * 心跳新鲜 **但 pid 已经不存在** = 残留心跳，必须判死。
+   *
+   * 心跳文件是「最后一次心跳」留下的，进程被强杀（关宿主、任务管理器）时它
+   * 不会自己消失，mtime 停在死亡那一刻，30 秒租约内怎么看都像「刚刚还在跳」。
+   * 2026-11-13 实机：心跳停在 08:52:15，08:52:34 重启，新的 Roost 认领时被
+   * 这条记录拦住（提示「AppID 被 PID 28256 占用」），机器人直接 `error`。
+   *
+   * 判据修正：心跳只用来解释「pid 被复用给别的 node 程序」，**先问 pid 在不在**。
+   * 进程不存在 ⇒ 一定死了（不存在「活着却没有 pid」）。反过来「心跳新鲜 + pid
+   * 还活着」仍然拦住重复认领——上面 `again` 那条钉的就是它，防双开没有被削弱。
    */
   const freshFile = _beatPathOf(F);
   await fs.writeFile(freshFile, '{}', 'utf8');
@@ -810,11 +817,15 @@ const RUN = Date.now().toString(36);
     l[F] = { pid: 999999, at: Date.now(), beat: path.basename(freshFile) };
     await writeLock(l);
   }
+  check(
+    '实例锁: 心跳新鲜但 pid 已消失 → prune 剪掉（残留心跳不能当活证据）',
+    !_pruneForTest({ __probe__: { pid: 999999, beat: path.basename(freshFile) } }).__probe__,
+  );
   const f = await claimInstance({ appId: F });
   check(
-    '实例锁: 心跳新鲜时即使 pid 查不到也判活（防双开）',
-    f.ok === false,
-    f.ok ? '被放行了（会双开）' : `拦住 PID ${f.conflict?.pid}`,
+    '实例锁: 重启时不再被自己刚死那条记录挡住',
+    f.ok === true,
+    f.ok ? '' : `仍被拦住：PID ${f.conflict?.pid}`,
   );
 
   /**
@@ -894,6 +905,7 @@ const RUN = Date.now().toString(36);
   await releaseInstance(H);
   await releaseInstance(Z);
   await releaseInstance(Q);
+  await releaseInstance(F);
   check('实例锁: 正常注销会删掉心跳文件', !(await fs.stat(_beatPathOf(H)).then(() => true).catch(() => false)));
   await clean();
 }
