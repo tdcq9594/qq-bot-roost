@@ -208,15 +208,58 @@ test('group.join：decline 带上拒绝原因与拉黑开关', async () => {
   assert.equal(hit[3].addToBlacklist, true);
 });
 
-test('scope：写操作要 manage，只读令牌调不动', async () => {
+test('scope：群管归 message（装了就能用），只读令牌调不动', async () => {
   const { methods } = make();
   const list = methods.describe();
+  // 群管是"对外部群动手"，不改框架状态 → 和 msg.send 一样归 message，
+  // 不要求用户去开 host.allowManage 总闸。
   for (const n of ['group.mute', 'group.kick', 'group.join']) {
-    assert.equal(list.find((m) => m.name === n).scope, 'manage', `${n} 应该是 manage`);
+    assert.equal(list.find((m) => m.name === n).scope, 'message', `${n} 应该是 message`);
   }
   assert.equal(list.find((m) => m.name === 'group.info').scope, 'read');
+
+  // 只有 read 的令牌仍然调不动写操作
   await assert.rejects(
     () => methods.call('group.mute', { groupOpenid: 'g1', memberOpenids: ['u1'], seconds: 60 }, { scopes: new Set(['read']) }),
     (e) => e.code === 'NO_SCOPE' && e.http === 403,
   );
+});
+
+test('scope：只有 message、没有 manage 也能管群（不需要开 allowManage）', async () => {
+  const { methods, calls } = make();
+  const r = await methods.call(
+    'group.mute',
+    { groupOpenid: 'g1', memberOpenids: ['u1'], seconds: 60 },
+    { scopes: new Set(['read', 'message']) },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(calls.filter((c) => c[0] === 'muteMembers').length, 1);
+});
+
+test('scope：改框架设置仍然要 manage（这条别一起放松）', async () => {
+  const { methods } = make();
+  const list = methods.describe();
+  // 能改权限、能以宿主身份执行代码的，只有这五条
+  for (const n of ['config.set', 'identity.bind', 'identity.unbind', 'plugin.config.set', 'plugin.tool.call']) {
+    const hit = list.find((m) => m.name === n);
+    assert.ok(hit, `${n} 应该在方法表里`);
+    assert.equal(hit.scope, 'manage', `${n} 必须仍然是 manage`);
+  }
+  // 只有 message 的令牌改不了框架设置
+  await assert.rejects(
+    () => methods.call('config.set', { logLevel: 'debug' }, { scopes: new Set(['read', 'message']) }),
+    (e) => e.code === 'NO_SCOPE' && e.http === 403,
+  );
+  // qq.call 本身是 read 入口，内部按目标方法的风险档再校验（不在这次改动范围）
+  assert.equal(list.find((m) => m.name === 'qq.call').scope, 'read');
+});
+
+test('scope：运维动作不需要 manage（暂停闸、插件启停与重载）', async () => {
+  const { methods } = make();
+  const list = methods.describe();
+  for (const n of ['gate.set', 'plugin.enable', 'plugin.disable', 'plugin.reload']) {
+    const hit = list.find((m) => m.name === n);
+    assert.ok(hit, `${n} 应该在方法表里`);
+    assert.equal(hit.scope, 'message', `${n} 是运维动作，应该是 message`);
+  }
 });

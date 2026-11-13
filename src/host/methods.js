@@ -42,8 +42,16 @@ const str = (v, d = '') => (v === undefined || v === null ? d : String(v));
  * 一个 token 实际能用的 scope。
  *
  * `allowManage` 是总闸：false 时哪怕配置里写了 manage 也删掉。
- * 配置写、插件启停、任意 qq.call 都能改框架状态，不该因为
- * 「scopes 数组里多写了一个词」就悄悄放开。
+ *
+ * **scope 怎么分（2026-11-13 定）**：`manage` 只留给**改框架自己的重要状态**——
+ * 也就是「能改权限」或「能以宿主身份执行代码」的那些：
+ *   - `config.set`（含 owners / whitelist，绑错等于给错人权限）
+ *   - `identity.bind` / `identity.unbind`（身份表就是权限的依据）
+ *   - `plugin.config.set`（插件密钥）
+ *   - `plugin.tool.call`（以宿主身份调插件工具，绕过 AI 权限）
+ * 其余**运维动作**一律 `message`：发消息、群管（禁言/踢人/审批）、暂停闸、
+ * 插件启停与热重载。理由：这些是「对外做事」或「临时刹车」，不改权限也不会
+ * 悄悄提权；让用户为了暂停一下去开总闸，只会逼他把总闸常开。
  */
 export function effectiveScopes(cfg = {}) {
   const out = new Set(['read']);
@@ -228,7 +236,7 @@ export function createMethods({ runtime: R, getState, log = () => {} }) {
     return await R.gate.snapshot();
   });
 
-  def('gate.set', 'manage', '设置全局 / 本鸟 / 单会话的暂停闸', async (p) => {
+  def('gate.set', 'message', '设置全局 / 本鸟 / 单会话的暂停闸', async (p) => {
     if (!R.gate) throw notReady('暂停闸未就绪');
     const scope = str(p.scope, 'bot');
     const paused = typeof p.paused === 'boolean' ? p.paused : true;
@@ -416,7 +424,13 @@ export function createMethods({ runtime: R, getState, log = () => {} }) {
    *
    * 为什么单开方法、不放开 `qq.call`：AI 工具对协议是外部输入，通用写面一暴露
    * 就等于把管理面交给模型（改配置、装插件、随便调官方接口）。这里每个动作
-   * 一条方法、各自 scope，调用方只能看到「禁言」这一个能力，看不到「任意调用」。
+   * 一条方法，调用方只能看到「禁言」这一个能力，看不到「任意调用」。
+   *
+   * **scope 归属**：群管是**对外部群**动手，不改框架自己的状态，所以和 `msg.send`
+   * 一样归 `message`；只有 `config.set` / `plugin.install` 这类**改框架自己**的才要
+   * `manage`。这样装了就能用，不必逼用户去开总闸（`host.allowManage`）。
+   * 代价是：谁拿到 `message` 谁就能管群——防线在调用方（roost 侧的档位、二次确认、
+   * 每日上限、审计），不是协议层。
    *
    * 返回值统一成 `{ ok, reason, ... }` 而不是抛错：官方错误码得翻译成
    * `not_admin` / `need_invite` / `rate_limited` 这种调用方能判断的原因，
@@ -476,7 +490,7 @@ export function createMethods({ runtime: R, getState, log = () => {} }) {
     };
   });
 
-  def('group.mute', 'manage', '禁言 / 解禁（seconds=0 解禁；最长 30 天，一次最多 20 人）', async (p) => {
+  def('group.mute', 'message', '禁言 / 解禁（seconds=0 解禁；最长 30 天，一次最多 20 人）', async (p) => {
     if (!R.api) throw notReady('官方接口未就绪');
     const groupOpenid = str(p.groupOpenid).trim();
     const targets = openidList(p.memberOpenids);
@@ -501,7 +515,7 @@ export function createMethods({ runtime: R, getState, log = () => {} }) {
     }
   });
 
-  def('group.kick', 'manage', '把成员移出群（需要群管内邀；可选加黑名单）', async (p) => {
+  def('group.kick', 'message', '把成员移出群（需要群管内邀；可选加黑名单）', async (p) => {
     if (!R.api) throw notReady('官方接口未就绪');
     const groupOpenid = str(p.groupOpenid).trim();
     const targets = openidList(p.memberOpenids);
@@ -517,7 +531,7 @@ export function createMethods({ runtime: R, getState, log = () => {} }) {
     }
   });
 
-  def('group.join', 'manage', '入群申请：list 列表 / approve 通过 / decline 拒绝', async (p) => {
+  def('group.join', 'message', '入群申请：list 列表 / approve 通过 / decline 拒绝', async (p) => {
     if (!R.api) throw notReady('官方接口未就绪');
     const groupOpenid = str(p.groupOpenid).trim();
     if (!groupOpenid) throw bad('要给 groupOpenid');
@@ -630,17 +644,17 @@ export function createMethods({ runtime: R, getState, log = () => {} }) {
     return hit;
   });
 
-  def('plugin.enable', 'manage', '启用插件', async (p) => {
+  def('plugin.enable', 'message', '启用插件', async (p) => {
     if (!plugins()) throw notReady('插件管理器未就绪');
     return { ok: await plugins().setEnabled(str(p.id), true) };
   });
 
-  def('plugin.disable', 'manage', '停用插件', async (p) => {
+  def('plugin.disable', 'message', '停用插件', async (p) => {
     if (!plugins()) throw notReady('插件管理器未就绪');
     return { ok: await plugins().setEnabled(str(p.id), false) };
   });
 
-  def('plugin.reload', 'manage', '重载插件', async (p) => {
+  def('plugin.reload', 'message', '重载插件', async (p) => {
     if (!plugins()) throw notReady('插件管理器未就绪');
     return { ok: await plugins().reload(str(p.id)) };
   });
