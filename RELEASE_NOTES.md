@@ -2,6 +2,55 @@
 
 ---
 
+## v1.0.15：框架自己长出两条对外协议
+
+一句话：宿主协议 `roost-host/1` 与 OneBot v11 兼容层同时落地，AI 宿主和现成 OneBot 客户端都能直连框架，不用再夹一层中间件。
+
+### 宿主协议 `roost-host/1`（`src/host/`）
+
+给「会想、不会连 QQ」的程序用：DSH 这类宿主只管收发，连接、限频、`msg_seq`、审核、素材上传都留在框架。
+
+- **一个端口三条路**：`POST /rpc`（方法调用）、`GET /events`（SSE）、`GET /ws`（双向帧）。WS 与 SSE 共用同一份事件流与 `seq` 补拉语义，选哪条都不影响功能。
+- **握手显式**：客户端连上先发 `hello`（带 `since`），服务端回 `welcome`（协议版本、机器人状态、方法数、scope）；`since` 之后的缓冲事件补发，缺口用 `gap` 帧明说，不静默丢。
+- **70 个方法，三种 scope**：`read` / `message` / `manage`。`allowManage` 是总闸——关着时 token 泄漏也不等于框架被接管（改配置、装插件、任意 `qq.call` 都归 manage）。
+- **鉴权**：`Authorization: Bearer` 或 `?access_token=`；`/health` 免鉴权，只报状态与连接数，给外部探活用。
+- **媒体**：图片 / 语音 / 文件 / 视频统一走 `media.*`，≤5MB 直传、更大走分片，Markdown 素材带 100 张配额管理。
+
+### OneBot v11 兼容层（`src/onebot/`）
+
+让 aurobot / NoneBot 这类现成客户端直接连上来，**不再需要 SnowLuma、NapCat** 这种登录小号的网关。
+
+- WS 服务端 + HTTP API 双通道，`access_token` 鉴权（`?access_token=` 与 `Bearer` 都认，等长走 `timingSafeEqual`）。
+- **能力表不吹牛**：官方没有的（空间、改资料、拍一拍、历史消息、好友列表）如实标 `unsupported`，按表拒绝而不是静默失败。
+- ID 双向映射（openid ↔ QQ 号）、`echo` 原样回、`retcode` 按 OneBot 约定；群消息可只推 @ 的，也可全量。
+- 语音：WAV/SILK 直接转，mp3 需要 ffmpeg（只做 PATH 探测，不打包）。
+- `mode`：`exclusive` 独占（跳过插件管线）/ `parallel` 并行 / `mirror` 只观测。
+
+### 插件工具自动投影
+
+插件 `ctx.registerTool` 注册的工具会变成一等协议方法 `tool.<名字>`，带参数 schema；宿主不用为每个插件改代码。插件卸载 / 停用立刻 404，并推一条 `capabilities.changed` 让宿主重拉能力表。
+
+### 依赖按需、两条出口共用
+
+- `ws` 是**可选依赖**，不进 `package.json`：面板「外接 → 依赖」点一次装到 `data/deps/ext/`，宿主协议与 OneBot 共用同一份；不装时宿主协议自动只开 HTTP + SSE。
+- **第一次发语音会自动补装 `silk-wasm`**（约 1.5MB，单飞 + 10 分钟冷却）；装不上只影响这一条消息，不拖累整轮。
+- 老版本装在 `data/deps/onebot/` 的依赖，启动时整目录迁移过来，不用重下。
+
+### 修
+
+- **残留心跳不再挡住重启**：进程被强杀后心跳文件停在死亡那一刻，30 秒租约内旧逻辑只看心跳就判活，新进程认领 AppID 被自己那条记录拦住（「已被 PID xxx 占用」）。现在心跳新鲜也要问 pid 在不在。
+- **`/healthz` 带出掉线原因**：`error` 状态附带 `lastError`（实例锁冲突、凭据过期），外部探活不用再猜。
+- **网络错误带根因**：`fetch failed` 后面补 `cause.code`（含 `AggregateError` 形状）；只对「连接没建起来」的（`ECONNREFUSED` / `ENOTFOUND` / `EAI_AGAIN` / 连接超时）自动重试一次——`ECONNRESET` / 读超时一律不重试，避免群里出现两条一样的消息。
+- **面板不再回显 token**：只保留「生成」与首次复制。
+- 依赖安装：连点不再起多份 npm、失败原因原样带出、`.deps.json` 与磁盘不一致时强制重装、装完 4×250ms 重试校验。
+- **OneBot 发出去的消息进投递账本**：以前 `outbound.send` 没带 `requestId`，账本只走「照发不记」分支，
+  面板「投递」页看不到客户端发的任何一条。现在每条（文本 / 图片 / 语音分别）生成 `ob-…` 幂等键。
+- **OneBot 面板说清「只收得到 @ 的群消息」**：`forwardAll` 只承诺「收到的都推」，上游 intents 没有 `1<<30`
+  （全量群消息）时，普通群聊根本到不了框架。启用时日志提示一次，面板直连状态里也常驻一行说明，
+  不再让人误判成客户端丢消息。
+
+**测试 1009 项全绿**（自检 702 + `node --test` 307）。
+
 ## v1.0.14：插件市场认得「扩展」，实例锁不再被 Node 24 骗过
 
 ### 市场索引分叉出「扩展」这一类

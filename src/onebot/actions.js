@@ -13,6 +13,7 @@ import { parseOutgoing, MAX_PARTS } from './segments.js';
 import { recallNotice } from './translate.js';
 import { fetchAudio, toSilk, uploadVoice } from './voice.js';
 import { fileURLToPath } from 'node:url';
+import crypto from 'node:crypto';
 
 function obError(retcode, message) {
   const e = new Error(message);
@@ -99,6 +100,18 @@ export function createActions({
       chatKey: `${kind}:${chatId}`,
       ...(passive ? { receivedAt: passive.at } : {}),
     };
+    /**
+     * 每次 `outbound.send` 都带一个**独立**的幂等键。
+     *
+     * 为什么必须有：`outbound` 只在拿到 `requestId` 时才写投递账本
+     * （`delivery.claim/settle`），没有就「照发但不入账」。OneBot 之前一个都
+     * 没带，于是客户端发出去的消息在面板「投递」页完全看不到——出问题了
+     * 只能翻日志。
+     *
+     * 必须**一条一条生成**：一条消息可能拆成文本 + 多张图 + 多段语音，
+     * 共用同一个 id 会被账本当成「重发」直接复用上一条的结果。
+     */
+    const rid = () => `ob-${crypto.randomUUID()}`;
     const withPassive = (payload) => ({ ...payload, ...(passive ? { msgId: passive.msgId } : {}) });
 
     let last = null;
@@ -106,7 +119,7 @@ export function createActions({
     if (parsed.text || parsed.reference || (parsed.images.length === 0 && parsed.records.length === 0)) {
       const payload = withPassive({ content: parsed.text || '' });
       if (parsed.reference) payload.messageReference = { message_id: parsed.reference };
-      last = await outbound.send({ ...base, payload });
+      last = await outbound.send({ ...base, requestId: rid(), payload });
     }
 
     // 图片：一张一条，msg_type=7
@@ -116,6 +129,7 @@ export function createActions({
       if (!up?.file_info) throw obError(1500, '图片上传成功但没拿到 file_info');
       last = await outbound.send({
         ...base,
+        requestId: rid(),
         payload: withPassive({ msgType: 7, media: { file_info: up.file_info } }),
       });
     }
@@ -128,6 +142,7 @@ export function createActions({
       const fileInfo = await uploadVoice(api, scene, targetOpenid, silkBuf);
       last = await outbound.send({
         ...base,
+        requestId: rid(),
         payload: withPassive({ msgType: 7, media: { file_info: fileInfo } }),
         fileType: 3,
       });

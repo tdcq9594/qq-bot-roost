@@ -281,7 +281,12 @@ const BOT_DEFAULTS = {
     selfUin: '',
     /** exclusive 独占（跳过插件管线）| parallel 并行 | mirror 只观测 */
     mode: 'exclusive',
-    /** 全量群消息也推给客户端 */
+    /**
+     * 「收到的都推给客户端」。
+     *
+     * **不等于「群里所有消息都能推」**：上游要下发才有得推。intents 没有
+     * `1 << 30`（全量群消息）时，非 @ 的群消息根本到不了框架——面板会显式提示。
+     */
     forwardAll: true,
     /** 同一端口上是否也接受 HTTP API */
     http: true,

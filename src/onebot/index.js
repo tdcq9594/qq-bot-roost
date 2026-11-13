@@ -72,6 +72,8 @@ export class OneBotBridge {
     this.silkOk = false;
     /** chatId(openid) → {msgId, at}：被动回复窗口用 */
     this.lastInbound = new Map();
+    /** 见过非 @ 的群消息（= 平台「接收所有消息」确实开着） */
+    this.sawUnaddressedGroup = false;
     this.pkgVersion = '';
     /** start/stop 串行化：连点两次「保存」不能起两个监听 */
     this.chain = Promise.resolve();
@@ -264,6 +266,19 @@ export class OneBotBridge {
       `兼容模式已监听 ${this.cfg.host || '127.0.0.1'}:${this.port}` +
         `（${this.cfg.mode}${this.cfg.http !== false ? ' + HTTP' : ''}）`,
     );
+    /**
+     * `forwardAll` 的承诺是「群里说什么都推给客户端」，但上游只在下发了
+     * 才能推。没有 `1 << 30`（全量群消息）时，非 @ 的群消息根本到不了框架，
+     * 客户端那边看起来就是「群聊没消息」——2026-11-13 就是这么被误判成 bug 的。
+     *
+     * 只在 OneBot 启用时打一次，不按消息刷屏。
+     */
+    if (this.cfg.forwardAll !== false) {
+      log.info(
+        '群聊默认只下发 @ 机器人的消息；要让普通群聊也进客户端，'
+          + '到 q.qq.com 给机器人开「接收所有消息」（平台开关，不是 intents 位）',
+      );
+    }
     return this;
   }
 
@@ -318,6 +333,12 @@ export class OneBotBridge {
       if (!uin || !guin) return;
     }
 
+    /**
+     * 非 @ 的群消息能到这儿，就证明平台侧「接收所有消息」开着。
+     * 面板据此区分「全量已开」和「只收到过 @ 的」，不用猜 intents 位。
+     */
+    if (msg.kind === 'group' && !msg.addressed) this.sawUnaddressedGroup = true;
+
     this.lastInbound.set(msg.chatId, { msgId: msg.id, at: msg.receivedAt || Date.now() });
     if (this.lastInbound.size > 500) {
       const first = this.lastInbound.keys().next().value;
@@ -357,8 +378,21 @@ export class OneBotBridge {
 
   /** 面板用 */
   snapshot() {
+    /**
+     * 上游能推什么，直接决定客户端能看到什么。
+     *
+     * 全量群消息（`GROUP_MESSAGE_CREATE` 里非 @ 的那些）**不是靠 intents 位**
+     * 决定的，而是开放平台的「接收所有消息」开关：开了，同一个
+     * `GROUP_AND_C2C_EVENT` 订阅就会把这些消息一起下发；没开，框架根本收不到，
+     * OneBot 这边再怎么配也转不出去（2026-11-13 的「收不到群聊消息」就是这个）。
+     *
+     * 配置里查不到那个开关，所以只能给「经验证据」：见过至少一条非 @ 的群消息，
+     * 就说明它确实开着；从来没见过的，面板提示去看一眼开关，而不是断言没开。
+     */
+    const intents = Number(this.runtime?.cfg?.intents) || 0;
     return {
       state: this.state,
+      upstream: { intents, groupAll: this.sawUnaddressedGroup },
       error: this.error,
       host: this.cfg.host || '127.0.0.1',
       port: this.port || 0,

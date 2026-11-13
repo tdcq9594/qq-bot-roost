@@ -109,7 +109,7 @@ onebot: {
   token: '',          // 空 = 拒绝启用
   selfUin: '',        // 机器人 QQ 号，启用时必填
   mode: 'exclusive',  // exclusive | parallel | mirror
-  forwardAll: true,   // 全量群消息也推给客户端
+  forwardAll: true,   // 收到的都推给客户端（注意：上游没开全量群消息时，只收得到 @ 的）
   http: true,         // 同一端口上是否也接受 HTTP API（false = 只收 WS）
   unboundPolicy: 'warn', // warn（合成号+告警）| block（丢事件）
   voice: 'auto',      // auto（有 silk-wasm 就转）| reject（一律拒）
@@ -322,7 +322,7 @@ selfOpenid = identity.openidOf(botId, selfUin)     // 这也是 selfUin 必填�
 | 官方事件                      | OneBot 事件                                | 说明                                |
 | ------------------------- | ---------------------------------------- | --------------------------------- |
 | `GROUP_AT_MESSAGE_CREATE` | `message` / `group` / `normal`           | `mentioned=true`                  |
-| `GROUP_MESSAGE_CREATE`    | `message` / `group` / `normal`           | 全量模式；`forwardAll=false` 时丢弃未 @ 的  |
+| `GROUP_MESSAGE_CREATE`    | `message` / `group` / `normal`           | 全量模式；`forwardAll=false` 时丢弃未 @ 的。**非 @ 的消息要上游开通**（intents 含 `1<<30` + 平台「接收所有消息」），否则到不了框架 |
 | `C2C_MESSAGE_CREATE`      | `message` / `private` / `friend`         |                                   |
 | `GROUP_MEMBER_ADD`        | `notice` / `group_increase`              | 官方不区分主动进群/被拉                      |
 | `GROUP_MEMBER_REMOVE`     | `notice` / `group_decrease` / `leave`    | 官方不区分主动退/被踢 → 统一 `leave`          |

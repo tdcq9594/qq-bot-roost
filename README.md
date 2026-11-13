@@ -8,9 +8,9 @@
 
 <img src="https://img.shields.io/badge/Node.js-22.13%2B-339933?logo=node.js&logoColor=white" alt="Node.js 22.13+">
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
-<img src="https://img.shields.io/badge/tests-913%20passed-brightgreen" alt="测试 913 项">
+<img src="https://img.shields.io/badge/tests-1009%20passed-brightgreen" alt="测试 1009 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
-<img src="https://img.shields.io/badge/version-1.0.14-blueviolet" alt="版本 1.0.14">
+<img src="https://img.shields.io/badge/version-1.0.15-blueviolet" alt="版本 1.0.15">
 <img src="https://img.shields.io/badge/license-AGPL--3.0--only-blue" alt="AGPL-3.0-only">
 <a href="https://github.com/tdcq9594/qq-bot-roost/actions"><img src="https://img.shields.io/github/actions/workflow/status/tdcq9594/qq-bot-roost/ci.yml?branch=master" alt="CI"></a>
 
@@ -86,6 +86,11 @@
 
 **连接与容错**
 
+- **两条对外协议**：宿主协议 `roost-host/1`（WS + SSE + HTTP RPC，给 DSH / 任意 AI 宿主用）与
+  **OneBot v11 兼容层**（给 aurobot / NoneBot 这类现成客户端用）。两者共用一份按需安装的 `ws`，
+  不装时宿主协议自动只开 HTTP + SSE
+- **插件工具自动投影**：插件 `ctx.registerTool` 注册的工具会变成协议方法 `tool.<名字>`，
+  宿主不用为每个插件改代码；插件卸载即 404
 - **两种收事件方式**：WebSocket 长连接（本地默认）或 **Webhook 回调**（公网 / Serverless / 容器）
 - **凭证自动刷新**：提前 120 秒续期，401 自动重试，不用管 token
 - **断线补事件**：心跳 + 指数退避重连，有 session 走 `Resume` 把掉线期间的事件补回来
@@ -480,6 +485,8 @@ openid 完全不同。共享 `roles.json` 等于所有权限记录全部对不�
 | [架构说明](docs/架构说明.md) | 进程模型、数据隔离、事件流、插件加载、面板多机器人实现 |
 | [DSH 接入指南](docs/DSH接入.md) | 装进 DeepSeek Harness，用 AI 管机器人：安装、配置、验证、排查 |
 | [AI 宿主接入](docs/AI宿主接入.md) | 外部 AI 驱动 Roost：SSE 消息下行、通用能力上行、能力清单 |
+| [宿主协议 v1](docs/宿主协议v1.md) | 框架自有外接协议全文：传输、握手、方法表、scope、补拉与鉴权 |
+| [OneBot v11 兼容层](docs/OneBot兼容层设计.md) | 把 Roost 当 OneBot 服务端用：能力表、ID 映射、语音、鉴权 |
 
 ### 相关仓库
 

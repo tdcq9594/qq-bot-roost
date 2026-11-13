@@ -4527,7 +4527,17 @@ function renderOnebot(d) {
           ? `<div class="hint" style="margin-top:6px;color:var(--err)"><b>机器人本体没上线</b>` +
             `${st.botError ? `（${escapeHtml(st.botError)}）` : ''}：客户端能连上，但发消息会失败——先到「运行」页让它上线</div>`
           : '') +
-        (st.selfOpenidBound ? '' : '<div class="hint" style="margin-top:6px"><b>机器人自己的 openid 没绑</b>：已按「过滤所有机器人消息」处理，避免自激</div>');
+        (st.selfOpenidBound ? '' : '<div class="hint" style="margin-top:6px"><b>机器人自己的 openid 没绑</b>：已按「过滤所有机器人消息」处理，避免自激</div>') +
+        /**
+         * `forwardAll` 只承诺「收到的都推」。上游没开全量群消息时，非 @ 的
+         * 群聊根本到不了框架——不写清楚的话，用户会以为是 OneBot 这边丢了。
+         */
+        (st.upstream && st.upstream.fullGroup === false && cfg.forwardAll !== false
+          ? '<div class="hint" style="margin-top:6px"><b>只收得到 @ 机器人的群消息</b>：'
+            + `上游 intents=${Number(st.upstream.intents ?? 0)} 不含全量群消息（1073741824 = 2^30）。`
+            + '要去 q.qq.com 给机器人开「接收所有消息」，再把 intents 加上 1073741824；'
+            + '否则普通群聊不会到达框架，客户端这边自然也看不到</div>'
+          : '');
     } else if (st.state === 'missing-deps' || st.state === 'error') {
       connHint.innerHTML = `<b>${escapeHtml(st.error || '没起来')}</b>`;
     } else {

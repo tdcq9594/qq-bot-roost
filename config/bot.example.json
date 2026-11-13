@@ -18,5 +18,35 @@
 
   "plugins": {
     "autoInstallDeps": true
+  },
+
+  "onebot": {
+    "enabled": false,
+    "host": "127.0.0.1",
+    "port": 0,
+    "token": "",
+    "selfUin": "",
+    "mode": "exclusive",
+    "forwardAll": true,
+    "http": true,
+    "unboundPolicy": "warn",
+    "voice": "auto",
+    "historyCache": 100,
+    "allowRemote": false,
+    "maxConnections": 4
+  },
+
+  "host": {
+    "enabled": false,
+    "host": "127.0.0.1",
+    "port": 0,
+    "token": "",
+    "scopes": ["read", "message"],
+    "allowManage": false,
+    "forwardAll": true,
+    "allowRemote": false,
+    "maxConnections": 4,
+    "historyLimit": 200,
+    "historyTtlMs": 3600000
   }
 }

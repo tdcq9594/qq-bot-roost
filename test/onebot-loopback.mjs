@@ -98,6 +98,16 @@ test('回环：事件推送 + action 收发', { skip: missingWs && '没装 ws（
 
   await bridge.start();
   assert.equal(bridge.state, 'running', bridge.error);
+  /**
+   * 全量群消息是**平台开关**，配置里查不到，所以只能用「见过非 @ 的群消息」
+   * 当证据。没见过就如实报 false，别让面板假装全量已开。
+   */
+  const snap = bridge.snapshot();
+  assert.equal(snap.upstream.intents, 0, 'fakeRuntime 没设 intents，应如实报 0');
+  assert.equal(snap.upstream.groupAll, false, '还没见过非 @ 群消息时不能声称全量已开');
+  bridge.sawUnaddressedGroup = true;
+  assert.equal(bridge.snapshot().upstream.groupAll, true, '见过之后应标记为 true');
+  bridge.sawUnaddressedGroup = false;
   const port = bridge.port;
   assert.ok(port > 0);
 
@@ -164,6 +174,11 @@ test('回环：事件推送 + action 收发', { skip: missingWs && '没装 ws（
   assert.equal(sent.chatKey, 'group:G1');
   assert.equal(sent.payload.content, '在');
   assert.equal(sent.payload.msgId, 'm1', '刚收过消息 → 应该走被动回复');
+  /**
+   * 投递账本只认「带 requestId 的发送」。OneBot 以前一个都不带，
+   * 客户端发出去的消息在面板「投递」页完全看不到。
+   */
+  assert.match(String(sent.requestId ?? ''), /^ob-/, 'OneBot 发送必须带幂等键，否则不入投递账本');
 
   /* ---------- 未实现的 action 必须报 1404 ---------- */
   ws.send(JSON.stringify({ action: 'send_poke', params: {}, echo: 'e2' }));
