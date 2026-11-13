@@ -10,7 +10,7 @@ import { PluginConfig, schemaOf } from './config.js';
 import { normalizeDashboard } from './dashboard.js';
 import { readPluginVersion } from './market.js';
 import { ensurePluginDeps } from './deps.js';
-import { satisfies, frameworkVersion } from '../semver.js';
+import { satisfiesFramework, frameworkVersion } from '../semver.js';
 import { PageRegistry } from './pages.js';
 import { RouteRegistry } from './routes.js';
 import { Declarations, normalizeManifest, checkEngines } from './manifest.js';
@@ -246,7 +246,8 @@ export class PluginManager {
     const need = meta?.frameworkVersion ?? meta?.requires?.framework;
     if (!need || this.ignoreCompat) return;
     const cur = frameworkVersion();
-    if (satisfies(cur, need)) return;
+    /** 预发布框架按同号正式版基线比，否则测试版会拒掉所有带 frameworkVersion 的插件 */
+    if (satisfiesFramework(cur, need)) return;
     throw new Error(
       `要求框架 ${need}，当前是 ${cur}。升级框架后再启用，` +
         '或者把插件里的 frameworkVersion 改成兼容的范围',
@@ -271,7 +272,7 @@ export class PluginManager {
       const r = checkEngines(
         m.engines,
         { roost: frameworkVersion(), node: process.versions.node },
-        satisfies,
+        satisfiesFramework,
       );
       if (!r.ok) {
         throw new Error(`${r.why}。升级后再启用，或者把插件里的 engines 改成兼容的范围`);
@@ -1043,7 +1044,7 @@ export class PluginManager {
         enginesOk: checkEngines(
           mf.engines,
           { roost: frameworkVersion(), node: process.versions.node },
-          satisfies,
+          satisfiesFramework,
         ).ok,
         enabled: this.isEnabled(id),
         loaded: Boolean(item),

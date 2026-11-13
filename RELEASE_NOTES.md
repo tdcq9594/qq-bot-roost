@@ -2,6 +2,17 @@
 
 ---
 
+## v1.0.16-beta.1：配合 dsh-roost 测试版的两条协议方法（beta，非稳定版）
+
+> npm **`beta` 通道**测试版，`latest` 仍是 1.0.15；不建 tag / Release。
+
+- `msg.typing`：单聊「正在输入」（`msg_type=6`）。**直连官方接口、不走 `sendOut`**——它不是消息，不占主动额度、也不进投递账本；群聊直接拒。
+- `media.convert`：给 dsh-roost 语音试听用的纯内存 SILK 校验，与 `media.send` 共用 `encodeChecked`，但到编码为止：不上传、不发送、不进账本、不装依赖、不写盘。需要 ffmpeg 重采样的格式明确返回 `needs_transcode`，不会为了一次试听去自动装 62MB。
+- 这两条由 dsh-roost 1.3.0-beta.1 调用；旧插件不受影响，缺方法时各自降级。
+- 测试：`npm test` 全绿（新增 `test/typing.mjs` 3 条、`test/media-convert.mjs` 6 条）；`SHA256SUMS` 已按本版本重算。
+
+---
+
 ## v1.0.15：框架自己长出两条对外协议
 
 一句话：宿主协议 `roost-host/1` 与 OneBot v11 兼容层同时落地，AI 宿主和现成 OneBot 客户端都能直连框架，不用再夹一层中间件。

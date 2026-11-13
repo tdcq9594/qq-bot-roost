@@ -144,6 +144,25 @@ export function satisfies(version, range) {
   return false;
 }
 
+/**
+ * 框架自己发预发布版（`-beta.1` / `-next.1`）时，按**同号正式版基线**
+ * 参与插件的兼容性判断。
+ *
+ * 为什么要分两层：`satisfies()` 的 npm 语义是「预发布版本不满足没写预发布号
+ * 的范围」，这对「挑依赖版本」是对的，但用在框架版本上会变成——测试版框架
+ * 把所有带 `frameworkVersion` 的插件全拒掉（`brain` 插件加载失败就是这么来的），
+ * 测试版根本没法用。兼容性检查只看 x.y.z 够不够，不关心这次发的是不是预览。
+ */
+export function compatibilityVersion(v) {
+  const p = parseVersion(v);
+  return p ? p.nums.join('.') : String(v ?? '');
+}
+
+/** 框架 / engines 的兼容性判断入口；`satisfies()` 本身语义一个字不动 */
+export function satisfiesFramework(version, range) {
+  return satisfies(compatibilityVersion(version), range);
+}
+
 let cached = null;
 
 /**

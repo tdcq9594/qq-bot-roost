@@ -1991,7 +1991,10 @@ await testPluginWatch();
 /* ---------- 版本范围匹配 ---------- */
 
 async function testSemver() {
-  const { satisfies, compareVersion, frameworkVersion, parseVersion } = await import(
+  const {
+    satisfies, compareVersion, frameworkVersion, parseVersion,
+    compatibilityVersion, satisfiesFramework,
+  } = await import(
     '../src/semver.js'
   );
 
@@ -2011,6 +2014,10 @@ async function testSemver() {
   // 预发行版：范围没写 - 就不认，免得作者以为测的是正式版
   check('版本: 预发行版默认不满足', !satisfies('0.6.0-beta.1', '>=0.5.0'));
   check('版本: 预发行版明确写了才认', satisfies('0.6.0-beta.1', '>=0.6.0-beta.1'));
+  /** 框架自己发测试版时，插件兼容性按基线正式版判断，否则所有插件被拒 */
+  check('版本: 预发布框架基线', compatibilityVersion('1.0.16-beta.1') === '1.0.16');
+  check('版本: 预发布框架仍满足插件范围', satisfiesFramework('1.0.16-beta.1', '>=0.1.0'));
+  check('版本: 预发布框架仍受上界约束', !satisfiesFramework('1.0.16-beta.1', '<1.0.0'));
   check('版本: 解析带 v 前缀', parseVersion('v1.2.3')?.nums.join('.') === '1.2.3');
   check('版本: compareVersion 仍可用', compareVersion('0.5.1', '0.5.2') === -1);
   check('版本: 框架版本读得到', /^\d+\.\d+\.\d+/.test(frameworkVersion()), frameworkVersion());
