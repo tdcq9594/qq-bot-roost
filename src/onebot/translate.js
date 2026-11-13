@@ -22,15 +22,32 @@ function pick(...vals) {
  *
  * @param {object} msg buildMessage 的产物
  * @param {import('./ids.js').OneBotIds} ids
+ * @param {number} [selfUin] 机器人自己的 QQ 号：被 @ 时要用它造 at 段
  */
-export function segmentsOf(msg, ids) {
+export function segmentsOf(msg, ids, selfUin = 0) {
   const segs = [];
+
+  /**
+   * **被 @ 的是机器人自己**：必须单独发一个 at 段。
+   *
+   * `msg.mentions` 里已经把机器人过滤掉了（插件点名单选人时不该选到它），
+   * 早先这里就按「被动回复本身已经指向它，多一个 @ 是噪音」不发段——
+   * 但 OneBot 客户端判断「有没有人叫我」**只看 at 段里的 qq 是不是自己**
+   * （aurabot 的 `parseMessageEvent`：`d.qq === self`）。
+   *
+   * 不发段的后果（2026-11-13 实测）：@ 她的群消息被当成普通群消息，
+   * 掉进「话题相关度」那道闸里，`相关度 0.00 → 不回`——用户看到的就是
+   * 「@ 了也没人理」。
+   */
+  if (msg.mentioned && Number(selfUin)) {
+    segs.push({ type: 'at', data: { qq: String(selfUin), name: '' } });
+  }
 
   // 引用：官方给的是 msgIdx（REFIDX_…），换成我们发出去的 message_id
   const quotedId = ids.messageIdOfIdx(msg.refMsgIdx);
   if (quotedId) segs.push({ type: 'reply', data: { id: String(quotedId) } });
 
-  // 被 @ 的人（不含机器人自己；`mentions` 里已经过滤过 bot）
+  // 被 @ 的**其他人**（不含机器人自己；`mentions` 里已经过滤过 bot）
   for (const m of Array.isArray(msg.mentions) ? msg.mentions : []) {
     const qq = ids.user(m.id);
     if (qq) segs.push({ type: 'at', data: { qq: String(qq), name: String(m.name ?? '') } });
@@ -79,7 +96,7 @@ export function rawMessageOf(segs) {
  */
 export function toMessageEvent({ msg, ids, selfUin }) {
   const isGroup = msg.kind === 'group';
-  const segs = segmentsOf(msg, ids);
+  const segs = segmentsOf(msg, ids, selfUin);
   const at = msg.raw?.author ?? {};
 
   return {
