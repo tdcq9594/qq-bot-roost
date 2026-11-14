@@ -26,6 +26,7 @@ import { createLogger } from '../logger.js';
 import * as deps from '../ext-deps.js';
 import { createHostServer } from './server.js';
 import { createMethods, effectiveScopes, HostError, HOST_PROTOCOL } from './methods.js';
+import { createExtBridge } from './ext-bridge.js';
 import { serializeMessage, serializeNotice } from './serialize.js';
 
 const log = createLogger('host');
@@ -70,10 +71,19 @@ export class HostBridge {
      * 才知道这个协议能干什么；createMethods 只捕获 runtime 引用，
      * 里面的 R.api / R.plugins 都是调用时现读，早建不会拿到过期对象。
      */
+    /**
+     * 反向调用桥：框架插件调 DSH 扩展。事件走协议自己的 SSE 流，
+     * 回执走 RPC，所以不新开监听、不给 DSH 发第二套令牌。
+     */
+    this.extBridge = createExtBridge({
+      pushEvent: (event, data) => this.#push(event, data),
+      log: (m) => log.info(`[ext-bridge] ${m}`),
+    });
     this.methods = createMethods({
       runtime: this.runtime,
       getState: () => this.#state(),
       log: (m) => log.info(m),
+      extBridge: this.extBridge,
     });
     /** 插件工具集签名：变了就往事件流推一条 capabilities.changed */
     this.toolSig = this.methods?.toolSignature?.() ?? '';
@@ -219,6 +229,8 @@ export class HostBridge {
       await this.server.stop().catch((e) => log.warn(`关监听失败：${e.message}`));
       this.server = null;
     }
+    /** 监听关了就没人能回执了，把还在等的扩展调用全部解掉，别挂死插件 */
+    this.extBridge?.clear?.('外接协议已停止');
     if (this.state === 'running') this.state = 'stopped';
     this.port = 0;
     return this;

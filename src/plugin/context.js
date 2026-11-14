@@ -407,7 +407,7 @@ export class PluginStorage {
 /**
  * 插件上下文：插件能用的全部能力都在这里，不暴露内部实现。
  */
-export function createContext({ meta, paths, registry, api, cfg, config, configStore, groups, roles, levels, outbound, session, pipeline, reach, ledger, gate, delivery, identity, isOwner, pages = null, routes = null, state = null }) {
+export function createContext({ meta, paths, registry, api, cfg, config, configStore, groups, roles, levels, outbound, session, pipeline, reach, ledger, gate, delivery, identity, isOwner, pages = null, routes = null, state = null, extBridge = null }) {
   const id = meta.id;
   // 日志 tag 带机器人 id，多机器人下同名插件的日志不会串
   const logger = createLogger(`plugin:${paths?.id ?? '-'}:${id}`);
@@ -771,6 +771,28 @@ export function createContext({ meta, paths, registry, api, cfg, config, configS
      */
     callTool(name, args, opts) {
       return callTool(name, args, opts);
+    },
+
+    /**
+     * 调 DSH 侧已装扩展的能力（直连协议反向联动）。
+     *
+     *   const list = await ctx.ext.list();          // 有哪些扩展 / 动作
+     *   const r = await ctx.ext.call('bili', 'test_share', { bvid: 'BV…' });
+     *
+     * 没接外接协议时 `available` 为 false、`list()` 回空、`call()` 明确抛错，
+     * 不静默变成「什么都没发生」。扩展自己按 `ui.actions` 白名单把着动作，
+     * 框架插件不能凭空调一个没声明的函数。
+     */
+    ext: {
+      get available() { return Boolean(extBridge); },
+      async list() {
+        if (!extBridge) return { extensions: [], updatedAt: 0, pending: 0 };
+        return extBridge.list();
+      },
+      async call(extId, action, payload = null, opts = {}) {
+        if (!extBridge) throw new Error('没接 DSH 外接协议，调不了扩展能力');
+        return await extBridge.call({ extId, action, payload, chat: opts.chat ?? '' });
+      },
     },
 
     /**

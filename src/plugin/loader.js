@@ -30,7 +30,7 @@ const log = createLogger('plugins');
  * 启用状态存在 data/bots/<机器人id>/plugins.json，删掉文件夹即等于卸载。
  */
 export class PluginManager {
-  constructor({ pluginsDir, paths, registry, api, cfg, goBin, groups, roles, outbound, session, pipeline, isOwner, reach, ledger, gate, delivery, identity, ignoreCompat }) {
+  constructor({ pluginsDir, paths, registry, api, cfg, goBin, groups, roles, outbound, session, pipeline, isOwner, reach, ledger, gate, delivery, identity, ignoreCompat, host = null }) {
     this.dir = pluginsDir;
     /** 插件声明的名字占用表（命令/工具/钩子），加载前查冲突、卸载时释放 */
     this.decl = new Declarations();
@@ -57,6 +57,8 @@ export class PluginManager {
     /** 身份对照表（只读给插件，见 context.js 的 readOnlyIdentity），见 src/identity.js */
     this.identity = identity;
     this.isOwner = isOwner;
+    /** 外接协议桥（可选，与 `loaded` 里那条 `host?` 不是一回事）：透传给 ctx.ext */
+    this.hostBridge = host;
     /** 跳过插件声明的 frameworkVersion 校验（作者本地调试用） */
     this.ignoreCompat = Boolean(ignoreCompat);
     this.loaded = new Map(); // id -> { meta, ctx?, host?, dir, kind, menuMissing }
@@ -488,6 +490,7 @@ export class PluginManager {
       isOwner: this.isOwner,
       pages: this.pages,
       routes: this.routes,
+      extBridge: this.hostBridge?.extBridge ?? null,
     });
 
     await meta.setup(ctx);

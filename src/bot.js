@@ -303,6 +303,8 @@ export class BotRuntime {
       /** 身份对照表：插件通过 ctx.identity 只读查询（QQ号 → openid） */
       identity: this.identity,
       isOwner: (uid) => cfg.owners.includes(uid),
+      /** 外接协议桥：给插件 `ctx.ext.*`，让它能调 DSH 侧已装扩展的能力 */
+      host: this.host,
       // 插件声明了 frameworkVersion 就做兼容校验；作者本地调试可以关掉
       ignoreCompat: this.globalCfg.plugins?.ignoreFrameworkVersion === true,
     });

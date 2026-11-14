@@ -136,7 +136,7 @@ const scopeForQq = (name) => {
  * @param {()=>object} p.getState 协议层自己的状态快照
  * @param {(m:string)=>void} [p.log]
  */
-export function createMethods({ runtime: R, getState, log = () => {} }) {
+export function createMethods({ runtime: R, getState, log = () => {}, extBridge = null }) {
   const table = new Map();
   const def = (name, scope, desc, run) => table.set(name, { name, scope, desc, run });
 
@@ -807,6 +807,30 @@ export function createMethods({ runtime: R, getState, log = () => {} }) {
   };
   registerMedia(def, { R, err, log });
   registerOps(def, { R, err, log });
+
+  /* ---------------- DSH 扩展反向互通（双向联动） ----------------
+   * 框架插件要调 DSH 侧已装扩展的能力时走这里：`ext.call` 推一条 SSE 事件
+   * 给 DSH，DSH 执行完用 RPC 回 `ext.call.reply`。桥接实例由 HostBridge 注入，
+   * 没接协议时整组方法不注册（面板能力表如实显示没有，不列一排 501）。
+   */
+  if (extBridge) {
+    def('ext.list', 'read', '列出 DSH 已装扩展暴露的动作', async () => extBridge.list());
+
+    def('ext.call', 'message', '调用 DSH 扩展的一个动作（经 SSE 请求 + RPC 回执）', async (p) => {
+      const out = await extBridge.call({
+        extId: str(p.extId), action: str(p.action), payload: p.payload ?? null, chat: str(p.chat ?? ''),
+      });
+      return { ok: true, result: out ?? null };
+    });
+
+    /** DSH 回执：由 DSH 用协议令牌主动调，scope 与 ext.call 一致 */
+    def('ext.call.reply', 'message', 'DSH 回传扩展调用结果（内部）', async (p) =>
+      extBridge.reply({ requestId: str(p.requestId), ok: p.ok !== false, result: p.result ?? null, error: str(p.error ?? '') }));
+
+    /** DSH 连上 / 扩展装卸后上报能力清单 */
+    def('ext.register', 'message', 'DSH 上报已装扩展能力清单（内部）', async (p) =>
+      extBridge.register({ extensions: p.extensions ?? [] }));
+  }
 
   /* ---------------- 插件工具 → 一等协议方法（方案 A） ---------------- */
 
