@@ -2,6 +2,28 @@
 
 ---
 
+## v1.0.16：协议双向打通 + 官方图文卡片放行
+
+> 1.0.16 的测试版内容一并转正，`latest` 从 **1.0.15** 升到 **1.0.16**。
+
+### 协议
+
+- **`msg.typing`**：单聊「正在输入」（`msg_type=6`）。直连官方接口、不走 `sendOut`——它不是消息，不占主动额度、也不进投递账本；群聊直接拒。
+- **`media.convert`**：给 dsh-roost 语音试听用的纯内存 SILK 校验，与 `media.send` 共用 `encodeChecked`，但到编码为止：不上传、不发送、不进账本、不装依赖、不写盘。需要 ffmpeg 重采样的格式明确返回 `needs_transcode`。
+- **反向联动**：框架插件可以调 DSH 扩展能力（`ext.list` / `ext.call` / `ext.call.reply` / `ext.register`），SSE 请求 → RPC 回执，插件侧拿 `ctx.ext`。
+- **直连协议放行官方图文卡片**：`msg.send` 把 `markdown / media / card / ark / keyboard` 算作「有内容」，纯卡片不再被「content / msgId / eventId 至少给一个」挡下；`buildSendPayload()` 把扁平卡片归一化成官方 `{type:'tuwen', content:{title, description, url, pic_url}}`。
+- **投递账本补全**：`briefOf()` / `digestTextOf()` 认扁平与嵌套两种卡片，日志与账本不再显示「(空)」；宿主代生成幂等键 `ext-<扩展 id>-<uuid>`，扩展自报的键一律丢掉。
+
+### 与 dsh-roost 的配套
+
+`dsh-roost 1.3.1` 用到上面两条协议方法与直连卡片；旧插件不受影响，缺方法时各自降级。
+
+### 验证
+
+测试 **1079 项全绿**（含 `selftest` 686 项）；`SHA256SUMS` 按本版本重算并通过 `sums:verify`。
+
+---
+
 ## v1.0.16-beta.1：配合 dsh-roost 测试版的两条协议方法（beta，非稳定版）
 
 > npm **`beta` 通道**测试版，`latest` 仍是 1.0.15；不建 tag / Release。
