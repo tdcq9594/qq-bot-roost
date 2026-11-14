@@ -87,6 +87,14 @@ test('digestTextOf：图文卡片带标题，别让账本里十条长得一样',
   assert.equal(digestTextOf({ card: { type: 'tuwen', content: {} } }), '[图文卡片]');
   // 没有标题也不能退回空串：空摘要等于这条记录在账本里消失了
   assert.notEqual(digestTextOf({ card: { type: 'tuwen' } }), '');
+  /**
+   * `/v1/roost.call` → `msg.send` 给的是扁平四字段（框架最终才包成官方结构），
+   * 出站账本看到的也是扁平的。以前只认嵌套，摘要退化成 '[图文卡片]'。
+   */
+  assert.equal(
+    digestTextOf({ content: '', card: { title: '扁平卡片', description: 'd', url: 'https://a/b', picUrl: 'https://a/c' } }),
+    '[图文卡片] 扁平卡片',
+  );
 });
 
 test('出站入账：没有 requestId（被动回复 / 富媒体 / 菜单）也要记', async (t) => {

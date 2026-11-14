@@ -68,11 +68,24 @@ test('loader 源码守卫：两处外部插件入口都认 kind', async () => {
 test('build-market-index 与 build-index 的 kind 规则一致（防两份漂移）', async () => {
   const botScript = await fs.readFile(new URL('../scripts/build-market-index.mjs', import.meta.url), 'utf8');
   assert.match(botScript, /kind: 'dsh-extension', runtime: 'mcp'/);
-  assert.match(botScript, /'kind'\]/, 'STRUCT_FIELDS 必须含 kind');
   const pluginsScript = path.resolve(import.meta.dirname, '../../qq-bot-roost-plugins/scripts/build-index.mjs');
   const exists = await fs.access(pluginsScript).then(() => true, () => false);
   if (!exists) return; // 单独 checkout 框架仓时没有兄弟仓，跳过；CI 里两边都在
   const p = await fs.readFile(pluginsScript, 'utf8');
   assert.match(p, /kind: 'dsh-extension', runtime: 'mcp'/);
-  assert.match(p, /'kind'\]/, '插件仓 STRUCT_FIELDS 也要含 kind');
+
+  /**
+   * 2026-11-14：STRUCT_FIELDS 扩成多行、多了 scopes/overrides/form 三个
+   * 权限声明字段。以前靠 `/'kind'\]/` 匹配数组结尾，格式一变就误报。
+   * 直接把两份数组抽出来逐项比，才是这个测试真正想守的东西。
+   */
+  const fieldsOf = (src) => (src.match(/const STRUCT_FIELDS = \[([\s\S]*?)\];/)?.[1] ?? '')
+    .match(/'[^']+'/g) ?? [];
+  const a = fieldsOf(botScript);
+  const b = fieldsOf(p);
+  assert.ok(a.length > 0 && b.length > 0, '两份脚本都要能读出 STRUCT_FIELDS');
+  assert.deepEqual(a, b, '两份索引脚本的 STRUCT_FIELDS 必须逐项一致，否则生成的索引会漂');
+  for (const key of ['kind', 'scopes', 'overrides', 'form']) {
+    assert.ok(a.includes(`'${key}'`), `STRUCT_FIELDS 少了 ${key}`);
+  }
 });

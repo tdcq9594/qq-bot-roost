@@ -325,7 +325,20 @@ export function createMethods({ runtime: R, getState, log = () => {}, extBridge 
     const chatId = str(p.chatId);
     if (!chatId || !kind) throw bad('要给 chatId，kind 只能是 group / c2c');
     const text = str(p.content);
-    if (!text && !p.msgId && !p.eventId) throw bad('content / msgId / eventId 至少给一个');
+    /**
+     * 富媒体（图文卡片 / markdown / 图片 / ark）**本来就不带正文**：
+     * `buildSendPayload()` 见到 card 会自己算 msg_type=8、并把 content 清空。
+     *
+     * 这里以前只认 text / msgId / eventId，于是「扩展直发一张官方卡片」
+     * 在协议层就被 400 挡掉：宿主 `narrowMsgSend` 明确不许扩展自报
+     * msgId / eventId（防伪造被动窗口），纯卡片永远凑不齐这三个条件，
+     * 表现出来就是面板上点「现在分享」毫无反应。
+     */
+    const hasRich = ['markdown', 'keyboard', 'media', 'card', 'ark']
+      .some((k) => p[k] !== undefined && p[k] !== null);
+    if (!text && !p.msgId && !p.eventId && !hasRich) {
+      throw bad('content / msgId / eventId / 富媒体至少给一个');
+    }
 
     const cid = str(p.clientMsgId).slice(0, 120);
     sweepSent();

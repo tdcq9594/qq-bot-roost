@@ -185,7 +185,27 @@ export function buildSendPayload(opts = {}, nextSeq = () => 1) {
    * 留着空串跟「类型与内容不匹配」（22006）只差一步。
    */
   if (card) {
-    payload.card = card;
+    /**
+     * 官方 msg_type=8 的 `card` 必须是
+     * `{type:'tuwen', content:{title, description, url, pic_url}}`。
+     *
+     * 但协议 / 扩展路径（`/v1/roost.call` → `msg.send`、`/v1/send`）给的
+     * 一直是扁平四字段 `{title, description, url, picUrl}`；直接透传官方回
+     * `card msg is nil`，消息根本发不出去，面板上就是「点了没反应」。
+     * `msg.replyTuwen()` 早已构造好嵌套结构，这里只补扁平那一种。
+     */
+    const normalized = card?.type === 'tuwen' && card?.content && typeof card.content === 'object'
+      ? card
+      : {
+        type: 'tuwen',
+        content: {
+          title: String(card?.title ?? ''),
+          description: String(card?.description ?? ''),
+          url: String(card?.url ?? ''),
+          pic_url: String(card?.picUrl ?? card?.pic_url ?? ''),
+        },
+      };
+    payload.card = normalized;
     payload.msg_type = 8;
     payload.content = '';
   }

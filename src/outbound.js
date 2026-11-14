@@ -72,6 +72,16 @@ function briefOf(payload) {
     parts.push(`[markdown] ${String(b.markdown.content).replace(/\s+/g, ' ').trim()}`);
   }
   if (b.ark) parts.push('[ark 卡片]');
+  /**
+   * 官方图文卡片（msg_type=8）**没有正文**：content 必须为空，四个字段都在
+   * card 里。以前 briefOf 不认它，日志里就只剩「发出 …：(空)」，排查时
+   * 完全看不出刚才发的是哪张卡片。扁平 / 官方嵌套两种结构都认。
+   */
+  if (b.card) {
+    const c = b.card?.content ?? b.card;
+    const title = String(c?.title ?? '').trim();
+    parts.push(title ? `[图文卡片] ${title}` : '[图文卡片]');
+  }
   if (b.media) {
     // fileType 是数字（1 图 / 2 视频 / 3 语音 / 4 文件），直接打数字没人看得懂
     const name = { 1: '图片', 2: '视频', 3: '语音', 4: '文件' }[b.media.fileType ?? b.fileType];
@@ -252,7 +262,9 @@ export function digestTextOf(payload) {
    * 图文卡片（`msg_type=8`）带上标题。只写 `[卡片]` 的话，一天发十条卡片
    * 就是十条一模一样的记录，账本里根本分不出哪条是哪条。
    */
-  const cardTitle = p.card?.content?.title;
+  /** 协议 / 扩展路径给的是扁平 `{title, …}`，`msg.replyTuwen()` 给的是嵌套 `{type,content}` */
+  const cardBody = p.card?.content ?? p.card;
+  const cardTitle = String(cardBody?.title ?? '').trim();
   if (p.card) return cardTitle ? `[图文卡片] ${cardTitle}` : '[图文卡片]';
   return '';
 }

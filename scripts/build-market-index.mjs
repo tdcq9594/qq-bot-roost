@@ -78,6 +78,10 @@ async function readExternal(file) {
       tags: raw.tags ?? [],
       frameworkVersion: raw.frameworkVersion ?? '',
       ...(isExt ? { kind: 'dsh-extension', runtime: 'mcp' } : { runtime: raw.runtime ?? 'python' }),
+      /** 与插件仓 build-index.mjs 同步：只存原始权限声明，等级由宿主现算 */
+      ...(isExt && Array.isArray(raw.scopes) ? { scopes: raw.scopes.map(String) } : {}),
+      ...(isExt && Array.isArray(raw.overrides) ? { overrides: raw.overrides.map(String) } : {}),
+      ...(isExt && typeof raw.form === 'string' && raw.form ? { form: raw.form } : {}),
     };
   } catch (e) {
     console.warn(`  跳过 ${path.basename(path.dirname(file))}：plugin.json 解析失败（${e.message}）`);
@@ -193,7 +197,10 @@ async function main() {
    * 把描述里的补充说明抹掉，看起来像升级，实际是数据丢失。
    */
   /** 与插件仓 `scripts/build-index.mjs` 的 `STRUCT_FIELDS` 保持一致（kind 决定下游怎么处理）。 */
-  const STRUCT_FIELDS = ['id', 'version', 'path', 'runtime', 'sha256', 'frameworkVersion', 'kind'];
+  const STRUCT_FIELDS = [
+    'id', 'version', 'path', 'runtime', 'sha256', 'frameworkVersion', 'kind',
+    'scopes', 'overrides', 'form',
+  ];
 
   const merged = plugins.map((p) => {
     const old = prevById.get(p.id);
@@ -209,6 +216,9 @@ async function main() {
      */
     if (p.kind === undefined) delete out.kind;
     if (!p.version) delete out.version;
+    for (const k of ['scopes', 'overrides', 'form']) {
+      if (p[k] === undefined) delete out[k];
+    }
     return out;
   });
 

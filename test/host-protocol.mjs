@@ -327,6 +327,52 @@ test('msg.send 用 camelCase：被动回复的 msg_id / msg_seq 不会退化成�
   assert.deepEqual(c2c.media, { file_info: 'x' }, '发图不该被迫去开 qq.call 的 manage 权限');
 });
 
+test('msg.send 纯图文卡片（content 为空）不该被「至少给一个」挡下', async () => {
+  const { runtime, methods } = makeMethods();
+  const scopes = new Set(['read', 'message']);
+  const card = {
+    title: '一只猫', description: '窗台上打盹',
+    url: 'https://www.bilibili.com/video/BV1xx411c7mD',
+    picUrl: 'https://i0.hdslb.com/a.jpg',
+  };
+  const r = await methods.call('msg.send', {
+    kind: 'c2c', chatId: 'u-openid', content: '', card,
+  }, { scopes });
+  assert.ok(r.msgId, '卡片发出去要回消息 id');
+  const ob = runtime.calls.find((c) => c[0] === 'outbound.send');
+  assert.ok(ob, '卡片也要走 outbound，不能绕开限速 / 额度 / 账本');
+  assert.deepEqual(ob[3].payload.card, card);
+  assert.equal(ob[3].payload.content, '', '官方 msg_type=8 不带正文');
+
+  /** 上线前必须包成官方嵌套结构，否则官方回 `card msg is nil`，卡片根本发不出去 */
+  const wire = buildSendPayload(ob[3].payload, () => 99);
+  assert.equal(wire.msg_type, 8);
+  assert.equal(wire.content, '');
+  assert.equal(wire.card.type, 'tuwen');
+  assert.deepEqual(wire.card.content, {
+    title: '一只猫',
+    description: '窗台上打盹',
+    url: 'https://www.bilibili.com/video/BV1xx411c7mD',
+    pic_url: 'https://i0.hdslb.com/a.jpg',
+  });
+
+  /** 放宽的是「富媒体」，不是「什么都没有也能发」 */
+  await assert.rejects(
+    () => methods.call('msg.send', { kind: 'c2c', chatId: 'u-openid', content: '' }, { scopes }),
+    (e) => e.code === 'BAD_PARAMS',
+  );
+});
+
+test('buildSendPayload：已经是 {type:tuwen,content} 的卡片不再包一层', () => {
+  const nested = {
+    type: 'tuwen',
+    content: { title: '标题', description: '描述', url: 'https://a.example', pic_url: 'https://b.example/a.jpg' },
+  };
+  const wire = buildSendPayload({ content: '', card: nested }, () => 1);
+  assert.equal(wire.card, nested, 'msg.replyTuwen() 构造好的结构要原样过去');
+  assert.equal(wire.msg_type, 8);
+});
+
 test('msg.send 必须经过 outbound：直连 api 会绕开限速/额度/审核/投递账本', async () => {
   const { runtime, methods } = makeMethods();
   await methods.call('msg.send', { kind: 'group', chatId: 'g-openid', content: 'hi' }, {
