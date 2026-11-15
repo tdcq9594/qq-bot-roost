@@ -401,7 +401,8 @@ export class EventLedger {
     const anchor = this.db
       .prepare(
         `SELECT * FROM events
-          WHERE bot_id = ? AND chat_id = ? AND seq = ? AND time_basis != 'unknown'`,
+          WHERE bot_id = ? AND chat_id = ? AND seq = ? AND time_basis != 'unknown'
+            AND kind != 'notice'`,
       )
       .get(this.botId, String(chatId), Number(anchorSeq) || 0);
     if (!anchor) return [];
@@ -409,8 +410,15 @@ export class EventLedger {
     const cols = `seq, id, kind, chat_id, msg_id, user_id, user_name, content, at, time_basis, msg_idx, ref_msg_idx, quoted`;
     const prev = this.db
       .prepare(
+        /**
+         * `kind='notice'` 是非消息频道事件（bot.js #recordNotice 写的）。
+         * 它们要能入账、能被 recent()/stats() 查到，但**不能进 AI 邻文**：
+         * dsh-roost 每轮调 ledger.context → timeline() 拿前后文，
+         * 混进 `[事件] GUILD_CREATE` 会挤掉真人消息、还可能被模型当成话。
+         */
         `SELECT ${cols} FROM events
           WHERE bot_id = ? AND chat_id = ? AND time_basis != 'unknown'
+            AND kind != 'notice'
             AND at >= ? AND seq < ?
           ORDER BY seq DESC LIMIT ?`,
       )
@@ -419,6 +427,7 @@ export class EventLedger {
       .prepare(
         `SELECT ${cols} FROM events
           WHERE bot_id = ? AND chat_id = ? AND time_basis != 'unknown'
+            AND kind != 'notice'
             AND at <= ? AND seq > ?
           ORDER BY seq ASC LIMIT ?`,
       )
@@ -492,14 +501,14 @@ export class EventLedger {
       ? this.db
           .prepare(
             `SELECT seq, id, kind, chat_id, user_id, user_name, content, at, msg_idx, quoted, payload
-               FROM events WHERE bot_id = ? AND chat_id = ? AND seq < ?
+               FROM events WHERE bot_id = ? AND chat_id = ? AND seq < ? AND kind != 'notice'
               ORDER BY seq DESC LIMIT ?`,
           )
           .all(this.botId, String(chatId), Number(beforeSeq), lim)
       : this.db
           .prepare(
             `SELECT seq, id, kind, chat_id, user_id, user_name, content, at, msg_idx, quoted, payload
-               FROM events WHERE bot_id = ? AND chat_id = ?
+               FROM events WHERE bot_id = ? AND chat_id = ? AND kind != 'notice'
               ORDER BY seq DESC LIMIT ?`,
           )
           .all(this.botId, String(chatId), lim);
@@ -535,7 +544,7 @@ export class EventLedger {
     const rows = this.db
       .prepare(
         `SELECT seq, id, kind, chat_id, user_id, user_name, content, at, time_basis, msg_idx, quoted, trace, plugin, bot_id
-           FROM events WHERE bot_id = ? AND user_id = ?
+           FROM events WHERE bot_id = ? AND user_id = ? AND kind != 'notice'
           ORDER BY at DESC, seq DESC LIMIT ?`,
       )
       .all(this.botId, String(userId), lim);

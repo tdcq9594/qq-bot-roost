@@ -827,9 +827,13 @@ export class BotRuntime {
      * （`ledger.append` 自己会吞写入异常，但拼 id 时的 JSON.stringify 在它之外）。
      */
     try {
-      const chatId = String(
-        d?.channel_id ?? d?.guild_id ?? d?.group_openid ?? d?.user_openid ?? d?.id ?? '',
-      );
+      /**
+       * 和 dsh-roost 的 `sessionKey` 同口径：同一个频道的文字子频道、
+       * 论坛、公告等事件的账本键也按 guild_id 聚合，别散在各子频道里。
+       */
+      const guildId = String(d?.guild_id ?? (eventName.startsWith('GUILD_') ? d?.id : '') ?? '');
+      const chatId = guildId ? `guild:${guildId}` : String(d?.channel_id ?? '');
+      const sub = d?.channel_id ? ` @子频道 ${String(d.channel_id).slice(0, 32)}` : '';
       const stable = [
         eventName,
         chatId,
@@ -843,7 +847,7 @@ export class BotRuntime {
         id: `notice:${stable}`,
         userId: String(d?.op_user_id ?? d?.author_id ?? ''),
         userName: '',
-        content: `[事件] ${eventName}${d?.name ? ` ${String(d.name).slice(0, 80)}` : ''}`,
+        content: `[事件] ${eventName}${sub}${d?.name ? ` ${String(d.name).slice(0, 80)}` : ''}`,
         raw: d,
       });
     } catch (e) {

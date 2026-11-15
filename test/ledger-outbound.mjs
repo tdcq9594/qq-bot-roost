@@ -325,8 +325,22 @@ test('非消息频道事件：kind=notice 可查，官方重推不会记重', (t
   };
   ledger.append(evt);
   ledger.append(evt);
+  /** 同会话再放一条真人消息，用来验证 notice 不会挤进邻文 */
+  const chat = ledger.append({
+    kind: 'guild', chatId: 'G1', id: 'MSG_1', userId: 'U1', userName: '小明',
+    content: '大家好', raw: { id: 'MSG_1', timestamp: '2026-01-01T00:00:01+08:00' },
+  });
+
   const rows = ledger.recent({ chatId: 'G1', limit: 10 });
-  assert.equal(rows.length, 1, 'dedupe 要挡住官方重推');
-  assert.equal(rows[0].kind, 'notice', '不能混进四态会话类型');
-  assert.match(String(rows[0].content), /\[事件\] GUILD_CREATE/, 'AI 邻文里要能一眼认出是系统事件');
+  assert.equal(rows.length, 2, 'notice 要入账可查，且 dedupe 挡住重推');
+  const notice = rows.find((r) => r.kind === 'notice');
+  assert.equal(notice?.kind, 'notice', '不能混进四态会话类型');
+  assert.match(String(notice?.content), /\[事件\] GUILD_CREATE/, '面板里要能认出是系统事件');
+
+  /** 关键回归：dsh-roost 每轮调 ledger.context → timeline()，不能被系统事件污染 */
+  const around = ledger.timeline({ chatId: 'G1', anchorSeq: chat.seq, before: 5, after: 5 });
+  assert.equal(around.length, 1, '邻文里只能有真人消息');
+  assert.equal(around[0].content, '大家好');
+  assert.equal(ledger.history({ chatId: 'G1', limit: 10 }).length, 1, 'OneBot 历史也不该混入系统事件');
+  assert.equal(ledger.byUser({ userId: 'U1', limit: 10 }).length, 1, '按人历史同样过滤');
 });
