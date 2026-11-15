@@ -23,6 +23,13 @@ export function serializeMessage(msg, { groupName = '' } = {}) {
       kind: msg.kind ?? 'unknown',
       chatId: msg.chatId ?? '',
       groupId: msg.groupId ?? '',
+      /**
+       * 频道维度（群/单聊为空串）。`groupId` 在 guild 场景是 channel_id、
+       * 在 dm 场景是私信会话 id，语义会混，所以另给两个明确字段：
+       * guildId 是真正的频道 ID，channelId 是子频道 ID。
+       */
+      guildId: msg.guildId ?? '',
+      channelId: msg.channelId ?? '',
       groupUin: msg.groupUin ?? '',
       groupIdentityId: msg.groupIdentityId ?? '',
       groupAliases: Array.isArray(msg.groupAliases) ? msg.groupAliases : [],

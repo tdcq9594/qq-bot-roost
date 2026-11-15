@@ -324,7 +324,7 @@ export class QQApi {
     this._mediaReclaimDone = false;
   }
 
-  async #request(method, path, body, { retried = false, headers } = {}) {
+  async #request(method, path, body, { retried = false, headers, multipart = false } = {}) {
     const token = await this.tokens.get();
     let res;
     try {
@@ -334,11 +334,18 @@ export class QQApi {
         signal: AbortSignal.timeout(15000),
         headers: {
           Authorization: `QQBot ${token}`,
-          'Content-Type': 'application/json',
           'X-Union-Appid': this.tokens.appId,
+          /**
+           * multipart 时**不能**手写 Content-Type：fetch 要自己带 boundary。
+           * 官方 send.html 明确频道发本地图片走 multipart/form-data，
+           * 且对象/数组字段要序列化成 JSON 字符串（见 #formDataOf）。
+           */
+          ...(multipart ? {} : { 'Content-Type': 'application/json' }),
           ...(headers ?? {}),
         },
-        body: body === undefined ? undefined : JSON.stringify(body),
+        body: multipart
+          ? this.#formDataOf(body)
+          : (body === undefined ? undefined : JSON.stringify(body)),
       });
     } catch (e) {
       this.metrics?.bump('errors');
@@ -1727,6 +1734,114 @@ export class QQApi {
   /** 删除子频道。`DELETE /channels/{channel_id}` */
   deleteChannel(channelId) {
     return this.#request('DELETE', `/channels/${enc(channelId)}`);
+  }
+
+  /* ---------------- 频道消息 / 私信 ---------------- */
+
+  /**
+   * 频道这套接口（`server-inter/channel/message/`）用 **snake_case**，
+   * 和 v2 群/单聊的 camelCase 是两套字段（对照官方 botpy 的
+   * `post_message` / `post_dms`：`msg_id`、`event_id`、`message_reference` 原样进 body）。
+   *
+   * 框架内部一律 camelCase，所以这里做一次转换；同时只放行官方列出的字段，
+   * 把 v2 专用的 `msgType` / `msgSeq` / `media` / `isWakeup` 丢掉，
+   * 免得它们被当成未知参数带到频道接口上。
+   */
+  /**
+   * `file_image` 只接受**内存字节**，绝不接受路径字符串。
+   *
+   * `qq.call` 的参数是外部输入，一旦允许传路径就等于把框架本机的任意文件
+   * 读出来发给平台。要发本地文件，由调用方（`message.js` / `host/media.js`）
+   * 在做过路径白名单校验之后读成 Buffer 再传进来。
+   */
+  #filePart(v) {
+    if (typeof Blob !== 'undefined' && v instanceof Blob) return v;
+    if (v instanceof Uint8Array || Buffer.isBuffer(v)) return v;
+    if (v && typeof v === 'object' && v.data) {
+      const d = v.data;
+      if (d instanceof Uint8Array || Buffer.isBuffer(d)) return d;
+      if (typeof Blob !== 'undefined' && d instanceof Blob) return d;
+    }
+    return null;
+  }
+
+  /**
+   * `send.html`：`multipart/form-data` 下对象/数组字段要序列化成 JSON 字符串，
+   * `file_image` 是文件字段。Node 22 自带 FormData / Blob，不引入依赖。
+   */
+  #formDataOf(body) {
+    const fd = new FormData();
+    for (const [k, v] of Object.entries(body ?? {})) {
+      if (v === undefined || v === null || v === '') continue;
+      if (k === 'file_image') {
+        const part = v instanceof Blob ? v : new Blob([v], { type: 'image/png' });
+        fd.append('file_image', part, 'image.png');
+      } else if (typeof v === 'object') {
+        fd.append(k, JSON.stringify(v));
+      } else {
+        fd.append(k, String(v));
+      }
+    }
+    return fd;
+  }
+
+  #channelBody(opts = {}) {
+    const renamed = {
+      msgId: 'msg_id',
+      eventId: 'event_id',
+      messageReference: 'message_reference',
+    };
+    const keep = new Set(['content', 'embed', 'ark', 'image', 'markdown', 'keyboard']);
+    const out = {};
+    let multipart = false;
+    for (const [k, v] of Object.entries(opts ?? {})) {
+      if (v === undefined || v === null || v === '') continue;
+      if (k === 'fileImage') {
+        const bytes = this.#filePart(v);
+        if (!bytes) throw new Error('fileImage 只接受 Blob / Buffer / Uint8Array（不接受路径字符串）');
+        out.file_image = bytes;
+        multipart = true;
+      } else if (renamed[k]) out[renamed[k]] = v;
+      else if (keep.has(k)) out[k] = v;
+    }
+    return { body: out, multipart };
+  }
+
+  /** 发子频道消息。`POST /channels/{channel_id}/messages`（带 fileImage 自动走 multipart） */
+  async sendChannelMessage(channelId, opts = {}) {
+    const { body, multipart } = this.#channelBody(opts);
+    return this.#request('POST', `/channels/${enc(channelId)}/messages`, body, { multipart });
+  }
+
+  /** 撤回子频道消息。`DELETE /channels/{channel_id}/messages/{message_id}` */
+  retractChannelMessage(channelId, messageId, { hidetip = false } = {}) {
+    const q = hidetip ? '?hidetip=true' : '';
+    return this.#request('DELETE', `/channels/${enc(channelId)}/messages/${enc(messageId)}${q}`);
+  }
+
+  /**
+   * 建私信会话。`POST /users/@me/dms`
+   * 要求机器人与目标用户有共同频道；返回的 `guild_id` 才是私信会话 id，
+   * 别和真正的频道 id 混（官方 botpy `create_dms` 同样做 user_id→recipient_id 映射）。
+   */
+  createDms({ recipientId, sourceGuildId, recipient_id, source_guild_id } = {}) {
+    const body = {
+      recipient_id: String(recipientId ?? recipient_id ?? ''),
+      source_guild_id: String(sourceGuildId ?? source_guild_id ?? ''),
+    };
+    return this.#request('POST', '/users/@me/dms', body);
+  }
+
+  /** 发私信。`POST /dms/{guild_id}/messages`，参数与发子频道消息一致 */
+  async sendDmMessage(guildId, opts = {}) {
+    const { body, multipart } = this.#channelBody(opts);
+    return this.#request('POST', `/dms/${enc(guildId)}/messages`, body, { multipart });
+  }
+
+  /** 撤回私信。`DELETE /dms/{guild_id}/messages/{message_id}` */
+  retractDmMessage(guildId, messageId, { hidetip = false } = {}) {
+    const q = hidetip ? '?hidetip=true' : '';
+    return this.#request('DELETE', `/dms/${enc(guildId)}/messages/${enc(messageId)}${q}`);
   }
 
   /* ---------------- 内部 ---------------- */

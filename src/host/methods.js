@@ -18,7 +18,7 @@ import { createToolCaller } from '../plugin/tools.js';
 import { OFFICIAL_ENDPOINTS, riskOf } from '../endpoints.js';
 import { registerMedia } from './media.js';
 import { registerOps } from './ops.js';
-import { sendOut, receivedAtOf } from './dispatch.js';
+import { sendOut, receivedAtOf, isChatKind, CHAT_KINDS } from './dispatch.js';
 
 export const HOST_PROTOCOL = 1;
 
@@ -73,6 +73,12 @@ export function effectiveScopes(cfg = {}) {
 const CONFIG_KEYS = new Set([
   'name', 'commandPrefix', 'owners', 'whitelist', 'rateLimit',
   'dedupWindowSec', 'messageLog', 'groupManage', 'media',
+  /**
+   * 频道能力要开 `GUILDS(1<<0)` / `PUBLIC_GUILD_MESSAGES(1<<30)` 等位，
+   * 以前协议层不给改 intents，宿主只能去面板操作。放行但要说清需重连，
+   * 见 config.set 里的 `needReconnect`。
+   */
+  'intents',
 ]);
 
 /** 只读配置时脱敏：键名命中就打码，不管它藏在第几层 */
@@ -308,7 +314,9 @@ export function createMethods({ runtime: R, getState, log = () => {}, extBridge 
    */
   def('msg.typing', 'message', '单聊「正在输入」提示（msg_type=6，不占额度、不进账本）', async (p) => {
     if (!R.api) throw notReady('官方接口未就绪（机器人还没连上）');
-    if (p.kind === 'group') throw bad('群聊没有「正在输入」');
+    /** 以前只挡 group，guild/dm 会被当成 c2c 悄悄发到单聊接口 */
+    const kind = p.kind === undefined ? 'c2c' : str(p.kind);
+    if (kind !== 'c2c') throw bad('「正在输入」只支持单聊（c2c），群聊 / 频道 / 私信都不支持');
     const chatId = str(p.chatId);
     if (!chatId) throw bad('要给 chatId');
     try {
@@ -321,9 +329,9 @@ export function createMethods({ runtime: R, getState, log = () => {}, extBridge 
 
   def('msg.send', 'message', '发文本/富媒体；带 clientMsgId 时 5 分钟内幂等', async (p) => {
     if (!R.api) throw notReady('官方接口未就绪（机器人还没连上）');
-    const kind = p.kind === 'group' ? 'group' : p.kind === 'c2c' ? 'c2c' : '';
+    const kind = isChatKind(p.kind) ? p.kind : '';
     const chatId = str(p.chatId);
-    if (!chatId || !kind) throw bad('要给 chatId，kind 只能是 group / c2c');
+    if (!chatId || !kind) throw bad(`要给 chatId，kind 只能是 ${CHAT_KINDS.join(' / ')}`);
     const text = str(p.content);
     /**
      * 富媒体（图文卡片 / markdown / 图片 / ark）**本来就不带正文**：
@@ -391,16 +399,18 @@ export function createMethods({ runtime: R, getState, log = () => {}, extBridge 
     const chatId = str(p.chatId);
     const msgId = str(p.msgId);
     if (!chatId || !msgId) throw bad('要给 chatId 和 msgId');
-    let kind = p.kind === 'group' || p.kind === 'c2c' ? p.kind : '';
+    let kind = isChatKind(p.kind) ? p.kind : '';
     if (!kind) {
       const rec = R.ledger?.get?.(msgId);
-      kind = rec?.kind === 'group' || rec?.kind === 'c2c' ? rec.kind : '';
+      kind = isChatKind(rec?.kind) ? rec.kind : '';
       // 以前不传就默认 c2c，群消息撤回会打到单聊端点，静默失败
-      if (!kind) throw bad('账本里查不到这条消息，群聊请显式给 kind: group');
+      if (!kind) throw bad(`账本里查不到这条消息，请显式给 kind（${CHAT_KINDS.join(' / ')}）`);
     }
-    return await (kind === 'group'
-      ? R.api.retractGroupMessage(chatId, msgId)
-      : R.api.retractC2CMessage(chatId, msgId));
+    const api = R.api;
+    return await (kind === 'group' ? api.retractGroupMessage(chatId, msgId)
+      : kind === 'c2c' ? api.retractC2CMessage(chatId, msgId)
+        : kind === 'guild' ? api.retractChannelMessage(chatId, msgId)
+          : api.retractDmMessage(chatId, msgId));
   });
 
   def('msg.stream', 'message', '发一片流式消息（只支持单聊；自动占用并复用 msg_seq）', async (p) => {
@@ -415,6 +425,8 @@ export function createMethods({ runtime: R, getState, log = () => {}, extBridge 
      * 限速与额度暂时由宿主自己控制，`msg_seq` 由本层统一占号避免撞 40054005。
      */
     if (!R.mock && R.online === false) throw notReady('机器人当前没有连上 QQ，流式消息发不出去');
+    /** 显式传了非单聊 kind 要挡住，别静默把频道消息发到单聊流式接口 */
+    if (p.kind !== undefined && str(p.kind) !== 'c2c') throw bad('流式消息只支持单聊（c2c）');
     const openid = str(p.chatId || p.openid).trim();
     if (!openid) throw bad('要给 chatId（单聊 openid）');
     const state = Number(p.state) === 10 ? 10 : 1;
@@ -748,9 +760,20 @@ export function createMethods({ runtime: R, getState, log = () => {}, extBridge 
     if (!keys.length) throw bad('没有可改的键');
 
     const cfg = R.cfg;
+    /** intents 需要重连网关才生效，不能假装「改完就能收频道事件」 */
+    let needReconnect = false;
     for (const k of keys) {
       const v = patch[k];
       switch (k) {
+        case 'intents': {
+          const n = Number(v);
+          if (!Number.isInteger(n) || n < 0 || n > 0x7fffffff) {
+            throw bad('intents 必须是 0 ~ 2147483647 的整数');
+          }
+          if (n !== Number(cfg.intents)) needReconnect = true;
+          cfg.intents = n;
+          break;
+        }
         case 'name':
         case 'commandPrefix':
           if (typeof v !== 'string' || !v.trim() || v.length > 120) throw bad(`${k} 要是 1–120 字字符串`);
@@ -807,7 +830,15 @@ export function createMethods({ runtime: R, getState, log = () => {}, extBridge 
     /** 和面板一样，这两个开关要立刻同步给 api 实例，不然得等重启才生效 */
     R.api?.setGroupInvited?.(cfg.groupManage?.invited === true);
     R.api?.setMediaPlaceholderSpace?.(cfg.media?.placeholderSpace === true);
-    return { ok: true, keys, config: redact(cfg) };
+    return {
+      ok: true,
+      keys,
+      config: redact(cfg),
+      ...(needReconnect ? {
+        needReconnect: true,
+        hint: 'intents 已写入配置，但要重连网关才生效（面板「配置」页保存或重启机器人）',
+      } : {}),
+    };
   });
 
   /* ---------------- 扩展能力 ----------------

@@ -74,6 +74,16 @@ export const OFFICIAL_ENDPOINTS = [
   { method: 'GET', path: '/guilds/{guild_id}/channels', api: 'getGuildChannels', group: '频道' },
   { method: 'POST', path: '/guilds/{guild_id}/channels', api: 'createGuildChannel', group: '频道', note: '需管理员，私域' },
 
+  /* ---------------- 频道消息 / 私信（server-inter/channel/message/） ----------------
+   * 这几个不在 autogen/ 索引里，但官方文档仍有效（见 api-call-guide.html 的频道错误码段）。
+   * 官方字段是 snake_case，与 v2 群/单聊的 camelCase 不同，api.js 里单独转换。
+   */
+  { method: 'POST', path: '/channels/{channel_id}/messages', api: 'sendChannelMessage', group: '频道·消息', note: '被动 5 分钟；主动 20 条/天·子频道、每频道每天 2 个子频道；每子频道 1s ≤5 条；需 WS 在线' },
+  { method: 'DELETE', path: '/channels/{channel_id}/messages/{message_id}', api: 'retractChannelMessage', group: '频道·消息', note: '管理员可撤成员、频道主可撤所有人；仅私域' },
+  { method: 'POST', path: '/users/@me/dms', api: 'createDms', group: '频道·私信', note: '需机器人与用户有共同频道；返回私信会话 guild_id' },
+  { method: 'POST', path: '/dms/{guild_id}/messages', api: 'sendDmMessage', group: '频道·私信', note: '主动 2 条/天·用户 + 200 条/天·机器人；被动不限条数；仅私域' },
+  { method: 'DELETE', path: '/dms/{guild_id}/messages/{message_id}', api: 'retractDmMessage', group: '频道·私信', note: '只能撤回机器人自己发的私信；仅私域' },
+
   /* ---------------- 用户 / 机器人 ---------------- */
   { method: 'GET', path: '/users/@me', api: 'getMe', group: '用户' },
   { method: 'GET', path: '/users/@me/guilds', api: 'getMyGuilds', group: '用户' },

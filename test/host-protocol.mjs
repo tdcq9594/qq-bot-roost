@@ -46,6 +46,22 @@ function makeRuntime() {
       calls.push(['retractGroupMessage', chatId, msgId]);
       return { ok: true };
     }
+    async sendChannelMessage(target, body) {
+      calls.push(['sendChannelMessage', target, body]);
+      return { id: `ch${calls.length}` };
+    }
+    async sendDmMessage(target, body) {
+      calls.push(['sendDmMessage', target, body]);
+      return { id: `dm${calls.length}` };
+    }
+    async retractChannelMessage(chatId, msgId) {
+      calls.push(['retractChannelMessage', chatId, msgId]);
+      return { ok: true };
+    }
+    async retractDmMessage(chatId, msgId) {
+      calls.push(['retractDmMessage', chatId, msgId]);
+      return { ok: true };
+    }
   }
   const runtime = {
     id: 'test-bot',
@@ -74,9 +90,10 @@ function makeRuntime() {
   runtime.outbound = {
     async send(o) {
       calls.push(['outbound.send', o.chatKey, o.payload, o]);
-      const r = o.kind === 'group'
-        ? await runtime.api.sendGroup(o.target, o.payload)
-        : await runtime.api.sendC2C(o.target, o.payload);
+      const r = o.kind === 'group' ? await runtime.api.sendGroup(o.target, o.payload)
+        : o.kind === 'c2c' ? await runtime.api.sendC2C(o.target, o.payload)
+          : o.kind === 'guild' ? await runtime.api.sendChannelMessage(o.target, o.payload)
+            : await runtime.api.sendDmMessage(o.target, o.payload);
       return { id: r?.msgId ?? r?.id ?? '', requestId: o.requestId ?? '' };
     },
   };
@@ -877,4 +894,100 @@ test('未开启时：方法表仍可查，状态与默认权限都收得住', ()
   assert.equal(snap.connections, 0);
   assert.equal(snap.mode, 'parallel');
   assert.deepEqual(snap.actions, { ok: 0, fail: 0 });
+});
+
+/* ------------------------------------------------------------------ */
+/* QQ 频道四态协议（2026-11-15 加频道能力）                              */
+/* ------------------------------------------------------------------ */
+
+test('msg.send 四种 kind 原值交给 outbound，guild/dm 不再被折叠成 c2c', async () => {
+  const { runtime, methods } = makeMethods();
+  const scopes = new Set(['read', 'message', 'manage']);
+  for (const [kind, apiName] of [
+    ['group', 'sendGroup'], ['c2c', 'sendC2C'],
+    ['guild', 'sendChannelMessage'], ['dm', 'sendDmMessage'],
+  ]) {
+    const before = runtime.calls.length;
+    await methods.call('msg.send', { kind, chatId: `target-${kind}`, content: 'hi' }, { scopes });
+    const logged = runtime.calls.slice(before);
+    const outbound = logged.find((c) => c[0] === 'outbound.send');
+    assert.ok(outbound, `${kind} 必须经过出站调度器`);
+    assert.equal(outbound[1], `${kind}:target-${kind}`, '限速/额度按 kind:chatId 记账');
+    assert.equal(outbound[3].kind, kind, `${kind} 不能被折叠成别的 kind`);
+    assert.ok(logged.some((c) => c[0] === apiName), `${kind} 要打到 ${apiName}`);
+  }
+});
+
+test('msg.send 拒绝未知 kind；msg.typing 只放行 c2c', async () => {
+  const { methods } = makeMethods();
+  const scopes = new Set(['read', 'message', 'manage']);
+  await assert.rejects(
+    () => methods.call('msg.send', { kind: 'channel', chatId: 'x', content: 'hi' }, { scopes }),
+  );
+  for (const kind of ['group', 'guild', 'dm']) {
+    await assert.rejects(
+      () => methods.call('msg.typing', { kind, chatId: 'x' }, { scopes }),
+      undefined,
+      `${kind} 不该触发单聊「正在输入」`,
+    );
+  }
+});
+
+test('msg.retract 四种 kind 各走自己的撤回端点', async () => {
+  const { runtime, methods } = makeMethods();
+  const scopes = new Set(['read', 'message', 'manage']);
+  for (const [kind, apiName] of [
+    ['group', 'retractGroupMessage'], ['guild', 'retractChannelMessage'],
+    ['dm', 'retractDmMessage'],
+  ]) {
+    const before = runtime.calls.length;
+    await methods.call('msg.retract', { kind, chatId: 'target', msgId: 'M1' }, { scopes });
+    assert.ok(runtime.calls.slice(before).some((c) => c[0] === apiName), `${kind} 要调 ${apiName}`);
+  }
+});
+
+test('config.set 收 intents 且校验范围（不再被当成凭证类键拒掉）', async () => {
+  const { methods } = makeMethods();
+  const scopes = new Set(['read', 'message', 'manage']);
+  /** 故意传非法值：会在 switch 里挡下、不走到 saveBotConfig，测试不写盘 */
+  await assert.rejects(
+    () => methods.call('config.set', { intents: -1 }, { scopes }),
+    (e) => /intents 必须是/.test(String(e?.message ?? e)),
+  );
+});
+
+test('宿主消息事件带 guildId / channelId，频道维度不再只剩 groupId', () => {
+  const s = serializeMessage({
+    kind: 'guild', chatId: 'CH1', groupId: 'CH1', guildId: 'G1', channelId: 'CH1',
+    userId: 'U1', userName: '小明', content: 'hi',
+  }, { groupName: '技术交流' });
+  assert.equal(s.chat.kind, 'guild');
+  assert.equal(s.chat.guildId, 'G1');
+  assert.equal(s.chat.channelId, 'CH1');
+});
+
+test('频道本地图片：file_image 走 multipart，路径字符串必须被拒', async () => {
+  const calls = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    calls.push({ url: String(url), headers: opts.headers, body: opts.body });
+    return { status: 200, ok: true, text: async () => '{"id":"m1"}', headers: { get: () => null } };
+  };
+  try {
+    const tokens = { appId: 'APP1', get: async () => 'TOK', refresh: async () => {} };
+    const api = new QQApi({ tokenManager: tokens, baseUrl: 'https://api.bot.qq.com' });
+    await api.sendChannelMessage('CH1', { content: 'hi', fileImage: Buffer.from([137, 80, 78, 71]) });
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].body instanceof FormData, '要用 FormData 而不是 JSON');
+    assert.equal(calls[0].body.get('content'), 'hi');
+    assert.ok(calls[0].body.get('file_image') instanceof Blob, 'file_image 得是文件字段');
+    assert.equal(calls[0].headers['Content-Type'], undefined, '不能手写 Content-Type，fetch 要自己带 boundary');
+    await assert.rejects(
+      () => api.sendChannelMessage('CH1', { fileImage: '/etc/passwd' }),
+      /只接受 Blob/,
+      '路径字符串必须拒，否则 qq.call 会变成任意文件读取',
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });

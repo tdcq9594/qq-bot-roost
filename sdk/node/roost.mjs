@@ -35,6 +35,9 @@ export class Msg {
     this.id = raw.id ?? '';
     this.kind = raw.kind ?? '';
     this.group = raw.group ?? '';
+    /** 频道维度（群/单聊为空串）：guildId 频道 ID、channelId 子频道 ID */
+    this.guildId = raw.guildId ?? '';
+    this.channelId = raw.channelId ?? '';
     this.user = raw.user ?? '';
     this.name = raw.name ?? '';
     this.content = raw.content ?? '';

@@ -98,6 +98,9 @@ export function serializeMessage(botId, msg) {
     kind: msg.kind,
     chatId: msg.chatId,
     groupId: msg.groupId,
+    /** 频道维度：guildId 频道 ID、channelId 子频道 ID（群/单聊为空串） */
+    guildId: msg.guildId,
+    channelId: msg.channelId,
     userId: msg.userId,
     userName: msg.userName,
     content: msg.content,

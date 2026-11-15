@@ -257,6 +257,16 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
 
   let groupId = '';
   let userId = '';
+  /**
+   * 频道维度单独留两个字段：以前只有 `groupId`，guild 场景塞的是
+   * `channel_id`、dm 场景塞的是 `guild_id`，同一个字段两种含义，
+   * 宿主协议没法区分「哪个频道的哪个子频道」。
+   *
+   * 注意 dm 事件里的 `guild_id` 是**私信会话 id**（createDms 的返回值），
+   * 不是真正的频道 id，所以 dm 的 `guildId` 留空、`groupId` 仍是会话 id。
+   */
+  let guildId = '';
+  let channelId = '';
   const userName = d.author?.username ?? '';
   if (kind === 'group') {
     groupId = d.group_openid ?? '';
@@ -265,9 +275,12 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
     userId = d.author?.user_openid ?? d.author?.id ?? '';
   } else if (kind === 'guild') {
     groupId = d.channel_id ?? '';
+    guildId = d.guild_id ?? '';
+    channelId = d.channel_id ?? '';
     userId = d.author?.id ?? '';
   } else if (kind === 'dm') {
     groupId = d.guild_id ?? '';
+    channelId = d.channel_id ?? '';
     userId = d.author?.id ?? '';
   }
 
@@ -334,6 +347,9 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
     userId,
     userName,
     chatId,
+    /** 频道维度（群/单聊为空串）：guildId 是频道 ID，channelId 是子频道 ID */
+    guildId,
+    channelId,
 
     /* ---------------- 身份（QQ号 / 群号 ↔ openid） ---------------- */
 
@@ -456,10 +472,10 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
     msg.args = rest;
   }
 
-  // 底层发送：group 走群接口，c2c 走单聊接口。
-  // 一律经过 outbound，由它处理被动窗口（群聊 5 分钟 / 单聊 60 分钟）、每秒限速、主动消息额度。
+  // 底层发送：四种会话都走 outbound，由它处理被动窗口、每秒限速、主动消息额度。
+  // guild 的 target 是 channel_id，dm 的 target 是私信会话 id（见 buildMessage）。
   const send = (opts, passive) => {
-    if (kind !== 'group' && kind !== 'c2c') return Promise.resolve(null);
+    if (!['group', 'c2c', 'guild', 'dm'].includes(kind)) return Promise.resolve(null);
     /**
      * `requestId` **不是官方字段**，要从 body 里摘出来单独传给 outbound——
      * 混进去会被 api.js 当成未知参数一路带到接口上。
@@ -492,11 +508,15 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
 
     if (!outbound) {
       // 兜底：没有调度器（例如早期调用方）就直接发
-      return kind === 'group' ? api.sendGroup(groupId, body) : api.sendC2C(userId, body);
+      const target = kind === 'c2c' ? userId : groupId;
+      return kind === 'group' ? api.sendGroup(target, body)
+        : kind === 'c2c' ? api.sendC2C(target, body)
+          : kind === 'guild' ? api.sendChannelMessage(target, body)
+            : api.sendDmMessage(target, body);
     }
     return outbound.send({
       kind,
-      target: kind === 'group' ? groupId : userId,
+      target: kind === 'c2c' ? userId : groupId,
       chatKey: `${kind}:${chatId}`,
       payload: body,
       receivedAt,
@@ -890,6 +910,24 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
     if (!source) return null;
     await msg.flushReplies();
     try {
+      /**
+       * 官方 `msg_type=7 + media.file_info` 的上传端点只有
+       * `/v2/users/{openid}/files` 与 `/v2/groups/{openid}/files`，
+       * 且 rich-media.html 明确「单聊和群聊的文件上传接口相互独立」，没有频道端点。
+       *
+       * 但**频道有自己的富媒体通道**（send.html / type/overview.html）：
+       * `image`（图片 URL，平台转存）、`file_image`（multipart 本地图片）、
+       * `embed` / `ark` / `markdown`。所以不是「频道不能发富媒体」，
+       * 而是这两个方法走的 v2 会话上传在频道下没有对应端点。
+       *
+       * 以前 guild/dm 会被折叠成 c2c，把频道用户 ID 当 user_openid 打到单聊端点，
+       * 这里明确不接；内存图片走 `msg.replyImageBuffer()`（multipart `file_image`），
+       * 公网图片走 `msg.reply({ image: <URL> })`。
+       */
+      if (kind !== 'group' && kind !== 'c2c') {
+        log.warn(`频道/私信 ${kind} 不走 v2 会话富媒体上传（file_info）；内存图片用 replyImageBuffer，URL 图片用 msg.reply({ image: URL })`);
+        return null;
+      }
       const scene = kind === 'group' ? 'group' : 'c2c';
       const target = kind === 'group' ? groupId : userId;
       if (scene !== 'group' && scene !== 'c2c') return null;
@@ -1224,6 +1262,20 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
     if (!buf?.length) return null;
     await msg.flushReplies();
     try {
+      /**
+       * 频道没有 `/v2/{groups,users}/files` 那套会话上传端点，但 `send.html`
+       * 给了 `file_image`（`multipart/form-data` 直传图片文件）。这里已经是内存
+       * Buffer，直接交给 `api.js` 走 multipart，不需要落盘、也不需要 file_info。
+       * 语音/视频/文件在频道没有对应通道，仍明确拒绝（type/overview.html）。
+       */
+      if (kind === 'guild' || kind === 'dm') {
+        if (fileType !== FILE_TYPE.IMAGE) {
+          log.warn(`频道/私信 ${kind} 只支持图片，fileType=${fileType} 没有对应通道`);
+          return null;
+        }
+        return await send({ fileImage: Buffer.from(buf) }, true);
+      }
+      if (kind !== 'group' && kind !== 'c2c') return null;
       const scene = kind === 'group' ? 'group' : 'c2c';
       const target = kind === 'group' ? groupId : userId;
       if (scene !== 'group' && scene !== 'c2c') return null;

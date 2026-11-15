@@ -804,6 +804,54 @@ export class BotRuntime {
   /* ---------------- 事件分发 ---------------- */
 
   /**
+   * 非消息频道事件入账。
+   *
+   * 消息事件在下面走 `ledger.append(msg)`，但非消息分支以前完全不写账本，
+   * 只有内存里的 `metrics.bumpEvent` —— GUILD_CREATE / CHANNEL_* / FORUM_* /
+   * MESSAGE_REACTION_* 这些频道事件重启后连「发生过」都查不到。
+   *
+   * 这里补一条 `kind:'notice'` 记录：`raw` 完整保留事件体，`recent()` /
+   * `timeline()` 能查到，面板与宿主协议也读得到。用 `notice` 而不是四态会话
+   * 类型，避免和聊天消息的 kind 语义混淆；content 带 `[事件]` 前缀，AI 邻文里
+   * 也能一眼认出那不是用户说的话。
+   *
+   * id 用事件名 + 场景 + 操作人 + 时间戳拼出**稳定**值，官方重推同一条时
+   * `ledger.append` 的 dedupe 唯一约束会把它挡掉，不会记重。
+   */
+  #recordNotice(eventName, d) {
+    if (!this.ledger?.append) return;
+    const CHANNEL_NOTICE = /^(GUILD|CHANNEL|FORUM|AUDIO|MESSAGE_REACTION|MESSAGE_AUDIT|PUBLIC_MESSAGE_DELETE|DIRECT_MESSAGE_DELETE)/;
+    if (!CHANNEL_NOTICE.test(eventName)) return;
+    /**
+     * 账本是增强，不是主链路：这里任何异常都不能把事件分发带崩
+     * （`ledger.append` 自己会吞写入异常，但拼 id 时的 JSON.stringify 在它之外）。
+     */
+    try {
+      const chatId = String(
+        d?.channel_id ?? d?.guild_id ?? d?.group_openid ?? d?.user_openid ?? d?.id ?? '',
+      );
+      const stable = [
+        eventName,
+        chatId,
+        String(d?.op_user_id ?? d?.author_id ?? ''),
+        String(d?.timestamp ?? d?.joined_at ?? ''),
+        JSON.stringify(d ?? {}).length,
+      ].join(':');
+      this.ledger.append({
+        kind: 'notice',
+        chatId,
+        id: `notice:${stable}`,
+        userId: String(d?.op_user_id ?? d?.author_id ?? ''),
+        userName: '',
+        content: `[事件] ${eventName}${d?.name ? ` ${String(d.name).slice(0, 80)}` : ''}`,
+        raw: d,
+      });
+    } catch (e) {
+      this.log.warn(`频道事件入账失败（不影响分发）：${e?.message ?? e}`);
+    }
+  }
+
+  /**
    * 这个方法和单机器人时的逻辑一致，只是绑到了某个实例上。
    * 所有事件都会转交给插件，未知事件也不例外。
    */
@@ -816,6 +864,8 @@ export class BotRuntime {
 
     /* ---- 非消息事件 ---- */
     if (!isMessageEvent(eventName)) {
+      /** 和消息事件一样「入账第一」，放在任何处理/过滤之前 */
+      this.#recordNotice(eventName, d);
       if (!isKnownEvent(eventName)) {
         this.log.warn(`收到未登记的事件 ${eventName}，已转交插件。建议在 src/events.js 补登记`);
       }

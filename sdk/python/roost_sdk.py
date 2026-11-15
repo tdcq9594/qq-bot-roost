@@ -49,6 +49,9 @@ class Msg:
     id: str = ""
     kind: str = ""
     group: str = ""
+    # 频道维度（群/单聊为空串）：guild_id 频道 ID、channel_id 子频道 ID
+    guild_id: str = ""
+    channel_id: str = ""
     user: str = ""
     name: str = ""
     content: str = ""
@@ -167,6 +170,8 @@ class Plugin:
             id=raw.get("id", ""),
             kind=raw.get("kind", ""),
             group=raw.get("group", ""),
+            guild_id=raw.get("guildId", ""),
+            channel_id=raw.get("channelId", ""),
             user=raw.get("user", ""),
             name=raw.get("name", ""),
             content=raw.get("content", ""),

@@ -305,3 +305,28 @@ test('出站入账：ledger.append 抛错不冒泡到发送链路', async (t) =>
   assert.equal(calls.group, 1, '发送链路没被记账异常打断');
   assert.ok(r);
 });
+
+/**
+ * 非消息频道事件入账（2026-11-15 补）。
+ * bot.js 的 #recordNotice 会把 GUILD_* / FORUM_* / MESSAGE_REACTION_* 之类
+ * 写成 `kind:'notice'` 的记录，这里锁住「能查到、重推不重复、不冒充用户消息」。
+ */
+test('非消息频道事件：kind=notice 可查，官方重推不会记重', (t) => {
+  const { ledger } = rig(t);
+  const evt = {
+    kind: 'notice',
+    chatId: 'G1',
+    /** #recordNotice 用事件名+场景+时间戳拼的稳定 id，dedupe 靠它 */
+    id: 'notice:GUILD_CREATE:G1::2026-01-01T00:00:00+08:00:120',
+    userId: '',
+    userName: '',
+    content: '[事件] GUILD_CREATE 测试频道',
+    raw: { id: 'G1', name: '测试频道', timestamp: '2026-01-01T00:00:00+08:00' },
+  };
+  ledger.append(evt);
+  ledger.append(evt);
+  const rows = ledger.recent({ chatId: 'G1', limit: 10 });
+  assert.equal(rows.length, 1, 'dedupe 要挡住官方重推');
+  assert.equal(rows[0].kind, 'notice', '不能混进四态会话类型');
+  assert.match(String(rows[0].content), /\[事件\] GUILD_CREATE/, 'AI 邻文里要能一眼认出是系统事件');
+});

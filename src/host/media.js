@@ -42,8 +42,21 @@ const FETCH_LIMIT = 20 * 1024 * 1024;
 const str = (v, d = '') => (v === undefined || v === null ? d : String(v));
 
 function sceneOf(p, err) {
+  /**
+   * `media.*` 走的是 v2 会话富媒体上传（file_info），上传端点只有
+   * `/v2/users/{openid}/files` 与 `/v2/groups/{openid}/files`，两者不互通、也没有频道端点。
+   * 频道不是「不能发富媒体」：send.html 给了 `image`（URL）、`file_image`（multipart 本地图片）、
+   * embed/ark/markdown。这里只拒绝会话上传这一套。
+   */
+  if (p.scene === 'guild' || p.scene === 'dm') {
+    throw err.bad(
+      '频道/私信不走 v2 会话富媒体上传（file_info）；图片请用 msg.send 的 image（URL），'
+      + '内存图片用 msg.replyImageBuffer() 走 file_image multipart；'
+      + '私信先调 qq.call 的 createDms 拿到会话 id',
+    );
+  }
   if (p.scene !== 'group' && p.scene !== 'c2c') {
-    throw err.bad('scene 只能是 group / c2c');
+    throw err.bad(`scene 只能是 group / c2c（收到 ${String(p.scene)}）`);
   }
   const target = str(p.target).trim();
   if (!target) throw err.bad('要给 target（群 / 用户 openid）');
@@ -313,6 +326,10 @@ export function registerMedia(def, { R, err, log = () => {} }) {
   });
 
   def('media.markdownImage', 'message', '上传 Markdown 素材图，返回可复用的 qqbot-media:// 引用（默认保留）', async (p) => {
+    /** qqbot-media:// 只能写进群/单聊 markdown；频道内嵌格式是另一套（<@> / <#> / <emoji:>） */
+    if (p.scene === 'guild' || p.scene === 'dm') {
+      throw err.bad('频道/私信不支持 qqbot-media:// 素材引用（那是 v2 markdown 的格式）；请用 msg.send 的 image 字段发图');
+    }
     return await uploadInput(p, {
       scene: p.scene === 'group' ? 'group' : 'c2c',
       target: str(p.target) || 'markdown',

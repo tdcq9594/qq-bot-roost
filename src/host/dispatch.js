@@ -32,6 +32,18 @@
 export const HOST_PLUGIN = 'host';
 
 /**
+ * 协议认可的会话类型。
+ *
+ * 以前这里写 `kind === 'group' ? 'group' : 'c2c'`，把 guild / dm / 拼错的
+ * 值一律折叠成 c2c —— 频道消息会被当成单聊发到 `/v2/users/{openid}/messages`，
+ * 而且发送方看不出哪里错了。四种都要能进出，未知值一律显式拒绝。
+ */
+export const CHAT_KINDS = Object.freeze(['group', 'c2c', 'guild', 'dm']);
+export function isChatKind(k) {
+  return CHAT_KINDS.includes(k);
+}
+
+/**
  * 被动回复窗口判断只看 `receivedAt`（outbound.js 里 `age = receivedAt ? ... : 0`）。
  *
  * 不传就等于「刚收到」，窗口检查永远不触发，过期消息会被当成新鲜消息发出去，
@@ -62,7 +74,7 @@ export function receivedAtOf(R, p) {
  * @param {object} p
  * @param {object} p.R           BotRuntime
  * @param {(m:string)=>void} [p.log]
- * @param {'group'|'c2c'} p.kind
+ * @param {'group'|'c2c'|'guild'|'dm'} p.kind
  * @param {string} p.chatId
  * @param {object} p.payload     交给 api.js 的报文（驼峰字段：msgId / msgSeq / media …）
  * @param {number} [p.receivedAt] 这条消息的接收时间，用于被动窗口判断
@@ -80,7 +92,8 @@ export async function sendOut({
   requestId = '',
   fileType = null,
 }) {
-  const k = kind === 'group' ? 'group' : 'c2c';
+  if (!isChatKind(kind)) throw new Error(`不支持的会话类型: ${kind}`);
+  const k = kind;
   const target = String(chatId ?? '');
   const body = payload && typeof payload === 'object' ? payload : {};
   const rid = String(requestId ?? '').trim();
@@ -114,7 +127,10 @@ export async function sendOut({
   log(`外接协议：outbound 未就绪，这条消息直连官方接口（不限速、不记额度、不进投递账本）`);
   const api = R?.api;
   if (!api) throw new Error('官方接口未就绪');
-  const r = k === 'group' ? await api.sendGroup(target, body) : await api.sendC2C(target, body);
+  const r = k === 'group' ? await api.sendGroup(target, body)
+    : k === 'c2c' ? await api.sendC2C(target, body)
+      : k === 'guild' ? await api.sendChannelMessage(target, body)
+        : await api.sendDmMessage(target, body);
   return {
     id: String(r?.id ?? r?.msgId ?? ''),
     pending: Number(r?.code) === 304023,

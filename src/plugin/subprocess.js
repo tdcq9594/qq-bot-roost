@@ -295,14 +295,33 @@ export class SubprocessPlugin {
       case 'reply': {
         const p = this.pending.get(o.seq);
         if (!p) break;
-        if (o.image) p.msg.replyImage(o.image).catch(() => {});
-        else if (o.text) p.msg.reply(o.text).catch(() => {});
+        const job = o.image ? p.msg.replyImage(o.image) : o.text ? p.msg.reply(o.text) : null;
+        /**
+         * 以前 `.catch(() => {})` 把发送失败整个吞掉：插件以为自己回过了，
+         * 实际消息没发出去（额度、离线、被动超窗、频道不支持…都一样静默）。
+         * 现在回一条 `res` 帧把原因带回去；老插件不认识这个 t 会直接忽略，
+         * 协议仍向后兼容。成功不回帧，避免给每条回复都加一次往返。
+         */
+        if (job && typeof job.catch === 'function') {
+          job.catch((e) => this.#send({
+            t: 'res', seq: o.seq, ok: false, action: 'reply',
+            error: String(e?.message ?? e), code: String(e?.code ?? ''),
+          }));
+        }
         this.#touchIdle(o.seq);
         break;
       }
       case 'push': {
         const p = this.pending.get(o.seq);
-        if (p && o.text) p.msg.push(o.text).catch(() => {});
+        if (p && o.text) {
+          const job = p.msg.push(o.text);
+          if (job && typeof job.catch === 'function') {
+            job.catch((e) => this.#send({
+              t: 'res', seq: o.seq, ok: false, action: 'push',
+              error: String(e?.message ?? e), code: String(e?.code ?? ''),
+            }));
+          }
+        }
         this.#touchIdle(o.seq);
         break;
       }

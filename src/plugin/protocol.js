@@ -8,6 +8,9 @@
  *   {"t":"init", ...}      启动时下发一次，插件应回 {"t":"ready", ...}
  *   {"t":"msg",  "seq":1, "msg":{...}}   有消息要处理
  *   {"t":"shutdown"}       准备退出，插件应尽快结束
+ *   {"t":"res",  "seq":1, "ok":false, "action":"reply|push",
+ *    "error":"...", "code":"..."}        发送失败回执（v1 补，可安全忽略；
+ *                                       成功不回帧，避免每条回复多一次往返）
  *
  * 插件 → 核心
  *   {"t":"ready","commands":[...],"menus":[...],"levels":[...]}
@@ -42,6 +45,9 @@ export function serializeMessage(msg, extra = {}) {
     trace: msg.traceId ?? '',
     kind: msg.kind,
     group: msg.groupId || '',
+    /** 频道维度：guildId 频道 ID、channelId 子频道 ID（群/单聊为空串） */
+    guildId: msg.guildId || '',
+    channelId: msg.channelId || '',
     user: msg.userId || '',
     name: msg.userName || '',
     content: msg.content ?? '',

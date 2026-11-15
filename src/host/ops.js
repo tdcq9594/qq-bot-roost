@@ -28,6 +28,7 @@ import { resolveTrust, blockReason } from '../trust.js';
 import { suspendPluginWatch } from '../services/plugin-watch.js';
 import { toggleGroupPlugin } from '../plugin/groupscope.js';
 import { scopeOf, levelName, NO_PERM } from '../roles.js';
+import { isChatKind } from './dispatch.js';
 
 const str = (v, d = '') => (v === undefined || v === null ? d : String(v));
 const clamp = (v, d, max) => Math.min(max, Math.max(0, Number(v ?? d) || 0));
@@ -191,8 +192,11 @@ export function registerOps(def, { R, err, log = () => {} }) {
     const userId = str(p.userId).trim();
     if (!userId) throw err.bad('要给 userId（openid）');
     const owners = Array.isArray(R.cfg?.owners) ? R.cfg.owners : [];
-    const msg = { userId, kind: p.kind === 'group' ? 'group' : 'c2c',
-      chatId: str(p.chatId), groupId: str(p.groupId) || str(p.chatId) };
+    const kind = isChatKind(p.kind) ? p.kind : 'c2c';
+    /** scopeOf() 对 guild/dm 走 `channel:${groupId}`，频道维度要一起带过去 */
+    const msg = { userId, kind,
+      chatId: str(p.chatId), groupId: str(p.groupId) || str(p.chatId),
+      guildId: str(p.guildId), channelId: str(p.channelId) };
     try {
       if (owners.includes(userId)) {
         return { userId, bucket: 'owner', level: 0, role: levelName(0) };
@@ -213,7 +217,11 @@ export function registerOps(def, { R, err, log = () => {} }) {
     const target = str(p.target).trim();
     if (!target) throw err.bad('要给 target');
     if (!R.reach) throw err.notReady('可达性表未就绪');
-    const kind = p.kind === 'group' ? 'group' : 'c2c';
+    const kind = isChatKind(p.kind) ? p.kind : 'c2c';
+    /** 频道没有 FRIEND_ADD / *_MSG_RECEIVE 那套事件，可达性表对频道不成立 */
+    if (kind === 'guild' || kind === 'dm') {
+      throw err.bad('频道/私信不适用可达性表（官方没有查询接口）；子频道主动消息按 send.html 的额度限制处理');
+    }
     const v = kind === 'group'
       ? await R.reach.canGroupPush?.(target)
       : await R.reach.canC2C?.(target);

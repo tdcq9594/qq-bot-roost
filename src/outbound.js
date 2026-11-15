@@ -37,20 +37,37 @@ const log = createLogger('outbound');
 const PASSIVE_WINDOW_MS = {
   group: 5 * 60 * 1000,
   c2c: 60 * 60 * 1000,
+  /** 文字子频道 / 频道私信：官方 `send.html` 写被动回复有效期 5 分钟 */
+  guild: 5 * 60 * 1000,
+  dm: 5 * 60 * 1000,
 };
 const PASSIVE_SAFE_MS = {
   group: PASSIVE_WINDOW_MS.group - 15_000,
   c2c: PASSIVE_WINDOW_MS.c2c - 15_000,
+  guild: PASSIVE_WINDOW_MS.guild - 15_000,
+  dm: PASSIVE_WINDOW_MS.dm - 15_000,
 };
 
 /**
  * 同一条消息最多回复次数：群聊 5、单聊 4。
  * 超过会返回 40034128「被动回复时间或次数超限」。
+ * 频道侧官方只给了 5 分钟窗口，没给次数上限，所以不在这里拦。
  */
 const PASSIVE_MAX_REPLIES = {
   group: 5,
   c2c: 4,
+  guild: Number.MAX_SAFE_INTEGER,
+  dm: Number.MAX_SAFE_INTEGER,
 };
+
+/**
+ * 主动消息日额度。群/单聊沿用 `this.dailyActive`（默认 1000）；
+ * 频道是另一套口径（`send.html` / `dms.html`）：
+ *   · 文字子频道：默认 20 条/天·子频道，且每个频道每天只能推 2 个子频道
+ *   · 频道私信：2 条/天·用户 + 200 条/天·机器人
+ * 本地先按单会话的严的那档记，跨子频道/跨用户的总量由平台兜底。
+ */
+const CHANNEL_DAILY_ACTIVE = Object.freeze({ guild: 20, dm: 2 });
 
 /** 主动消息进入审核的返回码，属于正常结果 */
 const CODE_AUDIT = 304023;
@@ -535,9 +552,11 @@ export class Outbound {
   }
 
   async #sendOnce({ kind, target, chatKey, payload, receivedAt, fileType }) {
-    if (kind !== 'group' && kind !== 'c2c') {
+    if (!['group', 'c2c', 'guild', 'dm'].includes(kind)) {
       throw new SendError(`不支持的会话类型: ${kind}`, 'api');
     }
+    /** 频道的主动额度与群/单聊不是一回事，按 kind 取 */
+    const dailyLimit = CHANNEL_DAILY_ACTIVE[kind] ?? this.dailyActive;
     if (!this.isOnline()) {
       this.stats.offline += 1;
       /**
@@ -625,10 +644,10 @@ export class Outbound {
       if (active) {
         if (!isWakeup) {
           const used = await this.quota.used(chatKey);
-          if (used >= this.dailyActive) {
+          if (used >= dailyLimit) {
             this.stats.quotaBlocked += 1;
             throw new SendError(
-              `这个会话今天的主动消息额度已用完（${this.dailyActive} 条/天），QQ 不再允许主动推送。\n` +
+              `这个会话今天的主动消息额度已用完（${dailyLimit} 条/天），QQ 不再允许主动推送。\n` +
                 `等用户 @ 一次机器人，就能继续用被动回复。`,
               'quota',
             );
@@ -672,7 +691,7 @@ export class Outbound {
         if (!canRetry) throw e;
 
         const used = await this.quota.used(chatKey);
-        if (used >= this.dailyActive || !this.#allowActiveThisMinute(chatKey)) {
+        if (used >= dailyLimit || !this.#allowActiveThisMinute(chatKey)) {
           this.stats.expired += 1;
           throw new SendError(
             'QQ 判定这条被动回复已过期，且主动消息额度不够补救',
@@ -698,7 +717,11 @@ export class Outbound {
   async #post(kind, target, body, how = '', fileType) {
     const r = kind === 'group'
       ? await this.api.sendGroup(target, body)
-      : await this.api.sendC2C(target, body);
+      : kind === 'c2c'
+        ? await this.api.sendC2C(target, body)
+        : kind === 'guild'
+          ? await this.api.sendChannelMessage(target, body)
+          : await this.api.sendDmMessage(target, body);
 
     // 发出去了什么。放在这里而不是调用处：三个调用点（正常 / 降级 / 审核中）
     // 都要打，写在一处不会漏
@@ -707,7 +730,8 @@ export class Outbound {
     const what = briefOf({ ...body, ...(fileType != null ? { fileType } : {}) }) || '(空)';
 
     // 主动消息需要审核，接口会用业务码返回「审核中」，这不是失败
-    if (r && typeof r === 'object' && Number(r.code) === CODE_AUDIT) {
+    /** 304023 主动、304024 被动进入审核，都不是失败（官方 send.html 明确写在 data 里返回） */
+    if (r && typeof r === 'object' && (Number(r.code) === CODE_AUDIT || Number(r.code) === 304024)) {
       log.info(`发出 ${kind} →${where}（${how}·审核中）：${what}`);
       return { pending: true, id: r.id ?? '', raw: r };
     }
