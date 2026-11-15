@@ -2,6 +2,62 @@
 
 ---
 
+## v1.1.0：QQ 频道四态 + 开放平台后台 + 面板重做
+
+> `latest` 从 **1.0.16** 升到 **1.1.0**。这一版把机器人能活动的地方从「群和单聊」扩成四态，框架第一次有了「登录 / 改资料 / 换票」这套后台能力，面板也按信息密度与反馈契约重排了一遍。
+> 从 1.0.x 直接升，配置不用改；绑号相关的统一声明见文首。
+
+一句话：群 / 单聊 / 频道 / 频道私信四态打底，机器人顺便能自己管自己的开放平台后台了。
+
+### QQ 频道（四态打底）
+
+- **四态出站**：`outbound/message` 支持 group / c2c / guild / dm，含被动窗口、频道专属额度、撤回分派、`guildId/channelId`，`replyImageBuffer` 走 multipart。
+- **94 个官方端点**：补齐 35 条频道端点（公告 / 论坛 / 精华 / 日程 / 身份组 / 子频道权限 / 成员 / API 权限 / 音频）+ 表情表态 3 条；端点总数 56 → 94，频道类 11 → 49，`checkCoverage missing=[]`。表情表态官方放在 `server-inter/message/trans/emoji.html`，按目录找必漏。
+- **协议四态**：`host/*` 停止 group/c2c 折叠，`msg.send / retract / typing / stream` 认四态；`config.set` 放行 intents 并返回 `needReconnect`；外部插件协议补 res 失败回执帧，SDK 与三份契约文档同步。
+- **账本**：非消息频道事件按 `kind=notice` 入账（稳定 id 去重、异常不阻断分发）；`timeline / history / byUser` 过滤 notice，不再污染 AI 邻文，`recent / stats` 仍可查；键归一到 `guild:<guild_id>`，与 dsh-roost 的 sessionKey 同口径。
+- **新增只读能力**：`bot.status` 增 `gatewayIntents`（配置值 vs 线上生效值是两回事，没重建 Gateway 之前跑的还是旧的）、`quota.get`（含频道 20/2 额度）、`system.events`（事件名 → intent 映射）——独立进程的宿主不用再抄一份常量表。
+- **安全**：`fileImage` 只接受 Blob / Buffer / Uint8Array，路径字符串一律拒绝，堵掉 `qq.call` 任意文件读取。
+
+### 开放平台后台接入（新 `dev` 模块）
+
+- **扫码登录**：独立 profile 起浏览器，跨平台探测 Edge / Chrome / Chromium / Brave / Vivaldi 与 snap / flatpak；默认禁扩展、起步停在 `/#/` 再跳 dashboard。备选是 F12 → Copy as cURL 整段导入（`b-token` 是 httpOnly，控制台脚本读不到，所以不做脚本方案）。
+- **只改本机那只**：appid 取自 `config/bots/<id>.json`，传别的 → 403 `NOT_BOUND`（连平台请求都不发）。登错号分两种结论：`account-empty`（账号下没机器人）/ `bot-missing`（有机器人但没这只）。
+- **资料与白名单**：昵称 / 简介 / 头像 / Webhook / 连接方式 / IP 白名单一框一存（平台分别计次数，合并提交必然「一半成功」）；头像按官方限制居中裁方并转 512×512 PNG（JPEG 会把透明底压成黑边）；体验白名单含测试用户与白名单群（最多 20）。
+- **票据续期**：401 时后台无头浏览器换票（`--headless=new`，拿到即关，不弹窗）；只认「完整票」（`b-token` + `developer_id_lite`），半份票会让下一次请求又 401；换票成功只顺手试一次原请求，仍忙则报 `RENEWED_WAIT` 并排 65 秒后补拉；限频冷却改递进（10/20/40/60 秒）。
+- **自检服务 `devTicket`**：启动 3 秒探一次、之后每 30 分钟复查；无票不探、mock 跳过、结论变化才 warn。
+- **扫码与续期不打架**：两条路径共用同一个 `--user-data-dir` 且收尾都会 `close()`。现在扫码中续期直接让路（返回 `skipped`，不算失败、不设退避），没票或没 profile 时根本不进续期，点扫码时若后台正在换票会先等它收尾再开窗。
+- **「记住登录」= 记住你的选择**：勾选以用户选择为准（`localStorage`），不再被「本机没票」推导回来；未登录时不打 `/remember`，避免 401 再把勾弹回去。
+- **接口**：`/api/dev/*` 一整套 + 协议 `dev.*`（manage 档，插件侧 `ctx.dev`）；错误码统一到 `src/dev/errors.js`，`GET /api/dev/errors` 自查。OneBot 侧补 `set_qq_profile` / `get_self_longnick` / `set_self_longnick`。
+
+### 面板
+
+- **信息密度与反馈契约（P0–P2）**：状态卡 128 → 240px、数值 20 → 24px；配置页保存入口收敛成一颗 primary + 顶部次级；危险操作固化（`.btn-danger` / `.danger-row`，确认弹窗按 danger 参数切色）；sticky 锚点目录 + 未保存标记；4 处空态补下一步动作；`Ctrl+K` 页面搜索、`Ctrl+S` 仅配置页保存；宽表列显隐；底部状态条（版本 / 内存 / 收发 / 状态）。
+- **错误边界**：任意 `loadXxx` 抛错不再静默停在「加载中…」，`safeLoad` 在该页顶部插一条可就地重试 / 关闭的错误条；顺带补 `toast()`——此前 3 处调用无定义，点概览页 dry 卡必抛 `ReferenceError`。
+- **按钮三级权重**：`.btn.primary`（一页只该有一个）> `.btn`（描边默认）> `.btn-ghost`（纯辅助）；危险是另一条轴，`.btn-danger` 实心红只给不可逆操作。
+- **暗色重做**：旧色阶 `--border` 与 `--panel-3` 只差 3（实测对比度 1.03，等于线消失在背景里）。先按 WCAG 逐层拉开，再按「太亮」的反馈把五层 RGB 总和压掉 33%，改成 shadcn / Grafana 那种「卡片与底近乎同色、靠边框分层」。**亮色主题一个字没动。**
+- **四套配色**：A 归巢暖琥珀（默认）/ B 夜航靛蓝 / C 暮羽青灰 / D 星夜紫，走 `:root[data-palette]` 覆盖，不新增变量名；与日间 / 夜间各自记忆，`theme-boot` 保证刷新不闪默认色。
+- **插件卡片按需折叠**：默认 4 个按钮全显示（行为零变化），点「收起」只留第一个；收起状态下新插入的「更新」按钮也会被一起折叠。
+- **依赖卡片**：新增安装源下拉（跟随系统 / npmmirror / 官方 / 自定义）与「手动检查」；显示实际生效的源（不只是你存的选择）；PATH 里有 ffmpeg 时提示可省 62MB。
+
+### 依赖安装
+
+- **npm 镜像源**：面板配置 > `npm_config_registry` > `.npmrc` > 官方源；官方源时不传 `--registry`，参数与以前逐字一致（不覆盖用户自己的 scoped registry）。网络类失败且当前是官方源时提示换镜像。
+- **复用已装的依赖**：全部依赖能从上层 `node_modules` / `NODE_PATH` 解析到就跳过安装；系统已有 ffmpeg 时不再下 62MB。
+- **只验不装**：`POST /api/ext/deps/verify` 真 require 一次、真跑一次 `ffmpeg -version`；`probeFfmpeg()` 区分「文件在」和「能跑」（0 字节 / 架构不对 / 软链断了只有真执行才发现）。
+
+### 其它
+
+- **`/ping` 拆两段耗时**：网络 = `receivedAt - at`，处理 = `now - receivedAt`；`at` 缺失时只回 pong，不输出假的 0ms（这是单向时间戳差，不是 ping-pong RTT）。
+- **面板保存 intents 真的生效了**：原来只改 intents 走 `gateway.restart()`，同一实例仍持构造时的旧 `this.intents`，重连也发旧订阅——现在在线时一律下线 → 上线重建 Gateway。
+- **昵称同步**：启动后按平台昵称刷新本机显示名（mock / 缺凭证跳过），`bot.nickname.sync` 与 `POST /api/bots/nickname` 可手动触发。
+- **WS 交互回执**：`putInteraction` 原来只有 HTTP 分支在调，两个实例都跑 websocket → 回调型按钮点下去平台收不到 PUT、客户端一直转圈。DISPATCH 分支补第二层确认（type 11/12 才回、id 缺失不回，放在 seq 去重之后以免 resume 重放重复回执）。
+
+### 升级说明
+
+- 从 1.0.x 直接升，配置不用改；`SHA256SUMS` 按本版本重算并通过 `sums:verify`。
+- 全量 **1204 项**测试通过（含 `selftest` 686 项）。
+- 频道能力要生效需在「机器人」页把 intents 打开并下线 → 上线一次（见上面那条修复）。
+
 ## v1.0.16：协议双向打通 + 官方图文卡片放行
 
 > 1.0.16 的测试版内容一并转正，`latest` 从 **1.0.15** 升到 **1.0.16**。
