@@ -721,8 +721,17 @@ export function createScanLogin({
         log(activeHeadless
           ? '[dev] 后台换票成功（票据已到手，窗口已关）'
           : '[dev] 扫码登录成功（票据已到手，后续走 Node 直发）');
-        await goDashboard();
+        /**
+         * 先放闸，再导航。
+         *
+         * `goDashboard()` 是一次真的页面跳转，慢的时候要好几秒；票已经到手，
+         * 这几秒里 `running` 还挂着，`refresh()` 就会当成「正在扫码」让路，
+         * `startScan()` 也会白等——明明已经登录完成了。**同上，`status='ok'`
+         * 与 `running=false` 之间不能隔 await**，否则外面会看到一个自相矛盾的
+         * 中间态：状态说已登录，`busy` 说还在扫。
+         */
         running = false;
+        await goDashboard();
         return;
       } catch (e) {
         // 选完主体 / 页面还在跳的时候会短暂 401，退回 waiting 继续等，不判死

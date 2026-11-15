@@ -321,6 +321,14 @@ test('续期：窗口本来就开着 → 直接读，不重开也不关', async 
 
   await scan.start();
   assert.ok(await waitFor(() => scan.status().state === 'ok', 2_000));
+  /**
+   * 登录完成那一刻 `busy` 就必须是 false。
+   *
+   * 这两件事之间原来隔着一次 `goDashboard()` 导航（CI 上慢的时候几秒），
+   * 于是外面能看到「状态说已登录、busy 说还在扫码」的矛盾中间态：
+   * 续期在这几秒里让路、扫码被顶着。Windows / Node 24 的 CI 就是这样红的。
+   */
+  assert.equal(scan.status().busy, false, '登录成功即放闸，不能等导航回来才放');
   const before = spawned;
 
   const r = await scan.refresh({ timeoutMs: 1_000 });
