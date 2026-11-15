@@ -2200,3 +2200,11 @@ tr[data-group-head] td::before { content: none; }
 .table-selectable tbody tr { cursor: pointer; }
 .table-selectable tbody tr.row-selected td { background: var(--primary-soft); }
 .table-selectable tbody tr[data-group-head] { cursor: default; }
+
+/* ---------- P1#8 · 插件卡片次要操作按需折叠（默认展开，不改绑定） ---------- */
+.btn.plugin-more {
+  min-width: 0; padding: 4px 9px; color: var(--muted);
+}
+.btn.plugin-more[aria-expanded="false"] {
+  color: var(--primary); border-color: var(--primary-border); background: var(--primary-soft);
+}

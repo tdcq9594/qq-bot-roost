@@ -6227,3 +6227,60 @@ function initTableTools() {
   initScrollBottom();
   initTableTools();
 })();
+
+/* ---------------- P1#8 · 插件卡片次要操作按需折叠 ---------------- */
+/*
+ * 盘点过 15 张表：只有「插件列表」行内是 4 个按钮（启用/重载/设置/卸载），
+ * 其余表都是 1–2 个，收成菜单反而多一次点击。所以这里只处理插件卡片，
+ * 而且**默认全部展开**：用户点「收起」才只留第一个按钮，再点恢复。
+ * 按钮 DOM、class、data-act 与原有事件绑定一个都不动，只是切 hidden。
+ */
+function initPluginMore() {
+  const list = $('#pluginList');
+  if (!list) return;
+
+  const paint = (card, toggle) => {
+    const on = card.dataset.collapsed === '1';
+    [...card.querySelectorAll(':scope > .btn')]
+      .filter((b) => !b.classList.contains('plugin-more'))
+      .forEach((b, i) => { b.hidden = on && i > 0; });
+    toggle.textContent = on ? '⋯ 更多' : '收起';
+    toggle.title = on ? '展开全部操作' : '收起次要操作，只保留第一个按钮';
+    toggle.setAttribute('aria-expanded', String(!on));
+  };
+
+  const decorate = (card) => {
+    let toggle = card.querySelector(':scope > .plugin-more');
+    if (!toggle) {
+      const acts = [...card.querySelectorAll(':scope > .btn')];
+      if (acts.length < 3) return;
+      toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'btn small plugin-more';
+      toggle.setAttribute('aria-expanded', 'true');
+      toggle.addEventListener('click', (e) => {
+        e.stopPropagation();
+        card.dataset.collapsed = card.dataset.collapsed === '1' ? '0' : '1';
+        paint(card, toggle);
+      });
+      card.appendChild(toggle);
+    }
+    // 卡片可能被 applyUpdateMarks 追加了「更新」按钮，每次都按当前 DOM 重算
+    paint(card, toggle);
+  };
+
+  const scan = () => $$('#pluginList .plugin').forEach(decorate);
+  scan();
+  if (typeof MutationObserver !== 'undefined') {
+    let queued = false;
+    new MutationObserver(() => {
+      if (queued) return;
+      queued = true;
+      requestAnimationFrame(() => { queued = false; scan(); });
+    }).observe(list, { childList: true, subtree: true });
+  }
+}
+
+(function initP18() {
+  initPluginMore();
+})();
