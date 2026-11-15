@@ -144,6 +144,76 @@
   --shadow-lg: 0 16px 40px rgba(0, 0, 0, .5);
 }
 
+/* ============================================================
+   配色主题：四套轮换，亮 / 暗各一组
+   ------------------------------------------------------------
+   A 归巢暖琥珀是默认值（:root 与 [data-theme="dark"]），不写覆盖规则；
+   B 夜航靛蓝 / C 暮羽青灰 / D 星夜紫只覆盖底色、文字与主色相关的变量。
+   变量名一个不新增，插件页主题契约不受影响；阴影与语义色沿用现有值。
+   暗色规则带 :root[data-theme=...] 才能压过上面的 [data-theme="dark"]。
+   ============================================================ */
+
+/* B 夜航靛蓝 · 亮 */
+:root[data-palette="b"] {
+  --bg: #f2f5fb; --panel: #ffffff; --panel-2: #eef2f9; --panel-3: #e4eaf5;
+  --border: #d5dcea; --border-strong: #b3bfd3;
+  --text: #172033; --text-2: #3c4961; --muted: #64708a; --faint: #8b96ad;
+  --primary: #3b55d9; --primary-hover: #2c44bd; --primary-soft: #e6ecff;
+  --primary-border: #b9c8f5; --primary-ring: rgba(59, 86, 219, .16); --primary-ink: #ffffff;
+  --log-bg: #fcfdff; --log-hover: #eef3fc;
+}
+/* B 夜航靛蓝 · 暗 */
+:root[data-palette="b"][data-theme="dark"] {
+  --bg: #0b1020; --panel: #121a31; --panel-2: #1a2440; --panel-3: #24304f;
+  --border: #2e3b5c; --border-strong: #3e4d73;
+  --text: #e6ecf8; --text-2: #b9c4dc; --muted: #93a0bd; --faint: #6c7898;
+  --primary: #8aa6ff; --primary-hover: #a8bcff; --primary-soft: #1a2447;
+  --primary-border: #33468a; --primary-ring: rgba(138, 166, 255, .22); --primary-ink: #0b1020;
+  --log-bg: #080d1a; --log-hover: #16203a;
+}
+
+/* C 暮羽青灰 · 亮 */
+:root[data-palette="c"] {
+  --bg: #f2efea; --panel: #fffdf9; --panel-2: #f0ede6; --panel-3: #e5e1d8;
+  --border: #d7d2c7; --border-strong: #b8b1a3;
+  --text: #1b2628; --text-2: #3d4c4e; --muted: #667574; --faint: #8d9a98;
+  --primary: #2e6e76; --primary-hover: #23565c; --primary-soft: #dceceb;
+  --primary-border: #a8cecc; --primary-ring: rgba(46, 110, 118, .16); --primary-ink: #ffffff;
+  --log-bg: #fcfbf7; --log-hover: #f0ede5;
+}
+/* C 暮羽青灰 · 暗 */
+:root[data-palette="c"][data-theme="dark"] {
+  --bg: #10191c; --panel: #162225; --panel-2: #1d2c30; --panel-3: #27383c;
+  --border: #33474b; --border-strong: #445c61;
+  --text: #e2ebe9; --text-2: #b6c7c5; --muted: #8fa5a3; --faint: #687f7e;
+  --primary: #79c6c2; --primary-hover: #98dad5; --primary-soft: #142e30;
+  --primary-border: #2f5b5d; --primary-ring: rgba(121, 198, 194, .22); --primary-ink: #10191c;
+  --log-bg: #0d1517; --log-hover: #1a282b;
+}
+
+/* D 星夜紫 · 亮 */
+:root[data-palette="d"] {
+  --bg: #f5f2fb; --panel: #fdfbff; --panel-2: #f1edfa; --panel-3: #e8e1f6;
+  --border: #d9cfec; --border-strong: #bcafd9;
+  --text: #201a35; --text-2: #443a5e; --muted: #6f6587; --faint: #958cab;
+  --primary: #5a48cf; --primary-hover: #4938b2; --primary-soft: #e9e3fb;
+  --primary-border: #c4b6ef; --primary-ring: rgba(90, 72, 207, .16); --primary-ink: #ffffff;
+  --log-bg: #fdfbff; --log-hover: #f3eefc;
+}
+/* D 星夜紫 · 暗 */
+:root[data-palette="d"][data-theme="dark"] {
+  --bg: #120e24; --panel: #1a1533; --panel-2: #221b40; --panel-3: #2c2450;
+  --border: #372e60; --border-strong: #483c78;
+  --text: #eae4f8; --text-2: #c0b6dc; --muted: #9a8fbd; --faint: #726894;
+  --primary: #a79bff; --primary-hover: #bdb4ff; --primary-soft: #251c4a;
+  --primary-border: #463a80; --primary-ring: rgba(167, 155, 255, .22); --primary-ink: #120e24;
+  --log-bg: #0e0a1c; --log-hover: #1d1636;
+}
+
+/* 配色轮换按钮：用当前主色显示当前配色名，一眼可辨 */
+#btnPalette { color: var(--primary); }
+#btnPalette span { font-size: 12px; line-height: 1; letter-spacing: 0; }
+
 /**
  * 暗色下常驻区块不要阴影。
  *

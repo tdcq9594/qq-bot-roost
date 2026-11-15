@@ -472,6 +472,39 @@ document.addEventListener('keydown', (e) => {
 /* ---------------- 主题 ---------------- */
 
 const THEME_KEY = 'qqbot_theme';
+const PALETTE_KEY = 'qqbot_palette';
+// 四套配色轮换：A 是默认值（style.css 不写覆盖规则），B/C/D 由
+// :root[data-palette="..."] 覆盖。亮 / 暗是独立的另一维，不受这里影响。
+const PALETTES = [
+  { id: 'a', mark: '暖', name: '归巢暖琥珀' },
+  { id: 'b', mark: '夜', name: '夜航靛蓝' },
+  { id: 'c', mark: '暮', name: '暮羽青灰' },
+  { id: 'd', mark: '星', name: '星夜紫' },
+];
+
+function setPalette(id, { persist = true } = {}) {
+  const p = PALETTES.find((x) => x.id === id) || PALETTES[0];
+  document.documentElement.dataset.palette = p.id;
+  const mark = $('#paletteMark');
+  if (mark) mark.textContent = p.mark;
+  const btn = $('#btnPalette');
+  if (btn) btn.title = `配色：${p.name}（点击轮换）`;
+  if (persist) {
+    try { localStorage.setItem(PALETTE_KEY, p.id); } catch {}
+  }
+  // 插件页的变量由服务端按亮 / 暗注入，配色不参与，不需要重载 iframe
+}
+
+function initPalette() {
+  let saved = 'a';
+  try { saved = localStorage.getItem(PALETTE_KEY) || 'a'; } catch {}
+  setPalette(saved, { persist: false });
+  $('#btnPalette')?.addEventListener('click', () => {
+    const cur = document.documentElement.dataset.palette || 'a';
+    const i = PALETTES.findIndex((x) => x.id === cur);
+    setPalette(PALETTES[(i + 1) % PALETTES.length].id);
+  });
+}
 
 function updateThemeBtn(t) {
   const btn = $('#btnTheme');
@@ -493,6 +526,7 @@ function setTheme(t, { persist = true } = {}) {
 }
 
 function initTheme() {
+  initPalette();
   const btn = $('#btnTheme');
   const saved = (() => { try { return localStorage.getItem(THEME_KEY); } catch { return null; } })();
   const sysDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -5596,21 +5630,29 @@ function initTableLabels() {
   bodies.forEach((tb) => mo.observe(tb, { childList: true, subtree: true }));
 }
 
-/** 手机浏览器地址栏跟随深浅色，纯展示，不碰 setTheme() */
+/** 手机浏览器地址栏跟随深浅色与配色，纯展示，不碰 setTheme() */
 function initThemeColor() {
   const meta = document.querySelector('meta[name="theme-color"]');
   if (!meta) return;
+  // 亮 / 暗各一个底色，顺序与 PALETTES 的 a/b/c/d 对应
+  const CHROME = {
+    a: ['#f8f5f1', '#19120e'],
+    b: ['#f2f5fb', '#0b1020'],
+    c: ['#f2efea', '#10191c'],
+    d: ['#f5f2fb', '#120e24'],
+  };
   const apply = () => {
+    const p = CHROME[document.documentElement.dataset.palette] || CHROME.a;
     meta.setAttribute(
       'content',
-      document.documentElement.dataset.theme === 'dark' ? '#19120e' : '#f8f5f1',
+      document.documentElement.dataset.theme === 'dark' ? p[1] : p[0],
     );
   };
   apply();
   if (typeof MutationObserver === 'undefined') return;
   new MutationObserver(apply).observe(document.documentElement, {
     attributes: true,
-    attributeFilter: ['data-theme'],
+    attributeFilter: ['data-theme', 'data-palette'],
   });
 }
 
