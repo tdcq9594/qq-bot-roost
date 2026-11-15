@@ -1844,6 +1844,202 @@ export class QQApi {
     return this.#request('DELETE', `/dms/${enc(guildId)}/messages/${enc(messageId)}${q}`);
   }
 
+  /* ---------------- 频道·公告 ---------------- */
+
+  /** 创建频道公告。`POST /guilds/{guild_id}/announces` */
+  postGuildAnnounces(guildId, body = {}) {
+    return this.#request('POST', `/guilds/${enc(guildId)}/announces`, body);
+  }
+
+  /** 删除频道公告。`DELETE /guilds/{guild_id}/announces/{message_id}`；`message_id=all` 删全部推荐子频道 */
+  deleteGuildAnnounces(guildId, messageId) {
+    return this.#request('DELETE', `/guilds/${enc(guildId)}/announces/${enc(messageId)}`);
+  }
+
+  /** 创建子频道公告。`POST /channels/{channel_id}/announces` */
+  postChannelAnnounces(channelId, body = {}) {
+    return this.#request('POST', `/channels/${enc(channelId)}/announces`, body);
+  }
+
+  /** 删除子频道公告。`DELETE /channels/{channel_id}/announces/{message_id}` */
+  deleteChannelAnnounces(channelId, messageId) {
+    return this.#request('DELETE', `/channels/${enc(channelId)}/announces/${enc(messageId)}`);
+  }
+
+  /* ---------------- 频道·论坛 ---------------- */
+
+  /** 帖子列表。`GET /channels/{channel_id}/threads` */
+  getThreadsList(channelId) {
+    return this.#request('GET', `/channels/${enc(channelId)}/threads`);
+  }
+
+  /** 帖子详情。`GET /channels/{channel_id}/threads/{thread_id}` */
+  getThread(channelId, threadId) {
+    return this.#request('GET', `/channels/${enc(channelId)}/threads/${enc(threadId)}`);
+  }
+
+  /** 发表帖子。`PUT /channels/{channel_id}/threads`；format：1 文本 / 2 HTML / 3 Markdown / 4 JSON */
+  putThread(channelId, body = {}) {
+    return this.#request('PUT', `/channels/${enc(channelId)}/threads`, body);
+  }
+
+  /** 删除帖子。`DELETE /channels/{channel_id}/threads/{thread_id}` */
+  deleteThread(channelId, threadId) {
+    return this.#request('DELETE', `/channels/${enc(channelId)}/threads/${enc(threadId)}`);
+  }
+
+  /* ---------------- 频道·精华消息 ---------------- */
+
+  /** 精华消息列表。`GET /channels/{channel_id}/pins` */
+  getPinsMessage(channelId) {
+    return this.#request('GET', `/channels/${enc(channelId)}/pins`);
+  }
+
+  /** 添加精华消息。`PUT /channels/{channel_id}/pins/{message_id}` */
+  putPinsMessage(channelId, messageId) {
+    return this.#request('PUT', `/channels/${enc(channelId)}/pins/${enc(messageId)}`);
+  }
+
+  /** 删除精华消息。`DELETE /channels/{channel_id}/pins/{message_id}` */
+  deletePinsMessage(channelId, messageId) {
+    return this.#request('DELETE', `/channels/${enc(channelId)}/pins/${enc(messageId)}`);
+  }
+
+  /* ---------------- 频道·日程 ---------------- */
+
+  /** 日程列表。`GET /channels/{channel_id}/schedules?since=` */
+  getSchedules(channelId, { since = '' } = {}) {
+    const qs = since === '' ? '' : `?${new URLSearchParams({ since: String(since) })}`;
+    return this.#request('GET', `/channels/${enc(channelId)}/schedules${qs}`);
+  }
+
+  /** 日程详情。`GET /channels/{channel_id}/schedules/{schedule_id}` */
+  getSchedule(channelId, scheduleId) {
+    return this.#request('GET', `/channels/${enc(channelId)}/schedules/${enc(scheduleId)}`);
+  }
+
+  /** 创建日程。`POST /channels/{channel_id}/schedules` */
+  postSchedule(channelId, body = {}) {
+    return this.#request('POST', `/channels/${enc(channelId)}/schedules`, body);
+  }
+
+  /** 修改日程。`PATCH /channels/{channel_id}/schedules/{schedule_id}` */
+  patchSchedule(channelId, scheduleId, body = {}) {
+    return this.#request('PATCH', `/channels/${enc(channelId)}/schedules/${enc(scheduleId)}`, body);
+  }
+
+  /** 删除日程。`DELETE /channels/{channel_id}/schedules/{schedule_id}` */
+  deleteSchedule(channelId, scheduleId) {
+    return this.#request('DELETE', `/channels/${enc(channelId)}/schedules/${enc(scheduleId)}`);
+  }
+
+  /* ---------------- 频道·身份组 ---------------- */
+
+  /** 身份组列表。`GET /guilds/{guild_id}/roles` */
+  getGuildRoles(guildId) {
+    return this.#request('GET', `/guilds/${enc(guildId)}/roles`);
+  }
+
+  /** 创建身份组。`POST /guilds/{guild_id}/roles` */
+  postGuildRole(guildId, body = {}) {
+    return this.#request('POST', `/guilds/${enc(guildId)}/roles`, body);
+  }
+
+  /** 修改身份组。`PATCH /guilds/{guild_id}/roles/{role_id}` */
+  patchGuildRole(guildId, roleId, body = {}) {
+    return this.#request('PATCH', `/guilds/${enc(guildId)}/roles/${enc(roleId)}`, body);
+  }
+
+  /** 删除身份组。`DELETE /guilds/{guild_id}/roles/{role_id}` */
+  deleteGuildRole(guildId, roleId) {
+    return this.#request('DELETE', `/guilds/${enc(guildId)}/roles/${enc(roleId)}`);
+  }
+
+  /** 给成员加身份组。`PUT /guilds/{guild_id}/members/{user_id}/roles/{role_id}` */
+  putGuildMemberRole(guildId, userId, roleId, body = {}) {
+    return this.#request('PUT', `/guilds/${enc(guildId)}/members/${enc(userId)}/roles/${enc(roleId)}`, body);
+  }
+
+  /** 移除成员身份组。`DELETE /guilds/{guild_id}/members/{user_id}/roles/{role_id}` */
+  deleteGuildMemberRole(guildId, userId, roleId) {
+    return this.#request('DELETE', `/guilds/${enc(guildId)}/members/${enc(userId)}/roles/${enc(roleId)}`);
+  }
+
+  /** 身份组成员列表。`GET /guilds/{guild_id}/roles/{role_id}/members` */
+  getRoleMembers(guildId, roleId, { startIndex = '0', limit = 1 } = {}) {
+    const qs = new URLSearchParams({ start_index: String(startIndex), limit: String(limit) });
+    return this.#request('GET', `/guilds/${enc(guildId)}/roles/${enc(roleId)}/members?${qs}`);
+  }
+
+  /* ---------------- 频道·子频道权限 ---------------- */
+
+  /** 子频道权限。`GET /channels/{channel_id}/permissions` */
+  getChannelPermissions(channelId) {
+    return this.#request('GET', `/channels/${enc(channelId)}/permissions`);
+  }
+
+  /** 修改子频道权限。`PUT /channels/{channel_id}/permissions` */
+  putChannelPermissions(channelId, body = {}) {
+    return this.#request('PUT', `/channels/${enc(channelId)}/permissions`, body);
+  }
+
+  /** 身份组在子频道的权限。`GET /channels/{channel_id}/roles/{role_id}/permissions` */
+  getChannelRolesPermissions(channelId, roleId) {
+    return this.#request('GET', `/channels/${enc(channelId)}/roles/${enc(roleId)}/permissions`);
+  }
+
+  /** 修改身份组在子频道的权限。`PUT /channels/{channel_id}/roles/{role_id}/permissions` */
+  putChannelRolesPermissions(channelId, roleId, body = {}) {
+    return this.#request('PUT', `/channels/${enc(channelId)}/roles/${enc(roleId)}/permissions`, body);
+  }
+
+  /* ---------------- 频道·成员 ---------------- */
+
+  /** 频道成员列表。`GET /guilds/{guild_id}/members?after=&limit=` */
+  getGuildMembers(guildId, { after = '0', limit = 1 } = {}) {
+    const qs = new URLSearchParams({ after: String(after), limit: String(limit) });
+    return this.#request('GET', `/guilds/${enc(guildId)}/members?${qs}`);
+  }
+
+  /** 频道成员详情。`GET /guilds/{guild_id}/members/{user_id}` */
+  getGuildMember(guildId, userId) {
+    return this.#request('GET', `/guilds/${enc(guildId)}/members/${enc(userId)}`);
+  }
+
+  /** 在线成员数。`GET /channels/{channel_id}/online_nums` */
+  getOnlineNums(channelId) {
+    return this.#request('GET', `/channels/${enc(channelId)}/online_nums`);
+  }
+
+  /* ---------------- 频道·API 权限 ---------------- */
+
+  /** 频道 API 权限清单。`GET /guilds/{guild_id}/api_permission` */
+  getGuildApiPermission(guildId) {
+    return this.#request('GET', `/guilds/${enc(guildId)}/api_permission`);
+  }
+
+  /** 申请频道 API 权限。`POST /guilds/{guild_id}/api_permission/demand` */
+  postGuildApiPermissionDemand(guildId, body = {}) {
+    return this.#request('POST', `/guilds/${enc(guildId)}/api_permission/demand`, body);
+  }
+
+  /* ---------------- 频道·音频（仅音频类机器人） ---------------- */
+
+  /** 音频控制。`POST /channels/{channel_id}/audio` */
+  audioControl(channelId, body = {}) {
+    return this.#request('POST', `/channels/${enc(channelId)}/audio`, body);
+  }
+
+  /** 机器人上麦。`PUT /channels/{channel_id}/mic` */
+  putMic(channelId) {
+    return this.#request('PUT', `/channels/${enc(channelId)}/mic`, {});
+  }
+
+  /** 机器人下麦。`DELETE /channels/{channel_id}/mic` */
+  deleteMic(channelId) {
+    return this.#request('DELETE', `/channels/${enc(channelId)}/mic`);
+  }
+
   /* ---------------- 内部 ---------------- */
 
   /**

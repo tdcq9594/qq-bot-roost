@@ -74,6 +74,59 @@ export const OFFICIAL_ENDPOINTS = [
   { method: 'GET', path: '/guilds/{guild_id}/channels', api: 'getGuildChannels', group: '频道' },
   { method: 'POST', path: '/guilds/{guild_id}/channels', api: 'createGuildChannel', group: '频道', note: '需管理员，私域' },
 
+  /* ---------------- 频道·公告 ---------------- */
+  { method: 'POST', path: '/guilds/{guild_id}/announces', api: 'postGuildAnnounces', group: '频道·公告', note: '消息公告或推荐子频道；推荐最多 3 条；仅私域' },
+  { method: 'DELETE', path: '/guilds/{guild_id}/announces/{message_id}', api: 'deleteGuildAnnounces', group: '频道·公告', note: 'message_id=all 删除全部推荐子频道' },
+  { method: 'POST', path: '/channels/{channel_id}/announces', api: 'postChannelAnnounces', group: '频道·公告' },
+  { method: 'DELETE', path: '/channels/{channel_id}/announces/{message_id}', api: 'deleteChannelAnnounces', group: '频道·公告' },
+
+  /* ---------------- 频道·论坛（仅私域） ---------------- */
+  { method: 'GET', path: '/channels/{channel_id}/threads', api: 'getThreadsList', group: '频道·论坛', note: 'channel 须为论坛子频道' },
+  { method: 'GET', path: '/channels/{channel_id}/threads/{thread_id}', api: 'getThread', group: '频道·论坛' },
+  { method: 'PUT', path: '/channels/{channel_id}/threads', api: 'putThread', group: '频道·论坛', note: 'format: 1 文本 / 2 HTML / 3 Markdown / 4 JSON' },
+  { method: 'DELETE', path: '/channels/{channel_id}/threads/{thread_id}', api: 'deleteThread', group: '频道·论坛' },
+
+  /* ---------------- 频道·精华消息 ---------------- */
+  { method: 'GET', path: '/channels/{channel_id}/pins', api: 'getPinsMessage', group: '频道·精华' },
+  { method: 'PUT', path: '/channels/{channel_id}/pins/{message_id}', api: 'putPinsMessage', group: '频道·精华', note: '每子频道最多 20 条' },
+  { method: 'DELETE', path: '/channels/{channel_id}/pins/{message_id}', api: 'deletePinsMessage', group: '频道·精华' },
+
+  /* ---------------- 频道·日程 ---------------- */
+  { method: 'GET', path: '/channels/{channel_id}/schedules', api: 'getSchedules', group: '频道·日程', note: 'since 起始时间戳（秒）' },
+  { method: 'GET', path: '/channels/{channel_id}/schedules/{schedule_id}', api: 'getSchedule', group: '频道·日程' },
+  { method: 'POST', path: '/channels/{channel_id}/schedules', api: 'postSchedule', group: '频道·日程', note: '单管理员/天 10 次、单频道/天 100 次' },
+  { method: 'PATCH', path: '/channels/{channel_id}/schedules/{schedule_id}', api: 'patchSchedule', group: '频道·日程' },
+  { method: 'DELETE', path: '/channels/{channel_id}/schedules/{schedule_id}', api: 'deleteSchedule', group: '频道·日程' },
+
+  /* ---------------- 频道·身份组 ---------------- */
+  { method: 'GET', path: '/guilds/{guild_id}/roles', api: 'getGuildRoles', group: '频道·身份组' },
+  { method: 'POST', path: '/guilds/{guild_id}/roles', api: 'postGuildRole', group: '频道·身份组' },
+  { method: 'PATCH', path: '/guilds/{guild_id}/roles/{role_id}', api: 'patchGuildRole', group: '频道·身份组' },
+  { method: 'DELETE', path: '/guilds/{guild_id}/roles/{role_id}', api: 'deleteGuildRole', group: '频道·身份组' },
+  { method: 'PUT', path: '/guilds/{guild_id}/members/{user_id}/roles/{role_id}', api: 'putGuildMemberRole', group: '频道·身份组' },
+  { method: 'DELETE', path: '/guilds/{guild_id}/members/{user_id}/roles/{role_id}', api: 'deleteGuildMemberRole', group: '频道·身份组' },
+  { method: 'GET', path: '/guilds/{guild_id}/roles/{role_id}/members', api: 'getRoleMembers', group: '频道·身份组', note: 'start_index 分页，limit 1–400' },
+
+  /* ---------------- 频道·子频道权限 ---------------- */
+  { method: 'GET', path: '/channels/{channel_id}/permissions', api: 'getChannelPermissions', group: '频道·权限' },
+  { method: 'PUT', path: '/channels/{channel_id}/permissions', api: 'putChannelPermissions', group: '频道·权限' },
+  { method: 'GET', path: '/channels/{channel_id}/roles/{role_id}/permissions', api: 'getChannelRolesPermissions', group: '频道·权限' },
+  { method: 'PUT', path: '/channels/{channel_id}/roles/{role_id}/permissions', api: 'putChannelRolesPermissions', group: '频道·权限' },
+
+  /* ---------------- 频道·成员 ---------------- */
+  { method: 'GET', path: '/guilds/{guild_id}/members', api: 'getGuildMembers', group: '频道·成员', note: 'after 分页，limit 1–400；仅私域' },
+  { method: 'GET', path: '/guilds/{guild_id}/members/{user_id}', api: 'getGuildMember', group: '频道·成员' },
+  { method: 'GET', path: '/channels/{channel_id}/online_nums', api: 'getOnlineNums', group: '频道·成员' },
+
+  /* ---------------- 频道·API 权限 ---------------- */
+  { method: 'GET', path: '/guilds/{guild_id}/api_permission', api: 'getGuildApiPermission', group: '频道·API权限' },
+  { method: 'POST', path: '/guilds/{guild_id}/api_permission/demand', api: 'postGuildApiPermissionDemand', group: '频道·API权限' },
+
+  /* ---------------- 频道·音频（仅音频类机器人） ---------------- */
+  { method: 'POST', path: '/channels/{channel_id}/audio', api: 'audioControl', group: '频道·音频', note: '需平台开通音频类机器人' },
+  { method: 'PUT', path: '/channels/{channel_id}/mic', api: 'putMic', group: '频道·音频' },
+  { method: 'DELETE', path: '/channels/{channel_id}/mic', api: 'deleteMic', group: '频道·音频' },
+
   /* ---------------- 频道消息 / 私信（server-inter/channel/message/） ----------------
    * 这几个不在 autogen/ 索引里，但官方文档仍有效（见 api-call-guide.html 的频道错误码段）。
    * 官方字段是 snake_case，与 v2 群/单聊的 camelCase 不同，api.js 里单独转换。
