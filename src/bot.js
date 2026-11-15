@@ -175,6 +175,15 @@ export class BotRuntime {
       online: this.online,
       appId: this.cfg.appId,
       intents: this.cfg.intents,
+      /**
+       * **当前连接实际用的** intents（构造 Gateway 时的快照）。
+       *
+       * `intents` 是配置值，`config.set` 改完就变了，但没重建 Gateway 之前
+       * 线上跑的还是旧值（`gateway.js` 的 `this.intents` 不变）。面板要显示
+       * 「当前连接 / 待生效」两栏，必须区分这两个，不能拿配置值冒充。
+       * 未连接时为 null。
+       */
+      gatewayIntents: this.gateway?.intents ?? null,
       plugins: this.plugins ? this.plugins.list() : [],
       uptimeMs: this.startedAt ? Date.now() - this.startedAt : 0,
       error: this.lastError,

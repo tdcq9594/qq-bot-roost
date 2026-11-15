@@ -16,6 +16,8 @@ import { saveBotConfig } from '../config.js';
 import { recentLogs } from '../logger.js';
 import { createToolCaller } from '../plugin/tools.js';
 import { OFFICIAL_ENDPOINTS, riskOf } from '../endpoints.js';
+import { INTENTS, INTENT_META, EVENTS } from '../events.js';
+import { CHANNEL_DAILY_ACTIVE } from '../outbound.js';
 import { registerMedia } from './media.js';
 import { registerOps } from './ops.js';
 import { sendOut, receivedAtOf, isChatKind, CHAT_KINDS } from './dispatch.js';
@@ -271,6 +273,48 @@ export function createMethods({ runtime: R, getState, log = () => {}, extBridge 
       risk: QQ_RISK.get(n) ?? 'write',
       scope: scopeForQq(n),
       blocked: QQ_BLOCKED_APIS.has(n),
+    }])),
+  }));
+
+  /**
+   * 额度快照（按会话键）。
+   *
+   * `quota.json` 的键是 `group:<id>` / `c2c:<id>` / `guild:<id>` / `dm:<id>`，
+   * 面板要显示「今天发了多少 / 上限多少」只能靠它。以前只有 `reach.get`
+   * （可达性），拿不到用量。只读，不含正文。
+   */
+  def('quota.get', 'read', '主动消息额度快照（按会话键）与各场景上限', async () => {
+    if (!R.outbound?.quotaSnapshot) throw notReady('出站调度器未就绪');
+    const items = await R.outbound.quotaSnapshot();
+    return {
+      day: new Date().toISOString().slice(0, 10),
+      items: items && typeof items === 'object' ? items : {},
+      /** 群/单聊走 `outbound.dailyActive`；频道与私信是官方固定值 */
+      limits: {
+        group: Number(R.outbound.dailyActive) || 0,
+        c2c: Number(R.outbound.dailyActive) || 0,
+        guild: CHANNEL_DAILY_ACTIVE.guild,
+        dm: CHANNEL_DAILY_ACTIVE.dm,
+      },
+    };
+  });
+
+  /**
+   * 事件表与 intents 位。
+   *
+   * dsh-roost 是**独立进程 / 独立仓库**，读不到 `events.js` 的 `EVENTS` 表，
+   * 但它要按 intent 判断「这个事件是不是频道类」来做入口过滤。与其在那边
+   * 抄一份常量表（迟早漂移），不如从协议读。只读。
+   */
+  def('system.events', 'read', '事件表与 intents 位（事件名 → intent / 会话类型）', async () => ({
+    intents: INTENTS,
+    meta: INTENT_META,
+    events: Object.fromEntries(Object.entries(EVENTS).map(([name, m]) => [name, {
+      intent: String(m?.intent ?? ''),
+      group: String(m?.group ?? ''),
+      /** 有值就是消息事件，值是会话类型（group/c2c/guild/dm） */
+      message: m?.message ?? null,
+      desc: String(m?.desc ?? ''),
     }])),
   }));
 

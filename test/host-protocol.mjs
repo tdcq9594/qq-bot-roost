@@ -76,7 +76,8 @@ function makeRuntime() {
       owners: [],
       host: { token: 'host-token-must-not-leak', enabled: false },
     },
-    status: { id: 'test-bot', state: 'online' },
+    /** 面板要区分「配置 intents」与「当前连接实际用的 intents」 */
+    status: { id: 'test-bot', state: 'online', intents: 1 << 25, gatewayIntents: 1 << 25 },
     api: new FakeApi(),
     calls,
   };
@@ -88,6 +89,9 @@ function makeRuntime() {
    * 同时新增的断言可以证明消息确实经过了调度器（而不是又直连 api 了）。
    */
   runtime.outbound = {
+    /** `quota.get` 用：给个稳定快照，别让方法报「未就绪」 */
+    dailyActive: 1000,
+    async quotaSnapshot() { return { 'group:G1': 3, 'guild:CH1': 1 }; },
     async send(o) {
       calls.push(['outbound.send', o.chatKey, o.payload, o]);
       const r = o.kind === 'group' ? await runtime.api.sendGroup(o.target, o.payload)
@@ -990,4 +994,24 @@ test('频道本地图片：file_image 走 multipart，路径字符串必须被�
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+test('新增只读方法：quota.get 给用量与上限，system.events 给事件分类，status 带当前连接 intents', async () => {
+  const { methods } = makeMethods();
+  const scopes = new Set(['read']);
+
+  const q = await methods.call('quota.get', {}, { scopes });
+  assert.equal(q.items['group:G1'], 3);
+  assert.equal(q.limits.guild, 20, '频道主动额度 20 条/天·子频道');
+  assert.equal(q.limits.dm, 2, '私信主动额度 2 条/天·用户');
+
+  const e = await methods.call('system.events', {}, { scopes });
+  assert.equal(e.intents.GUILDS, 1 << 0);
+  assert.equal(e.meta.GUILDS.bit, 0);
+  assert.equal(e.events.GUILD_CREATE.intent, 'GUILDS');
+  assert.equal(e.events.AT_MESSAGE_CREATE.message, 'guild', '消息事件要带会话类型');
+
+  const st = await methods.call('runtime.status', {}, { scopes });
+  assert.equal(st.gatewayIntents, 1 << 25, '当前连接实际用的 intents 要能读到');
+  assert.equal(st.intents, 1 << 25, '配置值仍保留');
 });

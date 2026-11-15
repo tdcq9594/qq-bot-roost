@@ -67,7 +67,7 @@ const PASSIVE_MAX_REPLIES = {
  *   · 频道私信：2 条/天·用户 + 200 条/天·机器人
  * 本地先按单会话的严的那档记，跨子频道/跨用户的总量由平台兜底。
  */
-const CHANNEL_DAILY_ACTIVE = Object.freeze({ guild: 20, dm: 2 });
+export const CHANNEL_DAILY_ACTIVE = Object.freeze({ guild: 20, dm: 2 });
 
 /** 主动消息进入审核的返回码，属于正常结果 */
 const CODE_AUDIT = 304023;
