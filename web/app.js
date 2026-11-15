@@ -6724,6 +6724,8 @@ let DEV_CURRENT = '';
  * 就等于「一点就把线上那只能改坏」，所以这里不是「默认选中」，是**唯一目标**。
  */
 let DEV_BOUND = null;
+/** 当前是否已登录开放平台（勾选逻辑要据此决定「写不写盘」） */
+let DEV_LOGGED_IN = false;
 /** 当前机器人的详情（`loadDevBot` 拿回来的那份），改配置时用来比对「有没有变」 */
 let DEV_BOT = null;
 /** 体验白名单：测试用户 + 白名单群（每次切换机器人重读） */
@@ -6846,9 +6848,31 @@ function devPaintScan(scan) {
 /**
  * 「记住登录」两个勾（扫码区、备选区）永远同进退。
  *
- * 以 `remembered`（本机有没有 dev-session.json）为唯一真相，不靠用户在页面
- * 上的操作记忆——否则取消勾选后刷新、或者票据被别处删掉，界面就会说谎。
+ * 勾选状态以**用户的选择**为准（存在 localStorage），不再拿「本机有没有
+ * dev-session.json」当唯一真相——那会把两件事混成一件：磁盘上有没有票，和
+ * 用户想不想记住。踩过的坑：取消勾选后票据文件被删掉，前端一看 `loggedIn`
+ * 是 false 就按「未登录默认勾上」把它画回勾选，用户刚取消的选择当场被覆盖，
+ * 提示却还写着「已取消」。
+ *
+ * `remembered` 只在**没有存过偏好**时用来做初值（比如换了个浏览器）。
  */
+const DEV_REMEMBER_KEY = 'roost.devRemember';
+
+function devRememberPref() {
+  try {
+    const v = localStorage.getItem(DEV_REMEMBER_KEY);
+    return v === null ? null : v === '1';
+  } catch {
+    return null; // 隐私模式下 localStorage 会抛，按「没存过」处理
+  }
+}
+
+function devSetRememberPref(on) {
+  try {
+    localStorage.setItem(DEV_REMEMBER_KEY, on ? '1' : '0');
+  } catch { /* 存不了就只在这次页面里有效，不影响功能 */ }
+}
+
 function devPaintRemember(on) {
   for (const sel of ['#devScanRemember', '#devRemember']) {
     const box = $(sel);
@@ -6916,15 +6940,19 @@ function devPaintStatus(st) {
   devPaintScan(st?.scan);
   devPaintAuto(st?.autoRelogin);
   /**
-   * 勾选状态：登录时以「本机有没有存票」为准；**没登录时一律显示勾上**。
+   * 勾选状态：**用户选过就按用户的**（localStorage），没选过才看磁盘。
    *
-   * 后者是「默认记住」的落点。退出登录会删掉票据文件，假如这时把勾也清掉，
-   * 下次扫码就是按 `remember:false` 走的——用户明明什么都没改，登录态却从
-   * 「记得」变成「不记得」，重启又得重扫。所以未登录时勾只表示默认意图。
+   * 这里绝不能按登录态去覆盖：取消勾选后 `loggedIn` 可能同时变 false（比如
+   * 用户先退出登录再取消），覆盖回去就会「点了取消还是勾着」。
    */
-  if (st?.loggedIn) {
-    if (typeof st?.remembered === 'boolean') devPaintRemember(st.remembered);
+  DEV_LOGGED_IN = Boolean(st?.loggedIn);
+  const pref = devRememberPref();
+  if (pref !== null) {
+    devPaintRemember(pref);
+  } else if (st?.loggedIn && typeof st?.remembered === 'boolean') {
+    devPaintRemember(st.remembered);
   } else {
+    // 第一次来、又没登录：默认勾上（这是「默认记住登录」的落点）
     devPaintRemember(true);
   }
 
@@ -7318,13 +7346,35 @@ async function devSave(patch, what) {
    */
   const devSetRemember = async (on) => {
     const want = Boolean(on);
+
+    /**
+     * 没登录时这里没有任何票可以写盘或删——以前照样发请求，必然回
+     * `401 NOT_LOGGED_IN`，然后把勾弹回去，用户观感是「勾不动」。
+     * 现在只记下意图：下次登录时按它决定要不要保存。
+     */
+    if (!DEV_LOGGED_IN) {
+      devSetRememberPref(want);
+      devPaintRemember(want);
+      devRememberSay(
+        want ? '已记住：下次登录会保存票据，重启不用重扫' : '已取消：下次登录不保存，重启要重新扫码',
+        'ok',
+      );
+      return;
+    }
+
     devRememberSay(want ? '正在写入本机…' : '正在删除本机票据…');
     try {
       const out = await api('/api/dev/remember', {
         method: 'POST',
         body: JSON.stringify({ remember: want }),
       });
-      devPaintRemember(out?.remembered ?? want);
+      /**
+       * 以**后端实际结果**为准记住这次选择：勾上但写盘失败时，不能显示成
+       * 「已记住」。同时把偏好落下来，刷新/退出登录都不会把它冲掉。
+       */
+      const actual = typeof out?.remembered === 'boolean' ? out.remembered : want;
+      devSetRememberPref(actual);
+      devPaintRemember(actual);
       devPaintStatus(out);
       devRememberSay(
         out?.remembered
@@ -7334,6 +7384,7 @@ async function devSave(patch, what) {
       );
     } catch (e) {
       // 失败要把勾弹回去，不能让界面显示一个没生效的状态
+      devSetRememberPref(!want);
       devPaintRemember(!want);
       devRememberSay('改不了：' + errText(e), 'error');
     }
@@ -7412,8 +7463,14 @@ async function devSave(patch, what) {
     DEV_BOT = null;
     devSay('已退出', 'ok');
     devScanSay('已退出。需要重新登录时点「扫码登录」。', 'ok');
-    // 票据文件已被删；勾保持「记住」——那是下次登录的默认值
-    devRememberSay('已退出：本机保存的票据已删除，下次登录仍会默认记住', 'ok');
+    // 票据文件已被删；勾保持用户之前的选择，别在这里替他改主意
+    const keep = devRememberPref() !== false;
+    devRememberSay(
+      keep
+        ? '已退出：本机保存的票据已删除，下次登录仍会记住'
+        : '已退出：本机保存的票据已删除，下次登录也不保存',
+      'ok',
+    );
     devPaintStatus({ loggedIn: false });
   });
 
