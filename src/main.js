@@ -297,8 +297,35 @@ function registerCoreCommands(rt) {
     if (h) await h(msg, { args: msg.args, raw: msg.content, bot: rt });
   });
 
+  /**
+   * 延迟拆分。
+   *
+   * 两个时间点都是现成的（`message.js` 里的 `receivedAt` 与 `at`）：
+   *   · `msg.at`         QQ 事件时间戳（平台给的）
+   *   · `msg.receivedAt` 框架收到这条消息的时刻
+   *
+   * 于是「网络传输」= 收到时刻 − 事件时间戳，「插件处理」= 现在 − 收到时刻。
+   * 这是**单向时间戳差，不是 ping-pong RTT**——官方插件同口径，别当往返延迟看。
+   *
+   * 群聊里 `timestamp` 偶尔缺失，此时 `at` 会回退成 `receivedAt`，
+   * 拆出来的网络耗时恒为 0。与其输出一个假的 0ms，不如只回 pong。
+   */
   core('ping', { desc: '测试机器人是否在线' }, async (msg) => {
-    await msg.reply(`pong（已运行 ${Math.floor(runtime.uptimeMs / 1000)} 秒）`);
+    const up = Math.floor(runtime.uptimeMs / 1000);
+    const at = Number(msg.at) || 0;
+    const recv = Number(msg.receivedAt) || 0;
+    /** at >= recv 说明时间戳缺失或时钟偏差，拆出来的数不可信 */
+    if (!at || !recv || at >= recv) {
+      await msg.reply(`pong（已运行 ${up} 秒）`);
+      return;
+    }
+    const now = Date.now();
+    const total = Math.max(0, now - at);
+    const net = Math.max(0, recv - at);
+    const proc = Math.max(0, now - recv);
+    await msg.reply(
+      [`pong（已运行 ${up} 秒）`, `⏱ ${total}ms`, `  ├ 网络 ${net}ms`, `  └ 处理 ${proc}ms`].join('\n'),
+    );
   });
 
   /**
