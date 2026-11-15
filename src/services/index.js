@@ -19,6 +19,8 @@ import { ConfigWatchService } from './config-watch.js';
 import { RestartService } from './restart.js';
 import { AutoUpdateService } from './auto-update.js';
 import { PluginWatchService } from './plugin-watch.js';
+import { NicknameService } from './nickname.js';
+import { DevTicketService } from './dev-ticket.js';
 
 const log = createLogger('services');
 
@@ -60,6 +62,25 @@ export class Services {
     // 插件热重载：默认开。改完插件代码存盘即生效，不用重启也不用点重载
     if (globalCfg.plugins?.hotReload !== false) {
       this.list.push(new PluginWatchService({ globalCfg, getRuntimes }));
+    }
+    // 昵称同步：默认开。启动后把本机显示名对齐平台昵称（改了名不至于一直喊旧的）
+    if (cfg.nickname !== false) {
+      this.list.push(new NicknameService({ getRuntimes }));
+    }
+    /**
+     * 开放平台票据自检：默认开。
+     *
+     * 它是**主动**检测——启动后探一次，之后每 30 分钟复查。票据过期就地在
+     * 后台换票（无头浏览器，不弹窗），换不到才 warn。没有它的话，续期只能
+     * 等某个请求撞上 401，用户得先打开面板才知道「早就过期了」。
+     *
+     * 配成对象时取 `minutes`；写 `false` 整体关掉。
+     */
+    if (cfg.devTicket !== false) {
+      this.list.push(new DevTicketService({
+        getRuntimes,
+        minutes: cfg.devTicket?.minutes,
+      }));
     }
   }
 

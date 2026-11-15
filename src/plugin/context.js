@@ -7,6 +7,7 @@ import { normalizeDashboard } from './dashboard.js';
 import { createToolCaller } from './tools.js';
 import { createMailApi, sharedMail } from '../mail/service.js';
 import { wrapApiForLedger } from './api-record.js';
+import { getDevPlatform } from '../host/dev.js';
 
 
 /**
@@ -468,6 +469,20 @@ export function createContext({ meta, paths, registry, api, cfg, config, configS
      * **`unknown` 不能当 `no` 用**——未知是「不知道」，不是「不行」。
      */
     reach,
+    /**
+     * 开放平台（开发者后台）：查机器人列表、改资料 / 回调 / IP 白名单。
+     *
+     *   await ctx.dev.bots();
+     *   await ctx.dev.setBot('102030405', { base: { desc: '新的简介' } });
+     *
+     * **不给 `loginImport` / `logout`**：票据是该开发者全部机器人的管理权，
+     * 只能由人从面板导入（`/api/dev/login/import`）。插件拿到的永远是
+     * 「已登录的那个人」的会话，而且只在本进程内存里。
+     *
+     * 写操作会让 `dev.bot.set` 产生一条 `lastWrite`，面板能看到「谁在什么时候
+     * 改过」；插件没有独立身份，所以审计只能记到「插件调用」这一级。
+     */
+    dev: getDevPlatform({ log: (m) => logger.info(String(m)) }).facade(),
     /**
      * 事件账本（**只读**）：`ctx.ledger.recent({chatId})` / `.timeline({chatId, anchorSeq})` / `.get(id)`。
      *

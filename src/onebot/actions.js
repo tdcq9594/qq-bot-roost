@@ -13,7 +13,9 @@ import { parseOutgoing, renderPlainText, renderMarkdownText, MAX_PARTS } from '.
 import { recallNotice } from './translate.js';
 import { fetchAudio, toSilk, uploadVoice } from './voice.js';
 import { fileURLToPath } from 'node:url';
+import fs from 'node:fs/promises';
 import crypto from 'node:crypto';
+import { getDevPlatform } from '../host/dev.js';
 
 function obError(retcode, message) {
   const e = new Error(message);
@@ -55,6 +57,8 @@ export function createActions({
   silk = null,
   version = '',
   historyLimit = 100,
+  /** 开放平台门面；测试可以塞假的，正常跑用单例 */
+  dev = null,
 }) {
   const { api, outbound, gate, groups } = runtime;
   const log = runtime.log;
@@ -70,6 +74,76 @@ export function createActions({
     const st = Number(e?.status ?? 0);
     return st >= 400 && st < 500 && st !== 401 && st !== 429;
   };
+
+  /* ---------------- 机器人资料（开放平台后台） ----------------
+   *
+   * OneBot 客户端的「改机器人资料」只能落到官方后台，所以这条链跟发消息
+   * 完全无关：用的是**开发者账号票据**，不是机器人 token。三条辅助函数
+   * 把「要不要人登录」「改哪一只」「图片是什么格式」这三件事先钉死。
+   */
+
+  /** 这只鸟的 AppID；没有它连改谁都不知道 */
+  const requireAppid = () => String(runtime.cfg?.appId ?? '').trim();
+
+  const devOf = () => dev || getDevPlatform({ log: (m) => log.info?.(String(m)) });
+
+  /**
+   * 拿到能干活的门面，否则抛出**能指导用户下一步**的错误。
+   *
+   * 用 `checkSession(verify)` 而不是「先 getBot 再看抛什么」：没登录、
+   * 登错号、账号里没这只、平台限频——四种原因对用户来说动作完全不同，
+   * 混成一句「失败」等于让他去猜。
+   */
+  async function requireDev() {
+    const appid = requireAppid();
+    if (!appid) throw obError(1400, '配置里没有 AppID，没法定位要改哪只机器人');
+    const P = devOf();
+    const check = P.check || P.checkSession;
+    let chk;
+    try {
+      chk = await check.call(P, { verify: true, bound: { id: String(runtime.id ?? ''), name: botName, appid } });
+    } catch (e) {
+      throw obError(1401, `开放平台检查失败：${e?.message || e}`);
+    }
+    if (chk?.state === 'ready') return P;
+    // 1401 = 需要人先做一步（登录 / 换号 / 填 AppID），不是技术故障
+    throw obError(1401, `改不了机器人资料：${chk?.message || '未知原因'}${chk?.hint ? `。${chk.hint}` : ''}`);
+  }
+
+  /** 认图片格式：官方只收 png / bmp / jpeg / jpg / gif */
+  function sniffImage(buf) {
+    if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
+    if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+    const head = buf.slice(0, 4).toString('ascii');
+    if (head.startsWith('GIF')) return 'image/gif';
+    if (head.startsWith('BM')) return 'image/bmp';
+    return '';
+  }
+
+  /**
+   * `avatar` 参数 → `setAvatar` 能吃的形态。
+   *
+   * 客户端给的东西三种：http(s) 地址、`base64://`、`file:///`（也有直接
+   * 甩本地路径的）。顺带在这里拦住官方的两条硬限制：≤ 2 MB、格式在白名单。
+   */
+  async function avatarSource(raw) {
+    const v = String(raw || '').trim();
+    if (/^https?:\/\//i.test(v)) return { url: v };
+
+    let buf = null;
+    if (/^base64:\/\//i.test(v)) {
+      buf = Buffer.from(v.slice('base64://'.length), 'base64');
+    } else if (v.startsWith('file://')) {
+      buf = await fs.readFile(fileURLToPath(v)).catch(() => null);
+    } else if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(v)) {
+      buf = await fs.readFile(v).catch(() => null);
+    }
+    if (!buf?.length) throw obError(1400, 'avatar 只支持 http(s) 地址、base64://、file:/// 或本地路径');
+    if (buf.length > 2 * 1024 * 1024) throw obError(1400, `头像 ${(buf.length / 1024 / 1024).toFixed(1)} MB，超过官方 2 MB 上限`);
+    const mime = sniffImage(buf);
+    if (!mime) throw obError(1400, '官方只收 png / bmp / jpeg / jpg / gif，这张认不出格式');
+    return { dataUrl: `data:${mime};base64,${buf.toString('base64')}` };
+  }
 
   /** 统一的发送：先过暂停闸，再拆条，最后逐条走 outbound */
   async function sendMessage({ kind, targetOpenid, chatId, parsed }) {
@@ -499,6 +573,65 @@ export function createActions({
       const openid = ids.openidOfUser(params?.user_id);
       if (!openid) throw obError(1404, '这个 QQ 号没有对应的 openid');
       return { messages: historyOf(openid, 'c2c', Number(params?.count) || 20) };
+    },
+
+    /**
+     * 改机器人资料（昵称 / 头像 / 简介）。
+     *
+     * OneBot 客户端里的 `set_qq_profile` 是「改这个号的名字和头像」，官方
+     * 机器人唯一能改的地方就是开放平台后台，所以直接映射过去：
+     *   · `nickname`            → `dev.bot.set` 的 `base.name`
+     *   · `avatar`              → `dev.setAvatar`（支持 http url / base64:// / file:///）
+     *   · `longNick`/`personal_note` → `base.desc`（后台的「介绍」）
+     *
+     * 三道闸缺一不可：必须已登录开放平台（账号级票据）、只能改**这只**机器人
+     * （`cfg.appId`，不接受参数另指）、只发改动过的项（平台按次限次数）。
+     */
+    async set_qq_profile(params) {
+      const p = params ?? {};
+      const name = p.nickname == null ? '' : String(p.nickname).trim();
+      const avatar = p.avatar == null ? '' : String(p.avatar).trim();
+      const descRaw = [p.longNick, p.long_nick, p.personal_note, p.desc].find((v) => v != null);
+      const desc = descRaw == null ? '' : String(descRaw).trim();
+
+      if (!name && !avatar && !desc) {
+        throw obError(1400, '没有可改的字段：兼容层支持 nickname / avatar / longNick（personal_note）；'
+          + 'company、email 这些账号资料官方后台没有接口，改不了');
+      }
+
+      const P = await requireDev();
+      const appid = requireAppid();
+      const touched = [];
+
+      if (name || desc) {
+        const base = {};
+        if (name) base.name = name;
+        if (desc) base.desc = desc;
+        await P.setBot(appid, { base });
+        touched.push(name ? 'nickname' : '', desc ? 'longNick' : '');
+      }
+      if (avatar) {
+        await P.setAvatar(appid, await avatarSource(avatar));
+        touched.push('avatar');
+      }
+      log.info?.(`[onebot] set_qq_profile → ${touched.filter(Boolean).join(' / ')}`);
+      return {};
+    },
+
+    /** 读机器人简介（官方后台的「介绍」） */
+    async get_self_longnick() {
+      const P = await requireDev();
+      const bot = await P.getBot(requireAppid());
+      return { longNick: String(bot?.base?.desc ?? '') };
+    },
+
+    /** 写机器人简介（NapCat / Lagrange 的扩展动作） */
+    async set_self_longnick(params) {
+      const longNick = String(params?.longNick ?? params?.long_nick ?? params?.desc ?? '').trim();
+      if (!longNick) throw obError(1400, 'longNick 不能是空的');
+      const P = await requireDev();
+      await P.setBot(requireAppid(), { base: { desc: longNick } });
+      return {};
     },
 
     async mark_msg_as_read() {

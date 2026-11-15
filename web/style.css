@@ -349,6 +349,22 @@ body {
 [data-theme="dark"] .icon-btn .ic-sun { display: block; }
 [data-theme="dark"] .icon-btn .ic-moon { display: none; }
 
+/* 顶栏里少数「带字」的按钮。
+ *
+ * `.icon-btn` 是 34×34 的方块（给图标用的），直接往里塞「更换主题」四个字
+ * 会被挤成两行或者溢出。这里改成按内容撑宽 + 左右留白，高度仍跟旁边图标
+ * 按钮对齐，免得顶栏高低不齐。
+ */
+.icon-btn-text {
+  width: auto;
+  min-width: 34px;
+  padding: 0 11px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 12.5px; line-height: 1;
+  letter-spacing: .02em;
+  white-space: nowrap;
+}
+
 /* 关闭程序按钮：平时低调，悬停才显红，避免误点 */
 .icon-btn-danger:hover {
   background: var(--err-soft);
@@ -2370,3 +2386,69 @@ tr[data-group-head] td::before { content: none; }
 .btn.plugin-more[aria-expanded="false"] {
   color: var(--primary); border-color: var(--primary-border); background: var(--primary-soft);
 }
+
+/* ---------- 开放平台 · 每个字段自己一行、自己一个保存按钮 ----------
+ *
+ * 为什么不是 .grid2：那边是「两列并排 + 底部一排按钮」，一个按钮管一片。
+ * 平台按「资料 / 连接 / 白名单」分别计次数，一次提交改好几项会出现
+ * 「一半成功」，用户也说不清是哪条没生效。这里就一框一存。
+ */
+.dev-field {
+  display: flex; align-items: flex-end; gap: 10px;
+  margin: 0 0 12px;
+}
+.dev-field > label { flex: 1 1 auto; min-width: 0; margin: 0; }
+/* 按钮贴着输入框底边，但不要被 textarea 拉高 */
+.dev-field > .btn { flex: 0 0 auto; margin-bottom: 2px; }
+
+/* 头像那一行：左边预览，右边输入 + 选图 */
+.dev-avatar { display: flex; gap: 10px; align-items: flex-start; margin-top: 4px; }
+.dev-avatar img {
+  width: 56px; height: 56px; border-radius: 50%; flex: 0 0 auto;
+  object-fit: cover; background: var(--panel-2); border: 1px solid var(--border);
+}
+.dev-avatar img[data-empty="1"] { opacity: .35; }
+.dev-avatar-pick { flex: 1 1 auto; min-width: 0; }
+
+@media (max-width: 720px) {
+  /* 窄屏改上下排：按钮顶到右侧会把输入框挤成一条缝 */
+  .dev-field { flex-wrap: wrap; align-items: stretch; }
+  .dev-field > .btn { margin-bottom: 0; align-self: flex-end; }
+}
+
+/* ---------- 开放平台 · 白名单（测试用户 / 白名单群） ----------
+ *
+ * 区别于上面的配置区：这里每条都是「立刻生效」的独立动作，没有「保存」。
+ * 所以列表要能把「当前平台上是哪些」画清楚，删按钮就挂在这一行上——
+ * 让用户清楚自己点掉的是哪一条，而不是删完再回来看列表对不对。
+ */
+.dev-scope-block { margin-top: 4px; }
+.dev-scope-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 2px; }
+.dev-scope-title { font-weight: 600; }
+.dev-scope-list { display: flex; flex-direction: column; gap: 6px; }
+
+.dev-scope-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel-2);
+}
+.dev-scope-item-main {
+  flex: 1 1 auto; min-width: 0;
+  display: flex; align-items: baseline; gap: 8px;
+  /* 名字太长时压缩名字，不要把号码挤到第二行——号码是要核对的那部分 */
+  flex-wrap: nowrap;
+}
+.dev-scope-item-name {
+  flex: 0 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 46%;
+}
+.dev-scope-item-id {
+  flex: 0 0 auto;
+  font-family: var(--mono, ui-monospace, monospace); color: var(--text-2); font-size: 12px;
+}
+/* 「机器人不在这个群」：不是错误，是让人去检查群号。
+   靠右站，别和号码黏在一起（黏住会被当成长号码的一部分）。 */
+.dev-scope-item-warn { margin-left: auto; color: var(--warn, #d68a00); font-size: 12px; white-space: nowrap; }
+.dev-scope-item > .btn { flex: 0 0 auto; }
+.dev-scope-empty { color: var(--text-2); font-size: 13px; padding: 6px 2px; }

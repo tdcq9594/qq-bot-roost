@@ -25,8 +25,13 @@
     </div>
   </div>
   <div class="bot-switch" id="botSwitch">
+    <!--
+      这里原来有一个 8px 的红/绿点表示在线状态。去掉的原因：顶栏这个位置
+      是「我是谁」的标识，不是状态灯；而状态点只有颜色、没有文字，绿点/红点
+      对色弱用户等于没有，旁边还有「在线 · 离线」四个字在页面里，重复且容易误读。
+      下拉列表里仍保留点（那是列表里快速扫视用的，和「在线 / 离线」文字并存）。
+    -->
     <button class="bot-trigger" id="botTrigger" aria-haspopup="listbox" aria-expanded="false">
-      <span class="bot-dot" id="botDot"></span>
       <span class="bot-name" id="botNameLabel">加载中…</span>
       <svg class="bot-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor"
            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -118,6 +123,9 @@
         </button>
         <div class="tab-menu" hidden>
           <button class="tab-item" data-tab="config" data-primary>配置</button>
+          <!-- 开放平台：开发者后台里的机器人配置（资料/回调/白名单），
+               和「配置」页不是一回事——那边改的是本机运行时 -->
+          <button class="tab-item" data-tab="dev">开放平台</button>
           <!-- 身份：QQ号 / 群号 ↔ openid。常用页而不是设置项 -->
           <button class="tab-item" data-tab="identity">身份</button>
           <button class="tab-item" data-tab="groups">群组</button>
@@ -176,8 +184,8 @@
 
   <div class="topbar-spacer"></div>
   <div class="crumb" id="navCrumb">概览</div>
-  <button class="icon-btn" id="btnPalette" title="配色：归巢暖琥珀（点击轮换）" aria-label="切换配色主题">
-    <span id="paletteMark">暖</span>
+  <button class="icon-btn icon-btn-text" id="btnPalette" title="配色：归巢暖琥珀（点击轮换）" aria-label="更换配色主题">
+    更换主题
   </button>
   <button class="icon-btn" id="btnTheme" title="切换日间 / 夜间" aria-label="切换主题">
     <svg class="ic-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -507,6 +515,213 @@
   </section>
 
   <!-- 配置 -->
+  <section id="tab-dev" class="panel">
+    <div class="box">
+      <div class="box-hd"><h3>登录开放平台</h3>
+        <span class="hint">开发者账号级 · 票据只在本机</span>
+      </div>
+      <p class="hint" id="devLoginState">正在读取状态…</p>
+
+      <div id="devScanBox">
+        <div class="btn-row">
+          <button type="button" class="btn" id="devScanBtn">扫码登录</button>
+          <button type="button" class="btn small" id="devScanCancelBtn" hidden>取消扫码</button>
+          <button type="button" class="btn small" id="devOpenDashBtn">打开开发平台</button>
+          <button type="button" class="btn small" id="devLogoutBtn">退出登录</button>
+        </div>
+        <!--
+          「记住登录」默认勾上，而且**勾/取消会立刻落盘**（走 /api/dev/remember）。
+          以前这个勾只在点「扫码登录」那一刻读一次，已登录时勾它等于没勾，
+          刷新又空回去，看着就像「缺个保存按钮」。
+        -->
+        <label class="switch small" style="margin-top:8px">
+          <input type="checkbox" id="devScanRemember" checked> 记住登录（默认开启，改完立即生效）
+        </label>
+        <p class="hint" id="devRememberMsg"></p>
+        <!--
+          自动续期说明放在这里：票据一过期，框架会用扫码窗口那个 profile
+          自己开一次浏览器换新票、拿到就关。不写清楚的话，用户只会看到
+          「浏览器自己弹出来了」，还以为中毒了。
+        -->
+        <p class="hint" id="devAutoMsg"></p>
+        <p class="hint" id="devScanMsg">点「扫码登录」会在这台机器上开一个独立浏览器窗口，用手机 QQ 扫一下就好。登录成功后窗口会停在机器人设置页，<b>留着看或随手关掉都行</b>——后续请求由框架自己发，不依赖这个窗口。</p>
+        <p class="hint">扫之前先确认手机 QQ 登的是<b>管着这台机器人（<span id="devBoundInline">appid 未知</span>）的那个号</b>：这个页面只会改它，登错账号会直接告诉你。</p>
+
+        <details id="devBrowserBox" style="margin-top:10px">
+          <summary class="hint" style="cursor:pointer">没找到浏览器，或装在自定义路径？手动指定</summary>
+          <div class="full" style="margin-top:10px">
+            <p class="hint" style="margin:0 0 8px">只认 Chromium 内核（Edge / Chrome / Chromium / Brave / Vivaldi）。Firefox 和 Safari 不支持调试协议，用不了扫码登录，只能走下面的备选。</p>
+            <label>浏览器可执行文件路径
+              <input id="devBrowserPath" placeholder="例如 C:\Program Files\Chromium\Application\chrome.exe">
+            </label>
+            <div class="btn-row">
+              <button type="button" class="btn small" id="devBrowserSave">保存路径</button>
+              <button type="button" class="btn small" id="devBrowserClear">改回自动探测</button>
+            </div>
+            <p class="hint" id="devBrowserMsg"></p>
+          </div>
+        </details>
+      </div>
+
+      <details id="devFallback" style="margin-top:14px">
+        <summary class="hint" style="cursor:pointer">备选：从已登录的浏览器复制一个请求（没装 Edge / Chrome，或扫码被安全软件拦住时用）</summary>
+        <div class="full" style="margin-top:10px">
+          <!--
+            这里以前是「复制控制台脚本」，已删掉，原因是它根本不可能成功：
+            登录票据里的 `b-token` / `p_skey` 是 httpOnly，页面里的 JS（含控制台）
+            一律读不到 document.cookie 里的它们，脚本只能抄到 qticket_lite 这几个
+            半串的，导入必然 401。DevTools 的「Copy as cURL」是浏览器自己导出的，
+            带 httpOnly，所以这条才是能用的路。
+          -->
+          <ol class="hint" style="margin:0 0 10px 18px;padding:0;line-height:1.7">
+            <li>在你要用来登录的浏览器里打开 <code>q.qq.com/qqbot/dashboard/</code>，扫码登录</li>
+            <li>按 <b>F12</b> → 切到 <b>Network</b>（网络）标签 → 刷新一下页面</li>
+            <li>筛选框里输入 <code>bot.q.qq.com</code>，在结果里点<b>任意一条</b>请求</li>
+            <li>右键那条请求 → <b>Copy</b> → <b>Copy as cURL</b>（bash / cmd / PowerShell 都行）</li>
+            <li>回到这里 <b>Ctrl+V</b> 粘到下面输入框，点「导入并验证」</li>
+          </ol>
+          <pre id="devCurlHow" style="max-height:180px;overflow:auto;background:var(--panel-2);border:1px solid var(--border);border-radius:8px;padding:10px;margin:8px 0;font-size:12px;line-height:1.5;white-space:pre-wrap;color:var(--text-2)">粘进来的应该长这样，关键是里面有 -H 'cookie: ...'（这一行带 httpOnly 票据）：
+
+curl 'https://bot.q.qq.com/cgi-bin/v2/info/list_bots' \
+  -H 'cookie: p_skey=...; b-token=...; qticket_lite=...; developer_id_lite=...' \
+  -H 'content-type: application/json' \
+  --data-raw '{"developer_id":"...","filter":{"page_limit":100}}'</pre>
+          <label>粘贴 cURL（或 cookie 串）
+            <textarea id="devCookieInput" rows="4"
+              placeholder="curl 'https://bot.q.qq.com/...' -H 'cookie: ...'"></textarea>
+          </label>
+          <label class="switch small" style="margin-top:8px">
+            <input type="checkbox" id="devRemember" checked> 记住登录（和上面那个是同一个开关）
+          </label>
+          <div class="btn-row">
+            <button type="button" class="btn" id="devImportBtn">导入并验证</button>
+          </div>
+          <p class="hint" id="devLoginMsg"></p>
+        </div>
+      </details>
+    </div>
+
+    <div class="box" id="devBotsBox" hidden>
+      <div class="box-hd"><h3>当前机器人</h3><span class="hint" id="devBotCount"></span></div>
+      <div class="grid2">
+        <div>
+          <div id="devBoundName" style="font-weight:600"></div>
+          <div class="hint" id="devBoundAppid"></div>
+        </div>
+        <div class="hint" id="devBotMeta" style="align-self:end"></div>
+      </div>
+      <p class="hint" id="devBoundMsg"></p>
+    </div>
+
+    <div class="box" id="devEditBox" hidden>
+      <div class="box-hd"><h3>机器人配置</h3><span class="hint" id="devEditHint"></span></div>
+
+      <!-- 每个框配一个自己的保存按钮：平台按「资料 / 连接 / 白名单」分别计次数，
+           一次改一堆会出现「一半成功」，用户也说不清是哪条没生效 -->
+      <div class="dev-field">
+        <label>头像
+          <div class="dev-avatar">
+            <img id="devAvatarImg" alt="当前头像" referrerpolicy="no-referrer" title="当前头像">
+            <div class="dev-avatar-pick">
+              <input id="devAvatarSrc" placeholder="本地图片 / 图片地址 / 官方页面的 avatar_id">
+              <div class="btn-row" style="margin:6px 0 0">
+                <button type="button" class="btn small" id="devAvatarPick">选本地图片</button>
+                <input type="file" id="devAvatarFile" accept="image/*" hidden>
+                <span class="hint" id="devAvatarMsg"></span>
+              </div>
+              <div class="hint" style="margin-top:4px">
+                官方限制：<b>png / bmp / jpeg / jpg / gif</b>，不超过 <b>2 MB</b>，必须正方形（官方页面建议 144×144）。
+                选本地图片会先居中裁成正方形、缩到 512×512 的 PNG 再上传，透明底不会变黑。
+              </div>
+            </div>
+          </div>
+        </label>
+        <button type="button" class="btn small" id="devSaveAvatar">保存头像</button>
+      </div>
+
+      <div class="dev-field">
+        <label>昵称<input id="devName" maxlength="20" placeholder="机器人昵称"></label>
+        <button type="button" class="btn small" id="devSaveName">保存昵称</button>
+      </div>
+
+      <div class="dev-field">
+        <label>简介<textarea id="devDesc" rows="3" maxlength="100" placeholder="公开展示的简介"></textarea></label>
+        <button type="button" class="btn small" id="devSaveDesc">保存简介</button>
+      </div>
+
+      <div class="dev-field">
+        <label>Webhook 地址<input id="devWebhook" placeholder="https://example.com/callback"></label>
+        <button type="button" class="btn small" id="devSaveWebhook">保存 Webhook</button>
+      </div>
+
+      <div class="dev-field">
+        <label>连接动作
+          <select id="devConnectAction">
+            <option value="1">保存 Webhook</option>
+            <option value="2">校验 Webhook</option>
+            <option value="3">切换 WebSocket</option>
+          </select>
+        </label>
+        <button type="button" class="btn small" id="devSaveConnect">执行</button>
+      </div>
+
+      <div class="dev-field">
+        <label>IP 白名单（每行一个）<textarea id="devIps" rows="3" placeholder="1.2.3.4"></textarea></label>
+        <button type="button" class="btn small" id="devSaveIps">保存白名单</button>
+      </div>
+
+      <p class="hint" id="devEditMsg"></p>
+      <p class="hint">每个框各存各的：平台按「资料 / 连接 / 白名单」分别计次数，一次改一堆容易「一半成功」。改连接方式会立即生效，机器人可能短暂掉线。</p>
+    </div>
+
+    <!--
+      体验白名单：机器人「正式发布」之前能用它的人/群。
+
+      这两块和上面的配置分开放，是因为它们改的是**谁有权用**，不是机器人长什么样；
+      混在一起容易一点「保存」就把名单也提交一遍。每条都是即时生效的单独动作。
+    -->
+    <div class="box" id="devScopeBox" hidden>
+      <div class="box-hd"><h3>白名单</h3><span class="hint" id="devScopeHint"></span></div>
+
+      <div class="dev-scope-block">
+        <div class="dev-scope-head">
+          <span class="dev-scope-title">测试用户</span>
+          <span class="hint" id="devUserCount"></span>
+        </div>
+        <p class="hint" style="margin:0 0 8px">
+          填 <b>QQ 号</b>（5~11 位数字）。名单里的人可以在机器人发布前私聊调试；
+          移除后该用户就不能继续体验了。
+        </p>
+        <div id="devUserList" class="dev-scope-list"></div>
+        <div class="dev-field" style="margin-top:8px">
+          <label>QQ 号<input id="devUserInput" inputmode="numeric" maxlength="11" placeholder="例如 10001"></label>
+          <button type="button" class="btn small" id="devAddUser">添加用户</button>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="dev-scope-block">
+        <div class="dev-scope-head">
+          <span class="dev-scope-title">白名单群</span>
+          <span class="hint" id="devGroupCount"></span>
+        </div>
+        <p class="hint" style="margin:0 0 8px">
+          填 <b>群号</b>（5~10 位数字），最多 20 个。白名单群可以用一套独立的群管能力配置，
+          常用来给新功能做小范围测试；机器人不在群里也能先加，但会标出来。
+        </p>
+        <div id="devGroupList" class="dev-scope-list"></div>
+        <div class="dev-field" style="margin-top:8px">
+          <label>群号<input id="devGroupInput" inputmode="numeric" maxlength="10" placeholder="例如 123456789"></label>
+          <button type="button" class="btn small" id="devAddGroup">添加群</button>
+        </div>
+      </div>
+
+      <p class="hint" id="devScopeMsg"></p>
+      <p class="hint">加/删都是立刻生效的单个动作，没有「保存」这一步；改动会同步到开放平台后台。</p>
+    </div>
+  </section>
+
   <section id="tab-config" class="panel">
     <form id="cfgForm">
       <div class="box">
@@ -1576,5 +1791,6 @@
 
 <script src="/vendor/qrcode.js"></script>
 <script src="/app.js"></script>
+
 </body>
 </html>

@@ -44,6 +44,11 @@ export const CAPABILITY = [
   { name: 'set_group_leave', level: 'unsupported', why: '官方无对应接口' },
   { name: 'set_group_special_title', level: 'unsupported', why: '官方无对应接口' },
 
+  /* 资料（走开发者后台，不是机器人 token） */
+  { name: 'set_qq_profile', level: 'degrade', why: '只改官方后台的昵称 / 头像 / 简介；company、email 这类账号资料官方没接口' },
+  { name: 'set_self_longnick', level: 'support', note: '写机器人简介（= 后台的「介绍」）' },
+  { name: 'get_self_longnick', level: 'support', note: '读机器人简介' },
+
   /* 其它 */
   { name: 'set_input_status', level: 'unsupported', why: '只有单聊能发「输入中」，兼容层没接' },
   { name: 'send_poke', level: 'unsupported', why: '官方没有拍一拍' },

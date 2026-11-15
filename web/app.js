@@ -30,8 +30,27 @@ async function api(path, opts = {}) {
   const text = await res.text();
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
-  if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+  if (!res.ok) {
+    /**
+     * 把后端的错误码和「下一步」一起带出来。
+     *
+     * 只给 `message` 的话，前端只能原样贴一句话，用户看不出是自己操作错了、
+     * 平台限频了、还是该重新登录。`code` 用于分支判断，`hint` 用于展示。
+     */
+    const err = new Error(data?.error || `HTTP ${res.status}`);
+    err.code = String(data?.code || '');
+    err.hint = String(data?.hint || '');
+    err.status = res.status;
+    throw err;
+  }
   return data;
+}
+
+/** 错误 + 下一步，统一成一行给人看 */
+function errText(e) {
+  const msg = String(e?.message || e || '');
+  const hint = String(e?.hint || '');
+  return hint && !msg.includes(hint) ? `${msg}（${hint}）` : msg;
 }
 
 /* ---------------- 轻量提示 ---------------- */
@@ -130,9 +149,14 @@ function botById(id) {
 function updateBotTrigger() {
   const cur = botById(CURRENT_BOT) ?? BOTS[0] ?? null;
   $('#botNameLabel').textContent = cur ? cur.name : '无机器人';
-  const dot = $('#botDot');
-  dot.className = 'bot-dot' + (cur?.online ? ' on' : cur ? ' off' : '');
-  dot.title = cur?.online ? '在线' : '离线';
+  /**
+   * 顶栏不再画状态点（见 index.html 里的说明）：那里只回答「我在管哪只鸟」。
+   * 在线状态照旧在「运行」页和下拉列表里看，数据一点没少，只是不再用颜色当唯一信号。
+   */
+  const trigger = $('#botTrigger');
+  if (trigger) {
+    trigger.title = cur ? `${cur.name}${cur.online ? ' · 在线' : ' · 离线'}` : '还没有机器人';
+  }
 }
 
 function renderBotMenu(keyword = '') {
@@ -485,10 +509,16 @@ const PALETTES = [
 function setPalette(id, { persist = true } = {}) {
   const p = PALETTES.find((x) => x.id === id) || PALETTES[0];
   document.documentElement.dataset.palette = p.id;
-  const mark = $('#paletteMark');
-  if (mark) mark.textContent = p.mark;
+  /**
+   * 按钮上原来是配色名的首字（暖 / 夜 / 暮 / 星）。问题是一个字既不自解释、
+   * 也看不出「点它能换」——不熟悉的用户只会当它是装饰。现在按钮固定写
+   * 「更换主题」，当前是哪套放 title / aria-label，视觉上不再变。
+   */
   const btn = $('#btnPalette');
-  if (btn) btn.title = `配色：${p.name}（点击轮换）`;
+  if (btn) {
+    btn.title = `当前配色：${p.name}（点击更换）`;
+    btn.setAttribute('aria-label', `更换配色主题，当前是${p.name}`);
+  }
   if (persist) {
     try { localStorage.setItem(PALETTE_KEY, p.id); } catch {}
   }
@@ -717,6 +747,7 @@ function activateTab(name) {
     }
   }
   if (name === 'config') safeLoad('config', loadConfig);
+  if (name === 'dev') safeLoad('dev', loadDev);
   if (name === 'groups') safeLoad('groups', loadGroups);
   if (name === 'reach') safeLoad('reach', loadReach);
   if (name === 'delivery') safeLoad('delivery', loadDelivery);
@@ -6676,4 +6707,1025 @@ function initPluginMore() {
 
 (function initP18() {
   initPluginMore();
+})();
+
+/* ---------------- 开放平台（开发者后台） ----------------
+ *
+ * 和「配置」页的区别要说在前面：那边改的是**本机运行时**（AppID / 密钥 / intents），
+ * 这边改的是**开放平台后台里的机器人资料与回调**。两条链的凭据完全不同：
+ * 本页用的是开发者票据（账号级），机器人 token 碰不到这些字段。
+ */
+
+let DEV_CURRENT = '';
+/**
+ * 本机这只鸟：`{ id, name, appid }`，由后端按 `?bot=` 算好递下来。
+ *
+ * 面板只改它。账号级票据 + 一个账号下好几只机器人，允许在页面里随便挑
+ * 就等于「一点就把线上那只能改坏」，所以这里不是「默认选中」，是**唯一目标**。
+ */
+let DEV_BOUND = null;
+/** 当前机器人的详情（`loadDevBot` 拿回来的那份），改配置时用来比对「有没有变」 */
+let DEV_BOT = null;
+/** 体验白名单：测试用户 + 白名单群（每次切换机器人重读） */
+let DEV_SCOPE = { users: [], groups: [], limits: {} };
+/** 选好但还没保存的头像（dataURL，已缩到 256px） */
+let DEV_AVATAR_DATA = '';
+
+/** 扫码进行中的三个状态：面板据此禁用按钮、开着轮询 */
+const DEV_SCAN_ACTIVE = ['starting', 'waiting', 'verifying'];
+let devScanTimer = null;
+/** 上次处理过的自动续期时间戳：轮询里靠它只重载一次列表 */
+let DEV_AUTO_AT = 0;
+
+function devSay(text, kind = '') {
+  const el = $('#devLoginMsg');
+  if (!el) return;
+  el.textContent = String(text ?? '');
+  el.style.color = kind === 'error' ? 'var(--err)' : kind === 'ok' ? 'var(--ok)' : '';
+}
+
+function devScanSay(text, kind = '') {
+  const el = $('#devScanMsg');
+  if (!el) return;
+  el.textContent = String(text ?? '');
+  el.style.color = kind === 'error' ? 'var(--err)' : kind === 'ok' ? 'var(--ok)' : '';
+}
+
+/**
+ * 配置区的提示位。
+ *
+ * 不能复用 `devLoginMsg`——它在「备选：手动粘贴」折叠区里，用户保存配置时
+ * 那段多半是收起来的，消息写进去等于没提示。
+ */
+function devEditSay(text, kind = '') {
+  const el = $('#devEditMsg');
+  if (!el) return;
+  el.textContent = String(text ?? '');
+  el.style.color = kind === 'error' ? 'var(--err)' : kind === 'ok' ? 'var(--ok)' : '';
+}
+
+/** 头像那一行的提示位（上传进度 / 失败原因都写这里，别混进 devEditMsg） */
+function devAvatarSay(text, kind = '') {
+  const el = $('#devAvatarMsg');
+  if (!el) return;
+  el.textContent = String(text ?? '');
+  el.style.color = kind === 'error' ? 'var(--err)' : kind === 'ok' ? 'var(--ok)' : '';
+}
+
+/**
+ * 把选中的图片裁成正方形并缩到 `size`，输出 **PNG**。
+ *
+ * 为什么是正方形：官方「修改机器人资料」里选了图之后要裁剪成正方形，
+ * 我们提前裁好，省得平台上被居中切掉半个脑袋。
+ * 为什么是 PNG：官方原话「建议使用 png 格式图片，以保持最佳效果」；
+ * 而且 PNG 有 alpha，不会像 JPEG 那样把透明底压成黑边。
+ * 为什么是 512：弹窗建议 144×144、创建页要求 240×240 以上，取 512
+ * 既够清晰又远小于 2 MB 的上限。
+ */
+function devShrinkImage(dataUrl, size = 512) {
+  return new Promise((resolve, reject) => {
+    const im = new Image();
+    im.onload = () => {
+      try {
+        const side = Math.min(im.width || 0, im.height || 0);
+        if (!side) throw new Error('读不到图片尺寸');
+        // 居中裁一块正方形，再缩到目标尺寸
+        const sx = Math.round((im.width - side) / 2);
+        const sy = Math.round((im.height - side) / 2);
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, size, size);
+        ctx.drawImage(im, sx, sy, side, side, 0, 0, size, size);
+        resolve(canvas.toDataURL('image/png'));
+      } catch (e) {
+        reject(e);
+      }
+    };
+    im.onerror = () => reject(new Error('这张图浏览器解不开'));
+    im.src = dataUrl;
+  });
+}
+
+/**
+ * 扫码进度渲染。
+ *
+ * 状态机在后端（`src/dev/browser.js`），前端只照着 `scan.state` 画，
+ * 不自己推——否则两边的判断迟早对不上（比如后端超时了前端还在转圈）。
+ */
+function devPaintScan(scan) {
+  const btn = $('#devScanBtn');
+  const cancelBtn = $('#devScanCancelBtn');
+  if (!btn) return;
+
+  const active = DEV_SCAN_ACTIVE.includes(scan?.state);
+  btn.disabled = active;
+  if (cancelBtn) cancelBtn.hidden = !active;
+
+  if (scan?.state === 'starting') {
+    btn.textContent = '正在打开浏览器…';
+    devScanSay(scan.message || '正在启动浏览器…');
+    return;
+  }
+  if (active) {
+    btn.textContent = '等待扫码…';
+    devScanSay(scan.message || '等待扫码…');
+    return;
+  }
+
+  btn.textContent = scan?.state === 'ok' && scan?.alive ? '重新扫码' : '扫码登录';
+  if (scan?.state === 'ok') devScanSay(scan.message || '登录成功', 'ok');
+  else if (scan?.state === 'expired') devScanSay(scan.message || '等待超时，请重新发起扫码', 'error');
+  else if (scan?.state === 'error') devScanSay(scan.message || '扫码启动失败', 'error');
+  else if (scan?.state === 'canceled') devScanSay(scan.message || '已取消', 'error');
+  // idle：保留 HTML 里的默认说明，不要用空字符串盖掉
+}
+
+/**
+ * 「记住登录」两个勾（扫码区、备选区）永远同进退。
+ *
+ * 以 `remembered`（本机有没有 dev-session.json）为唯一真相，不靠用户在页面
+ * 上的操作记忆——否则取消勾选后刷新、或者票据被别处删掉，界面就会说谎。
+ */
+function devPaintRemember(on) {
+  for (const sel of ['#devScanRemember', '#devRemember']) {
+    const box = $(sel);
+    if (box) box.checked = Boolean(on);
+  }
+}
+
+/** 「记住登录」那一行的提示位 */
+function devRememberSay(text, kind = '') {
+  const el = $('#devRememberMsg');
+  if (!el) return;
+  el.textContent = String(text ?? '');
+  el.style.color = kind === 'error' ? 'var(--err)' : kind === 'ok' ? 'var(--ok)' : '';
+}
+
+/**
+ * 自动续期的状态行。
+ *
+ * 这条存在的唯一理由：续期会**真的弹一个浏览器窗口**。不说清楚，
+ * 用户看到窗口自己冒出来只会以为出问题了。
+ */
+function devPaintAuto(a) {
+  const el = $('#devAutoMsg');
+  if (!el) return;
+  el.style.color = '';
+  if (a?.enabled === false) {
+    el.textContent = '自动续期已关闭（ROOST_DEV_AUTO_RELOGIN=0）：票据过期后要手动扫码。';
+    return;
+  }
+  const last = a?.last;
+  if (last?.reason === 'running') {
+    el.textContent = '票据过期了，正在后台换新票（不弹窗，拿到就关）…';
+    return;
+  }
+  /**
+   * 换票成功但平台还没放开——这条必须写清楚「不用重新扫码」。
+   * 否则用户看到「平台还在忙」还是会去点扫码，一扫又把窗口和限频拖回来。
+   */
+  if (a?.warmupPending) {
+    el.textContent = '票据已换新（不用重新扫码），等平台放开后自动补一次，大约 65 秒。';
+    return;
+  }
+  if (a?.warmup?.ok === true && a?.warmup?.at) {
+    const t2 = new Date(a.warmup.at).toLocaleTimeString('zh-CN');
+    el.textContent = `${t2} 平台已放开，补拉成功${a.warmup.botCount == null ? '' : `（${a.warmup.botCount} 只机器人）`}。`;
+    return;
+  }
+  if (!last?.at) {
+    el.textContent = '票据过期时会在后台自动换新票（无头浏览器，不弹窗），拿到后自动关闭。';
+    return;
+  }
+  const t = new Date(last.at).toLocaleTimeString('zh-CN');
+  if (last.ok) {
+    el.textContent = `${t} 票据过期，已自动换新${last.message ? `（${last.message}）` : ''}。`;
+  } else {
+    el.style.color = 'var(--err)';
+    const cool = Number(a?.retryInMs) > 0 ? `（${Math.ceil(a.retryInMs / 60_000)} 分钟内不会再自动尝试）` : '';
+    el.textContent = `${t} 自动换票没成功：${last.message || last.reason}。点「扫码登录」手动补一次${cool}。`;
+  }
+}
+
+function devPaintStatus(st) {
+  const el = $('#devLoginState');
+  if (!el) return;
+  devPaintScan(st?.scan);
+  devPaintAuto(st?.autoRelogin);
+  /**
+   * 勾选状态：登录时以「本机有没有存票」为准；**没登录时一律显示勾上**。
+   *
+   * 后者是「默认记住」的落点。退出登录会删掉票据文件，假如这时把勾也清掉，
+   * 下次扫码就是按 `remember:false` 走的——用户明明什么都没改，登录态却从
+   * 「记得」变成「不记得」，重启又得重扫。所以未登录时勾只表示默认意图。
+   */
+  if (st?.loggedIn) {
+    if (typeof st?.remembered === 'boolean') devPaintRemember(st.remembered);
+  } else {
+    devPaintRemember(true);
+  }
+
+  if (!st?.loggedIn) {
+    el.textContent = '未登录：点「扫码登录」，或展开下面的备选区手动粘贴。';
+    $('#devBotsBox').hidden = true;
+    $('#devEditBox').hidden = true;
+    return;
+  }
+  const when = st.updatedAt ? new Date(st.updatedAt).toLocaleString('zh-CN') : '未知';
+  /**
+   * 通道状态露出来是为了排查：默认请求走框架自己发，只有显式开了
+   * `ROOST_DEV_PAGE_TRANSPORT=1` 才借扫码窗口的页面上下文。
+   */
+  const channel = st.scan?.alive ? ' · 扫码窗口已开（可直接看机器人页）' : ' · 扫码窗口已关，接口不受影响';
+  /**
+   * 限频冷却得说出来。平台回 `10000` 之后我们主动停手 60 秒，
+   * 面板上如果只写「已登录」，用户点任何按钮都失败却不知道为什么。
+   */
+  const cool = Number(st.cooldownMs) > 0 ? ` · 平台限频，约 ${Math.ceil(st.cooldownMs / 1000)} 秒后自动恢复` : '';
+  el.textContent = `已登录 · 票据更新于 ${when}${st.remembered ? ' · 已记住' : ' · 仅本次进程'}${channel}${cool}`;
+}
+
+function devStopScanWatch() {
+  if (devScanTimer) {
+    clearTimeout(devScanTimer);
+    devScanTimer = null;
+  }
+}
+
+/**
+ * 轮询扫码状态。
+ *
+ * 用 setTimeout 串行而不是 setInterval：每次请求回来再排下一次，
+ * 后端慢的时候不会堆一堆并发请求上去。
+ */
+async function devScanWatch() {
+  devStopScanWatch();
+  let st;
+  try {
+    st = await api('/api/dev/login/scan');
+  } catch (e) {
+    devScanSay('查询扫码状态失败：' + errText(e), 'error');
+    return;
+  }
+  devPaintStatus(st);
+
+  /**
+   * 自动续期成功了就把列表重读一遍：换票意味着可能换了账号，
+   * 不刷新的话面板还挂着上一个人的机器人。
+   */
+  const autoAt = Number(st?.autoRelogin?.last?.at) || 0;
+  if (autoAt > DEV_AUTO_AT && st?.autoRelogin?.last?.ok) {
+    DEV_AUTO_AT = autoAt;
+    await loadDevBots();
+    return;
+  }
+
+  if (DEV_SCAN_ACTIVE.includes(st?.scan?.state)) {
+    devScanTimer = setTimeout(devScanWatch, 1200);
+    return;
+  }
+  if (st?.scan?.state === 'ok') await loadDevBots();
+}
+
+async function loadDev() {
+  let st;
+  try {
+    st = await api('/api/dev/status');
+  } catch (e) {
+    devScanSay('读取登录状态失败：' + errText(e), 'error');
+    return;
+  }
+  // 没登录也要先把「本机是哪只鸟」画出来：扫码前用户得先确认改的是谁
+  if (st?.bound) {
+    DEV_BOUND = st.bound;
+    paintDevBound();
+  }
+  devPaintStatus(st);
+  // 回显手填的浏览器路径，用户不用记得自己上次填了什么
+  const bp = $('#devBrowserPath');
+  if (bp && document.activeElement !== bp) bp.value = String(st?.browserPath || '');
+  if (DEV_SCAN_ACTIVE.includes(st?.scan?.state)) devScanWatch();
+  if (!st?.loggedIn) return;
+  await loadDevBots();
+}
+
+/** 「当前机器人」这一块的提示位（登错号、账号里没这只，都写这里） */
+function devBoundSay(text, kind = '') {
+  const el = $('#devBoundMsg');
+  if (!el) return;
+  el.textContent = String(text ?? '');
+  el.style.color = kind === 'error' ? 'var(--err)' : kind === 'ok' ? 'var(--ok)' : '';
+}
+
+/** 把「本机这只鸟」画出来：扫码前就要能看到改的是谁，不能等登录完才显示 */
+function paintDevBound() {
+  const name = DEV_BOUND?.name || '';
+  const appid = DEV_BOUND?.appid || '';
+  const inline = $('#devBoundInline');
+  if (inline) inline.textContent = appid ? `${name}，AppID ${appid}` : `${name || '当前机器人'}（还没填 AppID）`;
+  const n = $('#devBoundName');
+  if (n) n.textContent = name || '没找到当前机器人';
+  const a = $('#devBoundAppid');
+  if (a) a.textContent = appid ? `AppID ${appid} · 这个页面只会改它` : '本机配置里没有 AppID';
+}
+
+/**
+ * 「能不能干活」的全部判断都交给后端 `/api/dev/session?verify=1`。
+ *
+ * 以前是「列表 + 本地选中」两段各判一半，出现过的坑是：账号里一只都没有，
+ * 面板依旧显示「已登录」并让用户去改——点下去才 11001。现在六个状态由后端
+ * 给（`ready` / `account-empty` / `bot-missing` / `no-appid` / `busy` /
+ * `expired`），前端只负责照着渲染，不在两处各推一遍。
+ */
+/**
+ * 「等平台放开」时的一次性自动刷新。
+ *
+ * 只排一次，不做轮询：这时候平台本来就不接受请求，轮询除了加深限频没好处。
+ * 真按后端给的 `retryAfterMs` 醒过来一次就够。
+ */
+let devWakeTimer = null;
+/** 自动唤醒已经试过几次：防止「一直没放开」时每 66 秒无限重来 */
+let devWakeCount = 0;
+function scheduleDevWake(ms) {
+  if (devWakeTimer) clearTimeout(devWakeTimer);
+  devWakeTimer = setTimeout(() => {
+    devWakeTimer = null;
+    loadDevBots();
+  }, Math.max(1000, Number(ms) || 66_000));
+}
+
+async function loadDevBots() {
+  let st;
+  try {
+    st = await api('/api/dev/session?verify=1');
+  } catch (e) {
+    devEditSay('检查登录状态失败：' + errText(e), 'error');
+    return;
+  }
+  DEV_BOUND = st?.bound || DEV_BOUND;
+  paintDevBound();
+  $('#devBotsBox').hidden = false;
+  $('#devBotCount').textContent = st?.botCount == null ? '' : `账号下共 ${st.botCount} 只`;
+
+  if (st?.state === 'ready') {
+    if (devWakeTimer) { clearTimeout(devWakeTimer); devWakeTimer = null; }
+    devWakeCount = 0;
+    devBoundSay(st.message || '可以改。', 'ok');
+    DEV_CURRENT = String(st.bot?.appid || DEV_BOUND?.appid || '');
+    await loadDevBot(DEV_CURRENT);
+    return;
+  }
+
+  /**
+   * 「票已经换好、平台还没放开」——**不是失败**，是等一会。
+   *
+   * 换票成功之后不再连打（连打只会把平台恢复时间往后推），后端已经排了一次
+   * 65 秒后的补拉。这里只做两件事：把话说清楚（不用重新扫码），并照着同一个
+   * 时间自己醒来刷新一次。
+   */
+  if (st?.state === 'renewed-wait') {
+    $('#devEditBox').hidden = true;
+    $('#devScopeBox').hidden = true;
+    DEV_SCOPE = { users: [], groups: [], limits: {} };
+    DEV_BOT = null;
+    const wait = Math.ceil(Number(st?.retryAfterMs || 65_000) / 1000);
+    /**
+     * 自动刷新最多 3 次。平台真长时间不放开的（极少见）如果一直排下去，就变成
+     * 每 66 秒打一次接口的循环，反而更难恢复。到次数就把动作交给用户。
+     */
+    if (devWakeCount >= 3) {
+      devBoundSay('票据已换新，但平台一直没放开。过一会再来看，或点「扫码登录」重新登一次。', 'error');
+      devEditSay('');
+      return;
+    }
+    devWakeCount += 1;
+    devBoundSay(`票据已换新（不用重新扫码），平台还没放开；约 ${wait} 秒后自动刷新（第 ${devWakeCount} 次）。`, '');
+    devEditSay('');
+    scheduleDevWake(wait * 1000 + 1500);
+    return;
+  }
+
+  /**
+   * 每种「不能改」都写清为什么 + 下一步。`hint` 是后端码表给的，
+   * 前端不重复维护一份文案（改口径只改一处）。
+   */
+  $('#devEditBox').hidden = true;
+  // 白名单同样收起来：账号里没这只鸟的时候，列出名单只会让人以为「能改」
+  $('#devScopeBox').hidden = true;
+  DEV_SCOPE = { users: [], groups: [], limits: {} };
+  DEV_BOT = null;
+  const tail = st?.hint ? ` ${st.hint}` : '';
+  const text = `${st?.message || '现在不能改'}。${tail}`;
+  devBoundSay(text, 'error');
+  devEditSay('');
+}
+
+async function loadDevBot(appid) {
+  if (!appid) return;
+  let bot;
+  try {
+    ({ bot } = await api('/api/dev/bot?appid=' + encodeURIComponent(appid)));
+  } catch (e) {
+    devEditSay('读机器人配置失败：' + errText(e), 'error');
+    return;
+  }
+  DEV_BOT = bot;
+  $('#devEditBox').hidden = false;
+  $('#devEditHint').textContent = `appid ${bot.appid}`;
+  /**
+   * 顺手把扫码窗口切到这个机器人的设置页。
+   *
+   * 管理端是「列表 → 点进详情」两层，只停在列表上时用户还得自己找一遍；
+   * 面板选了谁，窗口就跟到谁，两边不至于看串。失败无所谓——窗口不在
+   * （例如走的是粘贴 Cookie）就只是个 `opened:false`。
+   */
+  api('/api/dev/focus', { method: 'POST', body: JSON.stringify({ appid: bot.appid }) }).catch(() => {});
+  $('#devName').value = bot.base?.name ?? '';
+  $('#devDesc').value = bot.base?.desc ?? '';
+  $('#devWebhook').value = bot.connect?.webhookUrl ?? '';
+  $('#devIps').value = (bot.ipWhitelist ?? []).join('\n');
+
+  /**
+   * 头像：预览当前那张，并把「待选的」清掉。
+   *
+   * 清 `DEV_AVATAR_DATA` 很重要——不清的话，用户换完头像再点一次「保存头像」，
+   * 会拿上一张已经用过的图再传一次，白耗一次平台的修改次数。
+   */
+  DEV_AVATAR_DATA = '';
+  const avSrc = $('#devAvatarSrc');
+  if (avSrc) avSrc.value = '';
+  const avImg = $('#devAvatarImg');
+  const avSrcRaw = String(bot.base?.avatar || '').trim();
+  /**
+   * 只有真·图片地址才塞进 `src`。
+   *
+   * 平台回的 `bot_avatar` 绝大多数时候是图床 URL，但也见过只给一个
+   * `avatar_id` 的情况——那种塞进 `src` 只会得到 `http://host/<id>` 这种
+   * 必然 404 的地址，界面留一个裂图标，比明说「预览不了」更糟。
+   */
+  const viewable = /^(https?:|data:|blob:)/i.test(avSrcRaw);
+  if (avImg) {
+    if (viewable) {
+      avImg.src = avSrcRaw;
+      avImg.dataset.empty = '0';
+      avImg.title = avSrcRaw;
+    } else {
+      avImg.removeAttribute('src');
+      avImg.dataset.empty = '1';
+      avImg.title = avSrcRaw ? `avatar_id ${avSrcRaw}` : '平台侧还没有头像';
+    }
+  }
+  if (!avSrcRaw) devAvatarSay('平台侧还没有头像');
+  else if (!viewable) devAvatarSay(`平台只回了 avatar_id（${avSrcRaw}），不是图片地址，这里预览不了；换过一张图就会显示`, '');
+  else devAvatarSay('');
+  $('#devBotMeta').textContent = [
+    bot.developer?.adminName ? `管理员 ${bot.developer.adminName}` : '',
+    bot.connect?.mode === 3 ? '当前 WebSocket' : bot.connect?.mode ? '当前 Webhook' : '',
+    bot.base?.modifyRemain != null ? `资料可改 ${bot.base.modifyRemain} 次` : '',
+  ].filter(Boolean).join(' · ');
+  devEditSay('');
+  // 白名单和资料是两个接口，串行拉：这一只的资料先画出来，名单晚一点不影响
+  await loadDevScope(bot.appid);
+}
+
+function devScopeSay(text, kind = '') {
+  const el = $('#devScopeMsg');
+  if (!el) return;
+  el.textContent = String(text ?? '');
+  el.style.color = kind === 'error' ? 'var(--err)' : kind === 'ok' ? 'var(--ok)' : '';
+}
+
+/**
+ * 白名单两块的渲染。
+ *
+ * 「不在群内」单独标出来，是因为它不是失败：官方允许先把群号加进白名单，
+ * 机器人再被拉进群。不标的话用户会以为加错了，反复删了再加。
+ */
+function devPaintScope() {
+  const box = $('#devScopeBox');
+  if (!box) return;
+
+  const users = Array.isArray(DEV_SCOPE.users) ? DEV_SCOPE.users : [];
+  const groups = Array.isArray(DEV_SCOPE.groups) ? DEV_SCOPE.groups : [];
+  const maxGroups = Number(DEV_SCOPE.limits?.groups) || 20;
+
+  const uList = $('#devUserList');
+  if (uList) {
+    uList.innerHTML = users.length
+      ? users.map((u) => `
+        <div class="dev-scope-item">
+          <div class="dev-scope-item-main">
+            <span class="dev-scope-item-name">${escapeHtml(u.name || '（平台没给昵称）')}</span>
+            <span class="dev-scope-item-id">${escapeHtml(u.uin)}</span>
+          </div>
+          <button type="button" class="btn small" data-scope-remove="users" data-id="${escapeHtml(u.uin)}">移除</button>
+        </div>`).join('')
+      : '<div class="dev-scope-empty">还没有测试用户。发布前只有名单里的人能私聊调试。</div>';
+  }
+
+  const gList = $('#devGroupList');
+  if (gList) {
+    gList.innerHTML = groups.length
+      ? groups.map((g) => `
+        <div class="dev-scope-item">
+          <div class="dev-scope-item-main">
+            <span class="dev-scope-item-name" title="${escapeHtml(g.name || g.groupId)}">${escapeHtml(g.name || '未知群名')}</span>
+            <span class="dev-scope-item-id">${escapeHtml(g.groupId)}</span>
+            ${g.inGroup === false ? '<span class="dev-scope-item-warn">机器人不在这个群</span>' : ''}
+          </div>
+          <button type="button" class="btn small" data-scope-remove="groups" data-id="${escapeHtml(g.groupId)}">移除</button>
+        </div>`).join('')
+      : '<div class="dev-scope-empty">还没有白名单群。</div>';
+  }
+
+  $('#devUserCount').textContent = `${users.length} 个`;
+  $('#devGroupCount').textContent = `${groups.length} / ${maxGroups}`;
+  $('#devScopeHint').textContent = `appid ${DEV_SCOPE.appid || DEV_CURRENT || ''}`;
+}
+
+async function loadDevScope(appid) {
+  const id = String(appid || '').trim();
+  if (!id) return;
+  const box = $('#devScopeBox');
+  try {
+    const out = await api('/api/dev/scope?appid=' + encodeURIComponent(id));
+    DEV_SCOPE = { users: out.users || [], groups: out.groups || [], limits: out.limits || {}, appid: out.appid || id };
+    if (box) box.hidden = false;
+    devScopeSay('');
+    devPaintScope();
+  } catch (e) {
+    // 读不到名单不影响改资料，所以不隐藏整页，只在这里说清楚
+    DEV_SCOPE = { users: [], groups: [], limits: {}, appid: id };
+    if (box) box.hidden = false;
+    devPaintScope();
+    devScopeSay('读白名单失败：' + errText(e), 'error');
+  }
+}
+
+/**
+ * 加 / 删一条。
+ *
+ * 不弹二次确认：删的是「名单里一个人/一个群」，不是删机器人。平台那边
+ * 加回来也只是填一次号码，代价远小于每次都被 confirm 打断。
+ */
+async function devScopeChange(kind, action, ids, label) {
+  if (!DEV_CURRENT) return;
+  const who = DEV_BOT?.base?.name || DEV_CURRENT;
+  devScopeSay(action === 1 ? `正在添加${label}…` : `正在移除${label} ${ids.join('、')}…`);
+  try {
+    await api('/api/dev/scope', {
+      method: 'POST',
+      body: JSON.stringify({ appid: DEV_CURRENT, kind, action, ids }),
+    });
+    // 回读平台侧真实状态，不用本地数组「猜」成功
+    await loadDevScope(DEV_CURRENT);
+    devScopeSay(`${action === 1 ? '已添加' : '已移除'}：${ids.join('、')}（${who}）`, 'ok');
+    return true;
+  } catch (e) {
+    devScopeSay(`${action === 1 ? '添加' : '移除'}失败：` + errText(e), 'error');
+    return false;
+  }
+}
+
+async function devSave(patch, what) {
+  if (!DEV_CURRENT) return;
+  // 报「改哪只」时带上名字：账号下好几只时，只说 appid 用户对不上号
+  const who = DEV_BOT?.base?.name || DEV_CURRENT;
+  if (!window.confirm(`确认修改「${who}」（AppID ${DEV_CURRENT}）的${what}？`)) return;
+  try {
+    const out = await api('/api/dev/bot', {
+      method: 'POST',
+      body: JSON.stringify({ appid: DEV_CURRENT, patch }),
+    });
+    // 先回读再报成功：loadDevBot 会清空提示位，顺序反了用户就看不到「已保存」
+    await loadDevBot(DEV_CURRENT);
+    devEditSay(`已保存：${(out.parts || []).join(' / ')}`, 'ok');
+  } catch (e) {
+    devEditSay('保存失败：' + errText(e), 'error');
+  }
+}
+
+(function initDev() {
+  /* ---------------- 记住登录（勾/取消立刻生效） ----------------
+   *
+   * 以前这个勾只在「点扫码登录 / 点导入」那一刻被读一次，已经登录的情况下
+   * 勾它什么都不会发生，刷新页面又空回去——用户看到的现象就是「少了个保存
+   * 按钮」。现在它自己就是个开关：勾上 = 把内存里的票据写盘，取消 = 删盘
+   * （登录态仍在，只是重启要重登），两边都不需要重新登录。
+   */
+  const devSetRemember = async (on) => {
+    const want = Boolean(on);
+    devRememberSay(want ? '正在写入本机…' : '正在删除本机票据…');
+    try {
+      const out = await api('/api/dev/remember', {
+        method: 'POST',
+        body: JSON.stringify({ remember: want }),
+      });
+      devPaintRemember(out?.remembered ?? want);
+      devPaintStatus(out);
+      devRememberSay(
+        out?.remembered
+          ? '已记住：重启框架不用重扫（票据存在 data/dev-session.json，权限 0600）'
+          : '已取消：票据只在这次进程里有效，重启要重新扫码',
+        'ok',
+      );
+    } catch (e) {
+      // 失败要把勾弹回去，不能让界面显示一个没生效的状态
+      devPaintRemember(!want);
+      devRememberSay('改不了：' + errText(e), 'error');
+    }
+  };
+
+  $('#devScanRemember')?.addEventListener('change', (e) => devSetRemember(e.target.checked));
+  $('#devRemember')?.addEventListener('change', (e) => devSetRemember(e.target.checked));
+
+  /* ---------------- 扫码（主路径） ---------------- */
+
+  $('#devScanBtn')?.addEventListener('click', async () => {
+    const btn = $('#devScanBtn');
+    devStopScanWatch();
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '正在打开浏览器…';
+    }
+    devScanSay('正在启动浏览器…');
+    try {
+      /**
+       * 这个请求会**同步等到窗口就绪**才返回（通常 1–3 秒），
+       * 所以按钮在期间保持禁用，避免用户连点开出多个窗口。
+       */
+      const st = await api('/api/dev/login/scan', {
+        method: 'POST',
+        body: JSON.stringify({ remember: Boolean($('#devScanRemember')?.checked) }),
+      });
+      devPaintStatus(st);
+      if (DEV_SCAN_ACTIVE.includes(st?.scan?.state)) devScanWatch();
+    } catch (e) {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = '扫码登录';
+      }
+      devScanSay('启动扫码失败：' + errText(e), 'error');
+    }
+  });
+
+  $('#devScanCancelBtn')?.addEventListener('click', async () => {
+    devStopScanWatch();
+    try {
+      devPaintStatus(await api('/api/dev/login/scan/cancel', { method: 'POST' }));
+    } catch (e) {
+      devScanSay('取消失败：' + errText(e), 'error');
+    }
+  });
+
+  /* ---------------- 备选：手动粘贴 ---------------- */
+
+  $('#devImportBtn')?.addEventListener('click', async () => {
+    const input = $('#devCookieInput')?.value?.trim() || '';
+    if (!input) {
+      devSay('先粘贴 Cookie 或 cURL', 'error');
+      return;
+    }
+    devSay('正在验证票据…');
+    try {
+      const out = await api('/api/dev/login/import', {
+        method: 'POST',
+        body: JSON.stringify({ input, remember: Boolean($('#devRemember')?.checked) }),
+      });
+      devSay(`登录成功，账号下读到 ${out.botCount} 个机器人`, 'ok');
+      $('#devCookieInput').value = '';
+      devPaintStatus(out);
+      await loadDevBots();
+    } catch (e) {
+      devSay('导入失败：' + errText(e), 'error');
+    }
+  });
+
+  $('#devLogoutBtn')?.addEventListener('click', async () => {
+    if (!window.confirm('退出后本机保存的票据会被删除，确认？')) return;
+    devStopScanWatch();
+    await api('/api/dev/logout', { method: 'POST' }).catch(() => {});
+    DEV_CURRENT = '';
+    DEV_BOT = null;
+    devSay('已退出', 'ok');
+    devScanSay('已退出。需要重新登录时点「扫码登录」。', 'ok');
+    // 票据文件已被删；勾保持「记住」——那是下次登录的默认值
+    devRememberSay('已退出：本机保存的票据已删除，下次登录仍会默认记住', 'ok');
+    devPaintStatus({ loggedIn: false });
+  });
+
+  $('#devOpenDashBtn')?.addEventListener('click', () => {
+    window.open('https://q.qq.com/qqbot/dashboard/', '_blank', 'noopener');
+  });
+
+  /* ---------------- 手填浏览器路径 ---------------- */
+
+  const devBrowserSay = (text, kind = '') => {
+    const el = $('#devBrowserMsg');
+    if (!el) return;
+    el.textContent = String(text ?? '');
+    el.style.color = kind === 'error' ? 'var(--err)' : kind === 'ok' ? 'var(--ok)' : '';
+  };
+
+  const devSaveBrowserPath = async (path) => {
+    try {
+      const out = await api('/api/dev/browser', {
+        method: 'POST',
+        body: JSON.stringify({ path }),
+      });
+      const saved = String(out?.browserPath || '');
+      const input = $('#devBrowserPath');
+      if (input) input.value = saved;
+      devBrowserSay(saved ? `已保存：${saved}` : '已改回自动探测（Edge → Chrome → Chromium → Brave → Vivaldi）', 'ok');
+    } catch (e) {
+      devBrowserSay('保存失败：' + errText(e), 'error');
+    }
+  };
+
+  $('#devBrowserSave')?.addEventListener('click', () => {
+    const p = $('#devBrowserPath')?.value?.trim() || '';
+    if (!p) {
+      devBrowserSay('先填一个可执行文件路径', 'error');
+      return;
+    }
+    devSaveBrowserPath(p);
+  });
+
+  $('#devBrowserClear')?.addEventListener('click', () => devSaveBrowserPath(''));
+
+  /* ---------------- 配置：一框一存 ----------------
+   *
+   * 平台把「资料 / 连接 / 白名单」分开计次数，合并提交会出现「一半成功」，
+   * 用户也说不清是哪条没生效。所以每个输入框配自己的按钮，只发自己那一项。
+   */
+  const devBotNow = () => DEV_BOT?.base || {};
+
+  $('#devSaveName')?.addEventListener('click', () => {
+    if (!DEV_CURRENT) return;
+    const name = ($('#devName')?.value || '').trim();
+    if (!name) {
+      devEditSay('昵称不能是空的', 'error');
+      return;
+    }
+    if (name === (devBotNow().name || '')) {
+      devEditSay('昵称没变，不用保存', 'error');
+      return;
+    }
+    devSave({ base: { name } }, '昵称');
+  });
+
+  $('#devSaveDesc')?.addEventListener('click', () => {
+    if (!DEV_CURRENT) return;
+    const desc = ($('#devDesc')?.value || '').trim();
+    if (desc === (devBotNow().desc || '')) {
+      devEditSay('简介没变，不用保存', 'error');
+      return;
+    }
+    devSave({ base: { desc } }, '简介');
+  });
+
+  /* ---------------- 头像 ---------------- */
+
+  /**
+   * 头像拉不下来（图床 403、地址过期、被策略拦）时别留一个裂图标：
+   * 退回灰圈占位，并说清是「预览失败」而不是「没有头像」——两者下一步完全不同。
+   */
+  $('#devAvatarImg')?.addEventListener('error', () => {
+    const img = $('#devAvatarImg');
+    if (!img || img.dataset.empty === '1') return;
+    img.dataset.empty = '1';
+    img.removeAttribute('src');
+    devAvatarSay('这张头像预览不出来（图床拒绝或地址已过期），不影响换新图', 'error');
+  });
+
+  $('#devAvatarPick')?.addEventListener('click', () => $('#devAvatarFile')?.click());
+
+  $('#devAvatarFile')?.addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    // 源图只要求浏览器能解开；真正的格式/大小限制在裁完之后的 PNG 上
+    if (!/^image\//i.test(file.type)) {
+      devAvatarSay('要选图片文件', 'error');
+      return;
+    }
+    if (file.size > 16 * 1024 * 1024) {
+      devAvatarSay('这张图超过 16 MB，先自己压一下', 'error');
+      return;
+    }
+    devAvatarSay('正在读图…');
+    const raw = await new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => resolve('');
+      reader.readAsDataURL(file);
+    });
+    if (!raw) {
+      devAvatarSay('读这个文件失败，换一张试试', 'error');
+      return;
+    }
+    let small;
+    try {
+      small = await devShrinkImage(raw, 512);
+    } catch (err) {
+      devAvatarSay('处理这张图失败：' + err.message, 'error');
+      return;
+    }
+    /**
+     * 官方上限 2 MB。512 的 PNG 正常只有几百 KB，但极端图（大片噪点）
+     * 也会顶上去——这里量的是 base64 解码后的字节数，不是字符串长度。
+     */
+    const bytes = Math.round((small.length - small.indexOf(',') - 1) * 0.75);
+    if (bytes > 2 * 1024 * 1024) {
+      devAvatarSay(`裁完还有 ${(bytes / 1024 / 1024).toFixed(1)} MB，超过官方的 2 MB 上限，换张简单的图`, 'error');
+      return;
+    }
+    DEV_AVATAR_DATA = small;
+    const img = $('#devAvatarImg');
+    if (img) {
+      img.src = small;
+      img.dataset.empty = '0';
+    }
+    const src = $('#devAvatarSrc');
+    if (src) src.value = '';
+    devAvatarSay(`已选 ${file.name} → 正方形 ${Math.round(bytes / 1024)} KB PNG（上传前会再用这个尺寸），点「保存头像」`, 'ok');
+  });
+
+  $('#devSaveAvatar')?.addEventListener('click', async () => {
+    if (!DEV_CURRENT) return;
+    const raw = String($('#devAvatarSrc')?.value || '').trim();
+    const body = { appid: DEV_CURRENT };
+    if (raw) {
+      // 填了 http(s) 就当图片来源；否则当成官方页面给的 avatar_id 直接用
+      if (/^https?:\/\//i.test(raw)) body.url = raw;
+      else body.avatarId = raw;
+    } else if (DEV_AVATAR_DATA) {
+      body.dataUrl = DEV_AVATAR_DATA;
+    } else {
+      devAvatarSay('先选一张本地图片，或填图片地址 / avatar_id', 'error');
+      return;
+    }
+    if (!window.confirm(`确认给 ${DEV_CURRENT} 换头像？平台侧会立即生效。`)) return;
+    devAvatarSay('正在上传…');
+    try {
+      const out = await api('/api/dev/avatar', { method: 'POST', body: JSON.stringify(body) });
+      await loadDevBot(DEV_CURRENT);
+      devEditSay(`头像已更新（${out.uploaded ? '上传并套用' : '按 avatar_id 套用'}）`, 'ok');
+    } catch (e) {
+      devAvatarSay('换头像失败：' + errText(e), 'error');
+    }
+  });
+
+  /* ---------------- 连接 / 白名单 ---------------- */
+
+  $('#devSaveWebhook')?.addEventListener('click', () => {
+    if (!DEV_CURRENT) return;
+    const url = ($('#devWebhook')?.value || '').trim();
+    if (!/^https?:\/\//i.test(url)) {
+      devEditSay('Webhook 要填 http(s) 地址', 'error');
+      return;
+    }
+    devSave({ connect: { action: 1, webhookUrl: url } }, 'Webhook');
+  });
+
+  $('#devSaveConnect')?.addEventListener('click', () => {
+    if (!DEV_CURRENT) return;
+    const action = Number($('#devConnectAction')?.value) || 1;
+    const patch = { connect: { action } };
+    if (action === 1) {
+      const url = ($('#devWebhook')?.value || '').trim();
+      if (!/^https?:\/\//i.test(url)) {
+        devEditSay('「保存 Webhook」需要先在上面填一个 http(s) 地址', 'error');
+        return;
+      }
+      patch.connect.webhookUrl = url;
+    }
+    devSave(patch, action === 1 ? 'Webhook' : action === 2 ? 'Webhook 校验' : '连接方式');
+  });
+
+  $('#devSaveIps')?.addEventListener('click', () => {
+    if (!DEV_CURRENT) return;
+    const addresses = ($('#devIps')?.value || '').split('\n').map((s) => s.trim()).filter(Boolean);
+    const bad = addresses.find((ip) => !/^[0-9a-fA-F:.]+$/.test(ip));
+    if (bad) {
+      devEditSay(`这行不像 IP：${bad}（只支持 IPv4 / IPv6，一行一个）`, 'error');
+      return;
+    }
+    devSave({ ip: { mode: 'replace', addresses } }, 'IP 白名单');
+  });
+
+  /* ---------------- 白名单：测试用户 / 白名单群 ----------------
+   *
+   * 和上面那些「保存」按钮不同，这里是**加一条立刻发一次**。平台侧本来就是
+   * 单条增删的接口，凑一批再提交没有任何好处，反而会出现「三条里错一条」
+   * 却不知道是哪条。
+   */
+  const devAddScope = async (kind) => {
+    if (!DEV_CURRENT) return;
+    const isUser = kind === 'users';
+    const input = isUser ? $('#devUserInput') : $('#devGroupInput');
+    const raw = String(input?.value || '').trim();
+    if (!raw) {
+      devScopeSay(isUser ? '先填一个 QQ 号' : '先填一个群号', 'error');
+      return;
+    }
+    // 本机先挡一次：官方校验是 QQ 号 5~11 位、群号 5~10 位纯数字
+    const ok = isUser ? /^\d{5,11}$/.test(raw) : /^\d{5,10}$/.test(raw);
+    if (!ok) {
+      devScopeSay(isUser ? `QQ 号要 5~11 位纯数字，这个不对：${raw}` : `群号要 5~10 位纯数字，这个不对：${raw}`, 'error');
+      return;
+    }
+    const list = isUser ? DEV_SCOPE.users : DEV_SCOPE.groups;
+    const dup = isUser
+      ? list.some((u) => u.uin === raw)
+      : list.some((g) => g.groupId === raw);
+    if (dup) {
+      devScopeSay(`已经在白名单里了：${raw}`, 'error');
+      return;
+    }
+    const done = await devScopeChange(kind, 1, [raw], isUser ? '测试用户' : '白名单群');
+    // 成功才清空：失败时把号码留着，用户改一下就能重试
+    if (done && input) input.value = '';
+  };
+
+  $('#devAddUser')?.addEventListener('click', () => devAddScope('users'));
+  $('#devAddGroup')?.addEventListener('click', () => devAddScope('groups'));
+  // 回车就加，省一次点按钮；不拦的话会触发页面里的其他默认行为
+  for (const [sel, kind] of [['#devUserInput', 'users'], ['#devGroupInput', 'groups']]) {
+    $(sel)?.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      devAddScope(kind);
+    });
+  }
+
+  /**
+   * 移除按钮用事件委托：列表是每次回读后重画的，逐个绑会越绑越多，
+   * 而且新渲染出来的行压根绑不上（这是列表类 UI 最容易踩的坑）。
+   */
+  for (const sel of ['#devUserList', '#devGroupList']) {
+    $(sel)?.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-scope-remove]');
+      if (!btn) return;
+      const kind = btn.dataset.scopeRemove;
+      const id = btn.dataset.id || '';
+      if (!id) return;
+      devScopeChange(kind, 2, [id], kind === 'users' ? '测试用户' : '白名单群');
+    });
+  }
+
+  /* ---------------- 开发页的状态自检（每 4 秒） ----------------
+   *
+   * 为什么需要：自动续期、扫码成功都发生在**后端**，而页面原来只在
+   * 「点了扫码」或「点了保存」时才去读状态。于是出现过「日志说票已到手、
+   * 页面还停在『登录已过期』」——用户只能靠手动刷新页面才发现其实好了。
+   *
+   * 这条轮询只打本地 `/api/dev/status`（不联网、不碰平台），代价可以忽略。
+   * 只在开发页可见时才跑，切到别的页签就完全停手。
+   */
+  let lastLoggedIn = null;
+  let lastAutoAt = 0;
+  /** 上一次处理过的「65 秒补拉」时间戳 */
+  let lastWarmAt = 0;
+  const devTabVisible = () => {
+    const el = $('#tab-dev');
+    return Boolean(el && !el.hidden && el.classList.contains('active'));
+  };
+
+  setInterval(async () => {
+    if (document.hidden || !devTabVisible()) return;
+    let st;
+    try {
+      st = await api('/api/dev/status');
+    } catch {
+      return; // 本地接口偶发失败，下一轮再说，别在界面上刷错误
+    }
+    devPaintStatus(st);
+
+    const logged = Boolean(st?.loggedIn);
+    const autoAt = Number(st?.autoRelogin?.last?.at) || 0;
+    const autoOk = Boolean(st?.autoRelogin?.last?.ok) && autoAt > lastAutoAt;
+    /**
+     * 只在「登录态变了」或「刚续期成功」时重读机器人详情：
+     * 无条件重读会把用户正在编辑的昵称/简介覆盖掉。
+     */
+    /**
+     * 补拉完成（`warmup.at` 变了）：说明平台已经放开，立刻把数据拉回来。
+     * 这条是「65 秒后自己好」的落点——用户什么都不用点。
+     */
+    const warmAt = Number(st?.autoRelogin?.warmup?.at) || 0;
+    const warmDone = warmAt > lastWarmAt;
+    if (warmDone) lastWarmAt = warmAt;
+
+    if ((lastLoggedIn === false && logged) || autoOk || warmDone) {
+      lastLoggedIn = logged;
+      if (autoOk) lastAutoAt = autoAt;
+      await loadDevBots();
+      return;
+    }
+    lastLoggedIn = logged;
+  }, 4000)?.unref?.();
 })();

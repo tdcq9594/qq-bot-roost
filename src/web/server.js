@@ -35,8 +35,12 @@ import { userFacingSendError } from '../outbound.js';
 import { runRoute } from '../plugin/routes.js';
 import { toggleGroupPlugin } from '../plugin/groupscope.js';
 import { suspendPluginWatch } from '../services/plugin-watch.js';
+import { syncNickname } from '../services/nickname.js';
 import { onMessage as onBusMessage } from '../message-bus.js';
 import { handleQqCall, capabilityPayload } from './qq-call.js';
+import { getDevPlatform } from '../host/dev.js';
+import { requireBoundAppid } from '../dev/platform.js';
+import { devErrorPayload, devErrorTable } from '../dev/errors.js';
 import * as extDeps from '../ext-deps.js';
 import { runDoctor, summarize } from '../doctor.js';
 import { createBindTask, pollBindResult } from '../qq/qrlogin.js';
@@ -88,7 +92,8 @@ const PROCESS_STARTED_AT = Date.now();
  *     而面板 localStorage 里存着访问密钥。
  *   - `style-src` **必须**留 'unsafe-inline'：app.js 里有二十多处
  *     `style="width:...%"` 这类动态样式，去掉它布局直接散架。
- *   - `img-src` 带 data: 和 blob:：二维码是 SVG 内联，插件图标可能用 data URI。
+ *   - `img-src` 带 data: / blob: / http(s):：二维码是 SVG 内联，插件图标可能用
+ *     data URI，机器人头像在腾讯图床（外站）。
  *   - 不设 HSTS：本地是 http，加了会让浏览器以后强制走 https 打不开。
  *     反代终止 TLS 时由 Nginx/Caddy 那边加。
  *   - `frame-src 'self'` 是给插件页面 iframe 用的，与 `frame-ancestors 'none'`
@@ -98,7 +103,16 @@ const CSP_MAIN = [
   "default-src 'self'",
   "script-src 'self'",
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob:",
+  /**
+   * 图片必须放开外站：机器人头像存在腾讯图床（`gchat.qpic.cn` 之类），
+   * 面板只是把它 `<img src>` 出来预览。只写 `'self' data: blob:` 的后果
+   * 是头像位置一个裂图标 + 控制台一条 CSP violation——看着像「接口没返回
+   * 头像」，其实是本地策略自己拦的。
+   *
+   * 只放开图片这一类：图片不能执行脚本，风险面和 `script-src` 完全不同。
+   * 顺手带 `http:` 是因为老机器的图床地址可能还是明文 http。
+   */
+  "img-src 'self' data: blob: https: http:",
   "font-src 'self' data:",
   "connect-src 'self'",
   "frame-src 'self'",
@@ -1365,6 +1379,178 @@ async function startWebServerInstance({
           return json(res, out.code, out.body);
         }
 
+        /* ---------------- 开放平台（开发者后台） ----------------
+         * 和 `/api/qq/call` 是两条完全不同的链：
+         *   · qq.call   → 机器人 token，改的是机器人自己的菜单/面板
+         *   · dev.*     → 开发者票据（账号级），改的是后台里的机器人配置
+         * 所以不复用同一个白名单，也不让 dev 走 qq-call 的风险表。
+         */
+        if (pathname.startsWith('/api/dev/')) {
+          const dev = getDevPlatform({ log });
+          /**
+           * 面板一页只服务「当前这只鸟」。
+           *
+           * `bound` 取的是本机配置里那只（`?bot=<id>` 换一只就跟着换），
+           * 页面上的读写一律被钉在这个 appid 上：票据是账号级的，账号下
+           * 通常有好几只，允许随手挑就等于「一点就把线上那只能改坏」。
+           */
+          const bound = rt
+            ? { id: rt.id, name: rt.name ?? rt.id, appid: String(rt.cfg?.appId ?? '').trim() }
+            : null;
+          /** 请求里的 appid 必须等于 bound；不相等直接拒，别让平台请求出网 */
+          const onlyBound = (appid) => requireBoundAppid(appid, bound?.appid ?? '', bound?.name);
+          try {
+            if (pathname === '/api/dev/methods' && req.method === 'GET') {
+              return json(res, 200, { ok: true, methods: dev.methods() });
+            }
+            /**
+             * 错误码表。前端不用把码和文案再抄一份，直接按 code 查这张表就行；
+             * 外部工具也能拿它来翻译（`hint` 就是「下一步做什么」）。
+             */
+            if (pathname === '/api/dev/errors' && req.method === 'GET') {
+              return json(res, 200, { ok: true, errors: devErrorTable() });
+            }
+            /**
+             * 「现在到底能不能干活」——一个接口出结论，不用前端自己拼。
+             *
+             * `?verify=1` 会真向平台核一次（`list_bots` 有 30 秒缓存）。
+             * 不传就只查本地票据，不发任何网络请求，页面初始化用这个。
+             *
+             * 注意这个接口**永远回 200**：它是个探针，答案在 `state` / `code` 里。
+             * 把「没登录」做成 401 会让调用方以为请求本身失败了，实际是一次
+             * 成功的检查——这两种要分开。
+             */
+            if (pathname === '/api/dev/session' && req.method === 'GET') {
+              const verify = ['1', 'true', 'yes'].includes(String(url.searchParams.get('verify') || '').toLowerCase());
+              return json(res, 200, { ok: true, ...(await dev.checkSession({ verify, bound })) });
+            }
+            if (pathname === '/api/dev/status' && req.method === 'GET') {
+              return json(res, 200, { ok: true, bound, ...(await dev.status()) });
+            }
+            /**
+             * 扫码登录三件套。
+             *
+             * 启动是**同步等窗口就绪**再返回的（通常 1–3 秒），不是返回一个
+             * job id 让前端猜——就绪之后才有意义告诉用户「可以扫了」。
+             * 之后前端按 1.2 秒轮询 `/api/dev/login/scan`。
+             */
+            if (pathname === '/api/dev/login/scan' && req.method === 'POST') {
+              const b = await readBody(req);
+              // 不传就当「记住」：默认值放在后端，前端口径改了也不会两边打架
+              await dev.startScan({ remember: b?.remember ?? true });
+              // 回完整 status：前端只要认 `scan` 一个字段就能画，不用自己拼状态
+              return json(res, 200, { ok: true, ...(await dev.status()) });
+            }
+            if (pathname === '/api/dev/login/scan' && req.method === 'GET') {
+              return json(res, 200, { ok: true, ...(await dev.status()) });
+            }
+            if (pathname === '/api/dev/login/scan/cancel' && req.method === 'POST') {
+              await dev.cancelScan();
+              return json(res, 200, { ok: true, ...(await dev.status()) });
+            }
+            if (pathname === '/api/dev/login/import' && req.method === 'POST') {
+              const b = await readBody(req);
+              const r = await dev.loginImport(b?.input, { remember: b?.remember ?? true });
+              return json(res, 200, r);
+            }
+            /**
+             * 登录之后再改「记不记住」。
+             *
+             * 以前这个开关只在发起登录那一刻读一次，于是「已经登录了再勾上它」
+             * 什么都不会发生，刷新页面勾又空回去——用户自然会以为少了个保存按钮。
+             * 现在勾/取消立刻生效：勾 = 把当前票据写盘，取消 = 删盘（登录态还在，
+             * 只是重启后要重登）。
+             */
+            if (pathname === '/api/dev/remember' && req.method === 'POST') {
+              const b = await readBody(req);
+              const out = await dev.setRemember(b?.remember ?? true);
+              return json(res, 200, { ok: true, ...out, ...(await dev.status()) });
+            }
+            if (pathname === '/api/dev/logout' && req.method === 'POST') {
+              return json(res, 200, await dev.logout());
+            }
+            if (pathname === '/api/dev/browser' && req.method === 'POST') {
+              const b = await readBody(req);
+              return json(res, 200, { ok: true, ...(await dev.setBrowserPath(b?.path ?? '')) });
+            }
+            /**
+             * 机器人列表 + 「本页只认哪一只」。
+             *
+             * 前端要能一眼看出三件事：本机这只鸟是谁（bound）、账号下有没有它
+             * （matched）、账号里到底有几只（bots）。分开给比前端自己猜稳——
+             * 猜错的后果是「登录了别的账号，但 UI 显示已就绪」。
+             */
+            if (pathname === '/api/dev/bots' && req.method === 'GET') {
+              const bots = await dev.listBots();
+              return json(res, 200, {
+                ok: true,
+                bots,
+                bound,
+                matched: Boolean(bound?.appid) && bots.some((b) => b.appid === bound.appid),
+              });
+            }
+            if (pathname === '/api/dev/bot' && req.method === 'GET') {
+              const appid = onlyBound(url.searchParams.get('appid') || '');
+              return json(res, 200, { ok: true, bot: await dev.getBot(appid) });
+            }
+            if (pathname === '/api/dev/focus' && req.method === 'POST') {
+              const b = await readBody(req);
+              // 窗口也跟着钉死：手动传别的 appid 一律当越权
+              return json(res, 200, await dev.focus(onlyBound(b?.appid)));
+            }
+            if (pathname === '/api/dev/bot' && req.method === 'POST') {
+              const b = await readBody(req);
+              const appid = onlyBound(b?.appid);
+              return json(res, 200, await dev.setBot(appid, b?.patch ?? {}));
+            }
+            /**
+             * 体验白名单：测试用户（QQ 号）+ 白名单群（群号）。
+             *
+             * 只读一次把两样都拿回来——两个列表在平台侧是同一个 CGI，分开请求
+             * 只会多挨一次限频。`appid` 照旧钉死在本机那只上，传别的当越权。
+             */
+            if (pathname === '/api/dev/scope' && req.method === 'GET') {
+              // 不传 appid 就用本机那只：面板里就这一只，要求必传只会多一处能写错的地方
+              const appid = onlyBound(url.searchParams.get('appid') || bound?.appid || '');
+              return json(res, 200, { ok: true, ...(await dev.getScope(appid)) });
+            }
+            /**
+             * 加 / 删白名单成员。`action` 1 加 2 删，`kind` users / groups。
+             * 一次只动一类、只动一份名单：平台侧「加」和「删」是两个动作，
+             * 混着发会出现「一半成功」，用户也说不清哪半生效了。
+             */
+            if (pathname === '/api/dev/scope' && req.method === 'POST') {
+              const b = await readBody(req);
+              const appid = onlyBound(b?.appid);
+              return json(res, 200, await dev.setScope(appid, {
+                kind: b?.kind, action: b?.action, ids: b?.ids,
+              }));
+            }
+            /**
+             * 换头像。图片走 dataURL 传上来（前端先缩到 256 以内再 base64），
+             * 所以这里要把 body 上限放宽到 4 MB——默认的 256 KB 装不下一张截图。
+             */
+            if (pathname === '/api/dev/avatar' && req.method === 'POST') {
+              const b = await readBody(req, 4 * 1024 * 1024);
+              const appid = onlyBound(b?.appid);
+              return json(res, 200, await dev.setAvatar(appid, {
+                dataUrl: b?.dataUrl ?? '',
+                url: b?.url ?? '',
+                avatarId: b?.avatarId ?? '',
+              }));
+            }
+            return json(res, 404, { ok: false, error: '没有这个接口' });
+          } catch (e) {
+            /**
+             * 失败一律走同一张码表：`code` 给程序判断、`error` 给用户看、
+             * `hint` 给用户「下一步做什么」。票据过期是 401（前端据此回到
+             * 导入态），限频是 429（带 retryAfterMs），不能一律 500。
+             */
+            const payload = devErrorPayload(e);
+            return json(res, payload.http, { ok: false, ...payload });
+          }
+        }
+
         /**
          * mock 模式下注入一条群消息，用来在面板里手工试插件 / 验证消息推送。
          *
@@ -1410,6 +1596,49 @@ async function startWebServerInstance({
             };
           });
           return json(res, 200, { bots: list, current: rt?.id ?? null });
+        }
+
+        /**
+         * 手动同步昵称：把本机显示名对齐开放平台上的机器人昵称。
+         *
+         * 启动 3 秒后 `services.nickname` 会自动跑一次，这条是给「刚改完名、
+         * 不想重启」用的。用的是**机器人 token**（`/users/@me`），跟 `/api/dev/*`
+         * 的开发者票据无关，所以放在机器人这块、也不要求开放平台已登录。
+         *
+         * `{ "changed": false }` 是正常结果（名字本来就一样），不是失败。
+         */
+        if (pathname === '/api/bots/nickname' && req.method === 'POST') {
+          let body = {};
+          try {
+            body = (await readBody(req)) ?? {};
+          } catch {
+            /* 空 body 当「用当前这只」 */
+          }
+          const id = String(body?.id ?? rt?.id ?? '').trim();
+          const target = id ? runtimes.find((x) => x.id === id) : rt;
+          if (!target) return json(res, 404, { ok: false, code: 'NO_BOT', error: '没有这只机器人' });
+
+          const out = await syncNickname(target);
+          if (out.reason === 'no-credential') {
+            return json(res, 400, {
+              ok: false, code: 'NO_CREDENTIAL', error: '缺少 AppID / AppSecret，先在「配置」里补上',
+            });
+          }
+          if (out.reason?.startsWith('query-failed')) {
+            return json(res, 502, {
+              ok: false, code: 'NICKNAME_QUERY_FAILED',
+              error: `查不到平台昵称：${out.reason.slice(14)}`,
+              hint: '检查这台机器能不能访问 api.qq.com，以及 AppSecret 是否被重置过',
+            });
+          }
+          return json(res, 200, {
+            ok: true,
+            id: target.id,
+            changed: Boolean(out.changed),
+            name: out.name || target.name || target.id,
+            // mock 下没有真昵称，但「同步跑通了」这件事仍然要如实回报
+            ...(out.reason === 'mock' ? { mock: true } : {}),
+          });
         }
 
         /**

@@ -16,10 +16,12 @@ import { saveBotConfig } from '../config.js';
 import { recentLogs } from '../logger.js';
 import { createToolCaller } from '../plugin/tools.js';
 import { OFFICIAL_ENDPOINTS, riskOf } from '../endpoints.js';
+import { syncNickname } from '../services/nickname.js';
 import { INTENTS, INTENT_META, EVENTS } from '../events.js';
 import { CHANNEL_DAILY_ACTIVE } from '../outbound.js';
 import { registerMedia } from './media.js';
 import { registerOps } from './ops.js';
+import { registerDev } from './dev.js';
 import { sendOut, receivedAtOf, isChatKind, CHAT_KINDS } from './dispatch.js';
 
 export const HOST_PROTOCOL = 1;
@@ -801,6 +803,21 @@ export function createMethods({ runtime: R, getState, log = () => {}, extBridge 
 
   def('config.get', 'read', '读配置（密钥已脱敏）', async () => redact(R.cfg ?? {}));
 
+  /**
+   * 按平台昵称刷新本机显示名。
+   *
+   * 启动时后台服务会自动跑一次（`services.nickname`），这条是给「刚在开放平台
+   * 改完名、懒得重启」用的。scope 给 manage：它会写 `config/bots/<id>.json`，
+   * 和 `config.set` 同一个档——`message` 档是「对外做事」，不该能改本地配置。
+   */
+  def('bot.nickname.sync', 'manage', '按开放平台上的昵称刷新本机显示名（会写回配置）', async () => {
+    const out = await syncNickname(R);
+    if (out.reason === 'mock') throw bad('mock 模式下没有真实昵称');
+    if (out.reason === 'no-credential') throw bad('缺少 AppID / AppSecret，先补凭证');
+    if (out.reason?.startsWith('query-failed')) throw bad(`查不到平台昵称：${out.reason.slice(14)}`);
+    return { ok: true, changed: out.changed, name: out.name || R.name };
+  });
+
   def('config.set', 'manage', '改运行时设置（白名单键，凭证类请走面板）', async (p) => {
     const patch = p.patch && typeof p.patch === 'object' && !Array.isArray(p.patch) ? p.patch : p;
     const keys = Object.keys(patch).filter((k) => CONFIG_KEYS.has(k));
@@ -902,6 +919,8 @@ export function createMethods({ runtime: R, getState, log = () => {}, extBridge 
   };
   registerMedia(def, { R, err, log });
   registerOps(def, { R, err, log });
+  /** 开放平台（开发者后台）：登录态是账号级，方法前缀统一 `dev.` */
+  registerDev(def, { log });
 
   /* ---------------- DSH 扩展反向互通（双向联动） ----------------
    * 框架插件要调 DSH 侧已装扩展的能力时走这里：`ext.call` 推一条 SSE 事件
