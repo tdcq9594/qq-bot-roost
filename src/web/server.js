@@ -1774,7 +1774,23 @@ async function startWebServerInstance({
               }
             } else {
               log.info('连接参数变化，正在重连网关...');
-              rt.gateway?.restart?.().catch(() => {});
+              /**
+               * **intents 变了必须重建 Gateway**。
+               *
+               * `gateway.restart()` 是同一个实例，仍持构造时的旧 `this.intents`
+               * （`gateway.js:49`），断线重连也只会用旧订阅发 Identify ——
+               * 结果就是「面板保存了 intents，但线上永远不生效」。
+               *
+               * `goOffline + goOnline` 会 `new Gateway({ intents: cfg.intents })`
+               * （`bot.js:443`），才会用上新值。已下线时没有「重连」可言，
+               * 退回 `restart()` 让下次上线自然用新配置。
+               */
+              if (rt.state === 'online') {
+                await rt.goOffline?.().catch(() => {});
+                await rt.goOnline?.().catch(() => {});
+              } else {
+                rt.gateway?.restart?.().catch(() => {});
+              }
             }
           }
 

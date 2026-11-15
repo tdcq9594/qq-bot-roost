@@ -887,7 +887,7 @@ export function createMethods({ runtime: R, getState, log = () => {}, extBridge 
       config: redact(cfg),
       ...(needReconnect ? {
         needReconnect: true,
-        hint: 'intents 已写入配置，但要重连网关才生效（面板「配置」页保存或重启机器人）',
+        hint: 'intents 已写入配置，但要重建网关才生效：面板「上下线」点一次（下线→上线），或重启机器人',
       } : {}),
     };
   });
