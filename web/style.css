@@ -1222,6 +1222,27 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 }
 .market-filter .mini-input { flex: 1 1 220px; width: auto; }
 
+/* 分类计数 chip：横向滚动而不是换行，几十个标签换行会把列表顶下去一大截 */
+.cat-chips {
+  display: flex; gap: 6px; flex-wrap: nowrap;
+  overflow-x: auto; padding-bottom: 8px; margin-bottom: 10px;
+  scrollbar-width: thin;
+}
+.cat-chip {
+  flex: 0 0 auto;
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 4px 10px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--panel);
+  color: var(--text-2); font-size: 12.5px;
+  transition: border-color .15s var(--ease), color .15s var(--ease), background .15s var(--ease);
+}
+.cat-chip:hover { border-color: var(--primary); color: var(--primary); }
+.cat-chip.on {
+  background: var(--primary-soft); border-color: var(--primary);
+  color: var(--primary); font-weight: 600;
+}
+.cat-chip b { font-size: 11.5px; font-weight: 600; opacity: .72; }
+
 /* ---------------- 窄屏 ---------------- */
 
 @media (max-width: 720px) {
@@ -2012,6 +2033,29 @@ main { transition: margin-left .34s var(--ease); }
   border-top: 1px solid var(--border);
   padding-top: 12px; margin-top: 12px;
 }
+/* 危险操作区：不可逆的删除单独成块并写清后果，避免和翻页 / 导出混排 */
+.danger-zone {
+  border: 1px solid var(--err-border);
+  background: var(--err-soft);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin-top: 14px;
+}
+.danger-hd {
+  font-size: 13px; font-weight: 650; color: var(--err); margin-bottom: 4px;
+}
+.danger-desc {
+  font-size: 12.5px; color: var(--text-2); line-height: 1.65; margin-bottom: 10px;
+}
+
+/* 页面级错误条：就地反馈，可重试可关闭，不弹窗 */
+.page-error {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 0 0 14px; padding: 10px 12px;
+  border: 1px solid var(--err-border); background: var(--err-soft);
+  border-radius: var(--radius); font-size: 13px;
+}
+.page-error .pe-msg { flex: 1 1 240px; color: var(--err); line-height: 1.6; }
 @media (max-width: 720px) {
   .toast-host { bottom: calc(72px + env(safe-area-inset-bottom)); }
 }

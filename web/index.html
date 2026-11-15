@@ -884,10 +884,10 @@
         <button id="ledgerExport" class="btn small">导出 CSV</button>
         <button id="ledgerExportJson" class="btn small">导出 JSON</button>
       </div>
-      <div class="btn-row danger-row">
-        <button id="ledgerImport" class="btn small btn-danger">导入…</button>
+      <div class="btn-row">
+        <button id="ledgerImport" class="btn small">导入…</button>
         <input id="ledgerImportFile" type="file" accept=".jsonl,.json,application/x-ndjson" hidden>
-        <button id="ledgerVacuum" class="btn small btn-danger">压缩数据库</button>
+        <button id="ledgerVacuum" class="btn small">压缩数据库</button>
       </div>
       <div class="table-wrap">
         <table>
@@ -910,6 +910,11 @@
         </div>
         <div class="btn-row">
           <button id="ledgerMore" class="btn small">下一页</button>
+        </div>
+        <!-- 删会话记录不可逆，单独成块并写清后果，别和「下一页」混排 -->
+        <div class="danger-zone">
+          <div class="danger-hd">危险操作</div>
+          <div class="danger-desc">删掉这个会话的全部记录，不可撤销，导出过的才有备份。</div>
           <button id="ledgerDelChat" class="btn small btn-danger">删掉这个会话的记录</button>
         </div>
       </div>

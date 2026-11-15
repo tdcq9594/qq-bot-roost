@@ -590,6 +590,58 @@ function closeTabMenus(except = null) {
   });
 }
 
+/**
+ * 页面级错误边界。
+ *
+ * 之前任意一个 loadXxx 抛错都是静默的：面板停在「加载中…」，只留一条控制台
+ * unhandled rejection，用户看不出哪里坏了。现在失败就在该页顶部亮一条可重试
+ * 的错误条——就地反馈，不弹窗、不打断在别的页面上的操作。
+ */
+function showPageError(name, err) {
+  const panel = document.getElementById(`tab-${name}`);
+  const msg = (err && (err.message || err.reason?.message)) || String(err || '未知错误');
+  console.error(`[webui] ${name} 加载失败`, err);
+  if (!panel) return;
+  let bar = panel.querySelector(':scope > .page-error');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.className = 'page-error';
+    bar.setAttribute('role', 'alert');
+    bar.innerHTML =
+      '<span class="pe-msg"></span>' +
+      '<button type="button" class="btn small" data-pe-retry>重试</button>' +
+      '<button type="button" class="icon-btn" data-pe-close aria-label="关闭提示">✕</button>';
+    bar.addEventListener('click', (e) => {
+      if (e.target.closest('[data-pe-retry]')) {
+        bar.remove();
+        activateTab(name);
+      } else if (e.target.closest('[data-pe-close]')) {
+        bar.remove();
+      }
+    });
+    panel.prepend(bar);
+  }
+  bar.querySelector('.pe-msg').textContent = `这个页面没加载出来：${msg}`;
+}
+
+/** 包一层：同步抛错和未处理的 Promise 都收敛到 showPageError */
+function safeLoad(name, fn) {
+  try {
+    const r = fn();
+    if (r && typeof r.catch === 'function') r.catch((e) => showPageError(name, e));
+  } catch (e) {
+    showPageError(name, e);
+  }
+}
+
+/* 兜底：没被 safeLoad 覆盖到的异常至少留个可查的痕迹，别让人对着白屏猜 */
+window.addEventListener('error', (e) => {
+  console.error('[webui] 未捕获异常', e.error || e.message);
+});
+window.addEventListener('unhandledrejection', (e) => {
+  console.error('[webui] 未处理的 Promise 拒绝', e.reason);
+});
+
 function activateTab(name) {
   const btn = tabButton(name);
   if (!btn) return;
@@ -607,16 +659,16 @@ function activateTab(name) {
   $$('.panel').forEach((p) => p.classList.toggle('active', p.id === `tab-${name}`));
   // 插件指标只在插件页轮询，切走就停——别在后台白耗请求
   if (name === 'plugins') {
-    loadPlugins();
+    safeLoad('plugins', loadPlugins);
     startPluginDashPolling();
   } else {
     stopPluginDashPolling();
   }
-  if (name === 'events') loadEvents();
-  if (name === 'ledger') loadLedger();
+  if (name === 'events') safeLoad('events', loadEvents);
+  if (name === 'ledger') safeLoad('ledger', loadLedger);
   // 统计页：进来先拉一次，之后 10 秒一轮（统计本身是 1 秒批量落盘的，不用更密）
   if (name === 'stats') {
-    loadStats();
+    safeLoad('stats', loadStats);
     startStatsPolling();
   } else {
     stopStatsPolling();
@@ -629,14 +681,17 @@ function activateTab(name) {
       if (frame.getAttribute('src') !== url) frame.src = url;
     }
   }
-  if (name === 'config') loadConfig();
-  if (name === 'groups') loadGroups();
-  if (name === 'reach') loadReach();
-  if (name === 'delivery') loadDelivery();
-  if (name === 'roles') { loadRoles(); loadPeople(); }
-  if (name === 'identity') loadIdentity();
-  if (name === 'notify') loadNotify();
-  if (name === 'onebot') loadOnebot();
+  if (name === 'config') safeLoad('config', loadConfig);
+  if (name === 'groups') safeLoad('groups', loadGroups);
+  if (name === 'reach') safeLoad('reach', loadReach);
+  if (name === 'delivery') safeLoad('delivery', loadDelivery);
+  if (name === 'roles') {
+    safeLoad('roles', loadRoles);
+    safeLoad('roles', loadPeople);
+  }
+  if (name === 'identity') safeLoad('identity', loadIdentity);
+  if (name === 'notify') safeLoad('notify', loadNotify);
+  if (name === 'onebot') safeLoad('onebot', loadOnebot);
   // 纯展示同步：侧栏 / 底栏高亮、面包屑、抽屉收起。不碰任何数据加载。
   syncNav(name);
 }
@@ -2976,12 +3031,57 @@ function buildMarketCats() {
     '<option value="">全部分类</option>' +
     [...tags].sort().map((t) => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('');
   sel.value = keep;
+  buildCatChips();
+}
+
+/**
+ * 分类计数 chip。
+ * 下拉换成 chip 是为了让「哪个分类有内容、有几个」一眼可见——几十条插件时
+ * 下拉里翻一遍才知道有没有东西。下拉本身保留，键盘和窄屏仍用它。
+ */
+function buildCatChips() {
+  const sel = $('#marketCat');
+  const filter = sel?.closest('.market-filter');
+  if (!filter) return;
+  let box = $('#catChips');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'catChips';
+    box.className = 'cat-chips';
+    filter.insertAdjacentElement('afterend', box);
+  }
+  const counts = new Map();
+  for (const p of MARKET.all) {
+    for (const t of new Set([...(p.tags || []), p.category].filter(Boolean))) {
+      counts.set(t, (counts.get(t) || 0) + 1);
+    }
+  }
+  // 条目多的排前面，同样多按名字排，避免每次刷新顺序乱跳
+  const order = [...counts.keys()].sort(
+    (a, b) => counts.get(b) - counts.get(a) || a.localeCompare(b, 'zh')
+  );
+  const chips = [
+    `<button type="button" class="cat-chip${MARKET.tag ? '' : ' on'}" data-cat="">全部 <b>${MARKET.all.length}</b></button>`,
+    ...order.map(
+      (t) =>
+        `<button type="button" class="cat-chip${MARKET.tag === t ? ' on' : ''}" data-cat="${escapeHtml(t)}">${escapeHtml(t)} <b>${counts.get(t)}</b></button>`
+    ),
+  ];
+  box.innerHTML = chips.join('');
+}
+
+/** 只改高亮，不重建——重建会让横向滚动的 chip 条跳回开头 */
+function syncCatChips() {
+  $$('#catChips .cat-chip').forEach((c) => {
+    c.classList.toggle('on', (c.dataset.cat || '') === (MARKET.tag || ''));
+  });
 }
 
 function renderMarketRows() {
   const list = $('#marketList');
   const upd = MARKET.upd;
   const shown = MARKET.all.filter(matchMarket);
+  syncCatChips();
 
   if (!shown.length) {
     list.innerHTML = `<div class="empty">没有匹配的插件${
@@ -3187,6 +3287,15 @@ $('#marketSearch')?.addEventListener('input', (e) => {
 });
 $('#marketCat')?.addEventListener('change', (e) => {
   MARKET.tag = e.target.value;
+  renderMarketRows();
+});
+// 分类 chip 与下拉是同一份状态：点 chip 也把下拉同步过去，键盘用户不受影响
+document.addEventListener('click', (e) => {
+  const chip = e.target.closest?.('.cat-chip');
+  if (!chip) return;
+  MARKET.tag = chip.dataset.cat || '';
+  const sel = $('#marketCat');
+  if (sel) sel.value = MARKET.tag;
   renderMarketRows();
 });
 
