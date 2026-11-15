@@ -217,6 +217,9 @@ test('自动续期自身抛错：闸要放回去，且要退避', async () => {
   const { createDevPlatform } = await import('../src/dev/platform.js');
 
   const P = createDevPlatform({ fetchImpl: async () => jsonRes(200, { retcode: 0, data: {} }) });
+  // 续期只会发生在「手里有票、本机也留着登录态」之后，先把这两个前提摆上
+  P._session.adopt('b-token=old; developer_id_lite=dev');
+  P._scanner.hasProfile = async () => true;
   // 扫码器直接炸：模拟「起浏览器就失败」
   P._scanner.refresh = async () => { throw new Error('boom'); };
 
@@ -248,6 +251,8 @@ test('换票成功后排一次补拉：时间一到自己拉回数据，不用�
       return jsonRes(200, { retcode: 0, data: { bots: [{ bot_appid: 123, bot_name: '小鸟' }] } });
     },
   });
+  P._session.adopt('b-token=old; developer_id_lite=dev');
+  P._scanner.hasProfile = async () => true;
   P._scanner.refresh = async () => ({
     ok: true,
     jar: new Map([['b-token', 'fresh'], ['developer_id_lite', 'dev']]),
@@ -271,4 +276,80 @@ test('换票成功后排一次补拉：时间一到自己拉回数据，不用�
     process.env.ROOST_DEV_RENEW_WAIT_MS = bak;
     await fs.rm(home, { recursive: true, force: true });
   }
+});
+
+/* ------------------------------------------------------------------ */
+/* 扫码与续期不能打架，没登录过也不该谈换票                              */
+/* ------------------------------------------------------------------ */
+
+/** 造一个「已经登录过」的平台：手里有票、本机留着 profile */
+async function platformLoggedInInPast({ scanBusy = false } = {}) {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'roost-clash-'));
+  process.env.ROOST_HOME = home;
+  const { createDevPlatform } = await import('../src/dev/platform.js');
+  const P = createDevPlatform({ fetchImpl: async () => jsonRes(200, { retcode: 0, data: {} }) });
+  P._session.adopt('b-token=old; developer_id_lite=dev');
+  P._scanner.hasProfile = async () => true;
+  P._scanner.status = () => ({ state: scanBusy ? 'waiting' : 'idle', busy: scanBusy, alive: false });
+  return P;
+}
+
+test('扫码进行中：自动续期让路，不算失败、不退避、不开第二个窗口', async () => {
+  const P = await platformLoggedInInPast({ scanBusy: true });
+  let refreshed = 0;
+  P._scanner.refresh = async () => { refreshed += 1; return { ok: true, jar: new Map() }; };
+
+  assert.equal(await P._autoRelogin(), false);
+
+  const a = (await P.status()).autoRelogin;
+  assert.equal(refreshed, 0, '扫码时绝不能起第二个浏览器（同一个 profile 起不来，还会互相关窗）');
+  assert.equal(a.scanBusy, true, '面板要知道「浏览器被扫码占着」');
+  assert.equal(a.last.skipped, true, '让路必须标成 skipped');
+  assert.equal(a.last.ok, false);
+  assert.equal(a.retryInMs, 0, '让路不设退避：扫完真过期了要能立刻换');
+});
+
+test('从没登录过（手里没票）：自动续期直接不跑', async () => {
+  const P = await platformLoggedInInPast();
+  P._session.clear();
+  let refreshed = 0;
+  P._scanner.refresh = async () => { refreshed += 1; return { ok: true, jar: new Map() }; };
+
+  assert.equal(await P._autoRelogin(), false);
+  assert.equal(refreshed, 0, '连票都没有，换票解决不了任何问题');
+  const a = (await P.status()).autoRelogin;
+  assert.equal(a.last.at, 0, '不该留下任何「换票失败」的记录');
+});
+
+test('有票但本机没登录记录（profile 没了）：不续期，如实说要去扫码', async () => {
+  const P = await platformLoggedInInPast();
+  P._scanner.hasProfile = async () => false;
+  let refreshed = 0;
+  P._scanner.refresh = async () => { refreshed += 1; return { ok: true, jar: new Map() }; };
+
+  assert.equal(await P._autoRelogin(), false);
+  assert.equal(refreshed, 0, '没有 profile 时开窗只会白等 25 秒超时');
+  const a = (await P.status()).autoRelogin;
+  assert.equal(a.last.skipped, true);
+  assert.equal(a.last.reason, 'no-login');
+  assert.equal(a.retryInMs, 0, '这不是失败，别退避');
+});
+
+test('后台正在换票时点扫码：先等它收尾，再开扫码窗口', async () => {
+  const P = await platformLoggedInInPast();
+  const order = [];
+  P._scanner.refresh = async () => {
+    await new Promise((r) => { setTimeout(r, 40); });
+    order.push('renew-done');
+    return { ok: true, jar: new Map([['b-token', 'fresh'], ['developer_id_lite', 'dev']]) };
+  };
+  P._scanner.start = async () => { order.push('scan-start'); return { state: 'starting', busy: true }; };
+
+  const renew = P._autoRelogin();
+  await new Promise((r) => { setTimeout(r, 10); }); // 让续期先起跑
+  await P.startScan({ remember: true });
+  await renew;
+
+  assert.deepEqual(order, ['renew-done', 'scan-start'],
+    '两个流程都会 close() 浏览器，抢着跑会把刚开的扫码窗口一起关掉');
 });

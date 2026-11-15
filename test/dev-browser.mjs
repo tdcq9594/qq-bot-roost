@@ -354,7 +354,14 @@ test('续期：正在扫码时不抢窗口', async () => {
   const r = await scan.refresh({ timeoutMs: 500 });
   assert.equal(r.ok, false);
   assert.equal(r.reason, 'busy');
+  /**
+   * `skipped` 必须带上：上层（platform）靠它区分「这回合轮不到我」和
+   * 「换票失败」。少了这个字段，用户刚点扫码就会看到红字 + 5 分钟退避。
+   */
+  assert.equal(r.skipped, true, '让路要标记成 skipped，不能算失败');
+  assert.equal(scan.status().busy, true, '扫码进行中要能被上层看见');
   await scan.cancel();
+  assert.equal(scan.status().busy, false);
 });
 
 test('续期默认无头（不弹窗），扫码仍然是有窗口的', async () => {

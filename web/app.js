@@ -6893,18 +6893,44 @@ function devRememberSay(text, kind = '') {
  *
  * 这条存在的唯一理由：续期会**真的弹一个浏览器窗口**。不说清楚，
  * 用户看到窗口自己冒出来只会以为出问题了。
+ *
+ * `loggedIn` 一起传进来：**没登录过就不谈换票**。续期的前提是「本机留着
+ * 长期登录态」，前提不成立时它本来就不该跑，面板也不该在上面写换票的事。
  */
-function devPaintAuto(a) {
+function devPaintAuto(a, loggedIn = true) {
   const el = $('#devAutoMsg');
   if (!el) return;
+  /** 「什么事都没发生」时的那句话，下面好几个分支要回到它 */
+  const idleText = '票据过期时会在后台自动换新票（无头浏览器，不弹窗），拿到后自动关闭。';
   el.style.color = '';
   if (a?.enabled === false) {
     el.textContent = '自动续期已关闭（ROOST_DEV_AUTO_RELOGIN=0）：票据过期后要手动扫码。';
     return;
   }
   const last = a?.last;
+  if (!loggedIn) {
+    el.textContent = '还没登录：登录成功之后才会自动续期，现在不用管换票。';
+    return;
+  }
   if (last?.reason === 'running') {
     el.textContent = '票据过期了，正在后台换新票（不弹窗，拿到就关）…';
+    return;
+  }
+  /**
+   * 「让路」不是「失败」：人正在扫码，续期这一轮本来就不该插手（两边抢同一个
+   * profile，窗口会互相关掉）。以前这里按失败画成红字 + 「5 分钟内不会再尝试」，
+   * 于是刚点完扫码就看到「自动换票没成功」——纯粹自己吓自己。
+   *
+   * 扫码收尾后这条就过期了（人已经登上了），直接回到默认说明，不留旧结论。
+   * `no-login`（本机没有 profile，换不了票）要留着说，那是需要人动手的。
+   */
+  if (last?.skipped) {
+    if (last.reason === 'scan-busy' && a?.scanBusy === false) {
+      el.textContent = idleText;
+      return;
+    }
+    const t0 = new Date(last.at).toLocaleTimeString('zh-CN');
+    el.textContent = `${t0} ${last.message || '正在扫码登录，自动换票先让路（扫完就有新票）'}。`;
     return;
   }
   /**
@@ -6921,7 +6947,7 @@ function devPaintAuto(a) {
     return;
   }
   if (!last?.at) {
-    el.textContent = '票据过期时会在后台自动换新票（无头浏览器，不弹窗），拿到后自动关闭。';
+    el.textContent = idleText;
     return;
   }
   const t = new Date(last.at).toLocaleTimeString('zh-CN');
@@ -6938,7 +6964,7 @@ function devPaintStatus(st) {
   const el = $('#devLoginState');
   if (!el) return;
   devPaintScan(st?.scan);
-  devPaintAuto(st?.autoRelogin);
+  devPaintAuto(st?.autoRelogin, Boolean(st?.loggedIn));
   /**
    * 勾选状态：**用户选过就按用户的**（localStorage），没选过才看磁盘。
    *

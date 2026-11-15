@@ -410,6 +410,14 @@ export function createScanLogin({
       ...st,
       /** 浏览器还连着吗：面板靠它区分「能发请求」和「只剩一份可能过期的 cookie」 */
       alive: Boolean(cdp) && !closing,
+      /**
+       * 这一轮流程（起浏览器 → 等扫码 → 校验）是不是还没收尾。
+       *
+       * 自动续期要知道这件事：**不能在扫码途中开自己的窗口**。两边共用同一个
+       * `--user-data-dir`，第二个进程只会把 URL 转给已有实例然后等不到调试
+       * 端口；而且两边收尾时都会 `close()`，谁先结束谁就把对方的窗口一起关掉。
+       */
+      busy: Boolean(running),
       expiresIn: st.startedAt ? Math.max(0, st.startedAt + ttlMs - now()) : 0,
     };
   }
@@ -880,8 +888,21 @@ export function createScanLogin({
    * 返回 `{ ok, jar }`：`jar` 是票据 Map，交给会话层整份替换。
    */
   async function refresh({ timeoutMs = 25_000, verify: wantVerify = false, headless = true } = {}) {
-    // 正在等用户扫码：别抢，也别把人家的窗口关掉
-    if (running) return { ok: false, reason: 'busy', message: '正在扫码登录，先等这个流程结束' };
+    /**
+     * 正在等用户扫码：别抢，也别把人家的窗口关掉。
+     *
+     * `skipped` 是给上层看的**关键区别**：这不是「换票失败」，而是「这回合
+     * 轮不到换票」。以前上层一律按失败处理，于是用户刚点完扫码，面板上就多
+     * 一条红字「自动换票没成功」+ 5 分钟退避——明明什么都没坏。
+     */
+    if (running) {
+      return {
+        ok: false,
+        skipped: true,
+        reason: 'busy',
+        message: '正在扫码登录，先等这个流程结束',
+      };
+    }
 
     // 窗口本来就开着：直接读，最快也最稳
     if (cdp) {
@@ -953,6 +974,21 @@ export function createScanLogin({
   }
 
   /**
+   * 这个 profile 还在不在。
+   *
+   * 自动续期全靠它：profile 里才有长期登录态，删掉就等于「从没登录过」。
+   * 这种情况下再去开窗只会白等 25 秒超时，然后报一个听起来很严重的失败。
+   */
+  async function hasProfile() {
+    try {
+      await fsp.access(profileDir);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * 连 profile 一起删掉。
    *
    * 这个 profile 是扫码窗口专用的独立目录，登录态就存在里面——所以「退出登录」
@@ -973,6 +1009,7 @@ export function createScanLogin({
     refresh,
     cancel,
     close,
+    hasProfile,
     purgeProfile,
     openBotPage,
     status,

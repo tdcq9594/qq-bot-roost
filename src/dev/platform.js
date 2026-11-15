@@ -310,8 +310,58 @@ export function createDevPlatform({ log = () => {}, fetchImpl = fetch } = {}) {
   async function autoRelogin() {
     if (autoRenewDisabled || suspendAutoRenew || autoRenewing) return false;
     if (Date.now() < autoRenewBackoffUntil) return false;
+
+    /**
+     * 人正在扫码 → 自动续期让路，**而且不算失败**。
+     *
+     * 这两条路径会真的打架：它们共用同一个 `--user-data-dir`，扫码窗口开着
+     * 的时候再起一个无头实例，第二个进程只会把 URL 转给已有实例、等不到调试
+     * 端口；两边收尾又都会 `close()`，谁先结束谁把对方的窗口一起关掉。
+     *
+     * 更要紧的是**触发时机**：扫码成功那一刻，`verify()` 会拿刚到手的票据打
+     * 一次 `list_bots`，票还没「生效」时平台回 401，正好被续期钩子接住——
+     * 于是「登录刚成功」和「自动换票失败」同时出现。实测就是这个场面：
+     * 面板红字说换票没成功，其实人正在扫码，扫完自然有票。
+     *
+     * 所以这里只记一条中性状态：不设退避、不动 `autoRenewAt`（扫完/取消后
+     * 真过期了要能立刻换），也不写日志刷屏。
+     */
+    if (scanner.status?.().busy) {
+      if (autoRenewInfo.reason !== 'scan-busy') {
+        autoRenewInfo = {
+          at: Date.now(), ok: false, skipped: true,
+          reason: 'scan-busy', message: '正在扫码登录，自动换票先让路（扫完就有新票）',
+        };
+        log('[dev] 正在扫码登录，自动换票先让路（本轮不需要换票）');
+      }
+      return false;
+    }
+
     if (Date.now() - autoRenewAt < 20_000) return false;
     if (autoRenewPromise) return autoRenewPromise;
+
+    /**
+     * 从没登录过 / 已经退出登录 → **根本不尝试续期**。
+     *
+     * 续期能成的前提是「扫码 profile 里还留着长期登录态」。这个前提不成立时
+     * 开窗只会白等 25 秒，然后把「用户还没登录」写成一条失败——面板上就变成
+     * 「自动换票没成功」，而用户连一次登录都还没完成。
+     *
+     * 两道判断都要过：手里有票（没票连 401 都发不出来）+ 机器上还留着 profile
+     * 或存过票。手动粘 cURL 进来的票没有 profile，也只能走手动重登。
+     */
+    if (!session.has()) return false;
+    if (!(await scanner.hasProfile?.()) && !(await hasSaved())) {
+      if (autoRenewInfo.reason !== 'no-login') {
+        autoRenewInfo = {
+          at: Date.now(), ok: false, skipped: true,
+          reason: 'no-login',
+          message: '本机没有登录记录（profile 已没有），不能后台换票，需要手动扫码',
+        };
+        log('[dev] 本机没有扫码登录记录，跳过自动换票');
+      }
+      return false;
+    }
 
     /**
      * 默认**后台无头**：这条路径由请求触发，不该在桌面正中弹一个窗口。
@@ -344,6 +394,22 @@ export function createDevPlatform({ log = () => {}, fetchImpl = fetch } = {}) {
         try {
           const r = await scanner.refresh({ timeoutMs: 25_000, headless });
           if (!r?.ok) {
+            /**
+             * `skipped`（扫码抢在前面）不是失败：不进退避，也不把红字写到
+             * 面板上。真按失败处理的话，用户点一次扫码就能换来 5 分钟
+             * 「不再自动尝试」——本来该自愈的场景被自己关掉了。
+             */
+            if (r?.skipped) {
+              autoRenewInfo = {
+                at: Date.now(), ok: false, skipped: true,
+                reason: 'scan-busy',
+                message: r?.message || '正在扫码登录，自动换票先让路（扫完就有新票）',
+              };
+              // 把 20 秒节流清零：扫码被取消后如果票真的是废的，下一发 401 要能立刻换
+              autoRenewAt = 0;
+              log('[dev] 自动换票让路：正在扫码登录，不设退避');
+              return false;
+            }
             const why = r?.message || '没换到新票，需要手动扫码登录';
             autoRenewInfo = {
               at: Date.now(), ok: false, reason: r?.reason || 'failed',
@@ -613,6 +679,18 @@ export function createDevPlatform({ log = () => {}, fetchImpl = fetch } = {}) {
 
   /** 发起扫码登录：拉起独立浏览器窗口，用户在里面用手机 QQ 扫 */
   async function startScan({ remember = true } = {}) {
+    /**
+     * 后台正在换票时先等它收尾，再开扫码窗口。
+     *
+     * 两边用同一个 `--user-data-dir`，而且都会 `close()`：直接开第二个实例，
+     * 要么等不到调试端口，要么被续期的 `finally { close() }` 连窗带登录态
+     * 一起关掉——用户看到的是「窗口一闪就没了」。续期自己有 25 秒上限，
+     * 等这几秒比抢那一下划算。
+     */
+    if (autoRenewing && autoRenewPromise) {
+      log('[dev] 后台正在换票，等它收尾后再开扫码窗口');
+      await autoRenewPromise.catch(() => false);
+    }
     scanRemember = Boolean(remember);
     return scanner.start();
   }
@@ -645,6 +723,13 @@ export function createDevPlatform({ log = () => {}, fetchImpl = fetch } = {}) {
          */
         running: autoRenewing,
         last: autoRenewInfo,
+        /**
+         * 扫码占用着浏览器：续期此时**注定让路**。
+         *
+         * 露出来是为了让面板能把「换票没成功」和「人正在扫码」分开说——
+         * 这两件事同时出现时，只有后者是真的，前者会自动消失。
+         */
+        scanBusy: Boolean(scanner.status?.().busy),
         /** 失败退避还剩多久：面板据此说明「这段时间不会再自动试」 */
         retryInMs: Math.max(0, autoRenewBackoffUntil - Date.now()),
         /** 65 秒后的补拉：`ok:null` = 还没跑，`ok:true` = 平台已放开 */
