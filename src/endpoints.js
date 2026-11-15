@@ -133,6 +133,14 @@ export const OFFICIAL_ENDPOINTS = [
    */
   { method: 'POST', path: '/channels/{channel_id}/messages', api: 'sendChannelMessage', group: '频道·消息', note: '被动 5 分钟；主动 20 条/天·子频道、每频道每天 2 个子频道；每子频道 1s ≤5 条；需 WS 在线' },
   { method: 'DELETE', path: '/channels/{channel_id}/messages/{message_id}', api: 'retractChannelMessage', group: '频道·消息', note: '管理员可撤成员、频道主可撤所有人；仅私域' },
+
+  /* ---------------- 频道·表情表态（server-inter/message/trans/emoji） ----------------
+   * 官方把这三个放在 `message/trans/` 而不是 `channel/` 下，所以按目录找会漏。
+   * 表情表态**仅频道内可用**；type 见 EmojiType，id 见 Emoji 列表。
+   */
+  { method: 'PUT', path: '/channels/{channel_id}/messages/{message_id}/reactions/{type}/{id}', api: 'putReaction', group: '频道·表态', note: '机器人对消息发表情表态' },
+  { method: 'DELETE', path: '/channels/{channel_id}/messages/{message_id}/reactions/{type}/{id}', api: 'deleteReaction', group: '频道·表态', note: '只能删自己发的表态' },
+  { method: 'GET', path: '/channels/{channel_id}/messages/{message_id}/reactions/{type}/{id}', api: 'getReactionUsers', group: '频道·表态', note: 'cookie 分页；limit 默认 20、最多 50' },
   { method: 'POST', path: '/users/@me/dms', api: 'createDms', group: '频道·私信', note: '需机器人与用户有共同频道；返回私信会话 guild_id' },
   { method: 'POST', path: '/dms/{guild_id}/messages', api: 'sendDmMessage', group: '频道·私信', note: '主动 2 条/天·用户 + 200 条/天·机器人；被动不限条数；仅私域' },
   { method: 'DELETE', path: '/dms/{guild_id}/messages/{message_id}', api: 'retractDmMessage', group: '频道·私信', note: '只能撤回机器人自己发的私信；仅私域' },

@@ -1819,6 +1819,37 @@ export class QQApi {
     return this.#request('DELETE', `/channels/${enc(channelId)}/messages/${enc(messageId)}${q}`);
   }
 
+  /* ---------------- 频道·表情表态（仅频道内可用） ---------------- */
+
+  /** 机器人发表表情表态。`PUT /channels/{id}/messages/{mid}/reactions/{type}/{id}` */
+  putReaction(channelId, messageId, type, emojiId) {
+    return this.#request(
+      'PUT',
+      `/channels/${enc(channelId)}/messages/${enc(messageId)}/reactions/${enc(type)}/${enc(emojiId)}`,
+      {},
+    );
+  }
+
+  /** 删除机器人自己发的表情表态。同上路径，`DELETE` */
+  deleteReaction(channelId, messageId, type, emojiId) {
+    return this.#request(
+      'DELETE',
+      `/channels/${enc(channelId)}/messages/${enc(messageId)}/reactions/${enc(type)}/${enc(emojiId)}`,
+    );
+  }
+
+  /** 表情表态的用户列表。`GET .../reactions/{type}/{id}?cookie=&limit=` */
+  getReactionUsers(channelId, messageId, type, emojiId, { cookie = '', limit = 20 } = {}) {
+    const qs = new URLSearchParams({
+      ...(cookie ? { cookie: String(cookie) } : {}),
+      limit: String(limit),
+    });
+    return this.#request(
+      'GET',
+      `/channels/${enc(channelId)}/messages/${enc(messageId)}/reactions/${enc(type)}/${enc(emojiId)}?${qs}`,
+    );
+  }
+
   /**
    * 建私信会话。`POST /users/@me/dms`
    * 要求机器人与目标用户有共同频道；返回的 `guild_id` 才是私信会话 id，
