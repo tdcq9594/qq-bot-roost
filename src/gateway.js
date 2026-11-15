@@ -331,6 +331,33 @@ export class Gateway {
           }
           this.lastSeq = p.s;
         }
+        /**
+         * 交互事件回执（WS 分支）。
+         *
+         * HTTP 分支在 webhook.js 做了「两层确认」：reply `{op:12,code:0}` +
+         * `PUT /interactions/{id}`。WS 没有 HTTP 响应可回，只剩下第二层，
+         * 以前整个仓库只有 webhook 会调 putInteraction，于是 WS 模式下
+         * 回调型按钮点下去客户端一直转圈。
+         *
+         * 只有 type 11（消息按钮）/ 12（快捷菜单）需要回执；13/14/16/18/19
+         * 官方明确不用，乱回同一 id 会被判非法。口径与 webhook.js 保持一致。
+         *
+         * 放在 seq 去重之后：resume 重放的同一 interaction_id 不会重复 PUT。
+         * 这一步是纯加法——现有按钮都是 `action.type: 2` 指令型，不产生 interaction。
+         */
+        if (t === 'INTERACTION_CREATE') {
+          const id = p.d?.id;
+          const tt = Number(p.d?.type ?? p.d?.data?.type ?? 0);
+          if (id && (tt === 11 || tt === 12)) {
+            try {
+              /** api.js:1093 返回 Promise，fire-and-forget，别 await 阻塞分发 */
+              const r = this.api?.putInteraction?.(id, 0);
+              if (r && typeof r.catch === 'function') r.catch(() => {});
+            } catch {
+              /* 回执失败不影响分发 */
+            }
+          }
+        }
         if (t === 'READY') {
           this.sessionId = p.d?.session_id ?? '';
           this.attempt = 0;
