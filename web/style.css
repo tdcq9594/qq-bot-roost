@@ -77,18 +77,31 @@
 [data-theme="dark"] {
   color-scheme: dark;
 
-  /* 深褐黑，不是纯黑——纯黑配暖色显廉价 */
-  --bg: #19120e;
-  --panel: #211a16;
-  --panel-2: #2a221d;
-  --panel-3: #342c26;
-  --border: #372e29;
-  --border-strong: #50453f;
+  /**
+   * 深褐黑，不是纯黑——纯黑配暖色显廉价。
+   *
+   * 四层背景按「离用户越近越亮」递进，每层之间保证 ≥1.15 的相对对比，
+   * 让人不用看边框也能分出「页面 < 区块 < 区块内的次级块 < 嵌在里面的小件」：
+   *   --bg      页面底，最深
+   *   --panel   卡片 / .box
+   *   --panel-2 输入框底、hover、次级块
+   *   --panel-3 标签 / 胶囊 / 进度条槽
+   *
+   * --border 必须比最亮的 --panel-3 还亮一档，否则在标签和输入框上看不见线。
+   * 旧的一组 border(#372e29) 与 panel-3(#342c26) 只差 3，实测 1.03 —— 等于没有。
+   */
+  --bg: #140d07;
+  --panel: #261d17;
+  --panel-2: #332921;
+  --panel-3: #41362c;
+  --border: #5a4c40;
+  --border-strong: #73645a;
 
+  /* 文字跟着底色加深一起提亮：--muted 在 panel-3 上要够 4.5:1，--faint 够 3:1 */
   --text: #ede7df;
-  --text-2: #c1b9b1;
-  --muted: #928b83;
-  --faint: #635c56;
+  --text-2: #c6beb6;
+  --muted: #aba49c;
+  --faint: #78716a;
 
   --primary: #eca342;
   --primary-hover: #fdbd63;
@@ -107,10 +120,11 @@
   --err-soft: #3c1618;
   --err-border: #7a3334;
 
-  --log-bg: #150f0c;
-  --log-hover: #211a16;
-  --log-time: #635c56;
-  --log-debug: #928b83;
+  /* 日志区比页面底再深一档（终端该是最暗的），时间/调试色跟随 faint / muted */
+  --log-bg: #110b06;
+  --log-hover: #2b221c;
+  --log-time: #78716a;
+  --log-debug: #aba49c;
 
   --c-teal: #7cd2ae;    --c-teal-soft: #0d251b;
   --c-blue: #88c1ff;    --c-blue-soft: #112033;
