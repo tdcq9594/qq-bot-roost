@@ -76,6 +76,7 @@ function confirmDialog({ title = '确认', message = '', okText = '确定', dang
   $('#modalTitle').textContent = title;
   $('#modalBody').innerHTML = message;
   btnOk.textContent = okText;
+  // danger 是兜底：万一 btn-danger 的规则被拿掉，至少还退成红描边，不会变成普通按钮
   btnOk.classList.toggle('danger', danger);
   btnOk.classList.toggle('btn-danger', danger);
   btnOk.classList.toggle('primary', !danger);

@@ -127,6 +127,25 @@
   --shadow-lg: 0 16px 40px rgba(0, 0, 0, .5);
 }
 
+/**
+ * 暗色下常驻区块不要阴影。
+ *
+ * 近黑底上投影几乎看不出来，只把块的边缘糊掉一圈；层级本来就该由背景深浅
+ * （--panel / --panel-2 / --panel-3）加 1px 边框表达，阴影只留给真正浮起来的
+ * 东西（.modal / 菜单 / 命令面板 / toast，那些用的都是 --shadow-lg）。
+ * 不改 --shadow* 的值，因为 day/dark 两套定义都被契约盯着，且亮色下这层
+ * 暖色阴影是想要的。
+ */
+[data-theme="dark"] .card,
+[data-theme="dark"] .box,
+[data-theme="dark"] .cfg-toc {
+  box-shadow: none;
+}
+/* 未保存标记是 inset 左边线，别被上面那条一起清掉 */
+[data-theme="dark"] .box.is-dirty {
+  box-shadow: inset 3px 0 0 var(--primary);
+}
+
 * { box-sizing: border-box; }
 
 body {
@@ -407,6 +426,20 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
 .btn.danger { color: var(--err); border-color: var(--err-border); }
 .btn.danger:hover { background: var(--err-soft); }
+/**
+ * 三级权重，按「这一页最想让人点哪个」来选：
+ *   .btn.primary  实心品牌色 —— 一页只该有一个（保存 / 确定 / 新建）
+ *   .btn          描边       —— 默认那一级，并列的普通动作
+ *   .btn-ghost    无边框     —— 纯辅助（取消、关闭、跳转），不该抢视线
+ * 危险动作是另一条轴：.btn-danger 实心红只给不可逆操作（删除、清空），
+ * .btn.danger 红描边留给「有副作用但能重来」的（解绑、恢复默认）。
+ */
+.btn-ghost {
+  border-color: transparent; background: transparent; color: var(--text-2);
+}
+.btn-ghost:hover {
+  border-color: var(--border); background: var(--panel-2); color: var(--text);
+}
 
 /* 配置页底部的保存条。要压住滚动内容，否则滑到一半看不见按钮 */
 .sticky-actions {
@@ -939,8 +972,6 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
   background: var(--panel); color: var(--text); outline: none; resize: vertical;
 }
 .pp-data-acts { display: flex; gap: 6px; margin-top: 6px; justify-content: flex-end; }
-.btn.danger { color: var(--err); border-color: var(--err-border); }
-.btn.danger:hover { background: var(--err-soft); }
 
 /* ============================================================
    插件运行数据（插件自定义，面板只负责排版）
