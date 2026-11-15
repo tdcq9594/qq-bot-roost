@@ -837,11 +837,91 @@ async function testMirror() {
   const npmBack = await api('/api/mirror');
   ok('npm 源: 能还原原设置', String(npmBack.data?.npmRegistry?.custom || '') === String(npmOrig || '') || npmOrig === 'npmmirror');
 
+  /**
+   * 手动检查（`POST /api/ext/deps/verify`）：**只验不装**。
+   *
+   * 以前面板只有 install / remove 两条路，`extDeps.verify()` 虽然写好了
+   * （专抓「版本号在、文件坏了」），却只在 `install()` 内部被调用，
+   * 用户点不到。这条用例守三件事：
+   *   1. 路由存在且能跑通；
+   *   2. 返回里带 `deps.registry`——面板要显示「这次会走哪个源」；
+   *   3. **没装的包不算故障**：可选包缺了只进 `missing`。`smoke()` 对
+   *      没装的包一律返回「加载失败」，直接透传会让面板把「没装」报成
+   *      「坏了」，用户会以为面板出问题。
+   */
+  const ver = await api('/api/ext/deps/verify', { method: 'POST', body: JSON.stringify({}) });
+  ok('手动检查: 接口可用', ver.status === 200, ver.data?.error || `status=${ver.status}`);
+  ok(
+    '手动检查: 带安装源信息',
+    Boolean(ver.data?.deps?.registry?.url),
+    JSON.stringify(ver.data?.deps?.registry ?? null),
+  );
+  ok(
+    '手动检查: ffmpeg 有探测结论',
+    typeof ver.data?.ffmpeg?.ok === 'boolean',
+    JSON.stringify(ver.data?.ffmpeg ?? null),
+  );
+
+  const errNames = (ver.data?.errors ?? []).map((e) => String(e).split('：')[0]);
+  const falseAlarm = errNames.filter((n) => (ver.data?.missing ?? []).includes(n));
+  ok(
+    '手动检查: 没装的包不报成故障',
+    falseAlarm.length === 0,
+    `被误报：${falseAlarm.join('、')}；errors=${JSON.stringify(ver.data?.errors ?? [])}`,
+  );
+
+  /** 旧路径也得认，否则老面板缓存的 app.js 一点就 404 */
+  const verLegacy = await api('/api/onebot/deps/verify', { method: 'POST', body: JSON.stringify({}) });
+  ok('手动检查: 旧路径仍然可用', verLegacy.status === 200, `status=${verLegacy.status}`);
+
+  /** 面板首屏读的是 GET /api/onebot——安装源不在里面的话，刷新后那一行就空了 */
+  const ob = await api('/api/onebot');
+  ok(
+    '依赖卡: 首屏带安装源',
+    Boolean(ob.data?.deps?.registry?.url) && Array.isArray(ob.data?.deps?.registry?.presets),
+    JSON.stringify(ob.data?.deps?.registry ?? null),
+  );
+
+  /**
+   * 部分提交不能清空别的字段。
+   *
+   * 「外接」页依赖卡只换 npm 源时只发 `{ npmRegistry }`。以前服务端对
+   * `mirrorCustom` / `giteeToken` 是无条件 `String(body?.x ?? '')`，于是一次
+   * 「换个源」就把用户的 Gitee 令牌悄悄清了——不报错，直到下次拉插件
+   * 才发现要重填。这条守的是「没传 = 不改」。
+   */
+  const seed = await api('/api/mirror', {
+    method: 'PUT',
+    body: JSON.stringify({
+      mirror: orig.id || 'auto',
+      mirrorCustom: 'https://mirror.example.test/',
+      giteeToken: 'e2e-token-1234',
+    }),
+  });
+  ok('部分提交: 能先写进前缀和令牌', seed.status === 200, seed.data?.error || '');
+
+  const partial = await api('/api/mirror', {
+    method: 'PUT',
+    body: JSON.stringify({ npmRegistry: 'npmmirror' }),
+  });
+  ok('部分提交: 只发 npm 源也能成功', partial.status === 200, partial.data?.error || '');
+  ok(
+    '部分提交: 自定义前缀没被清空',
+    partial.data?.current?.custom === 'https://mirror.example.test/',
+    String(partial.data?.current?.custom ?? '(空)'),
+  );
+  ok(
+    '部分提交: Gitee 令牌没被清空',
+    partial.data?.current?.giteeToken === 'e2e-token-1234',
+    String(partial.data?.current?.giteeToken ?? '(空)'),
+  );
+
   await api('/api/mirror', {
     method: 'PUT',
     body: JSON.stringify({
       mirror: orig.id || 'auto',
       mirrorCustom: orig.custom || '',
+      giteeToken: orig.giteeToken || '',
     }),
   });
   const back = await api('/api/mirror');

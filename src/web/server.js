@@ -54,6 +54,7 @@ import {
   configureRegistry,
   normRegistry,
   registryConfig,
+  resolveRegistry,
 } from '../npm-registry.js';
 import {
   configureProxy,
@@ -2009,11 +2010,22 @@ async function startWebServerInstance({
             npmRegistry = raw;
           }
 
+          /**
+           * 没传的字段一律**沿用当前值**，不能拿空串顶上。
+           *
+           * 以前 `mirrorCustom` / `giteeToken` 是无条件 `String(body?.x ?? '')`，
+           * 于是任何「只想改一个字段」的 PUT（比如外接页只换 npm 源）
+           * 都会顺手把用户的自定义前缀和 Gitee 令牌清掉——而且不报错，
+           * 直到下次拉插件才发现要重新填令牌。`proxy` / `npmRegistry`
+           * 一直是按「undefined = 不改」写的，这里对齐。
+           */
+          const keep = (v, cur) => (v !== undefined ? String(v ?? '').trim() : String(cur ?? '').trim());
+
           globalCfg.network = {
             ...(globalCfg.network ?? {}),
             mirror: id,
-            mirrorCustom: String(body?.mirrorCustom ?? '').trim(),
-            giteeToken: String(body?.giteeToken ?? '').trim(),
+            mirrorCustom: keep(body?.mirrorCustom, globalCfg.network?.mirrorCustom),
+            giteeToken: keep(body?.giteeToken, globalCfg.network?.giteeToken),
             proxy,
             npmRegistry,
           };
@@ -2718,7 +2730,21 @@ async function startWebServerInstance({
               historyCache: Number(c.historyCache ?? 100),
               allowRemote: Boolean(c.allowRemote),
             },
-            deps: { dir: st.dir, packages: st.packages, missing: st.missing, ready },
+            deps: {
+              dir: st.dir,
+              packages: st.packages,
+              missing: st.missing,
+              ready,
+              /**
+               * 「这次安装实际会走哪个源」。
+               *
+               * `registryConfig()` 只是用户在面板里存的选择（official /
+               * npmmirror / 自定义），真正生效的还可能是环境变量或 `.npmrc`
+               * ——面板要报事实就得用 `resolveRegistry()`，否则用户会看到
+               * 「选的是跟随系统，但它到底跟到了哪」这个空白。
+               */
+              registry: { ...resolveRegistry(), presets: NPM_REGISTRY_PRESETS },
+            },
             state: rt?.onebot?.snapshot?.() ?? null,
             capability: rt?.onebot?.capability?.() ?? null,
             whitelist: extDeps.WHITELIST,
@@ -2909,6 +2935,50 @@ async function startWebServerInstance({
               ok: true,
               deps: { dir: st.dir, packages: st.packages, missing: st.missing },
               state: rt?.onebot?.snapshot?.() ?? null,
+            });
+          } catch (e) {
+            return json(res, 400, { error: e.message });
+          }
+        }
+
+        /**
+         * 手动检查：**只验，不装**。
+         *
+         * 为什么需要它：面板上那排「已安装」来自 `status()`，判据是
+         * `require.resolve` 能过——版本号在、目录在，但文件被杀毒隔离、
+         * 平台子包放错架构、下载到一半断电，这几种都照样显示「已安装」，
+         * 直到用户发第一条语音才炸。`verify()` 会真 `require` 一次、真跑一次
+         * `ffmpeg -version`，专门抓这种半坏状态；它早就写好了，只是一直
+         * 只在 `install()` 内部被调用，面板没有入口。
+         *
+         * 只验**磁盘上确实有东西**的包：`smoke()` 对没装的包一律返回
+         * 「加载失败」，把可选包没装也报成故障，用户会以为面板坏了。
+         * 没装的单独放进 `missing`，由前端说「未安装」。
+         */
+        if (depsAction('verify') && req.method === 'POST') {
+          const body = await readBody(req);
+          const asked = Array.isArray(body?.packages) && body.packages.length
+            ? body.packages
+            : Object.keys(extDeps.WHITELIST);
+          try {
+            /** 缓存会让「刚手动改了文件」这种情况验不出真实结果 */
+            extDeps.resetCache();
+            const st = await extDeps.status();
+            const present = asked.filter((n) => st.packages[n]?.version);
+            const errors = await extDeps.verify(present);
+            return json(res, 200, {
+              ok: errors.length === 0,
+              checked: present,
+              missing: asked.filter((n) => !st.packages[n]?.version),
+              errors,
+              ffmpeg: await extDeps.probeFfmpeg({ fresh: true }),
+              deps: {
+                dir: st.dir,
+                packages: st.packages,
+                missing: st.missing,
+                ready: st.ready,
+                registry: { ...resolveRegistry(), presets: NPM_REGISTRY_PRESETS },
+              },
             });
           } catch (e) {
             return json(res, 400, { error: e.message });

@@ -1059,7 +1059,29 @@
     <div class="box">
       <div class="box-hd">
         <h3>依赖（两条出口共用）</h3>
-        <div class="btn-row" style="margin:0">
+        <div class="btn-row" style="margin:0;align-items:center">
+          <!--
+            安装源：ws / silk-wasm / ffmpeg 都是从 npm 拉的。
+            和「插件」页那个 npm 源是**同一个配置**（两处联动），放这里是为了
+            让「装不上 → 换个源 → 再装一次」不用来回切页找开关。
+            留空 = 跟随系统（npm config set / ~/.npmrc），不覆盖用户自己的设置。
+          -->
+          <span class="hint">安装源</span>
+          <select id="onebotNpmRegistry" class="mini-select" aria-label="npm 安装源">
+            <option value="">跟随系统</option>
+            <option value="npmmirror">npmmirror 镜像</option>
+            <option value="official">npm 官方源</option>
+            <option value="custom">自定义</option>
+          </select>
+          <input
+            id="onebotNpmRegistryCustom"
+            class="mini-input"
+            placeholder="https://registry.example.com"
+            aria-label="npm 安装源地址"
+            hidden
+          />
+          <!-- 只验不装：真 require 一次、真跑一次 ffmpeg -version -->
+          <button class="btn small" id="btnOnebotCheckDeps">手动检查</button>
           <button class="btn small" id="btnOnebotReloadDeps">刷新</button>
         </div>
       </div>
@@ -1074,6 +1096,8 @@
         </table>
       </div>
       <div class="hint" id="onebotDepsHint" style="margin-top:8px"></div>
+      <!-- 「手动检查」的结果单独一块：不跟着每次刷新重绘，用户能对照着看 -->
+      <div class="hint" id="onebotDepsCheck" style="margin-top:6px" hidden></div>
     </div>
 
     <div class="box" style="border-style:dashed">

@@ -264,6 +264,23 @@ export async function resolveFfmpeg({ fresh = false } = {}) {
 }
 
 /**
+ * 真跑一次 `ffmpeg -version`，确认「找得到」和「跑得起来」是同一件事。
+ *
+ * `status()` 只报文件在不在；系统 PATH 里那个 `ffmpeg.exe` 完全可能是
+ * 0 字节的占位、架构不对的旧版、或者指向一个已卸载目录的软链——
+ * 用户点「手动检查」要的正是这个答案，而不是再念一遍路径。
+ *
+ * @param {{fresh?: boolean}} [o]
+ * @returns {Promise<{path: string, source: 'managed'|'system'|'', ok: boolean, error: string}>}
+ */
+export async function probeFfmpeg({ fresh = false } = {}) {
+  const r = await resolveFfmpeg({ fresh });
+  if (!r.path) return { ...r, ok: false, error: '没找到 ffmpeg（托管目录和系统 PATH 里都没有）' };
+  const error = await runOnce(r.path, ['-version']);
+  return { ...r, ok: !error, error };
+}
+
+/**
  * 当前状态。
  *
  * 只读文件，不装任何东西，也不 `require`——面板每秒都可能调它。

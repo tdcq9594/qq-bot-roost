@@ -50,6 +50,7 @@
     "btnMirrorTest",
     "btnNotifyTest",
     "btnOnebotCapToggle",
+    "btnOnebotCheckDeps",
     "btnOnebotClearToken",
     "btnOnebotCopyToken",
     "btnOnebotGenToken",
@@ -220,10 +221,13 @@
     "onebotCapWrap",
     "onebotConnHint",
     "onebotDepsBody",
+    "onebotDepsCheck",
     "onebotDepsHint",
     "onebotEnabled",
     "onebotHost",
     "onebotMode",
+    "onebotNpmRegistry",
+    "onebotNpmRegistryCustom",
     "onebotPort",
     "onebotSelfUin",
     "onebotStateHint",
@@ -626,8 +630,8 @@
     "panels": 15,
     "tables": 15,
     "modals": 4,
-    "controls": 188,
-    "apiCalls": 92
+    "controls": 191,
+    "apiCalls": 94
   },
   "requiredIds": [
     {
@@ -727,6 +731,6 @@
     "tabItemClass": true,
     "cspScriptSelf": true,
     "pageThemeMirror": true,
-    "serverHash": "3eb236c9ac141f398ee7f90a145c76795e2b253c9c67b1fe7645378af050bf3b"
+    "serverHash": "fd8d0b313f6e5ab46e25f424ba0101e02b7483b60c523b9ec1391036d41dedc1"
   }
 }

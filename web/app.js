@@ -2860,6 +2860,14 @@ async function rescanPlugins() {
 let MIRRORS = null;
 
 /**
+ * 「外接」页依赖卡的安装源下拉补过值没有。
+ *
+ * `loadMirrorBar()` 只在「插件」页跑，所以那张卡的下拉第一次显示时可能
+ * 还停在 HTML 默认值上。补一次就够，之后不能反复覆盖——用户可能正在选。
+ */
+let NPM_CARD_BACKFILLED = false;
+
+/**
  * 下载源选择器。
  *
  * 国内直连 GitHub 经常超时，插件市场和框架更新都会失败。
@@ -2891,26 +2899,118 @@ async function loadMirrorBar() {
 }
 
 /**
+ * npm 源的几组控件。
+ *
+ * 同一个配置有两个入口：「插件」页的下载源那一行，和「外接」页的依赖卡片
+ * ——后者才是用户装不上时待着的地方，不该逼他切页去找开关。
+ * 两边显示同一个值、写同一份配置，所以统一在这里遍历，别各写一套。
+ */
+function npmRegistryEls() {
+  return [
+    { sel: $('#npmRegistrySelect'), inp: $('#npmRegistryCustom') },
+    { sel: $('#onebotNpmRegistry'), inp: $('#onebotNpmRegistryCustom') },
+  ].filter((p) => p.sel);
+}
+
+/**
  * npm 源那一行。
  *
  * 和「下载源」分开：那个改的是 GitHub 地址，这个改的是 npm registry——
  * 装插件依赖 / 外接依赖走的是后者。留空表示「跟随系统」，
  * 也就是不覆盖用户自己 `npm config set` 过的值。
+ *
+ * @param {{id?: string, custom?: string}} [cur] 要显示的选择，默认取已加载的配置
  */
-function syncNpmRegistry() {
-  const sel = $('#npmRegistrySelect');
-  const inp = $('#npmRegistryCustom');
-  if (!sel) return;
-
-  const cur = MIRRORS?.npmRegistry ?? {};
+function syncNpmRegistry(cur = MIRRORS?.npmRegistry ?? {}) {
   const id = String(cur.id ?? 'official');
   /** 官方源 = 跟随系统（留空），这样用户清掉选择后还能吃到自己的 .npmrc */
   const value = id === 'npmmirror' ? 'npmmirror' : id === 'custom' ? 'custom' : '';
-  sel.value = value;
-  if (inp) {
+
+  for (const { sel, inp } of npmRegistryEls()) {
+    sel.value = value;
+    if (!inp) continue;
     inp.hidden = value !== 'custom';
     if (value === 'custom') inp.value = cur.custom ?? '';
   }
+}
+
+/**
+ * 从接口给的「实际生效的源」倒推下拉该选哪一项。
+ *
+ * `deps.registry` 是 `{url, source}`（真会走的地址 + 它是从哪来的），
+ * 下拉要的是 `{id, custom}`。只有 `source === 'config'` 才说明用户真在面板里
+ * 选过——环境变量 / `.npmrc` 生效时下拉就该显示「跟随系统」，那正是它的语义。
+ */
+function npmChoiceFromRegistry(reg) {
+  if (reg?.source !== 'config') return { id: 'official', custom: '' };
+  const hit = (reg.presets ?? []).find((x) => x.url && x.url === reg.url);
+  if (hit && hit.id !== 'custom') return { id: hit.id, custom: '' };
+  return { id: 'custom', custom: reg.url ?? '' };
+}
+
+/**
+ * 只存 npm 源这一个字段。
+ *
+ * 不借道 `saveMirror()`：那个会把下载源 / 自定义前缀 / Gitee 令牌整包发一遍，
+ * 而「外接」页的依赖卡完全可能在「插件」页从没打开过的情况下被用——
+ * 那时那几个下拉还是空的，整包发上去就是拿空值覆盖用户已有设置
+ * （Gitee 令牌被清掉最要命，且不会报错）。
+ * 服务端现在对「没传的字段」保留原值，所以只发这一个字段是安全的。
+ *
+ * @param {string} value `''` / `'official'` / `'npmmirror'` / 完整 URL
+ * @param {HTMLElement} [fromEl] 触发的那组控件，用来决定把错误显示在哪儿
+ */
+async function saveNpmRegistry(value, fromEl) {
+  const inCard = String(fromEl?.id ?? '').startsWith('onebot');
+  try {
+    const r = await api('/api/mirror', {
+      method: 'PUT',
+      body: JSON.stringify({ npmRegistry: value }),
+    });
+    MIRRORS = { ...(MIRRORS ?? {}), npmRegistry: r.npmRegistry };
+    syncNpmRegistry();
+    /** 依赖卡里那一行「安装源：…」是渲染出来的，得重读一次才跟得上 */
+    if (inCard) await loadOnebot();
+  } catch (e) {
+    const out = inCard ? $('#onebotDepsCheck') : $('#mirrorTip');
+    if (out) {
+      out.hidden = false;
+      out.textContent = `切换安装源失败：${e.message}`;
+    }
+  }
+}
+
+/**
+ * 接上一组 npm 源控件：改一边，另一边跟着变，然后统一走 `saveNpmRegistry()`。
+ *
+ * 镜像只是让两处显示一致，不参与保存——保存只看用户刚动的那一个。
+ */
+function bindNpmRegistry(selId, inpId) {
+  const sel = $(`#${selId}`);
+  const inp = $(`#${inpId}`);
+  if (!sel) return;
+
+  const other = () => npmRegistryEls().find((p) => p.sel !== sel);
+
+  sel.addEventListener('change', () => {
+    if (inp) inp.hidden = sel.value !== 'custom';
+    const o = other();
+    if (o) {
+      o.sel.value = sel.value;
+      if (o.inp) {
+        o.inp.hidden = sel.value !== 'custom';
+        if (sel.value === 'custom' && inp?.value) o.inp.value = inp.value;
+      }
+    }
+    /** 选「自定义」时地址还空着，后端会（正确地）拒绝——等填完再保存 */
+    if (sel.value !== 'custom') saveNpmRegistry(sel.value, sel);
+  });
+
+  inp?.addEventListener('change', () => {
+    const o = other();
+    if (o?.inp && o.sel.value === 'custom') o.inp.value = inp.value;
+    saveNpmRegistry(inp.value.trim(), sel);
+  });
 }
 
 /**
@@ -3376,15 +3476,10 @@ $('#mirrorGiteeToken')?.addEventListener('change', saveMirror);
 
 /**
  * npm 源：选「自定义」只露出输入框（此时地址还空着，后端会正确地拒绝），
- * 其余选项立即保存。
+ * 其余选项立即保存。两处入口（插件页 / 外接页依赖卡）都接上，互相镜像。
  */
-$('#npmRegistrySelect')?.addEventListener('change', () => {
-  const sel = $('#npmRegistrySelect');
-  const inp = $('#npmRegistryCustom');
-  if (inp) inp.hidden = sel?.value !== 'custom';
-  if (sel?.value !== 'custom') saveMirror();
-});
-$('#npmRegistryCustom')?.addEventListener('change', saveMirror);
+bindNpmRegistry('npmRegistrySelect', 'npmRegistryCustom');
+bindNpmRegistry('onebotNpmRegistry', 'onebotNpmRegistryCustom');
 
 /**
  * 代理：选「自动 / 直连」立即保存；选「手动填写」只露出输入框，等填完再保存。
@@ -4776,9 +4871,16 @@ function renderOnebot(d) {
     const action = ok
       ? `<button class="btn small" data-remove="${escapeHtml(name)}">卸载</button>`
       : `<button class="btn small primary" data-install="${escapeHtml(name)}">一键安装</button>`;
+    /**
+     * 系统 PATH 里那份 ffmpeg 单独提示：托管目录里没有时才提——有的话
+     * 二进制路径已经显示出来了，再提一句只是噪音。提它是因为能省 62MB。
+     */
+    const sysHint = !ok && p.system
+      ? `<div class="hint" style="color:var(--ok)">系统里已有：<code>${escapeHtml(p.system)}</code></div>`
+      : '';
     return `<tr>
       <td class="mono">${escapeHtml(name)}</td>
-      <td>${escapeHtml(p.desc ?? '')}<div class="hint">${escapeHtml(p.size ?? '')}</div></td>
+      <td>${escapeHtml(p.desc ?? '')}<div class="hint">${escapeHtml(p.size ?? '')}</div>${sysHint}</td>
       <td>${badge}</td>
       <td class="mono">${escapeHtml(p.version || '—')}</td>
       <td>${action}</td>
@@ -4787,15 +4889,51 @@ function renderOnebot(d) {
   body.innerHTML = rows.join('') || '<tr><td colspan="5" class="empty">没有依赖声明</td></tr>';
 
   if (!hint) return;
+  /**
+   * 「这次安装实际会走哪个源」。
+   *
+   * 下拉框只显示用户存的选择（跟随系统 / npmmirror / 官方 / 自定义）；
+   * 选了「跟随系统」时真正生效的可能是环境变量或 `.npmrc`，用户看不到。
+   * 装不上要换源的时候，得先知道自己现在在哪个源上。
+   */
+  const reg = d?.deps?.registry ?? {};
+  const REG_FROM = {
+    explicit: '本次请求指定',
+    config: '面板设置',
+    env: '环境变量 npm_config_registry',
+    npmrc: '.npmrc',
+    default: '默认',
+  };
+  const regName =
+    (reg.presets ?? []).find((x) => x.url && x.url === reg.url)?.name ?? reg.url ?? '—';
+  const regLine =
+    `安装源：<code>${escapeHtml(regName)}</code>` +
+    (reg.source && reg.source !== 'default' ? `（来自${REG_FROM[reg.source] ?? reg.source}）` : '');
+
+  /**
+   * 下拉框补一次值。
+   *
+   * `syncNpmRegistry()` 平时由「插件」页的 `loadMirrorBar()` 驱动；用户直接
+   * 进「外接」页时它没跑过，下拉会停在默认的「跟随系统」，而实际可能早就
+   * 选了 npmmirror。以接口返回的实际源为准补一次——**只补一次**，
+   * 之后不再覆盖用户正在改的选择。
+   */
+  if (!NPM_CARD_BACKFILLED && reg.url) {
+    NPM_CARD_BACKFILLED = true;
+    syncNpmRegistry(npmChoiceFromRegistry(reg));
+  }
+
   if (d?.deps?.ready) {
     hint.innerHTML =
       `依赖已就绪，装在 <code>${escapeHtml(d?.deps?.dir ?? '')}</code>` +
-      '（宿主协议与 OneBot 共用这一份）';
+      '（宿主协议与 OneBot 共用这一份）' +
+      `<br>${regLine}`;
   } else {
     const missing = (d?.deps?.missing ?? []).join('、') || '—';
     hint.innerHTML =
       `还缺：<b>${escapeHtml(missing)}</b>。装不上时可以手动执行：` +
-      `<code>${escapeHtml(d?.manual ?? '')}</code>`;
+      `<code>${escapeHtml(d?.manual ?? '')}</code>` +
+      `<br>${regLine}　装不上先换个源再试`;
   }
 
   /* ---------- 能力矩阵 ---------- */
@@ -4833,6 +4971,9 @@ async function onebotDepsAction(kind, name, btn) {
     btn.disabled = true;
     btn.textContent = kind === 'install' ? '安装中…' : '卸载中…';
   }
+  /** 装/卸之后上一次的检查结论就不作数了，先撤掉，别让人对着旧结果判断 */
+  const check = $('#onebotDepsCheck');
+  if (check) check.hidden = true;
   try {
     await api(`/api/ext/deps/${kind}`, {
       method: 'POST',
@@ -4850,6 +4991,63 @@ async function onebotDepsAction(kind, name, btn) {
   }
 }
 
+/**
+ * 手动检查：**只验不装**。
+ *
+ * 面板上那排「已安装」是文件系统层面的判断——`require.resolve` 过了就算过。
+ * 但文件被杀毒隔离、平台子包放错架构（x64 机器装了 ia32）、下到一半断电，
+ * 这几种全都照样显示「已安装」，直到用户发第一条语音才炸。
+ *
+ * 后端这条路径会真 `require` 一次、真跑一次 `ffmpeg -version`，专门抓这种
+ * 半坏状态。ffmpeg 是可选依赖，所以「没装」不算故障，只有「找到了但跑不起来」
+ * 才算。
+ */
+async function onebotDepsVerify(btn) {
+  const out = $('#onebotDepsCheck');
+  const label = btn?.textContent;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '检查中…';
+  }
+  if (out) {
+    out.hidden = false;
+    out.textContent = '正在检查（会真加载模块、跑一次 ffmpeg -version）…';
+  }
+  try {
+    const r = await api('/api/ext/deps/verify', { method: 'POST', body: JSON.stringify({}) });
+
+    const ff = r.ffmpeg ?? {};
+    const ffText = ff.ok
+      ? `ffmpeg 可用（${ff.source === 'system' ? '系统 PATH' : '托管目录'}：`
+        + `<code>${escapeHtml(ff.path)}</code>）`
+      : ff.path
+        ? `<b>ffmpeg 找到了但跑不起来</b>：${escapeHtml(ff.error || '')}`
+        : 'ffmpeg 没装（可选，发 mp3/ogg 语音才需要）';
+
+    const stat = [
+      (r.checked ?? []).length ? `已验 ${(r.checked ?? []).length} 项` : '',
+      (r.missing ?? []).length ? `未安装 ${(r.missing ?? []).length} 项` : '',
+    ].filter(Boolean).join(' · ');
+
+    /** 「找到了但跑不起来」是真故障；「没装」只是没装 */
+    const broken = !r.ok || Boolean(ff.path && !ff.ok);
+    if (out) {
+      out.innerHTML = broken
+        ? `<span class="badge off">有问题</span> ${escapeHtml((r.errors ?? []).join('；') || '见下')}`
+          + `<br>${ffText}`
+        : `<span class="badge on">通过</span> ${escapeHtml(stat)}<br>${ffText}`;
+    }
+  } catch (e) {
+    if (out) out.innerHTML = `检查失败：${escapeHtml(e.message)}`;
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = label;
+    }
+  }
+}
+
+$('#btnOnebotCheckDeps')?.addEventListener('click', (e) => onebotDepsVerify(e.currentTarget));
 $('#btnOnebotReloadDeps')?.addEventListener('click', loadOnebot);
 $('#btnOnebotReload')?.addEventListener('click', loadOnebot);
 
