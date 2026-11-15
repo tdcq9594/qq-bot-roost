@@ -34,6 +34,33 @@ async function api(path, opts = {}) {
   return data;
 }
 
+/* ---------------- 轻量提示 ---------------- */
+
+/**
+ * 右下角短提示。此前只有调用点（概览页 dry 卡等 3 处）、全仓没有定义，
+ * 点一下就抛 ReferenceError。这里补上：不引第三方、不新增 CSS 变量、
+ * 容器用 createElement 动态生成，不进 index.html 的静态快照。
+ * 主要反馈仍走就地文案 / 内联提示，toast 只承接瞬时确认。
+ */
+function toast(message, kind = 'info') {
+  let host = $('#toastHost');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'toastHost';
+    host.className = 'toast-host';
+    host.setAttribute('aria-live', 'polite');
+    document.body.appendChild(host);
+  }
+  const el = document.createElement('div');
+  el.className = 'toast' + (kind === 'error' ? ' toast-err' : kind === 'ok' ? ' toast-ok' : '');
+  el.textContent = String(message ?? '');
+  host.appendChild(el);
+  setTimeout(() => {
+    el.classList.add('toast-out');
+    setTimeout(() => el.remove(), 240);
+  }, 4000);
+}
+
 /* ---------------- 通用确认弹窗 ---------------- */
 
 /**
@@ -50,6 +77,8 @@ function confirmDialog({ title = '确认', message = '', okText = '确定', dang
   $('#modalBody').innerHTML = message;
   btnOk.textContent = okText;
   btnOk.classList.toggle('danger', danger);
+  btnOk.classList.toggle('btn-danger', danger);
+  btnOk.classList.toggle('primary', !danger);
   btnOk.hidden = false;
   btnCancel.hidden = false;
   mask.hidden = false;
@@ -754,7 +783,7 @@ function renderStatus(s) {
 
   const body = $('#chatBody');
   if (!s.chats?.length) {
-    body.innerHTML = '<tr><td colspan="4" class="empty">暂无数据</td></tr>';
+    body.innerHTML = `<tr><td colspan="4" class="empty">暂无活跃会话${emptyAction('去发消息', 'go-send')}</td></tr>`;
   } else {
     body.innerHTML = s.chats.map((c) => `
       <tr>
@@ -764,6 +793,8 @@ function renderStatus(s) {
         <td>${fmtAgo(c.last)}</td>
       </tr>`).join('');
   }
+  updateStatusStrip(s);
+  updateMeters(s);
 }
 
 /** 上一次看到的进程实例标识，用来判断服务是不是重启过 */
@@ -836,7 +867,7 @@ async function loadServices() {
     const d = await api('/api/services');
     const list = d.services || [];
     if (!list.length) {
-      wrap.innerHTML = '<div class="empty">没有启用任何后台服务</div>';
+      wrap.innerHTML = `<div class="empty">没有启用任何后台服务${emptyAction('刷新', 'refresh-services')}</div>`;
       return;
     }
     wrap.innerHTML = list
@@ -1523,6 +1554,7 @@ $('#cfgForm').addEventListener('submit', async (e) => {
       : (renamed ? `已保存，机器人昵称同步为「${r.name}」` : '已保存') +
         (payload.appId ? '' : '（AppID 为空）');
     f.appSecret.value = '';
+    clearCfgDirty();
     setTimeout(() => ($('#cfgMsg').textContent = ''), 4000);
     await loadBots();
     pollStatus();
@@ -1834,7 +1866,7 @@ function renderStatsChart(series) {
 
 /** 排行条：名字 + 占比条 + 数值 */
 function renderStatList(items, label, value, unit = '') {
-  if (!items?.length) return '<div class="empty">暂无数据</div>';
+  if (!items?.length) return `<div class="empty">暂无数据${emptyAction('去检查配置', 'go-config')}</div>`;
   const max = Math.max(1, ...items.map(value));
   return items
     .map(
@@ -2954,7 +2986,7 @@ function renderMarketRows() {
   if (!shown.length) {
     list.innerHTML = `<div class="empty">没有匹配的插件${
       MARKET.q || MARKET.tag ? '，换个关键词或分类试试' : ''
-    }</div>`;
+    }${MARKET.q || MARKET.tag ? emptyAction('清除筛选', 'clear-market') : ''}</div>`;
     return;
   }
 
@@ -5544,4 +5576,654 @@ function initThemeColor() {
   syncNav(location.hash.slice(1) || 'overview');
   initTableLabels();
   initThemeColor();
+})();
+
+/* ---------------- P1 · 界面优化第二批（只增不减） ---------------- */
+/*
+ * 新增能力：配置页目录 / 未保存标记 / 空态引导 / 页面搜索 / 列显隐 / 底部状态条。
+ * 约定：新 DOM 全部动态生成，不写进 index.html；不删任何原有 id、按钮、页面；
+ * 不新增 CSS 变量、不动服务端。原有交互一个都不改道。
+ */
+
+/* ---- 空态：给「暂无数据」补一个可点的下一步动作 ---- */
+function emptyAction(label, act) {
+  return `<div class="empty-act"><button type="button" class="btn small" data-empty-act="${escapeHtml(act)}">${escapeHtml(label)}</button></div>`;
+}
+
+const EMPTY_ACTIONS = {
+  'go-send': () => {
+    const el = $('#sendTarget');
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.focus({ preventScroll: true });
+  },
+  'refresh-services': () => loadServices(),
+  'clear-market': () => {
+    const q = $('#marketSearch');
+    const cat = $('#marketCat');
+    if (q) { q.value = ''; MARKET.q = ''; }
+    if (cat) { cat.value = ''; MARKET.tag = ''; }
+    renderMarketRows();
+  },
+  'go-config': () => {
+    activateTab('config');
+    history.replaceState(null, '', '#config');
+  },
+};
+
+document.addEventListener('click', (e) => {
+  const btn = e.target?.closest?.('[data-empty-act]');
+  if (!btn) return;
+  EMPTY_ACTIONS[btn.dataset.emptyAct]?.();
+});
+
+/* ---- 配置页：sticky 锚点目录 + 未保存标记 ---- */
+function clearCfgDirty() {
+  $$('#cfgForm > .box.is-dirty').forEach((b) => b.classList.remove('is-dirty'));
+  const mark = $('#cfgDirtyMark');
+  if (mark) { mark.hidden = true; mark.textContent = ''; }
+  $('#cfgForm')?.classList.remove('is-dirty');
+}
+
+function markCfgDirty(box) {
+  if (!box) return;
+  box.classList.add('is-dirty');
+  const bar = $('#cfgForm .sticky-actions');
+  if (!bar) return;
+  let mark = $('#cfgDirtyMark');
+  if (!mark) {
+    mark = document.createElement('span');
+    mark.id = 'cfgDirtyMark';
+    mark.className = 'hint cfg-dirty-mark';
+    bar.insertBefore(mark, bar.firstChild);
+  }
+  mark.textContent = '● 有未保存改动';
+  mark.hidden = false;
+}
+
+function initConfigNav() {
+  const form = $('#cfgForm');
+  if (!form) return;
+  const boxes = [...form.children].filter((el) => el.classList.contains('box'));
+
+  const toc = document.createElement('div');
+  toc.className = 'cfg-toc';
+  const tocLabel = document.createElement('span');
+  tocLabel.className = 'cfg-toc-label';
+  tocLabel.textContent = '本页：';
+  toc.appendChild(tocLabel);
+  boxes.forEach((box, i) => {
+    const title = box.querySelector('.box-hd h3')?.textContent?.trim() || `第 ${i + 1} 组`;
+    if (!box.id) box.id = `cfgBox${i + 1}`;
+    const a = document.createElement('a');
+    a.href = `#${box.id}`;
+    a.textContent = title;
+    // 用 scrollIntoView 而不是改 hash：别把锚点写进深链
+    a.addEventListener('click', (e) => {
+      e.preventDefault();
+      box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+    toc.appendChild(a);
+  });
+  form.parentNode.insertBefore(toc, form);
+
+  // 「改动即生效」的控件自己走局部提交，不该被算成未保存
+  const instantIds = new Set(['mediaPlaceholderSpace', 'intentsManual', 'intentsAdvanced']);
+  const isInstant = (el) => Boolean(el.closest('.intents-block')) || instantIds.has(el.id);
+  const onEdit = (e) => {
+    const el = e.target;
+    if (!el?.closest || isInstant(el)) return;
+    const box = el.closest('.box');
+    if (box && box.parentElement === form) markCfgDirty(box);
+  };
+  form.addEventListener('input', onEdit);
+  form.addEventListener('change', onEdit);
+
+  // 统一标记，别让「改了就生效」和「要点保存」靠散落的文字区分
+  const badge = () => {
+    const b = document.createElement('span');
+    b.className = 'instant-badge';
+    b.textContent = '改动即生效';
+    return b;
+  };
+  const intentsTitle = form.querySelector('.intents-title');
+  if (intentsTitle && !intentsTitle.querySelector('.instant-badge')) intentsTitle.appendChild(badge());
+  const mediaLabel = $('#mediaPlaceholderSpace')?.closest('label');
+  if (mediaLabel && !mediaLabel.querySelector('.instant-badge')) mediaLabel.appendChild(badge());
+}
+
+/* ---- Ctrl+K 页面搜索 / Ctrl+S 保存配置 ---- */
+function initCommandPalette() {
+  const mask = document.createElement('div');
+  mask.className = 'cmd-mask';
+  mask.id = 'cmdMask';
+  mask.hidden = true;
+  mask.innerHTML =
+    '<div class="cmd-palette" role="dialog" aria-label="页面搜索">' +
+    '<input class="cmd-input" id="cmdInput" placeholder="搜索页面…" autocomplete="off">' +
+    '<ul class="cmd-list" id="cmdList"></ul>' +
+    '<div class="cmd-foot"><span>↑↓ 选择</span><span>Enter 打开</span>' +
+    '<span>Esc 关闭</span><span>Ctrl+S 保存当前配置</span></div>' +
+    '</div>';
+  document.body.appendChild(mask);
+  const input = mask.querySelector('#cmdInput');
+  const list = mask.querySelector('#cmdList');
+  let shown = [];
+  let idx = 0;
+
+  const entries = () => {
+    const seen = new Set();
+    return $$('.tab[data-tab], .tab-item[data-tab]')
+      .map((b) => ({
+        name: b.dataset.tab,
+        label:
+          (b.getAttribute('aria-label') || b.textContent || '').replace(/\s+/g, ' ').trim() ||
+          b.dataset.tab,
+      }))
+      .filter((e) => (seen.has(e.name) ? false : (seen.add(e.name), true)));
+  };
+  const paint = () => {
+    const q = input.value.trim().toLowerCase();
+    shown = entries().filter(
+      (e) => e.label.toLowerCase().includes(q) || e.name.toLowerCase().includes(q),
+    );
+    idx = 0;
+    list.innerHTML = shown.length
+      ? shown
+          .map(
+            (e, i) =>
+              `<li class="cmd-item${i === 0 ? ' cmd-active' : ''}" data-name="${escapeHtml(e.name)}">` +
+              `<span>${escapeHtml(e.label)}</span><span class="cmd-key">${escapeHtml(e.name)}</span></li>`,
+          )
+          .join('')
+      : '<li class="cmd-empty">没有匹配的页面</li>';
+  };
+  const move = (d) => {
+    if (!shown.length) return;
+    idx = (idx + d + shown.length) % shown.length;
+    [...list.querySelectorAll('.cmd-item')].forEach((li, i) =>
+      li.classList.toggle('cmd-active', i === idx),
+    );
+    list.querySelector('.cmd-active')?.scrollIntoView({ block: 'nearest' });
+  };
+  const close = () => { mask.hidden = true; };
+  const open = () => { mask.hidden = false; input.value = ''; paint(); input.focus(); };
+  const pick = (i) => {
+    const e = shown[i];
+    if (!e) return;
+    close();
+    activateTab(e.name);
+    history.replaceState(null, '', `#${e.name}`);
+  };
+
+  input.addEventListener('input', paint);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); move(1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); move(-1); }
+    else if (e.key === 'Enter') { e.preventDefault(); pick(idx); }
+    else if (e.key === 'Escape') { e.preventDefault(); close(); }
+  });
+  list.addEventListener('click', (e) => {
+    const li = e.target.closest('.cmd-item');
+    if (li) pick(shown.findIndex((x) => x.name === li.dataset.name));
+  });
+  mask.addEventListener('click', (e) => { if (e.target === mask) close(); });
+  document.addEventListener('keydown', (e) => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    const k = e.key.toLowerCase();
+    if (k === 'k') { e.preventDefault(); mask.hidden ? open() : close(); return; }
+    if (k === 's') {
+      const panel = $('#tab-config');
+      if (!panel || !panel.classList.contains('active')) return;
+      e.preventDefault();
+      $('#cfgForm')?.requestSubmit();
+    }
+  });
+}
+
+/* ---- 宽表的列显隐（默认全显示，行内操作列永远保留） ---- */
+function initColumnToggle() {
+  const tables = $$('main table').filter((t) => {
+    const n = t.querySelectorAll('thead th').length;
+    return n >= 5 && n <= 12;
+  });
+  tables.forEach((table) => {
+    const heads = [...table.querySelectorAll('thead th')];
+    const host = table.closest('.table-wrap') || table.parentElement;
+    const bar = document.createElement('div');
+    bar.className = 'col-bar';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn col-btn';
+    btn.textContent = '列显隐 ▾';
+    const pop = document.createElement('div');
+    pop.className = 'col-pop';
+    pop.hidden = true;
+    bar.append(btn, pop);
+    host.parentNode.insertBefore(bar, host);
+
+    const hidden = new Set();
+    const apply = () => {
+      table.querySelectorAll('tr').forEach((tr) => {
+        // P2 的分组标题行只有一列，别按列索引误隐藏
+        if (tr.dataset.groupHead) return;
+        [...tr.children].forEach((cell, i) => {
+          if (i < heads.length) cell.classList.toggle('col-hidden', hidden.has(i));
+        });
+      });
+    };
+    const head = document.createElement('div');
+    head.className = 'col-pop-head';
+    head.innerHTML =
+      '<span>显示哪些列</span><button type="button" class="btn small" data-col-all>全部显示</button>';
+    pop.appendChild(head);
+    heads.forEach((th, i) => {
+      const lab = document.createElement('label');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = true;
+      cb.dataset.col = String(i);
+      // 末列通常是行内操作，禁止隐藏 = 功能永远可达
+      if (i === heads.length - 1) cb.disabled = true;
+      const txt = document.createElement('span');
+      txt.textContent = (th.textContent || '').trim() || `第 ${i + 1} 列`;
+      lab.append(cb, txt);
+      pop.appendChild(lab);
+    });
+    btn.addEventListener('click', (e) => { e.stopPropagation(); pop.hidden = !pop.hidden; });
+    pop.addEventListener('click', (e) => e.stopPropagation());
+    pop.addEventListener('change', (e) => {
+      const cb = e.target;
+      if (!cb.dataset?.col) return;
+      const i = Number(cb.dataset.col);
+      if (i === heads.length - 1) { cb.checked = true; return; }
+      if (cb.checked) hidden.delete(i); else hidden.add(i);
+      apply();
+    });
+    head.querySelector('[data-col-all]')?.addEventListener('click', () => {
+      hidden.clear();
+      pop.querySelectorAll('input[data-col]').forEach((cb) => { cb.checked = true; });
+      apply();
+    });
+    document.addEventListener('click', () => { if (!pop.hidden) pop.hidden = true; });
+    // 动态重绘表格后重新套用；只观察 childList，改 class 不会自触发
+    if (typeof MutationObserver !== 'undefined') {
+      new MutationObserver(apply).observe(table, { childList: true, subtree: true });
+    }
+  });
+}
+
+/* ---- 底部状态条：只做新增展示，顶栏 7 个元素一个都不搬 ---- */
+function initStatusStrip() {
+  if ($('#statusStrip')) return;
+  const strip = document.createElement('div');
+  strip.className = 'status-strip';
+  strip.id = 'statusStrip';
+  strip.innerHTML =
+    '<span>栖 Roost</span>' +
+    '<span id="ssVersion">版本 -</span>' +
+    '<span id="ssMem">内存 -</span>' +
+    '<span id="ssMsg">收发 -</span>' +
+    '<span id="ssConn">状态 -</span>';
+  document.body.appendChild(strip);
+  document.body.classList.add('has-status-strip');
+}
+
+function updateStatusStrip(s) {
+  if (!s || !$('#statusStrip')) return;
+  const put = (id, text) => { const el = $(id); if (el) el.textContent = text; };
+  put('#ssVersion', `版本 ${s.version || '-'}`);
+  put('#ssMem', `内存 ${s.memoryMB ?? '-'} MB`);
+  put('#ssMsg', `收 ${s.counters?.recv ?? '-'} / 发 ${s.counters?.sent ?? '-'}`);
+  put(
+    '#ssConn',
+    `状态 ${s.state === 'online' ? '在线' : s.state === 'starting' ? '连接中' : '离线'}`,
+  );
+}
+
+(function initP1() {
+  initStatusStrip();
+  initConfigNav();
+  initCommandPalette();
+  initColumnToggle();
+})();
+
+/* ---------------- P2 · 真实数据进度条 / 加载态 / 表格工具 ---------------- */
+/*
+ * 仍然只增不减：新 DOM 全部动态生成，不写进 index.html；不删 id / 按钮 / 页面，
+ * 不新增 CSS 变量，不动服务端。进度条一律用「本会话真实观测值」做基准，
+ * 不假设官方 token 有效期或机器内存总量，避免画出编造的百分比。
+ */
+
+/* ---- 状态卡迷你条 + 连接心跳 ---- */
+let credPeak = 0;
+let memPeak = 0;
+const statusTrail = [];
+
+function paintMiniBar(valueEl, ratio, kind, note) {
+  const card = valueEl?.closest('.card');
+  if (!card) return;
+  let bar = card.querySelector('.mini-bar');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.className = 'mini-bar';
+    bar.appendChild(document.createElement('i'));
+    card.appendChild(bar);
+    const n = document.createElement('div');
+    n.className = 'mini-bar-note';
+    card.appendChild(n);
+  }
+  const pct = Math.max(0, Math.min(100, Math.round(ratio * 100)));
+  bar.querySelector('i').style.width = `${pct}%`;
+  bar.classList.toggle('warn', kind === 'warn');
+  bar.classList.toggle('danger', kind === 'danger');
+  const n = card.querySelector('.mini-bar-note');
+  if (n) n.textContent = note;
+}
+
+function renderHeartbeat() {
+  let box = $('#hbBox');
+  if (!box) {
+    const cards = $('#tab-overview > .cards');
+    if (!cards) return;
+    box = document.createElement('div');
+    box.className = 'box hb-box';
+    box.id = 'hbBox';
+    box.innerHTML =
+      '<div class="hb-head"><b>连接心跳</b>' +
+      '<span class="hint">最近 24 次状态推送 · 绿=在线 / 红=离线 / 灰=连接中或未知</span></div>' +
+      '<div class="heartbeat" id="hbTrail"></div>';
+    cards.parentNode.insertBefore(box, cards.nextSibling);
+  }
+  const trail = $('#hbTrail');
+  if (!trail) return;
+  trail.replaceChildren();
+  for (let i = 0; i < 24; i++) {
+    const d = document.createElement('span');
+    d.className = `hb ${statusTrail[i] || 'unknown'}`;
+    trail.appendChild(d);
+  }
+}
+
+function updateMeters(s) {
+  if (!s) return;
+  // 凭证：以本会话见过的最大剩余秒数为基准，不写死官方有效期
+  const cred = Number(s.credentialExpiresIn) || 0;
+  credPeak = Math.max(credPeak, cred);
+  const credEl = $('#c-cred');
+  if (credEl) {
+    const r = credPeak ? cred / credPeak : 0;
+    paintMiniBar(
+      credEl,
+      r,
+      r < 0.15 ? 'danger' : r < 0.35 ? 'warn' : '',
+      credPeak ? `相对本次会话峰值 ${Math.round(credPeak / 60)} 分` : '等待凭证数据',
+    );
+  }
+  // 内存：同样以会话峰值为基准，不假设机器内存总量
+  const mem = Number(s.memoryMB) || 0;
+  memPeak = Math.max(memPeak, mem);
+  const memEl = $('#c-mem');
+  if (memEl) {
+    paintMiniBar(
+      memEl,
+      memPeak ? mem / memPeak : 0,
+      '',
+      memPeak ? `本次会话峰值 ${memPeak} MB` : '等待内存数据',
+    );
+  }
+  statusTrail.push(s.state === 'online' ? 'ok' : s.state === 'starting' ? 'unknown' : 'down');
+  if (statusTrail.length > 24) statusTrail.shift();
+  renderHeartbeat();
+}
+
+/* ---- 体检三态条：只观察现有 DOM，不包装原加载函数 ---- */
+function initDoctorMeter() {
+  const list = $('#doctorList');
+  const hd = $('#doctorBox .box-hd');
+  if (!list || !hd || $('#doctorMeter')) return;
+  const meter = document.createElement('div');
+  meter.className = 'doctor-meter';
+  meter.id = 'doctorMeter';
+  meter.innerHTML = '<i class="dm-ok"></i><i class="dm-warn"></i><i class="dm-err"></i>';
+  hd.appendChild(meter);
+  const paint = () => {
+    const items = [...list.querySelectorAll('.doctor-item')];
+    const n = items.length || 1;
+    const count = (c) => items.filter((x) => x.classList.contains(c)).length;
+    const set = (cls, v) => {
+      const el = meter.querySelector(`.dm-${cls}`);
+      if (el) el.style.width = `${(v / n) * 100}%`;
+    };
+    set('ok', count('ok'));
+    set('warn', count('warn'));
+    set('err', count('error'));
+    meter.title = `体检：${count('ok')} 正常 / ${count('warn')} 提醒 / ${count('error')} 异常`;
+  };
+  paint();
+  if (typeof MutationObserver !== 'undefined') {
+    new MutationObserver(paint).observe(list, { childList: true });
+  }
+}
+
+/* ---- 加载态：保留原「加载中…」文案，补三行骨架 ---- */
+function markLoading(el) {
+  if (!el?.classList || el.classList.contains('loading')) return;
+  const t = (el.textContent || '').trim();
+  if (!/加载中|正在读取|读取中|检查中/.test(t)) return;
+  el.classList.add('loading');
+  const lines = document.createElement('div');
+  lines.className = 'loading-lines';
+  lines.innerHTML = '<i></i><i></i><i></i>';
+  el.appendChild(lines);
+}
+function upgradeLoading(root) {
+  if (!root) return;
+  root.querySelectorAll?.('.empty').forEach(markLoading);
+  if (root.classList?.contains('empty')) markLoading(root);
+}
+function initLoadingSkeleton() {
+  upgradeLoading(document);
+  if (typeof MutationObserver === 'undefined') return;
+  new MutationObserver((muts) => {
+    for (const m of muts) {
+      for (const n of m.addedNodes) upgradeLoading(n);
+      // 有些空态是复用节点改文字，不是替换 innerHTML。
+      // 限定只在 .empty 自身的文字变化时才扫，避免日志逐行 append 时全量遍历
+      if (m.type === 'characterData' && m.target.parentElement?.classList?.contains('empty')) {
+        upgradeLoading(m.target.parentElement);
+      }
+    }
+  }).observe(document.querySelector('main') || document.body, {
+    childList: true,
+    subtree: true,
+    characterData: true,
+  });
+}
+
+/* ---- 实时日志：偏离底部时给一个「滚动到底」圆钮 ---- */
+function initScrollBottom() {
+  const view = $('#logView');
+  if (!view) return;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'scroll-bottom';
+  btn.id = 'scrollBottom';
+  btn.textContent = '↓';
+  btn.title = '滚动到最新日志';
+  btn.setAttribute('aria-label', '滚动到最新日志');
+  btn.hidden = true;
+  document.body.appendChild(btn);
+  const sync = () => {
+    const onLogPage = $('#tab-logs')?.classList.contains('active');
+    const far = view.scrollHeight - view.scrollTop - view.clientHeight > 120;
+    btn.hidden = !(onLogPage && far && $('#autoScroll')?.checked);
+  };
+  view.addEventListener('scroll', sync, { passive: true });
+  window.addEventListener('hashchange', () => setTimeout(sync, 60));
+  document.addEventListener('click', (e) => {
+    if (e.target?.closest?.('[data-tab]')) setTimeout(sync, 60);
+  });
+  btn.addEventListener('click', () => { view.scrollTop = view.scrollHeight; sync(); });
+  if (typeof MutationObserver !== 'undefined') {
+    new MutationObserver(sync).observe(view, { childList: true });
+  }
+}
+
+/* ---- 表格：分组折叠 / 行点选批量 / 表尾计数 / 导出所选 ---- */
+function initTableTools() {
+  const tables = $$('main table').filter(
+    (t) => t.tBodies[0] && t.querySelectorAll('thead th').length >= 3,
+  );
+  tables.forEach((table) => {
+    const heads = [...table.querySelectorAll('thead th')];
+    const body = table.tBodies[0];
+    const beforeEl = table.closest('.table-wrap') || table;
+    const parent = beforeEl.parentNode;
+
+    const tools = document.createElement('div');
+    tools.className = 'table-tools';
+    const gBtn = document.createElement('button');
+    gBtn.type = 'button';
+    gBtn.className = 'btn';
+    gBtn.textContent = '按首列分组';
+    const sBtn = document.createElement('button');
+    sBtn.type = 'button';
+    sBtn.className = 'btn';
+    sBtn.textContent = '批量选择';
+    tools.append(gBtn, sBtn);
+
+    const foot = document.createElement('div');
+    foot.className = 'table-foot';
+    const count = document.createElement('span');
+    const exportBtn = document.createElement('button');
+    exportBtn.type = 'button';
+    exportBtn.className = 'btn';
+    exportBtn.textContent = '导出所选 CSV';
+    exportBtn.disabled = true;
+    foot.append(count, exportBtn);
+
+    parent.insertBefore(tools, beforeEl);
+    parent.insertBefore(foot, beforeEl.nextSibling);
+
+    let grouped = false;
+    let selectable = false;
+    let suppress = false;
+    const selected = new Set();
+    const dataRows = () =>
+      [...body.querySelectorAll('tr')].filter((tr) => !tr.dataset.groupHead);
+    const realRows = () =>
+      dataRows().filter(
+        (tr) => !(tr.children.length === 1 && tr.querySelector('.empty')),
+      );
+    const paintCount = () => {
+      count.textContent = `共 ${realRows().length} 行${selectable ? ` · 已选 ${selected.size}` : ''}`;
+      exportBtn.disabled = !(selectable && selected.size > 0);
+    };
+    const hold = () => {
+      suppress = true;
+      setTimeout(() => { suppress = false; }, 0);
+    };
+
+    const clearGroups = () => {
+      hold();
+      body.querySelectorAll('tr[data-group-head]').forEach((tr) => tr.remove());
+      dataRows().forEach((tr) => { tr.style.display = ''; delete tr.dataset.rowOf; });
+    };
+    const buildGroups = () => {
+      clearGroups();
+      const rows = dataRows();
+      const groups = new Map();
+      rows.forEach((tr) => {
+        const key = (tr.children[0]?.textContent || '').trim() || '（空）';
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(tr);
+      });
+      // 首列几乎每行都不同（openid / 时间戳）时分组只会添乱，直接放弃
+      if (rows.length < 4 || groups.size > Math.ceil(rows.length / 2)) {
+        grouped = false;
+        gBtn.classList.remove('on');
+        toast('这张表首列取值太分散，不适合按首列分组');
+        return;
+      }
+      hold();
+      [...groups.entries()].reverse().forEach(([key, list]) => {
+        const head = document.createElement('tr');
+        head.dataset.groupHead = '1';
+        const td = document.createElement('td');
+        td.colSpan = heads.length;
+        td.textContent = `▾ ${key}（${list.length}）`;
+        head.appendChild(td);
+        body.insertBefore(head, list[0]);
+        list.forEach((tr) => { tr.dataset.rowOf = key; });
+        head.addEventListener('click', () => {
+          const collapsed = head.dataset.collapsed === '1';
+          head.dataset.collapsed = collapsed ? '0' : '1';
+          td.textContent = `${collapsed ? '▾' : '▸'} ${key}（${list.length}）`;
+          list.forEach((tr) => { tr.style.display = collapsed ? '' : 'none'; });
+        });
+      });
+      grouped = true;
+      gBtn.classList.add('on');
+    };
+
+    gBtn.addEventListener('click', () => {
+      if (grouped) { clearGroups(); grouped = false; gBtn.classList.remove('on'); }
+      else buildGroups();
+      paintCount();
+    });
+    sBtn.addEventListener('click', () => {
+      selectable = !selectable;
+      sBtn.classList.toggle('on', selectable);
+      table.classList.toggle('table-selectable', selectable);
+      if (!selectable) {
+        selected.clear();
+        body.querySelectorAll('.row-selected').forEach((tr) => tr.classList.remove('row-selected'));
+      }
+      paintCount();
+    });
+    body.addEventListener('click', (e) => {
+      if (!selectable || e.target.closest('a,button,input')) return;
+      const tr = e.target.closest('tr');
+      if (!tr || tr.dataset.groupHead || !body.contains(tr)) return;
+      if (selected.has(tr)) selected.delete(tr); else selected.add(tr);
+      tr.classList.toggle('row-selected', selected.has(tr));
+      paintCount();
+    });
+    exportBtn.addEventListener('click', () => {
+      const rows = [...selected].filter((tr) => tr.isConnected && !tr.dataset.groupHead);
+      if (!rows.length) return;
+      const esc = (v) => `"${String(v).replace(/"/g, '""')}"`;
+      const lines = [heads.map((th) => (th.textContent || '').trim())]
+        .concat(rows.map((tr) => [...tr.children].map((td) => (td.textContent || '').trim())))
+        .map((r) => r.map(esc).join(','))
+        .join('\r\n');
+      const blob = new Blob(['\ufeff' + lines], { type: 'text/csv;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `roost-table-${Date.now()}.csv`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    });
+
+    paintCount();
+    if (typeof MutationObserver !== 'undefined') {
+      new MutationObserver(() => {
+        if (suppress) return;
+        // 表格被重绘：分组标题行会随 innerHTML 一起消失，这里只重置状态
+        grouped = false;
+        gBtn.classList.remove('on');
+        selected.clear();
+        body.querySelectorAll('.row-selected').forEach((tr) => tr.classList.remove('row-selected'));
+        paintCount();
+      }).observe(body, { childList: true });
+    }
+  });
+}
+
+(function initP2() {
+  initDoctorMeter();
+  initLoadingSkeleton();
+  initScrollBottom();
+  initTableTools();
 })();
