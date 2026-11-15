@@ -213,6 +213,8 @@
     "notifySecurityHint",
     "notifySecurityNow",
     "notifyTestMsg",
+    "npmRegistryCustom",
+    "npmRegistrySelect",
     "onebotCapBody",
     "onebotCapHint",
     "onebotCapWrap",
@@ -624,7 +626,7 @@
     "panels": 15,
     "tables": 15,
     "modals": 4,
-    "controls": 186,
+    "controls": 188,
     "apiCalls": 92
   },
   "requiredIds": [
@@ -725,6 +727,6 @@
     "tabItemClass": true,
     "cspScriptSelf": true,
     "pageThemeMirror": true,
-    "serverHash": "3643b8a43b4291fa4a32b1c925e031951e739697719986d8bb786846dca9233f"
+    "serverHash": "3eb236c9ac141f398ee7f90a145c76795e2b253c9c67b1fe7645378af050bf3b"
   }
 }

@@ -2882,10 +2882,34 @@ async function loadMirrorBar() {
       .join('');
     syncMirrorCustom();
     syncProxy();
+    syncNpmRegistry();
     const preset = (d.presets || []).find((p) => p.id === d.current?.id);
     $('#mirrorTip').textContent = preset?.note ?? '';
   } catch {
     sel.innerHTML = '<option value="auto">自动</option>';
+  }
+}
+
+/**
+ * npm 源那一行。
+ *
+ * 和「下载源」分开：那个改的是 GitHub 地址，这个改的是 npm registry——
+ * 装插件依赖 / 外接依赖走的是后者。留空表示「跟随系统」，
+ * 也就是不覆盖用户自己 `npm config set` 过的值。
+ */
+function syncNpmRegistry() {
+  const sel = $('#npmRegistrySelect');
+  const inp = $('#npmRegistryCustom');
+  if (!sel) return;
+
+  const cur = MIRRORS?.npmRegistry ?? {};
+  const id = String(cur.id ?? 'official');
+  /** 官方源 = 跟随系统（留空），这样用户清掉选择后还能吃到自己的 .npmrc */
+  const value = id === 'npmmirror' ? 'npmmirror' : id === 'custom' ? 'custom' : '';
+  sel.value = value;
+  if (inp) {
+    inp.hidden = value !== 'custom';
+    if (value === 'custom') inp.value = cur.custom ?? '';
   }
 }
 
@@ -2950,6 +2974,11 @@ async function saveMirror() {
   // 「手动填写」时取输入框，其余取下拉值（auto / off）
   const proxy = psel?.value === 'custom' ? (pinp?.value ?? '').trim() : (psel?.value ?? 'auto');
 
+  /** npm 源：选「自定义」时取输入框，其余取下拉值（空 = 跟随系统） */
+  const nsel = $('#npmRegistrySelect');
+  const ninp = $('#npmRegistryCustom');
+  const npmRegistry = nsel?.value === 'custom' ? (ninp?.value ?? '').trim() : (nsel?.value ?? '');
+
   try {
     const r = await api('/api/mirror', {
       method: 'PUT',
@@ -2958,10 +2987,12 @@ async function saveMirror() {
         mirrorCustom: inp?.value ?? '',
         giteeToken: tok?.value ?? '',
         proxy,
+        npmRegistry,
       }),
     });
-    MIRRORS = { ...(MIRRORS ?? {}), current: r.current, proxy: r.proxy };
+    MIRRORS = { ...(MIRRORS ?? {}), current: r.current, proxy: r.proxy, npmRegistry: r.npmRegistry };
     syncProxy();
+    syncNpmRegistry();
     const preset = (MIRRORS.presets || []).find((p) => p.id === sel.value);
     if (tip) tip.textContent = `已切换：${preset?.name ?? sel.value}（立即生效）`;
   } catch (e) {
@@ -3342,6 +3373,18 @@ $('#mirrorSelect')?.addEventListener('change', () => {
 });
 $('#mirrorCustom')?.addEventListener('change', saveMirror);
 $('#mirrorGiteeToken')?.addEventListener('change', saveMirror);
+
+/**
+ * npm 源：选「自定义」只露出输入框（此时地址还空着，后端会正确地拒绝），
+ * 其余选项立即保存。
+ */
+$('#npmRegistrySelect')?.addEventListener('change', () => {
+  const sel = $('#npmRegistrySelect');
+  const inp = $('#npmRegistryCustom');
+  if (inp) inp.hidden = sel?.value !== 'custom';
+  if (sel?.value !== 'custom') saveMirror();
+});
+$('#npmRegistryCustom')?.addEventListener('change', saveMirror);
 
 /**
  * 代理：选「自动 / 直连」立即保存；选「手动填写」只露出输入框，等填完再保存。

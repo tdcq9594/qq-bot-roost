@@ -804,6 +804,39 @@ async function testMirror() {
   });
   ok('下载源: 已移除的源被拒', old.status === 400, `status=${old.status}`);
 
+  /**
+   * npm 源：和「下载源」是两个字段——那个管 GitHub 地址，这个管 registry。
+   * 留空表示「跟随系统」（不覆盖用户自己 `npm config set` 的值），
+   * 所以还原时要按原值写回，不能硬写成 ''。
+   */
+  ok('npm 源: 接口带预设', Array.isArray(m.data?.npmRegistry?.presets));
+  const npmOrig = m.data?.npmRegistry?.id === 'npmmirror'
+    ? 'npmmirror'
+    : String(m.data?.npmRegistry?.custom || '');
+
+  const npmPut = await api('/api/mirror', {
+    method: 'PUT',
+    body: JSON.stringify({ mirror: orig.id || 'auto', npmRegistry: 'npmmirror' }),
+  });
+  ok('npm 源: 可以切到镜像', npmPut.status === 200 && npmPut.data?.npmRegistry?.id === 'npmmirror', npmPut.data?.error || '');
+
+  const npmBad = await api('/api/mirror', {
+    method: 'PUT',
+    body: JSON.stringify({ mirror: orig.id || 'auto', npmRegistry: 'ftp://nope' }),
+  });
+  ok('npm 源: 非法地址被拒', npmBad.status === 400, `status=${npmBad.status}`);
+
+  await api('/api/mirror', {
+    method: 'PUT',
+    body: JSON.stringify({
+      mirror: orig.id || 'auto',
+      mirrorCustom: orig.custom || '',
+      npmRegistry: npmOrig,
+    }),
+  });
+  const npmBack = await api('/api/mirror');
+  ok('npm 源: 能还原原设置', String(npmBack.data?.npmRegistry?.custom || '') === String(npmOrig || '') || npmOrig === 'npmmirror');
+
   await api('/api/mirror', {
     method: 'PUT',
     body: JSON.stringify({

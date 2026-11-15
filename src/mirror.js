@@ -25,6 +25,7 @@
  */
 import { createLogger } from './logger.js';
 import { netFetch } from './proxy.js';
+import { configureRegistry } from './npm-registry.js';
 
 const log = createLogger('mirror');
 
@@ -120,6 +121,14 @@ export function configureMirror(globalCfg) {
     // Gitee 私人令牌：选填。公开仓库匿名也能用，填了只是把 API 配额提上去
     giteeToken: String(n.giteeToken ?? '').trim(),
   };
+  /**
+   * npm 源也跟着这份配置走。
+   *
+   * 挂在这里而不是各自去调：`configureMirror` 是 main / 保存配置 / 配置热加载
+   * **三处**都会走的唯一入口，npm 源如果另开一条调用链，迟早有一处忘掉，
+   * 表现是「面板里改了源，装依赖还是走旧源」。
+   */
+  configureRegistry(globalCfg);
   // 换了源就把「自动记住的那个」清掉，否则会继续用旧的
   autoPick = null;
   return current;

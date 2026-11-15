@@ -4,8 +4,10 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { rel } from '../paths.js';
 import { buildPluginEnv } from './env.js';
+import { registryArgs, resolveRegistry } from '../npm-registry.js';
 
 /**
  * 插件依赖自动安装 + 运行时探测。
@@ -92,6 +94,75 @@ const NPM_ARGS = ['install', '--omit=dev', '--no-audit', '--no-fund', '--ignore-
  * Roost 放在自己项目里就会），pnpm 会拒绝安装并让你去 workspace 根装。
  */
 const PNPM_ARGS = ['install', '--prod', '--ignore-scripts', '--config.node-linker=hoisted', '--ignore-workspace'];
+
+/**
+ * 安装参数 + 当前 registry。
+ *
+ * **在调用时拼，不在探测时拼**：`detectRuntimes()` 带模块级缓存，而用户
+ * 可能在面板里换源之后马上点安装——缓存里的参数会还是旧源。
+ * `registryArgs()` 解析到官方源时返回空数组，参数与以前完全一致。
+ */
+function withRegistryArgs(args) {
+  return [...args, ...registryArgs()];
+}
+
+/**
+ * 这些依赖是不是**已经能从别处加载到**。
+ *
+ * Node 的解析规则本来就会向上找 `node_modules`、也会走 `NODE_PATH`；
+ * npm workspaces / pnpm hoisted / 用户全局装的包，都可能让插件不装也能
+ * `import` 到。既然能加载，就没必要再往插件目录里放一份（省一次联网 +
+ * 一份磁盘）。以前只看 `dir/node_modules` 在不在，于是「明明机器上有」
+ * 也会被当成缺依赖重新下一遍。
+ *
+ * 只在**全部**依赖都能解析时才算数：缺一个就老老实实装，避免装到一半的
+ * 状态。返回里带上解析到哪了，日志里能看出「复用的是谁那份」。
+ *
+ * @param {string} dir 插件目录
+ * @param {string[]} names 依赖名
+ * @returns {{all: boolean, where: string, miss: string[]}}
+ */
+function resolveExternally(dir, names) {
+  let req = null;
+  try {
+    req = createRequire(path.join(dir, 'package.json'));
+  } catch {
+    return { all: false, where: '', miss: names };
+  }
+  const miss = [];
+  let where = '';
+  for (const n of names) {
+    try {
+      const p = req.resolve(n);
+      if (!where) {
+        /** `.../node_modules/<pkg>/<entry>` → `.../node_modules` */
+        const i = p.lastIndexOf(`${path.sep}node_modules${path.sep}`);
+        where = i > 0 ? p.slice(0, i + `${path.sep}node_modules`.length) : path.dirname(p);
+      }
+    } catch {
+      miss.push(n);
+    }
+  }
+  return { all: miss.length === 0, where, miss };
+}
+
+/**
+ * 装失败时补一句「可能是源的问题」。
+ *
+ * 国内直连 `registry.npmjs.org` 超时是最常见的失败原因，但 npm 只会甩
+ * `ETIMEDOUT` / `EAI_AGAIN` 这种机器话，用户看不出该改什么。
+ * 只在**当前用的是官方源**时才提示——已经配了镜像还超时，那是别的毛病。
+ */
+function networkHint(result) {
+  const text = `${result?.err || ''}\n${result?.out || ''}`;
+  const net = /ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENOTFOUND|socket hang up|network timeout/i.test(text);
+  if (!net) return '';
+  if (resolveRegistry().source !== 'default') return '';
+  return (
+    '\n看起来是网络问题（连不上 npm 官方源）。可以把 npm 源换成镜像再试：'
+    + '面板「网络」里选 npmmirror，或先执行 npm config set registry https://registry.npmmirror.com'
+  );
+}
 
 /**
  * DSH 桌面版自带的运行时目录。
@@ -413,8 +484,23 @@ export async function ensurePluginDeps({ dir, manifest = {}, log = null, enabled
         .catch(() => false);
       const needInstall = !hasModules || marker.packageJson !== wantPkg;
 
+      /**
+       * 「插件目录里没有」≠「加载不到」。
+       *
+       * Node 的解析会向上找 `node_modules`、也会走 `NODE_PATH`——monorepo、
+       * pnpm hoisted、用户全局装过的包都在那条路上。全部依赖都能解析到时
+       * 就不用再往插件目录里放一份（省一次联网和一份磁盘）。
+       * 只在 `needInstall` 为真时才算，没变化的情况不付这个探测成本。
+       */
+      const external = needInstall
+        ? resolveExternally(dir, all)
+        : { all: false, where: '', miss: [] };
+
       if (!needInstall) {
         result.skipped.push('Node 依赖（未变化）');
+      } else if (external.all) {
+        result.skipped.push('Node 依赖（已从外部目录解析到，不再重复安装）');
+        log?.debug(`Node 依赖全部可外部解析：${external.where || '未知目录'}`);
       } else if (!enabled) {
         result.warnings.push(
           '检测到 package.json 依赖需要安装，但 config 里 plugins.autoInstallDeps = false，已跳过',
@@ -441,12 +527,13 @@ export async function ensurePluginDeps({ dir, manifest = {}, log = null, enabled
           );
           // --ignore-scripts：依赖的 postinstall 就是任意代码执行入口，
           // 装依赖不该顺带跑别人的安装脚本
-          const r = await run(rt.installer.cmd, rt.installer.args, { cwd: dir });
+          const r = await run(rt.installer.cmd, withRegistryArgs(rt.installer.args), { cwd: dir });
           const detail = `${r.reason || (r.err || r.out).slice(-600)}\n`
             + `可以手动执行：cd ${rel(dir)} && ${rt.installer.label} install`;
           if (!r.ok) {
-            if (required.length) throw new Error(`安装 Node 依赖失败：${detail}`);
-            result.warnings.push(`可选依赖没装上（不影响主功能）：${detail}`);
+            const hint = networkHint(r);
+            if (required.length) throw new Error(`安装 Node 依赖失败：${detail}${hint}`);
+            result.warnings.push(`可选依赖没装上（不影响主功能）：${detail}${hint}`);
           } else {
             result.installed.push(`Node 依赖（${rt.installer.label}）`);
           }

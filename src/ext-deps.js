@@ -26,6 +26,7 @@
  */
 
 import fs from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -210,6 +211,59 @@ export async function ffmpegBinary({ fresh = false } = {}) {
 }
 
 /**
+ * 系统 PATH 上的 ffmpeg；没有返回空串。
+ *
+ * 很多人已经用 apt / brew / choco / scoop 装过系统级 ffmpeg，再为它下
+ * 62MB 的 npm 包纯属浪费。这里只**扫 PATH 目录**看可执行文件在不在，
+ * 不 spawn（面板随时可能问状态，起进程太贵）；「真能跑」由冒烟负责。
+ *
+ * @param {{fresh?: boolean}} [o] `fresh` 丢掉缓存重扫（装/卸之后用）
+ * @returns {string}
+ */
+let systemFfmpegCache; // undefined=没查过；''=没有；string=路径
+export function systemFfmpeg({ fresh = false } = {}) {
+  if (fresh) systemFfmpegCache = undefined;
+  if (systemFfmpegCache !== undefined) return systemFfmpegCache;
+
+  const names = process.platform === 'win32'
+    ? ['ffmpeg.exe', 'ffmpeg.cmd', 'ffmpeg.bat']
+    : ['ffmpeg'];
+  const dirs = String(process.env.PATH || process.env.Path || '')
+    .split(path.delimiter)
+    .map((d) => d.trim().replace(/^"|"$/g, ''))
+    .filter(Boolean);
+
+  for (const d of dirs) {
+    for (const n of names) {
+      const p = path.join(d, n);
+      if (existsSync(p)) {
+        systemFfmpegCache = p;
+        return p;
+      }
+    }
+  }
+  systemFfmpegCache = '';
+  return '';
+}
+
+/**
+ * 这次该用哪个 ffmpeg：**装好的那份优先，其次系统 PATH**。
+ *
+ * 装好的那份是平台子包里的静态二进制，版本和行为都确定；系统的版本不可控
+ * 但能省 62MB。调用方要的是「能转码就行」，所以两份都算数。
+ *
+ * @param {{fresh?: boolean}} [o]
+ * @returns {Promise<{path: string, source: 'managed'|'system'|''}>}
+ */
+export async function resolveFfmpeg({ fresh = false } = {}) {
+  const own = await ffmpegBinary({ fresh });
+  if (own) return { path: own, source: 'managed' };
+  const sys = systemFfmpeg({ fresh });
+  if (sys) return { path: sys, source: 'system' };
+  return { path: '', source: '' };
+}
+
+/**
  * 当前状态。
  *
  * 只读文件，不装任何东西，也不 `require`——面板每秒都可能调它。
@@ -242,10 +296,20 @@ export async function status() {
       binary = await ffmpegBinary();
       resolvable = Boolean(binary);
     }
+    /**
+     * 系统里那份 ffmpeg 单独报，**不并进 `resolvable`**。
+     *
+     * `resolvable` 的语义是「装好的这份能不能用」，面板上的「一键安装」
+     * 按钮也按它决定显示什么；把系统那份混进去会让按钮变成「已装好」，
+     * 而实际上装的目录里什么都没有。系统那份作为独立字段给面板做提示：
+     * 「系统里已有 ffmpeg，可以不再下 62MB」。
+     */
+    const system = name === FFMPEG_PKG ? systemFfmpeg() : '';
     out.packages[name] = {
       version,
       resolvable,
       binary,
+      system,
       required: meta.required,
       desc: meta.desc,
       size: meta.size,
@@ -441,6 +505,15 @@ const FFMPEG_RETRY_MS = 30 * 60_000;
 export async function ensureFfmpeg({ reason = '转码语音' } = {}) {
   const bin = await ffmpegBinary();
   if (bin) return bin;
+  /**
+   * 系统里已经有 ffmpeg（apt / brew / choco 装的）就直接用，别再下 62MB。
+   * 转码结果一模一样，用户的等待时间差着一两个数量级。
+   */
+  const sys = systemFfmpeg();
+  if (sys) {
+    log.info(`系统里已有 ffmpeg（${sys}），跳过 62MB 的 npm 包`);
+    return sys;
+  }
   if (ffmpegInflight) return await ffmpegInflight;
   if (Date.now() - ffmpegFailedAt < FFMPEG_RETRY_MS) return '';
 
@@ -511,6 +584,8 @@ export function resetCache() {
   loaded.clear();
   /** 二进制路径也跟着重探：装/卸/重装之后不能还指着旧路径 */
   ffmpegCache = undefined;
+  /** 系统 PATH 可能刚变（用户新装了一份），一并重扫 */
+  systemFfmpegCache = undefined;
   const r = req();
   for (const name of Object.keys(WHITELIST)) {
     try {
@@ -548,18 +623,25 @@ export function install(names) {
      */
     const already = [];
     for (const name of picked) {
+      let ok = false;
       try {
         req().resolve(name);
-        /**
-         * ffmpeg 主包能 resolve ≠ 能用：平台子包/二进制可能不在
-         * （见 `ffmpegBinary`）。这时要当成「缺」继续往下走，
-         * 让 npm 重装，而不是返回 skipped 骗调用方。
-         */
-        if (name === FFMPEG_PKG && !(await ffmpegBinary({ fresh: true }))) continue;
-        already.push(name);
+        ok = true;
       } catch {
-        /* 真缺 */
+        ok = false;
       }
+      /**
+       * ffmpeg 主包能 resolve ≠ 能用：平台子包/二进制可能不在
+       * （见 `ffmpegBinary`）。这时要当成「缺」继续往下走，让 npm 重装，
+       * 而不是返回 skipped 骗调用方。
+       *
+       * **但系统里装了 ffmpeg 也算能用**——那 62MB 的 npm 包就没必要下。
+       */
+      if (ok && name === FFMPEG_PKG) {
+        const usable = (await ffmpegBinary({ fresh: true })) || systemFfmpeg({ fresh: true });
+        ok = Boolean(usable);
+      }
+      if (ok) already.push(name);
     }
     if (already.length === picked.length) {
       log.debug(`依赖已就绪，跳过安装：${picked.join('、')}`);

@@ -119,6 +119,19 @@ const GLOBAL_DEFAULTS = {
      * 于是「浏览器能打开 GitHub、框架说连不上」。详见 src/proxy.js。
      */
     proxy: 'auto',
+    /**
+     * npm 源。插件依赖、外接依赖（ws / silk-wasm / ffmpeg）都走 npm，
+     * 国内直连官方源经常超时。
+     *
+     *   ''            跟随系统：环境变量 npm_config_registry → ~/.npmrc → 官方源
+     *   'npmmirror'   淘宝镜像 https://registry.npmmirror.com
+     *   'official'    强制官方源
+     *   完整 URL      自定义源（必须 http(s)）
+     *
+     * 默认留空：用户自己 `npm config set registry` 过的话，这里不该覆盖他。
+     * 解析逻辑见 src/npm-registry.js。
+     */
+    npmRegistry: '',
   },
 
   /**

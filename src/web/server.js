@@ -50,6 +50,12 @@ import {
   probeMirrors,
 } from '../mirror.js';
 import {
+  PRESETS as NPM_REGISTRY_PRESETS,
+  configureRegistry,
+  normRegistry,
+  registryConfig,
+} from '../npm-registry.js';
+import {
   configureProxy,
   netFetch,
   normalizeProxySetting,
@@ -1946,6 +1952,11 @@ async function startWebServerInstance({
              * 这是排查「浏览器能打开、这里打不开」的第一手信息。
              */
             proxy: { ...proxyInfo(), setting: globalCfg.network?.proxy ?? 'auto' },
+            /**
+             * npm 源：装插件依赖 / 外接依赖时用。和上面的「下载源」是两回事——
+             * 那个管 GitHub 地址，这个管 registry。面板上是两行控件。
+             */
+            npmRegistry: { ...registryConfig(), presets: NPM_REGISTRY_PRESETS },
           });
         }
 
@@ -1981,21 +1992,41 @@ async function startWebServerInstance({
             proxy = norm.value;
           }
 
+          /**
+           * npm 源：空 = 跟随系统（env / .npmrc），也可以填 npmmirror /
+           * official / 完整 URL。**先校验再落盘**——写进去一个坏地址，
+           * 之后每次装依赖都会失败，而报错只会说「连不上」。
+           */
+          let npmRegistry = String(globalCfg.network?.npmRegistry ?? '');
+          if (body?.npmRegistry !== undefined) {
+            const raw = String(body.npmRegistry ?? '').trim();
+            const known = raw === '' || raw === 'official' || raw === 'npmmirror';
+            if (!known && !normRegistry(raw)) {
+              return json(res, 400, {
+                error: `npm 源要填 npmmirror / official / 留空，或者一个 http(s) 地址：${raw}`,
+              });
+            }
+            npmRegistry = raw;
+          }
+
           globalCfg.network = {
             ...(globalCfg.network ?? {}),
             mirror: id,
             mirrorCustom: String(body?.mirrorCustom ?? '').trim(),
             giteeToken: String(body?.giteeToken ?? '').trim(),
             proxy,
+            npmRegistry,
           };
           // 立刻生效：模块里缓存的那份要同步，不然要等重启
           configureMirror(globalCfg);
           configureProxy(globalCfg);
+          configureRegistry(globalCfg);
           await saveGlobalConfig?.(globalCfg).catch(() => {});
           return json(res, 200, {
             ok: true,
             current: currentMirror(),
             proxy: { ...proxyInfo(), setting: proxy },
+            npmRegistry: registryConfig(),
           });
         }
 

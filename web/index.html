@@ -779,6 +779,26 @@
         <span class="hint" id="mirrorTip"></span>
 
         <!--
+          npm 源：装插件依赖 / 外接依赖（ws / silk-wasm / ffmpeg）时用。
+          和上面的「下载源」是两回事——那个管 GitHub 地址，这个管 npm registry。
+          留空 = 跟随系统（npm config set 过的值 / ~/.npmrc），不覆盖用户自己的设置。
+        -->
+        <span class="hint">npm 源</span>
+        <select id="npmRegistrySelect" class="mini-select" aria-label="npm 源">
+          <option value="">跟随系统</option>
+          <option value="npmmirror">npmmirror 镜像</option>
+          <option value="official">npm 官方源</option>
+          <option value="custom">自定义</option>
+        </select>
+        <input
+          id="npmRegistryCustom"
+          class="mini-input"
+          placeholder="https://registry.example.com"
+          aria-label="npm 源地址"
+          hidden
+        />
+
+        <!--
           代理。Node 的 fetch 既不读系统代理也不读 HTTPS_PROXY，所以下载默认是
           「直连」——浏览器能打开 GitHub、这里却报连不上，就是这一层没接上。
         -->
