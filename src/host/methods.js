@@ -273,6 +273,13 @@ export function createMethods({ runtime: R, getState, log = () => {}, extBridge 
       risk: QQ_RISK.get(n) ?? 'write',
       scope: scopeForQq(n),
       blocked: QQ_BLOCKED_APIS.has(n),
+      /**
+       * 端点分组（来自 `OFFICIAL_ENDPOINTS`）。
+       *
+       * 宿主（dsh-roost）是独立进程，读不到 `endpoints.js`，但它要按分组
+       * 过滤出「频道相关方法」做面板操作台。给 group 比让它抄一份名单稳。
+       */
+      group: OFFICIAL_ENDPOINTS.find((e) => e.api === n)?.group ?? '',
     }])),
   }));
 
