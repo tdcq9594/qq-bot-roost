@@ -651,6 +651,18 @@ function labelWithAvatar(name, id, avatar) {
   return head + labelWithId(name, id);
 }
 
+/**
+ * 账本列表的头像：只认 http(s)，并把 qlogo 的 `s=640` 换成 `s=100`。
+ *
+ * 缩略图不是为了省服务器（图是腾讯的），是为了面板本身：一页 50 条，
+ * 640px 的图每张 ~70KB，滚动时能明显感觉到卡。
+ */
+function ledgerAvatar(url) {
+  const s = String(url ?? '').trim();
+  if (!/^https?:\/\//i.test(s)) return '';
+  return s.replace(/([?&]s=)\d+/, '$1100');
+}
+
 /* ---------------- Tab ---------------- */
 
 /** 找到某个页签的按钮：一级按钮，或分组菜单里的项 */
@@ -751,6 +763,14 @@ function activateTab(name) {
   }
   if (name === 'events') safeLoad('events', loadEvents);
   if (name === 'ledger') safeLoad('ledger', loadLedger);
+  /** 查询页：只在查过之后重跑一次，没查过就保持空状态，别一进来就打一次全表扫 */
+  if (name === 'search') {
+    /**
+     * `srchView` 声明在文件中部：`activateTab` 可能在脚本执行到那儿之前就被调用
+     * （hash 直接是 #search 时），同步读它会撞 TDZ。放进回调里读，那时脚本已经跑完。
+     */
+    safeLoad('search', () => (srchView.touched ? loadSearch(true) : undefined));
+  }
   // 统计页：进来先拉一次，之后 10 秒一轮（统计本身是 1 秒批量落盘的，不用更密）
   if (name === 'stats') {
     safeLoad('stats', loadStats);
@@ -2578,13 +2598,19 @@ function renderLedgerChats(st) {
     .map((c) => {
       const id = String(c.chatId ?? '');
       const short = id.length > 14 ? `${id.slice(0, 14)}…` : id;
+      /**
+       * 群会话优先显示群名（后端 `/api/ledger/stats` 补过一次，没补到就是空串）。
+       * 没有再退回 openid 短码——短码虽然难认，但至少能区分是哪一行。
+       * 群名不加 `mono`：那是给人读的，等宽字反而更难扫。
+       */
+      const name = String(c.name ?? '').trim();
       return `<tr>
-        <td class="mono lg-chat" title="${escapeHtml(id)}">${escapeHtml(short)}</td>
+        <td class="lg-chat${name ? '' : ' mono'}" title="${escapeHtml(name ? `${name} · ${id}` : id)}">${escapeHtml(name || short)}</td>
         <td class="lg-kind">${escapeHtml(LEDGER_KIND[c.kind] ?? c.kind ?? '')}</td>
         <td class="num lg-num">${Number(c.rows ?? 0)}</td>
         <td class="lg-range">${escapeHtml(fmtShort(c.oldestAt))} → ${escapeHtml(fmtShort(c.newestAt))}</td>
         <td class="lg-ops">
-          <button class="btn small" data-ledger-open="${escapeHtml(id)}">查看</button>
+          <button class="btn small" data-ledger-open="${escapeHtml(id)}" data-ledger-name="${escapeHtml(name)}">查看</button>
           <button class="btn small danger" data-ledger-del="${escapeHtml(id)}">删除</button>
         </td>
       </tr>`;
@@ -2608,12 +2634,17 @@ function syncLedgerRetention(days) {
   }
 }
 
-async function openLedgerChat(chatId) {
+async function openLedgerChat(chatId, name = '') {
   ledgerView = { chatId, cursor: 0 };
   const box = $('#ledgerRowsBox');
   if (box) box.hidden = false;
   const t = $('#ledgerRowsTitle');
-  if (t) t.textContent = `记录 · ${String(chatId).slice(0, 14)}`;
+  /** 有群名就写群名（加短码备查），没有就只写短码 */
+  if (t) {
+    const short = String(chatId).slice(0, 14);
+    const label = String(name ?? '').trim();
+    t.textContent = label ? `记录 · ${label}（${short}…）` : `记录 · ${short}`;
+  }
   const body = $('#ledgerRows');
   if (body) body.innerHTML = '<tr><td colspan="3" class="empty">加载中…</td></tr>';
   await loadLedgerRows(true);
@@ -2647,9 +2678,26 @@ async function loadLedgerRows(reset) {
            */
           const actor = x.plugin && x.plugin !== '__core' ? x.plugin : (x.botId || 'main');
           const who = x.userName || x.userId || actor;
-          return `<tr>
+          /**
+           * 发言人：群名片优先（`userName` 现在就是群内昵称），QQ 昵称放第二行。
+           *
+           * 两个名字一样就只留一行——不然每行都重复一遍，反而更难扫。
+           * 头像用缩略图（`s=640` 换成 `s=100`），一页 50 条不然要拖几百 KB。
+           * openid / QQ 号**不进界面文字**，只放 `data-*`：调试和复制要用，
+           * 但账本列表是给人扫的，塞两串长 id 只会把内容挤没。
+           */
+          const nick = String(x.nickname ?? '').trim();
+          const card = String(x.card ?? '').trim();
+          const name = String(x.userName ?? '').trim() || card || nick || who;
+          const sub = nick && nick !== name ? nick : '';
+          const av = ledgerAvatar(x.avatar);
+          return `<tr data-openid="${escapeHtml(String(x.openid ?? x.userId ?? ''))}" data-uin="${escapeHtml(String(x.uin ?? ''))}">
             <td class="lg-when">${escapeHtml(fmtWhen(x.at))}</td>
-            <td class="lg-who" title="${escapeHtml(who)}">${escapeHtml(who)}</td>
+            <td class="lg-who" title="${escapeHtml(name)}">${av
+            ? `<img class="who-av lg-av" src="${escapeHtml(av)}" alt="" loading="lazy" referrerpolicy="no-referrer">`
+            : ''}<span class="lg-name">${escapeHtml(name)}</span>${sub
+            ? `<span class="sub lg-sub">${escapeHtml(sub)}</span>`
+            : ''}</td>
             <td class="lg-content">${escapeHtml(String(x.content ?? '').slice(0, 200))}</td>
           </tr>`;
         })
@@ -2698,7 +2746,9 @@ async function ledgerDelete(cond) {
 
 $('#ledgerChats')?.addEventListener('click', (e) => {
   const open = e.target.closest('[data-ledger-open]');
-  if (open) return openLedgerChat(open.getAttribute('data-ledger-open'));
+  if (open) {
+    return openLedgerChat(open.getAttribute('data-ledger-open'), open.getAttribute('data-ledger-name') || '');
+  }
   const del = e.target.closest('[data-ledger-del]');
   if (del) return ledgerDelete({ chatId: del.getAttribute('data-ledger-del') });
 });
@@ -4116,7 +4166,7 @@ function renderGroups(list) {
   }
   body.innerHTML = list
     .map((g) => `
-      <tr data-id="${escapeHtml(g.groupOpenid)}">
+      <tr data-id="${escapeHtml(g.groupOpenid)}" data-name="${escapeHtml(g.groupName || '')}">
         <td title="${escapeHtml(g.groupOpenid)}">${labelWithId(g.groupName, g.groupOpenid)}${
           g.memberNum ? `<span class="sub"> · ${g.memberNum} 人</span>` : ''
         }</td>
@@ -4133,9 +4183,10 @@ function renderGroups(list) {
 
   body.querySelectorAll('button[data-act]').forEach((btn) => {
     btn.addEventListener('click', async () => {
-      const id = btn.closest('tr').dataset.id;
+      const row = btn.closest('tr');
+      const id = row.dataset.id;
       if (btn.dataset.act === 'plugins') {
-        openGroupPlugins(id);
+        openGroupPlugins(id, row.dataset.name || '');
         return;
       }
       if (!confirm('确定删除这个群的档案？机器人不会退群，只是忘掉这条记录（权限不受影响）。')) {
@@ -4206,6 +4257,262 @@ function triSelect(field, v, yes = '是', no = '否') {
     sel('', '未知') + sel('1', yes) + sel('0', no)
   }</select>`;
 }
+
+/* ---------------- 消息查询 ---------------- */
+
+/** 上一次查询的条件与游标（「下一页」要用） */
+let srchView = { cursor: 0, terms: [], touched: false };
+
+/**
+ * 命中词高亮。
+ *
+ * 不能「先把整段转义、再替换词」：词里带 `<` `&` 时转义后就匹配不上了。
+ * 正确做法是按原串切分，逐段转义，命中的那段包 `<mark>`。
+ */
+function markTerms(text, terms) {
+  const src = String(text ?? '');
+  const list = (Array.isArray(terms) ? terms : []).filter(Boolean).sort((a, b) => b.length - a.length);
+  if (!list.length) return escapeHtml(src);
+  const re = new RegExp(
+    `(${list.map((t) => String(t).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`,
+    'gi',
+  );
+  return src
+    .split(re)
+    .map((part, i) => (i % 2 === 1 ? `<mark>${escapeHtml(part)}</mark>` : escapeHtml(part)))
+    .join('');
+}
+
+function srchCondOf() {
+  return {
+    q: String($('#srchQ')?.value ?? '').trim(),
+    person: String($('#srchPerson')?.value ?? '').trim(),
+    kind: String($('#srchKind')?.value ?? ''),
+    days: String($('#srchDays')?.value ?? ''),
+  };
+}
+
+async function loadSearch(reset) {
+  const body = $('#srchRows');
+  if (!body) return;
+  const cond = srchCondOf();
+  if (!cond.q && !cond.person && !cond.kind && !cond.days) {
+    body.innerHTML = '<tr><td colspan="4" class="empty">输入关键词或发言人再查</td></tr>';
+    return;
+  }
+  if (reset) {
+    srchView.cursor = 0;
+    body.innerHTML = '<tr><td colspan="4" class="empty">查询中…</td></tr>';
+  }
+
+  const p = new URLSearchParams({ limit: '50' });
+  if (cond.q) p.set('q', cond.q);
+  if (cond.person) p.set('person', cond.person);
+  if (cond.kind) p.set('kind', cond.kind);
+  if (cond.days) p.set('days', cond.days);
+  if (!reset && srchView.cursor) p.set('beforeSeq', String(srchView.cursor));
+
+  let d;
+  try {
+    d = await api(`/api/ledger/search?${p.toString()}`);
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="4" class="empty">查询失败: ${escapeHtml(e.message)}</td></tr>`;
+    return;
+  }
+
+  const items = d?.items ?? [];
+  srchView.terms = Array.isArray(d?.terms) ? d.terms : [];
+  srchView.touched = true;
+  if (reset) body.innerHTML = '';
+
+  if (!items.length) {
+    /** 后端会带 `note` 解释「为什么空」（比如关键词全是疑问词被剥光了） */
+    const empty = String(d?.note ?? '').trim() || '没有匹配的记录';
+    if (reset) body.innerHTML = `<tr><td colspan="4" class="empty">${escapeHtml(empty)}</td></tr>`;
+    const more = $('#srchMore');
+    if (more) more.disabled = true;
+    const hint = $('#srchMoreHint');
+    if (hint) hint.textContent = '';
+    return;
+  }
+
+  body.insertAdjacentHTML(
+    'beforeend',
+    items
+      .map((x) => {
+        const nick = String(x.nickname ?? '').trim();
+        const card = String(x.card ?? '').trim();
+        const name = String(x.userName ?? '').trim() || card || nick || String(x.userId ?? '') || '（机器人）';
+        const sub = nick && nick !== name ? nick : '';
+        const av = ledgerAvatar(x.avatar);
+        const chatName = String(x.chatName ?? '').trim();
+        const chatShort = String(x.chatId ?? '').slice(0, 10);
+        return `<tr data-openid="${escapeHtml(String(x.openid ?? ''))}" data-uin="${escapeHtml(String(x.uin ?? ''))}">
+          <td class="lg-when">${escapeHtml(fmtWhen(x.at))}</td>
+          <td class="lg-chat" title="${escapeHtml(String(x.chatId ?? ''))}">${escapeHtml(chatName || `${chatShort}…`)}</td>
+          <td class="lg-who" title="${escapeHtml(name)}">${av
+          ? `<img class="who-av lg-av" src="${escapeHtml(av)}" alt="" loading="lazy" referrerpolicy="no-referrer">`
+          : ''}<span class="lg-name">${escapeHtml(name)}</span>${sub
+          ? `<span class="sub lg-sub">${escapeHtml(sub)}</span>`
+          : ''}</td>
+          <td class="lg-content">${markTerms(String(x.content ?? '').slice(0, 300), srchView.terms)}</td>
+        </tr>`;
+      })
+      .join(''),
+  );
+
+  /** 结果按时间倒序，游标取最后一条（最老的）的 seq，下一页接着往更早翻 */
+  srchView.cursor = Number(items[items.length - 1]?.seq) || 0;
+
+  const more = $('#srchMore');
+  if (more) more.disabled = !d?.hasMore;
+  const hint = $('#srchMoreHint');
+  if (hint) {
+    const bits = [`本页 ${items.length} 条`];
+    if (d?.relaxed) bits.push('多个关键词没有同时命中的记录，已放宽为任一');
+    if (d?.hasMore) bits.push('还有更早的记录，点「下一页」');
+    hint.textContent = bits.join(' · ');
+  }
+}
+
+$('#btnSearch')?.addEventListener('click', () => safeLoad('search', () => loadSearch(true)));
+$('#btnSearchReset')?.addEventListener('click', () => {
+  for (const id of ['#srchQ', '#srchPerson', '#srchKind', '#srchDays']) {
+    const el = $(id);
+    if (el) el.value = '';
+  }
+  const body = $('#srchRows');
+  if (body) body.innerHTML = '<tr><td colspan="4" class="empty">还没有查询</td></tr>';
+  const more = $('#srchMore');
+  if (more) more.disabled = true;
+  const hint = $('#srchMoreHint');
+  if (hint) hint.textContent = '';
+  srchView = { cursor: 0, terms: [], touched: false };
+});
+for (const id of ['#srchQ', '#srchPerson']) {
+  $(id)?.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    safeLoad('search', () => loadSearch(true));
+  });
+}
+$('#srchMore')?.addEventListener('click', () => safeLoad('search', () => loadSearch(false)));
+
+/* ---------------- 人物反查 ---------------- */
+
+/**
+ * 复制到剪贴板。
+ *
+ * 面板跑在 `127.0.0.1`，属于安全上下文，`navigator.clipboard` 通常可用；
+ * 但它会因「文档没焦点」「权限被拒」偶发失败，所以留一条 `execCommand` 退路
+ * （老浏览器 / 内嵌 webview 里这条反而是唯一能用的）。
+ */
+async function copyToClipboard(text) {
+  const s = String(text ?? '');
+  if (!s) return false;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(s);
+      return true;
+    }
+  } catch { /* 往下走备用方案 */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = s;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-1000px';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+/** 消息 / 人物两个模式互斥显示 */
+function srchShowMode(which) {
+  const isWho = which === 'who';
+  const msg = $('#srchMsgBox');
+  const who = $('#srchWhoBox');
+  if (msg) msg.hidden = isWho;
+  if (who) who.hidden = !isWho;
+  $('#srchModeMsg')?.classList.toggle('active', !isWho);
+  $('#srchModeWho')?.classList.toggle('active', isWho);
+}
+
+async function loadWho() {
+  const body = $('#whoRows');
+  if (!body) return;
+  const q = String($('#whoQ')?.value ?? '').trim();
+  if (!q) {
+    body.innerHTML = '<tr><td colspan="5" class="empty">输入昵称 / QQ 号 / openid 再查</td></tr>';
+    return;
+  }
+  body.innerHTML = '<tr><td colspan="5" class="empty">查询中…</td></tr>';
+
+  let d;
+  try {
+    d = await api(`/api/people/search?q=${encodeURIComponent(q)}&limit=50`);
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="5" class="empty">查询失败: ${escapeHtml(e.message)}</td></tr>`;
+    return;
+  }
+
+  const items = Array.isArray(d?.items) ? d.items : [];
+  const hint = $('#whoHint');
+  if (!items.length) {
+    body.innerHTML = '<tr><td colspan="5" class="empty">没找到这个人</td></tr>';
+    if (hint) hint.textContent = '试试只输昵称里的一两个字，或者直接粘 openid / QQ 号。';
+    return;
+  }
+
+  body.innerHTML = items
+    .map((p) => {
+      const av = ledgerAvatar(p.avatar);
+      const name = String(p.name || p.card || p.nickname || '').trim();
+      /** 群名片 / QQ 昵称**和显示名不同**时才作为副行，否则整行都是重复字 */
+      const sub = [p.card, p.nickname].filter(Boolean).filter((x) => x !== name);
+      const uin = String(p.uin ?? '');
+      const id = String(p.openid ?? '');
+      return `<tr data-openid="${escapeHtml(id)}" data-uin="${escapeHtml(uin)}">
+        <td>${av
+        ? `<img class="who-av" src="${escapeHtml(av)}" alt="" loading="lazy" referrerpolicy="no-referrer">`
+        : '<span class="who-av who-av-none"></span>'}</td>
+        <td class="lg-who">${escapeHtml(name || '（未知）')}${p.bound ? '<span class="chip-tag">已绑定</span>' : ''}${sub.length
+        ? `<span class="sub lg-sub">${escapeHtml(sub.join(' · '))}</span>`
+        : ''}</td>
+        <td class="mono">${uin ? escapeHtml(uin) : '<span class="muted">未绑定</span>'}</td>
+        <td class="mono" title="${escapeHtml(id)}">${escapeHtml(id.slice(0, 12))}…</td>
+        <td><button class="btn small" data-copy="${escapeHtml(id)}">复制 id</button></td>
+      </tr>`;
+    })
+    .join('');
+
+  if (hint) hint.textContent = `找到 ${items.length} 个人 · 点「复制 id」可一键复制 openid`;
+}
+
+$('#srchModeMsg')?.addEventListener('click', () => srchShowMode('msg'));
+$('#srchModeWho')?.addEventListener('click', () => srchShowMode('who'));
+$('#btnWho')?.addEventListener('click', () => safeLoad('search', loadWho));
+$('#whoQ')?.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  e.preventDefault();
+  safeLoad('search', loadWho);
+});
+/** 复制：事件委托，`data-copy` 里放要复制的原文 */
+$('#whoRows')?.addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-copy]');
+  if (!btn) return;
+  const ok = await copyToClipboard(btn.getAttribute('data-copy'));
+  const old = btn.textContent;
+  btn.textContent = ok ? '已复制' : '复制失败';
+  setTimeout(() => {
+    btn.textContent = old;
+  }, 1200);
+});
 
 /* ---------------- 投递账本 ---------------- */
 
@@ -4405,8 +4712,9 @@ $('#btnReachSave')?.addEventListener('click', async () => {
  * 按群卸载等于每个群一套运行时。
  *
  * @param {string} chatId 群 openid
+ * @param {string} [name] 群名（有就显示在副标题里，没有退回短码）
  */
-async function openGroupPlugins(chatId) {
+async function openGroupPlugins(chatId, name = '') {
   const mask = $('#gplugMask');
   const list = $('#gplugList');
   const save = $('#gplugSave');
@@ -4422,7 +4730,15 @@ async function openGroupPlugins(chatId) {
 
   const own = d.own;
   const g = d.global ?? { mode: 'all', list: [] };
-  $('#gplugSub').textContent = `群 ${shortId(chatId)}：只影响这一个群，其它群不受影响。`;  $('#gplugGlobalHint').textContent =
+  /**
+   * 副标题写群名，短码只在没有名字时兜底。
+   *
+   * 这个弹窗是「只对这个群生效」的开关面板，标题写一串 openid 时用户根本
+   * 无法确认自己改的是哪个群——改了错的群比不改更糟。
+   */
+  $('#gplugSub').textContent = name
+    ? `群「${name}」：只影响这一个群（${shortId(chatId)}），其它群不受影响。`
+    : `群 ${shortId(chatId)}：只影响这一个群，其它群不受影响。`;  $('#gplugGlobalHint').textContent =
     g.mode === 'all'
       ? '（全局：全部启用）'
       : `（全局：${g.mode === 'exclude' ? '排除' : '仅启用'} ${(g.list ?? []).length} 个）`;

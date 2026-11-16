@@ -293,6 +293,10 @@ body {
   background: var(--panel-3);
 }
 
+/* 账本发言人：头像与名字同行，QQ 昵称另起一行小字 */
+.lg-av { vertical-align: -5px; }
+.lg-sub { display: block; margin-top: 1px; }
+
 /* 关于页 */
 .about-hero { display: flex; align-items: center; gap: 16px; }
 .about-logo { width: 52px; height: 52px; border-radius: 14px; font-size: 26px; }
@@ -520,6 +524,37 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 .form-inline { display: flex; gap: 10px; flex-wrap: wrap; }
 .form-inline select { width: 110px; }
 .form-inline input { flex: 1; min-width: 180px; }
+
+/* 查询页：关键词输入要更宽，条件多时能换行 */
+.srch-form input { min-width: 200px; }
+.srch-form input#srchQ { flex: 2 1 260px; }
+/* 命中词高亮：底色用主色的浅色，浅/暗主题都能看清（两个变量都随主题变） */
+#tab-search mark {
+  background: var(--primary-soft);
+  color: var(--text);
+  border-radius: 3px;
+  padding: 0 2px;
+}
+/* 模式切换（消息 / 人物）：选中态借用 tab 的主色，但保持 btn 的尺寸 */
+#tab-search .btn.active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+/* 没拿到头像时的占位圆点，避免表格列宽跳动 */
+.who-av-none { display: inline-block; background: var(--panel-3); border-radius: 50%; }
+#tab-search .muted { color: var(--muted); }
+/* 「已绑定」小标签：比 chip 轻，只做标记 */
+.chip-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  line-height: 18px;
+  color: var(--ok);
+  background: var(--ok-soft);
+}
 
 .btn-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
 .btn {
@@ -1580,13 +1615,29 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
  */
 #tab-ledger .table-wrap { max-height: 460px; }
 #tab-ledger table { table-layout: fixed; }
-#tab-ledger .lg-chat { width: 190px; overflow: hidden; text-overflow: ellipsis; }
+#tab-ledger .lg-chat { width: 190px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #tab-ledger .lg-kind { width: 64px; }
 #tab-ledger .lg-num { width: 72px; }
 #tab-ledger .lg-range { width: 190px; white-space: nowrap; }
 #tab-ledger .lg-ops { width: 132px; white-space: nowrap; }
 #tab-ledger .lg-when { width: 150px; white-space: nowrap; }
-#tab-ledger .lg-who { width: 150px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/**
+ * 发言人列：头像 + 群名片（第一行）+ QQ 昵称（第二行小字）。
+ * 宽度从 150 放到 190：18px 头像 + 名字总要放得下；两行各自 ellipsis，
+ * 别让长名字把正文列挤没（`text-overflow` 只对块级自身生效，所以套在
+ * `.lg-name` / `.lg-sub` 上，而不是 td）。
+ */
+#tab-ledger .lg-who { width: 190px; }
+#tab-ledger .lg-name,
+#tab-ledger .lg-sub {
+  max-width: 158px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+#tab-ledger .lg-name { display: inline-block; }
+#tab-ledger .lg-sub { display: block; max-width: 170px; margin-top: 1px; }
 #tab-ledger .lg-content { word-break: break-word; }
 /* 概览里的时间范围：两行短格式，字号小一档，别撑破卡片 */
 #tab-ledger .card .v.lg-range-v {

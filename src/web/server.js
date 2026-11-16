@@ -7,6 +7,8 @@ import { ROOT } from '../config.js';
 import { redactText } from '../runtime.js';
 import { DIRS, botPaths, listBotIds, rel } from '../paths.js';
 import { createLogger, recentLogs, onLog, getLevel, setLevel } from '../logger.js';
+import { splitQuery } from '../search-query.js';
+import { filterPeople, sortPeople, isUinQuery, isOpenidQuery } from '../people-search.js';
 import { EVENT_NAMES, INTENT_META, describeIntents, groupEvents } from '../events.js';
 import {
   fetchIndex,
@@ -344,6 +346,19 @@ function isSafeId(s) {
 }
 
 /**
+ * 账本正文的面板显示版。
+ *
+ * 库里存的是原文（表情是 `<faceType=6,faceId="0",ext="…">` 这种标记），直接
+ * 显示会满屏尖括号。只清展示，**不改库**：导出、检索都还按原文走。
+ * 清完为空但原文有内容 = 纯图 / 纯表情，给个占位词，不然那行看着像坏的。
+ */
+function ledgerDisplayContent(raw) {
+  const s = String(raw ?? '');
+  const t = s.replace(/<faceType=[^>]*>/g, '').trim();
+  return t || (s ? '（表情）' : '（图片）');
+}
+
+/**
  * 常量时间比较，避免用响应时间猜密钥。
  * 长度不同直接 false——长度本身不是秘密。
  */
@@ -352,6 +367,71 @@ function safeEqual(a, b) {
   const y = Buffer.from(String(b ?? ''), 'utf8');
   if (x.length !== y.length) return false;
   return crypto.timingSafeEqual(x, y);
+}
+
+/**
+ * 账本里 openid → QQ 号（绑过才有）。
+ *
+ * 一页里同一个人常重复出现，所以返回一个**带缓存**的解析器，一个请求建一个。
+ */
+function makeUinResolver(rt) {
+  const cache = new Map();
+  return (openid) => {
+    const id = String(openid ?? '');
+    if (!id) return '';
+    if (cache.has(id)) return cache.get(id);
+    let v = '';
+    try {
+      v = String(rt?.identity?.resolveUser?.(rt?.cfg?.id ?? '', id)?.record?.uin ?? '');
+    } catch { /* 身份表读不到就空着，不影响账本显示 */ }
+    cache.set(id, v);
+    return v;
+  };
+}
+
+/**
+ * 私聊会话的显示名——`chat_id` 就是对方 openid。
+ *
+ * 四级回退：
+ *   ① 账本里这个人说过的最后一句话带的 `user_name`；
+ *   ② 内存里「最近说过话的人」；
+ *   ③ 身份绑定里人工填的名字；
+ *   ④ **QQ 号**（`QQ 2014433751`，至少认得出是谁）。
+ *
+ * 为什么不调 `getUserInfo` 拿真昵称：它要好友关系、10 QPS，而这是打开账本 /
+ * 查询页就会走的路径，为一个显示名把面板挂在网络上不划算。
+ */
+function c2cNameOf(rt, chatId) {
+  const id = String(chatId ?? '').trim();
+  if (!id) return '';
+  try {
+    /** 必须找「最近一个有名字的」：最后一条常常是机器人自己的回复，没有 user_name */
+    const n = String(rt?.ledger?.lastNameOf?.(id) ?? '').trim();
+    if (n) return n;
+  } catch { /* 账本关着往下走 */ }
+
+  try {
+    const p = (rt?.listRecentPeople?.(200) ?? []).find((x) => x.openid === id);
+    const n = String(p?.name ?? '').trim();
+    if (n) return n;
+  } catch { /* 没有这个人就往下走 */ }
+
+  try {
+    const rec = rt?.identity?.resolveUser?.(rt?.cfg?.id ?? '', id)?.record ?? null;
+    const nm = String(rec?.name ?? '').trim();
+    if (nm) return nm;
+    const uin = String(rec?.uin ?? '').trim();
+    return uin ? `QQ ${uin}` : '';
+  } catch {
+    return '';
+  }
+}
+
+/** 会话显示名：群用群名缓存，私聊用对方名字；频道 / 频道私信没有就空串 */
+function chatNameOf(rt, kind, chatId) {
+  if (kind === 'group') return String(rt?.groupName?.(chatId) ?? '');
+  if (kind === 'c2c') return c2cNameOf(rt, chatId);
+  return '';
 }
 
 /**
@@ -3235,7 +3315,46 @@ async function startWebServerInstance({
          */
         if (pathname === '/api/ledger/stats' && req.method === 'GET') {
           const st = rt?.ledger?.stats?.() ?? { available: false, total: 0 };
-          return json(res, 200, st);
+          /**
+           * 会话列表补群名。
+           *
+           * 账本只存 `chat_id`（群 openid），面板上原来是一串 `577C4A90…`，
+           * 根本认不出是哪个群。这里对**群会话**问一次群名缓存；没缓存的
+           * 顺手排进补名队列（`fetchGroupNames` 自带 10 分钟缓存、4 并发和
+           * 30 QPM 的时间闸），但**最多等 2.5 秒**——面板不能被一串群名拖死，
+           * 没补上就先显示短码，下次打开就有了。
+           */
+          const byChat = Array.isArray(st.byChat) ? st.byChat : [];
+          const groupIds = byChat.filter((c) => c.kind === 'group').map((c) => String(c.chatId ?? '')).filter(Boolean);
+          if (groupIds.length) {
+            /** 全都有名字就立刻返回：别为了「等一个不会再变的东西」把账本页拖慢 2.5 秒 */
+            const missing = groupIds.filter((id) => !rt?.groupName?.(id));
+            if (missing.length) {
+              /**
+               * 两手一起上：
+               *   ① `prefetchGroupNames` 把**所有**没缓存的群排进后台队列（不阻塞）。
+               *      30 QPM 下 20 个群要补 40 多秒，面板不可能等。
+               *   ② `fetchGroupNames` 再等最多 2.5 秒，让首屏能多显示一两个名字。
+               * 重复的部分由 `#ensureGroupName` 的 in-flight 去重吃掉。
+               */
+              rt?.prefetchGroupNames?.(missing);
+              await Promise.race([
+                rt?.fetchGroupNames?.(missing)?.catch?.(() => {}),
+                new Promise((resolve) => {
+                  const t = setTimeout(resolve, 2500);
+                  t.unref?.();
+                }),
+              ]);
+            }
+          }
+          return json(res, 200, {
+            ...st,
+            byChat: byChat.map((c) => ({
+              ...c,
+              /** 群名 / 私聊对方昵称；都没拿到是空串，前端回退到短码 */
+              name: chatNameOf(rt, c.kind, c.chatId),
+            })),
+          });
         }
 
         if (pathname === '/api/ledger/context' && req.method === 'GET') {
@@ -3253,7 +3372,7 @@ async function startWebServerInstance({
           if (!chatId) return json(res, 400, { error: '需要 chatId' });
           const limit = Number(url.searchParams.get('limit') ?? 50);
           const beforeSeq = Number(url.searchParams.get('beforeSeq') ?? 0) || undefined;
-          const rows = rt?.ledger?.recent?.({ chatId, limit, beforeSeq }) ?? [];
+          const rows = rt?.ledger?.recent?.({ chatId, limit, beforeSeq, withPeople: true }) ?? [];
           /**
            * 面板显示用的轻量清洗。
            *
@@ -3261,12 +3380,226 @@ async function startWebServerInstance({
            * 所以这里按同样口径各写一份：表情原文是 `<faceType=...>`，
            * 纯图 / 纯 @ 的 `content` 是空串。清洗只作用于展示，不改库里的原文。
            */
-          const clean = (v) => String(v ?? '').replace(/<faceType=[^>]*>/g, '').trim();
+          /** QQ 号反查：和查询页/人物反查共用同一个带缓存的解析器 */
+          const uinOf = makeUinResolver(rt);
           const items = rows.map((r) => {
-            const t = clean(r.content);
-            return { ...r, content: t || (String(r.content ?? '') ? '（表情）' : '（图片）') };
+            return {
+              ...r,
+              /** openid / QQ 号：接口里给全，界面不渲染（调试、复制、外部对接要用） */
+              openid: String(r.userId ?? ''),
+              uin: uinOf(r.userId),
+              content: ledgerDisplayContent(r.content),
+            };
           });
           return json(res, 200, { items });
+        }
+
+        /**
+         * 账本：全局查询（面板「查询」页）。
+         *
+         * 设计参考了几个成熟实现：
+         *   · clickclack / hatching：多词空白分隔、**AND 一起命中**，返回
+         *     带高亮区间的小段正文，cursor 翻页、多取一条判断有没有下一页；
+         *   · Matrix `/search`：关键词 + `filter.rooms / senders` + 时间维度的
+         *     组合筛选；
+         *   · 我们自己的账本：`seq` 是稳定游标，翻页直接用它。
+         *
+         * 几个刻意的取舍：
+         *   · **不解析搜索操作符**（`-词` `"短语"` 一律当普通文本）。SQLite 和
+         *     将来换别的后端行为要一致，操作符解析是最容易分叉的地方。
+         *   · **不算总数**：`COUNT(*)` 要再全扫一遍，几十万行时白等；给
+         *     `hasMore` 就够（多取一条判断）。
+         *   · 多词 AND 有结果就 AND；**一条都没有时自动降级为 OR**（`relaxed: true`），
+         *     否则用户搜「杭州 天气」在只提到一个词的消息上会看到空列表。
+         */
+        if (pathname === '/api/ledger/search' && req.method === 'GET') {
+          const q = String(url.searchParams.get('q') ?? '').trim();
+          const person = String(url.searchParams.get('person') ?? '').trim();
+          const chatId = String(url.searchParams.get('chatId') ?? '').trim();
+          const kind = String(url.searchParams.get('kind') ?? '').trim();
+          const days = Math.max(0, Math.min(Number(url.searchParams.get('days') ?? 0) || 0, 3650));
+          const limit = Math.min(Math.max(Number(url.searchParams.get('limit') ?? 50) || 50, 1), 200);
+          const beforeSeq = Number(url.searchParams.get('beforeSeq') ?? 0) || 0;
+
+          if (!q && !person && !chatId && !kind) {
+            return json(res, 400, { error: '至少给一个条件：关键词 / 发言人 / 会话 / 类型' });
+          }
+
+          const terms = splitQuery(q);
+
+          /**
+           * 关键词里**全是疑问 / 语气词**（「什么」「怎么」「吗」）→ 拆完一个词都不剩。
+           *
+           * 这时绝不能当成「没给关键词」往下走：SQL 里就只剩 `bot_id = ?`，
+           * 返回的是**最新 50 条**——用户看到的正是「搜什么出来一堆无关内容」。
+           * 直接给空列表加一句说明，比返回一屏垃圾诚实。
+           */
+          if (q && !terms.length) {
+            return json(res, 200, {
+              items: [],
+              terms: [],
+              relaxed: false,
+              hasMore: false,
+              note: '这个词里没有可检索的内容（全是疑问词/语气词），换个实义词试试',
+            });
+          }
+
+          /**
+           * 「发言人」一栏容三种输入，判断顺序：openid → QQ 号 → 昵称。
+           * QQ 号只有绑过才反查得到 openid；没绑就只能当昵称去碰运气。
+           */
+          const openids = [];
+          let name = '';
+          if (person) {
+            if (/^[0-9A-Za-z_-]{16,}$/.test(person) && /[A-Za-z]/.test(person)) {
+              openids.push(person);
+            } else if (/^\d{5,12}$/.test(person)) {
+              const opid = rt?.identity?.openidOf?.(rt?.cfg?.id ?? '', person);
+              if (opid) openids.push(String(opid));
+              else name = person;
+            } else {
+              name = person;
+            }
+          }
+
+          const since = days ? Date.now() - days * 86_400_000 : 0;
+          const base = { openids, name, chatId, kind, since, beforeSeq, limit, withPeople: true };
+
+          let rows = rt?.ledger?.search?.({ ...base, terms, mode: 'and' }) ?? [];
+          let relaxed = false;
+          if (!rows.length && terms.length > 1) {
+            rows = rt?.ledger?.search?.({ ...base, terms, mode: 'or' }) ?? [];
+            relaxed = rows.length > 0;
+          }
+
+          /** 群名没缓存的顺手排后台补（不阻塞这次查询） */
+          const missingGroups = [...new Set(rows.filter((r) => r.kind === 'group' && !rt?.groupName?.(r.chatId)).map((r) => r.chatId))];
+          if (missingGroups.length) rt?.prefetchGroupNames?.(missingGroups);
+
+          const uinOf = makeUinResolver(rt);
+          const items = rows.map((r) => ({
+            ...r,
+            /** openid / QQ 号给全，界面不渲染（调试、复制、外部对接要用） */
+            openid: String(r.userId ?? ''),
+            uin: uinOf(r.userId),
+            /** 会话名：群名或私聊对方昵称，前端没拿到就退回短码 */
+            chatName: chatNameOf(rt, r.kind, r.chatId),
+            /** 和账本页同一套显示清洗：表情标记清成「（表情）」，纯图给「（图片）」 */
+            content: ledgerDisplayContent(r.content),
+          }));
+
+          return json(res, 200, {
+            items,
+            /** 实际使用的检索词，前端拿它做高亮 */
+            terms,
+            relaxed,
+            hasMore: rows.length >= limit,
+          });
+        }
+
+        /**
+         * 反查人物：给「昵称 / 群名片 / QQ 号 / openid」任意一个，返回这个人的
+         * 全部可认字段（openid 供复制，QQ 号、头像、群名片一起给）。
+         *
+         * 三个数据源按可信度叠：
+         *   ① 身份绑定表 —— 人工绑过的 `QQ号 ↔ openid ↔ 备注名`，最权威；
+         *   ② 内存「最近说过话的人」—— 事件里带来的昵称 / 群名片 / 头像；
+         *   ③ 账本 —— 重启后 ② 空了，靠这个人历史上说过的话兜底。
+         *
+         * 头像**只作为输出**，不做输入条件（用户明确要求：除了头像，别的都能查）。
+         */
+        if (pathname === '/api/people/search' && req.method === 'GET') {
+          const q = String(url.searchParams.get('q') ?? '').trim();
+          const limit = Math.min(Math.max(Number(url.searchParams.get('limit') ?? 50) || 50, 1), 200);
+          const ident = rt?.identity;
+          /** 和身份页接口同一个口径：runtime 的 `id` 就是 botId */
+          const botId = String(rt?.id ?? '');
+
+          const wantUin = isUinQuery(q);
+          const wantOpenid = isOpenidQuery(q);
+
+          /** openid → 聚合结果 */
+          const people = new Map();
+          const upsert = (openid, patch, source) => {
+            const id = String(openid ?? '').trim();
+            if (!id) return null;
+            const cur = people.get(id) ?? {
+              openid: id, uin: '', name: '', card: '', nickname: '', note: '',
+              avatar: '', bound: false, sources: [],
+            };
+            for (const [k, v] of Object.entries(patch ?? {})) {
+              /** 先到先得：绑定表先跑，所以它的人工备注名 / 号码不会被事件里的昵称覆盖 */
+              if (v === undefined || v === null || v === '') continue;
+              if (!cur[k]) cur[k] = v;
+            }
+            if (source && !cur.sources.includes(source)) cur.sources.push(source);
+            people.set(id, cur);
+            return cur;
+          };
+
+          /* ① 身份绑定 */
+          try {
+            for (const rec of (await ident?.list?.('user')) ?? []) {
+              const claims = (Array.isArray(rec.claims) ? rec.claims : []).filter((c) => c.state === 'active');
+              const mine = claims.find((c) => String(c.botId) === String(botId)) ?? claims[0];
+              if (!mine?.openid) continue;
+              const hit = upsert(mine.openid, {
+                uin: String(rec.uin ?? ''),
+                name: String(rec.name ?? ''),
+                note: String(rec.note ?? ''),
+                bound: true,
+              }, 'identity');
+              if (hit) hit.bound = true;
+            }
+          } catch { /* 身份表没载入就跳过，还有后两个来源 */ }
+
+          /* ② 最近说过话的人 */
+          for (const p of rt?.listRecentPeople?.(200) ?? []) {
+            upsert(p.openid, {
+              uin: String(p.uin ?? ''),
+              card: String(p.card ?? ''),
+              nickname: String(p.nickname ?? ''),
+              avatar: String(p.avatar ?? ''),
+              /** `name` 是显示名（群名片优先），只在绑定表没给名字时用 */
+              ...(p.name ? { name: String(p.name) } : {}),
+            }, 'recent');
+          }
+
+          /* ③ 账本兜底：只在前面两个来源给不出东西时去翻，别每次都全表扫 */
+          try {
+            const rows = wantOpenid
+              ? rt?.ledger?.search?.({ openids: [q], limit: 5 }) ?? []
+              : q && !wantUin
+                ? rt?.ledger?.search?.({ name: q, limit: 50 }) ?? []
+                : [];
+            for (const r of rows) {
+              upsert(r.userId, {
+                name: String(r.userName ?? ''),
+                card: String(r.card ?? ''),
+                nickname: String(r.nickname ?? ''),
+                avatar: String(r.avatar ?? ''),
+              }, 'ledger');
+            }
+            if (wantUin) {
+              /** QQ 号 → openid 只有绑定表能给；给了就把这个人的账本信息也带上 */
+              const opid = ident?.openidOf?.(botId, q);
+              if (opid) {
+                for (const r of rt?.ledger?.search?.({ openids: [String(opid)], limit: 3 }) ?? []) {
+                  /** 绑定记录里名字常常是空的（绑号时没人填），所以这里连 `name` 一起补 */
+                  upsert(r.userId, {
+                    name: String(r.userName ?? ''),
+                    card: String(r.card ?? ''),
+                    nickname: String(r.nickname ?? ''),
+                    avatar: String(r.avatar ?? ''),
+                  }, 'ledger');
+                }
+              }
+            }
+          } catch { /* 账本关着就只给前两个来源 */ }
+
+          const items = sortPeople(filterPeople([...people.values()], q)).slice(0, limit);
+
+          return json(res, 200, { items, q });
         }
 
         /**

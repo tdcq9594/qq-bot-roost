@@ -106,6 +106,7 @@
           <button class="tab-item" data-tab="reach">可达性</button>
           <button class="tab-item" data-tab="delivery">投递</button>
           <button class="tab-item" data-tab="ledger">账本</button>
+          <button class="tab-item" data-tab="search">查询</button>
         </div>
       </div>
 
@@ -1142,7 +1143,7 @@ curl 'https://bot.q.qq.com/cgi-bin/v2/info/list_bots' \
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>时间</th><th>谁</th><th>内容</th></tr></thead>
+            <thead><tr><th>时间</th><th>发言人</th><th>内容</th></tr></thead>
             <tbody id="ledgerRows"></tbody>
           </table>
         </div>
@@ -1180,6 +1181,69 @@ curl 'https://bot.q.qq.com/cgi-bin/v2/info/list_bots' \
           <option value="user">只改发送者</option>
         </select>
         <button id="ledgerRemapGo" class="btn small">预览并执行</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 查询页：跨会话检索账本。词法参考 dsh-roost/journal 与 clickclack：多词全中优先，空了自动放宽 -->
+  <section id="tab-search" class="panel" hidden>
+    <div class="btn-row" style="margin:0 0 12px">
+      <button class="btn small active" id="srchModeMsg">消息</button>
+      <button class="btn small" id="srchModeWho">人物</button>
+      <span class="hint" style="margin-left:6px">消息：查聊天内容 · 人物：给昵称 / QQ号 / openid 反查</span>
+    </div>
+    <div class="box" id="srchMsgBox">
+      <div class="box-hd">
+        <h3>消息查询</h3>
+        <span class="hint">跨会话查账本 · 关键词空格分隔（默认全部命中，没有结果时自动放宽为任一）</span>
+      </div>
+      <div class="form-inline srch-form">
+        <input id="srchQ" placeholder="关键词，空格分隔多个词" autocomplete="off" />
+        <input id="srchPerson" placeholder="发言人：昵称 / openid / QQ 号" autocomplete="off" />
+        <select id="srchKind">
+          <option value="">全部类型</option>
+          <option value="group">群聊</option>
+          <option value="c2c">私聊</option>
+        </select>
+        <select id="srchDays">
+          <option value="">全部时间</option>
+          <option value="1">近 1 天</option>
+          <option value="7">近 7 天</option>
+          <option value="30">近 30 天</option>
+          <option value="90">近 90 天</option>
+        </select>
+        <button id="btnSearch" class="btn">查询</button>
+        <button id="btnSearchReset" class="btn btn-ghost">清空</button>
+      </div>
+      <div class="hint" id="srchHint" style="margin-top:10px">输入条件后回车。结果按时间倒序，命中词会高亮。</div>
+      <div class="table-wrap" style="margin-top:10px">
+        <table>
+          <thead><tr><th>时间</th><th>会话</th><th>发言人</th><th>内容</th></tr></thead>
+          <tbody id="srchRows"><tr><td colspan="4" class="empty">还没有查询</td></tr></tbody>
+        </table>
+      </div>
+      <div class="btn-row">
+        <button id="srchMore" class="btn small" disabled>下一页</button>
+        <span class="hint" id="srchMoreHint"></span>
+      </div>
+    </div>
+
+    <!-- 人物反查：昵称 / 群名片 / QQ 号 / openid 任一 → 这个人的全部可认字段 -->
+    <div class="box" id="srchWhoBox" hidden>
+      <div class="box-hd">
+        <h3>人物反查</h3>
+        <span class="hint">给昵称、群名片、QQ 号或 openid，查出这个人的其它字段（头像只作为结果，不能当条件）</span>
+      </div>
+      <div class="form-inline srch-form">
+        <input id="whoQ" placeholder="昵称 / 群名片 / QQ 号 / openid" autocomplete="off" />
+        <button id="btnWho" class="btn">查人</button>
+      </div>
+      <div class="hint" id="whoHint" style="margin-top:10px">输入后回车。openid 右侧可一键复制。</div>
+      <div class="table-wrap" style="margin-top:10px">
+        <table>
+          <thead><tr><th>头像</th><th>昵称 / 群名片</th><th>QQ 号</th><th>openid</th><th style="width:88px">操作</th></tr></thead>
+          <tbody id="whoRows"><tr><td colspan="5" class="empty">还没有查询</td></tr></tbody>
+        </table>
       </div>
     </div>
   </section>

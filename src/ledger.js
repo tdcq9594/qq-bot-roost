@@ -41,6 +41,21 @@ import { probeSqlite, openDatabase } from './storage/db.js';
 import { migrateEvents } from './storage/events-schema.js';
 import { SENSITIVE_KEY } from './runtime.js';
 
+/**
+ * 账本行的固定列。
+ *
+ * `payload` 不在里面：那是整包报文，面板列表不需要。要发言人头像/昵称时
+ * 单独用 `AUTHOR_COLS` 把它用 `json_extract` 拆成三列——一页 50 条每条
+ * 几十 KB 的报文全都读上来太浪费。
+ */
+const EVENT_COLS = 'seq, id, kind, chat_id, user_id, user_name, content, at, time_basis, msg_idx, quoted, trace, plugin, bot_id';
+
+/** 从 `payload.author` 里取的三个展示字段（昵称 / 群名片 / 头像） */
+const AUTHOR_COLS = `,
+  json_extract(payload, '$.author.avatar') AS author_avatar,
+  json_extract(payload, '$.author.member_nickname') AS author_card,
+  json_extract(payload, '$.author.username') AS author_nickname`;
+
 const log = createLogger('ledger');
 
 /** 每次滚动删最多删多少行。分批是为了不长时间锁库，收消息会卡 */
@@ -457,26 +472,191 @@ export class EventLedger {
     return this.db.prepare('SELECT * FROM events WHERE id = ?').get(String(id ?? '')) ?? null;
   }
 
-  /** 某会话最近的若干条，按时间正序返回 */
-  recent({ chatId, limit = 50, beforeSeq } = {}) {
+  /**
+   * 按 `seq` 取一条（带发言人字段）。
+   *
+   * 为什么需要它：模型搜到一条之后想看「前后还说了什么」，但 `timeline()`
+   * 要 `chatId`，而模型手里只有 `seq`。先按 seq 定位这条，才能知道它在哪个
+   * 会话里，再去取邻文。
+   *
+   * @param {number} seq
+   * @returns {object|null}
+   */
+  bySeq(seq) {
+    if (!this.available || this.closed || !this.db) return null;
+    const n = Number(seq) || 0;
+    if (n <= 0) return null;
+    try {
+      const r = this.db
+        .prepare(`SELECT ${EVENT_COLS}${AUTHOR_COLS} FROM events WHERE bot_id = ? AND seq = ?`)
+        .get(this.botId, n);
+      return r ? { ...mapRow(r), ...authorFieldsOf(r) } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 这个会话里**最近一个有名字的发言人**（`user_name` 非空）。
+   *
+   * 面板会话列表要显示人名而不是 openid。不能直接取「最近一条」——机器人自己
+   * 的回复（出站）没有 `user_name`，一段对话的最后一条往往就是出站，取到的是空串。
+   * 所以按 `seq` 倒序找第一条有名字的。
+   *
+   * @param {string} chatId 会话 openid（私聊就是对方 openid）
+   * @returns {string} 没有就空串
+   */
+  lastNameOf(chatId) {
+    if (!this.available || this.closed || !chatId) return '';
+    try {
+      const row = this.db
+        .prepare(
+          `SELECT user_name FROM events
+            WHERE bot_id = ? AND chat_id = ? AND user_name IS NOT NULL AND user_name != ''
+            ORDER BY seq DESC LIMIT 1`,
+        )
+        .get(this.botId, String(chatId));
+      return String(row?.user_name ?? '');
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * 某会话最近的若干条，按时间正序返回。
+   *
+   * @param {object} p
+   * @param {string} p.chatId
+   * @param {number} [p.limit]
+   * @param {number} [p.beforeSeq]
+   * @param {boolean} [p.withPeople] 带上发言人的头像 / QQ 昵称 / 群昵称
+   *        （面板账本要显示「谁说的」，只有 `user_name` 分不出群名片和 QQ 昵称）
+   */
+  recent({ chatId, limit = 50, beforeSeq, withPeople = false } = {}) {
     if (!this.available || this.closed || !chatId) return [];
     const lim = Math.min(Math.max(Number(limit) || 50, 1), 500);
+    const people = withPeople ? AUTHOR_COLS : '';
     const rows = beforeSeq
       ? this.db
           .prepare(
-            `SELECT seq, id, kind, chat_id, user_id, user_name, content, at, time_basis, msg_idx, quoted, trace, plugin, bot_id
+            `SELECT ${EVENT_COLS}${people}
                FROM events WHERE bot_id = ? AND chat_id = ? AND seq < ?
               ORDER BY seq DESC LIMIT ?`,
           )
           .all(this.botId, String(chatId), Number(beforeSeq), lim)
       : this.db
           .prepare(
-            `SELECT seq, id, kind, chat_id, user_id, user_name, content, at, time_basis, msg_idx, quoted, trace, plugin, bot_id
+            `SELECT ${EVENT_COLS}${people}
                FROM events WHERE bot_id = ? AND chat_id = ?
               ORDER BY seq DESC LIMIT ?`,
           )
           .all(this.botId, String(chatId), lim);
-    return rows.reverse().map(mapRow);
+
+    return rows.reverse().map((r) => {
+      const row = mapRow(r);
+      if (!withPeople) return row;
+      return { ...row, ...authorFieldsOf(r) };
+    });
+  }
+
+  /**
+   * 全局查询：按关键词 / 发言人 / 类型 / 时间筛账本。
+   *
+   * 「发言人」这一维要容三类输入：openid（精确）、QQ 号（server 层先反查成
+   * openid 列表）、昵称（模糊）。所以这里收的是**已经解析好的** `openids` +
+   * `name`，解析（尤其 QQ 号反查绑定）放在 server 层，这边只管拼 SQL。
+   *
+   * 排序是 `seq DESC`（最新在前）：查询场景是「找最近提到某事的那次」，
+   * 和账本页「按时间往下读」正好相反，所以**不 reverse**。
+   *
+   * @param {object} p
+   * @param {string[]} [p.terms]  正文关键词（`splitQuery` 拆好的词）
+   * @param {'and'|'or'} [p.mode] 多个词是「全都要有」还是「任一」（先 and，空了再 or）
+   * @param {string[]} [p.openids] 发言人 openid（精确，多个是 OR）
+   * @param {string} [p.name]    发言人昵称（模糊）
+   * @param {string} [p.chatId]  限定会话（精确）
+   * @param {string} [p.kind]    group / c2c / guild / dm
+   * @param {number} [p.since]   起始时间（毫秒）
+   * @param {number} [p.beforeSeq] 翻页游标（上一页最后一条的 seq）
+   * @param {number} [p.limit]
+   * @param {boolean} [p.withPeople]
+   */
+  search({
+    terms = [], mode = 'and', openids = [], name = '', chatId = '', kind = '',
+    since = 0, beforeSeq = 0, limit = 50, withPeople = true,
+  } = {}) {
+    if (!this.available || this.closed || !this.db) return [];
+    const lim = Math.min(Math.max(Number(limit) || 50, 1), 200);
+    const where = ['bot_id = ?'];
+    const args = [this.botId];
+
+    /** LIKE 里的 `%` `_` 要转义，否则用户搜「100%」会变成「匹配一切」 */
+    const like = (s) => `%${String(s).replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+
+    const list = (Array.isArray(terms) ? terms : [])
+      .map((t) => String(t ?? '').trim())
+      .filter(Boolean)
+      .slice(0, 8);
+    if (list.length) {
+      const cls = list.map(() => "content LIKE ? ESCAPE '\\'");
+      where.push(`(${cls.join(mode === 'or' ? ' OR ' : ' AND ')})`);
+      args.push(...list.map(like));
+    }
+
+    const room = String(chatId ?? '').trim();
+    if (room) {
+      where.push('chat_id = ?');
+      args.push(room);
+    }
+
+    const k = String(kind ?? '').trim();
+    if (k) {
+      where.push('kind = ?');
+      args.push(k);
+    }
+
+    const from = Number(since) || 0;
+    if (from > 0) {
+      where.push('at >= ?');
+      args.push(from);
+    }
+
+    const ids = [...new Set((Array.isArray(openids) ? openids : []).map((x) => String(x ?? '').trim()).filter(Boolean))];
+    const nm = String(name ?? '').trim();
+    if (ids.length) {
+      const ph = ids.map(() => '?').join(',');
+      if (nm) {
+        where.push(`(user_id IN (${ph}) OR user_name LIKE ? ESCAPE '\\')`);
+        args.push(...ids, like(nm));
+      } else {
+        where.push(`user_id IN (${ph})`);
+        args.push(...ids);
+      }
+    } else if (nm) {
+      where.push("user_name LIKE ? ESCAPE '\\'");
+      args.push(like(nm));
+    }
+
+    const cursor = Number(beforeSeq) || 0;
+    if (cursor > 0) {
+      where.push('seq < ?');
+      args.push(cursor);
+    }
+
+    const people = withPeople ? AUTHOR_COLS : '';
+    try {
+      const rows = this.db
+        .prepare(`SELECT ${EVENT_COLS}${people} FROM events WHERE ${where.join(' AND ')} ORDER BY seq DESC LIMIT ?`)
+        .all(...args, lim);
+      return rows.map((r) => {
+        const row = mapRow(r);
+        if (!withPeople) return row;
+        return { ...row, ...authorFieldsOf(r) };
+      });
+    } catch (e) {
+      log.warn(`账本查询失败：${e.message}`);
+      return [];
+    }
   }
 
   /**
@@ -935,6 +1115,23 @@ function mapRow(r) {
      */
     plugin: r.plugin ?? '',
     content: contentOf(r),
+  };
+}
+
+/**
+ * 把 `AUTHOR_COLS` 查出来的三列摊成展示字段。
+ *
+ * 老账本 / 出站行没有 `author`（`json_extract` 返回 NULL），一律给空串——
+ * 前端据此回退到 `user_name`，不会拿到 undefined。
+ */
+function authorFieldsOf(r) {
+  return {
+    /** 头像原图 URL；前端自己换小尺寸，不受这里的 s=640 影响 */
+    avatar: String(r?.author_avatar ?? ''),
+    /** 群名片 / 群内昵称 */
+    card: String(r?.author_card ?? ''),
+    /** QQ 昵称 */
+    nickname: String(r?.author_nickname ?? ''),
   };
 }
 
