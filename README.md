@@ -8,7 +8,7 @@
 
 <img src="https://img.shields.io/badge/Node.js-22.13%2B-339933?logo=node.js&logoColor=white" alt="Node.js 22.13+">
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
-<img src="https://img.shields.io/badge/tests-1215%20passed-brightgreen" alt="测试 1215 项">
+<img src="https://img.shields.io/badge/tests-1273%20passed-brightgreen" alt="测试 1273 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
 <img src="https://img.shields.io/badge/version-1.1.1-blueviolet" alt="版本 1.1.1">
 <img src="https://img.shields.io/badge/license-AGPL--3.0--only-blue" alt="AGPL-3.0-only">
@@ -288,6 +288,8 @@ docker compose up -d
 | 群组 | 全局主人增删、群档案（邀请人 / 群主 / 状态）、手动登记群 |
 | 权限 | 等级与作用域说明、按作用域增删管理员、已授权列表 |
 | 日志 | SSE 实时流，按级别和来源过滤，支持关键词搜索 |
+| 账本 | 每个会话的历史消息：发言人缩略头像 / 群名片 / QQ 昵称、会话显示群名，支持导出与按条件删除 |
+| 查询 | 跨会话检索：关键词（多词默认全中，无结果自动放宽）+ 发言人（昵称 / openid / QQ号）+ 时间；另有**人物反查**：给昵称 / QQ号 / openid 任一个，查出这个人的其它字段，openid 一键复制 |
 | 通知 | SMTP 服务器 / 端口 / 用户名 / 授权码 / 发件人 / 主人邮箱、测试邮件通知、普通成员自助绑定说明（位于顶栏「身份」与「关于」之间） |
 
 事件页把官方 47 个事件全列出来，灰掉的是当前 intents 没订阅的：
