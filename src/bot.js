@@ -115,6 +115,15 @@ export class BotRuntime {
     this.groupNameActive = 0;
     this.groupNameWaiters = [];
     /**
+     * 群信息接口的节奏控制：`getGroupInfo` 是 **30 QPM**。
+     *
+     * 并发上限（4）只防「同一瞬间打太多」，防不住「一分钟打了 40 次」——
+     * 面板一次补 20 个群就能撞上去。所以另存一个「下一个请求最早什么时候发」，
+     * 默认 2.2 秒一个（27 次/分钟，留 10% 余量）。
+     */
+    this.groupInfoNextAt = 0;
+    this.groupInfoGapMs = 2200;
+    /**
      * 启动预载：档案里存过群名的，直接灌进缓存。
      *
      * 不预载的话，重启后面板第一屏必然是一串 openid，要等群里有人说句话
@@ -687,6 +696,34 @@ export class BotRuntime {
   }
 
   /**
+   * 批量补群名：排进后台，按 30 QPM 慢慢拉，**不等结果**。
+   *
+   * 为什么需要它：`getGroupInfo` 是 30 QPM，补 20 个群要 40 多秒。面板请求
+   * 不可能等那么久（`fetchGroupNames` 自带 2.5 秒超时，到点就不再派活，
+   * 没派出去的会丢）。所以面板那边「先显示能显示的」，剩下的交给这里：
+   * 全部丢进 `#ensureGroupName`（并发 4 + 时间闸），它自己排队、自己落盘，
+   * 下次打开面板就都是名字了。
+   *
+   * 重复调用安全：`#ensureGroupName` 有 in-flight 去重，缓存未过期时直接返回。
+   *
+   * @param {string[]} ids
+   * @returns {number} 真正排进去的数量（已缓存的不算）
+   */
+  prefetchGroupNames(ids = []) {
+    let queued = 0;
+    for (const raw of Array.isArray(ids) ? ids : []) {
+      const id = String(raw ?? '').trim();
+      if (!id) continue;
+      const hit = this.groupNames.get(id);
+      if (hit && Date.now() - hit.at < (hit.ttl ?? 10 * 60_000)) continue;
+      if (this.groupNameInflight.has(id)) continue;
+      queued += 1;
+      this.#ensureGroupName(id).catch(() => {});
+    }
+    return queued;
+  }
+
+  /**
    * 补一个群的名字。
    *
    * 带 10 分钟缓存：群名不会总变，但每个群每次启动查一次就够，
@@ -756,13 +793,29 @@ export class BotRuntime {
     return job;
   }
 
-  /** 拿一个群名请求的名额（最多 4 个同时在飞） */
+  /** 拿一个群名请求的名额（最多 4 个同时在飞），再按 30 QPM 放行时间点 */
   async #groupNameSlot() {
     if (this.groupNameActive < 4) {
       this.groupNameActive += 1;
-      return;
+    } else {
+      await new Promise((resolve) => this.groupNameWaiters.push(resolve));
     }
-    await new Promise((resolve) => this.groupNameWaiters.push(resolve));
+    /**
+     * 并发上限只管「同时在飞几个」，不管「一分钟打了多少次」。
+     *
+     * 一次刷新面板拉 20 个群，4 并发几秒钟就能打满 30 次，然后整批 429。
+     * 所以拿到名额后还要过一道**时间闸**：默认 2.2 秒一个（27 次/分钟，
+     * 留 10% 余量）。代价是 20 个群要补 40 多秒——但这是显示用的，
+     * 面板等不到就先显示 openid，后台继续补，下次打开就是名字了。
+     *
+     * `groupInfoGapMs` 可以调（测试里设小值），0 = 不限制。
+     */
+    const gap = Math.max(0, Number(this.groupInfoGapMs) || 0);
+    if (!gap) return;
+    const now = Date.now();
+    const at = Math.max(now, this.groupInfoNextAt || 0);
+    this.groupInfoNextAt = at + gap;
+    if (at > now) await new Promise((r) => setTimeout(r, at - now));
   }
 
   #freeGroupNameSlot() {

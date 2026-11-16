@@ -25,6 +25,14 @@ function makeBot(getGroupInfo) {
     globalCfg: {},
   });
   rt.calls = 0;
+  /**
+   * 默认关掉时间闸（30 QPM 的 2.2 秒间隔）。
+   *
+   * 单测不该被真实节奏拖慢：这里要验的是「并发 4」「负缓存」「去重」这些逻辑，
+   * 时间闸本身由专门的用例设小值（25ms / 5ms）去验。不关的话，8 个群的用例
+   * 要跑 17 秒，还会撞上 `fetchGroupNames` 的 2.5 秒超时，测出来全是假失败。
+   */
+  rt.groupInfoGapMs = 0;
   rt.api = {
     getGroupInfo: async (id) => {
       rt.calls++;
@@ -175,4 +183,63 @@ test('群名：超时后不再派新的请求（尾巴不能一直延长）', as
     rt.calls <= atReturn + 2,
     `超时后还在派活：返回时 ${atReturn} 次，150ms 后 ${rt.calls} 次`,
   );
+});
+
+/* ---------------- 30 QPM 节奏 ---------------- */
+
+/**
+ * `getGroupInfo` 是 **30 QPM**。
+ *
+ * 原来只有「并发上限 4」——那只防同一瞬间打太多，防不住「一分钟打了 40 次」：
+ * 面板一次补 20 个群，4 并发几秒钟就能把额度打满。所以加了时间闸（默认 2.2 秒
+ * 一个），这里用 25ms 的间隔验「确实排了队」，不然要等 40 秒。
+ */
+test('群名：按 30 QPM 排队，不是只限并发', async () => {
+  const rt = makeBot(async (id) => ({ group_name: `群${id}` }));
+  rt.groupInfoGapMs = 25;
+
+  const t0 = Date.now();
+  await rt.fetchGroupNames(['P1', 'P2', 'P3']);
+  const cost = Date.now() - t0;
+
+  assert.equal(rt.calls, 3);
+  assert.ok(cost >= 40, `三个群应该按间隔排队（至少 2×25ms），实际 ${cost}ms`);
+});
+
+test('群名：间隔设 0 时不限速（测试和调试用）', async () => {
+  const rt = makeBot(async () => ({ group_name: '快' }));
+  rt.groupInfoGapMs = 0;
+  const t0 = Date.now();
+  await rt.fetchGroupNames(['Q1', 'Q2', 'Q3']);
+  assert.equal(rt.calls, 3);
+  assert.ok(Date.now() - t0 < 40);
+});
+
+/**
+ * 面板请求最多等 2.5 秒，而 30 QPM 下 20 个群要 40 多秒——所以「补名」必须能
+ * 脱离请求生命周期：`prefetchGroupNames` 同步返回，后台自己排队拉完。
+ */
+test('群名：prefetch 立即返回，后台补完并写进缓存', async () => {
+  const rt = makeBot(async (id) => ({ group_name: `群${id}` }));
+  rt.groupInfoGapMs = 5;
+
+  const t0 = Date.now();
+  const n = rt.prefetchGroupNames(['K1', 'K2', 'K3']);
+  const blocked = Date.now() - t0;
+
+  assert.equal(n, 3, '三个都没缓存，应该都排进去');
+  assert.ok(blocked < 20, `prefetch 不该阻塞面板，实际卡了 ${blocked}ms`);
+
+  await sleep(150);
+  assert.equal(rt.calls, 3);
+  assert.equal(rt.groupName('K2'), '群K2');
+});
+
+test('群名：prefetch 不重复排已缓存或正在飞的群', async () => {
+  const rt = makeBot(async () => ({ group_name: '已有' }));
+  rt.groupInfoGapMs = 0;
+
+  await rt.fetchGroupNames(['Z1']);
+  assert.equal(rt.prefetchGroupNames(['Z1']), 0, '缓存还在，不该再排');
+  assert.equal(rt.calls, 1);
 });
