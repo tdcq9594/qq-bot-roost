@@ -8,9 +8,9 @@
 
 <img src="https://img.shields.io/badge/Node.js-22.13%2B-339933?logo=node.js&logoColor=white" alt="Node.js 22.13+">
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
-<img src="https://img.shields.io/badge/tests-1204%20passed-brightgreen" alt="测试 1204 项">
+<img src="https://img.shields.io/badge/tests-1215%20passed-brightgreen" alt="测试 1215 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
-<img src="https://img.shields.io/badge/version-1.1.0-blueviolet" alt="版本 1.1.0">
+<img src="https://img.shields.io/badge/version-1.1.1-blueviolet" alt="版本 1.1.1">
 <img src="https://img.shields.io/badge/license-AGPL--3.0--only-blue" alt="AGPL-3.0-only">
 <a href="https://github.com/tdcq9594/qq-bot-roost/actions"><img src="https://img.shields.io/github/actions/workflow/status/tdcq9594/qq-bot-roost/ci.yml?branch=master" alt="CI"></a>
 
