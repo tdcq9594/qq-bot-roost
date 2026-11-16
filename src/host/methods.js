@@ -20,6 +20,7 @@ import { syncNickname } from '../services/nickname.js';
 import { INTENTS, INTENT_META, EVENTS } from '../events.js';
 import { CHANNEL_DAILY_ACTIVE } from '../outbound.js';
 import { registerMedia } from './media.js';
+import { splitQuery } from '../search-query.js';
 import { registerOps } from './ops.js';
 import { registerDev } from './dev.js';
 import { sendOut, receivedAtOf, isChatKind, CHAT_KINDS } from './dispatch.js';
@@ -265,6 +266,157 @@ export function createMethods({ runtime: R, getState, log = () => {}, extBridge 
       chatId: str(p.chatId),
       limit: Math.max(1, Math.min(200, Number(p.limit) || 50)),
     });
+  });
+
+  /**
+   * 围绕某条消息的前后文（按 `seq`）。
+   *
+   * 模型搜到一条之后想看「当时到底怎么聊的」，但它手里只有 `seq`——
+   * 所以先用 `bySeq` 定位这条（拿到 chatId），再取邻文。等价于面板上
+   * 「点一条看上下文」。
+   *
+   * **`anchor` 会一起返回**：宿主侧要靠 `anchor.userId` 判「非特权用户是不是
+   * 在翻别人的对话」——这个判断不能只在框架里做一半，因为「谁能看谁」是
+   * 会话身份的事，只有宿主知道。
+   */
+  def('ledger.around', 'read', '取某条消息的前后文（按 seq）', async (p) => {
+    if (!R.ledger) throw notReady('账本未就绪');
+    const seq = Math.max(1, Number(p.seq) || 0);
+    if (!seq) throw bad('要给 seq（搜索结果里每条都带）');
+
+    const anchor = R.ledger.bySeq?.(seq) ?? null;
+    if (!anchor) throw bad(`账本里没有 seq=${seq} 这条记录`);
+
+    /**
+     * `before` / `after`：缺省或非法（负数、NaN）都退默认 3；`0` 是合法值
+     * （表示「只要后面 / 只要前面」），上限 20。
+     */
+    const clampAround = (v, dft = 3) => {
+      const n = Number(v);
+      if (!Number.isFinite(n) || n < 0) return dft;
+      return Math.min(20, Math.floor(n));
+    };
+    const before = clampAround(p.before);
+    const after = clampAround(p.after);
+    const items = R.ledger.timeline?.({
+      chatId: anchor.chatId,
+      anchorSeq: seq,
+      before,
+      after,
+    }) ?? [];
+
+    return {
+      anchor: {
+        seq: anchor.seq,
+        chatId: anchor.chatId,
+        kind: anchor.kind,
+        userId: anchor.userId,
+        at: anchor.at,
+      },
+      items,
+    };
+  });
+
+  /**
+   * 跨会话搜索账本。
+   *
+   * 宿主（dsh-roost）拿它给模型做「翻以前说过什么」——这是**唯一**能让模型
+   * 接触到任意历史消息的口子，所以两件事必须在这里做对：
+   *
+   *   · 参数一律白名单化：`terms` 最多 8 个、`openids` 最多 20 个、`limit` 封顶 200；
+   *   · **权限不在这里判**。host 协议是本地受信进程（token + read scope），
+   *     它天然能读全库；「一个人只能查自己」是**宿主侧**按会话里的发送者身份
+   *     收窄的（见 dsh-roost 的 `search-scope.js`）。这里如果也判一遍，
+   *     就会变成「两个地方各有一套规则」，迟早分叉。
+   *
+   * `person` 容三种输入（openid / QQ号 / 昵称），解析口径与面板一致：
+   * QQ 号只有绑定过才反查得到 openid，没绑过就当昵称去碰运气。
+   */
+  def('ledger.search', 'read', '跨会话搜索账本（关键词 / 发言人 / 类型 / 时间）', async (p) => {
+    if (!R.ledger) throw notReady('账本未就绪');
+
+    const terms = (Array.isArray(p.terms) ? p.terms : [])
+      .map((x) => str(x).trim())
+      .filter(Boolean)
+      .slice(0, 8);
+    /** 只给了 `q`（一整句）时用同一套词法拆：剥疑问词、单字丢弃 */
+    const q = str(p.q).trim();
+    const finalTerms = terms.length ? terms : splitQuery(q);
+
+    const openids = (Array.isArray(p.openids) ? p.openids : [])
+      .map((x) => str(x).trim())
+      .filter(Boolean)
+      .slice(0, 20);
+    let name = str(p.name).trim();
+
+    const person = str(p.person).trim();
+    if (person) {
+      if (/^[0-9A-Za-z_-]{16,}$/.test(person) && /[A-Za-z]/.test(person)) {
+        openids.push(person);
+      } else if (/^\d{5,12}$/.test(person)) {
+        const opid = R.identity?.openidOf?.(R.id, person) ?? '';
+        if (opid) openids.push(String(opid));
+        else name = person;
+      } else {
+        name = person;
+      }
+    }
+
+    const kind = str(p.kind).trim();
+    /** 只支持单会话精确匹配：多会话由宿主各查一次再合并，别在这里做笛卡尔积 */
+    const chatId = str(p.chatId).trim();
+    const since = Math.max(0, Number(p.since) || 0);
+    const beforeSeq = Math.max(0, Number(p.beforeSeq) || 0);
+    const limit = Math.max(1, Math.min(200, Number(p.limit) || 20));
+
+    /**
+     * 只给了「什么 / 怎么 / 吗」这类词时，拆完一个关键词都不剩。
+     *
+     * 这时候**不能**当成「没有关键词」去跑：SQL 里只剩 `bot_id = ?`，
+     * 返回的是最新 N 条，模型会以为「搜到了」——面板上已经踩过这个坑。
+     * 直接回空列表 + 说明。
+     */
+    if (q && !finalTerms.length && !openids.length && !name && !kind && !chatId) {
+      return {
+        items: [],
+        terms: [],
+        relaxed: false,
+        hasMore: false,
+        note: '关键词里没有可检索的内容（全是疑问词/语气词），换个实义词试试',
+      };
+    }
+
+    const base = {
+      terms: finalTerms,
+      openids,
+      name,
+      kind,
+      since,
+      beforeSeq,
+      limit,
+      withPeople: true,
+    };
+
+    const run = (extra) => R.ledger.search({ ...base, ...extra });
+
+    let rows = run({ chatId, mode: 'and' });
+    let relaxed = false;
+    /** 多词全中 0 条时放宽成任一命中，和面板同一条策略 */
+    if (!rows.length && finalTerms.length > 1) {
+      rows = run({ chatId, mode: 'or' });
+      relaxed = rows.length > 0;
+    }
+
+    return {
+      items: rows.map((r) => ({
+        ...r,
+        openid: String(r.userId ?? ''),
+        chatName: r.kind === 'group' ? String(R.groupName?.(r.chatId) ?? '') : '',
+      })),
+      terms: finalTerms,
+      relaxed,
+      hasMore: rows.length >= limit,
+    };
   });
 
   /* ---------------- 官方 API 全量透传 ---------------- */
