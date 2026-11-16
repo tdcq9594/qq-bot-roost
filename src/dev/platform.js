@@ -37,6 +37,7 @@ import { DIRS } from '../paths.js';
 import { createDevSession, parseCookies, bknOf, DEV_HOST, TICKET_KEYS } from './session.js';
 import { DEV_ERRORS, devError } from './errors.js';
 import { createScanLogin } from './browser.js';
+import { fetchImageLimited } from './url-guard.js';
 
 export { bknOf, DEV_HOST };
 
@@ -188,7 +189,7 @@ export function isAuthFailure(e) {
 /**
  * @param {{log?:(m:string)=>void, fetchImpl?:typeof fetch}} o
  */
-export function createDevPlatform({ log = () => {}, fetchImpl = fetch } = {}) {
+export function createDevPlatform({ log = () => {}, fetchImpl = fetch, lookup = null } = {}) {
   /**
    * 传输层：**默认走 Node 直发**。
    *
@@ -1136,12 +1137,23 @@ export function createDevPlatform({ log = () => {}, fetchImpl = fetch } = {}) {
 
     const u = String(url || '').trim();
     if (!/^https?:\/\//i.test(u)) throw devError('BAD_IMAGE', '要么选一张本地图片，要么填 http(s) 图片地址');
-    const res = await fetchImpl(u, { signal: AbortSignal.timeout(15_000) });
-    if (!res.ok) throw devError('BAD_IMAGE', `取图失败（HTTP ${res.status}）：${u}`);
-    const type = String(res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
-    const buf = Buffer.from(await res.arrayBuffer());
-    check(type, buf.length);
-    return { blob: new Blob([buf], { type }), filename: `avatar.${type.split('/')[1] || 'png'}`, bytes: buf.length };
+    /**
+     * 出站校验不能只验 `^https?://`：OneBot 的 `set_qq_profile` 是**模型可触发**的，
+     * 裸 fetch 等于把「让宿主访问任意地址」开给模型（内网 / 云元数据 / 端口探测）。
+     * `fetchImageLimited` 逐跳校验、禁私有地址、按 2MB 流式截断。
+     */
+    let got;
+    try {
+      got = await fetchImageLimited(u, {
+        maxBytes: AVATAR_MAX_BYTES,
+        fetchImpl,
+        ...(lookup ? { lookup } : {}),
+      });
+    } catch (e) {
+      throw devError('BAD_IMAGE', `取图失败：${e?.message ?? e}`);
+    }
+    const type = check(got.type, got.buf.length);
+    return { blob: new Blob([got.buf], { type }), filename: `avatar.${type.split('/')[1] || 'png'}`, bytes: got.buf.length };
   }
 
   /**
