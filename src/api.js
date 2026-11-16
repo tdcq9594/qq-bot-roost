@@ -436,6 +436,28 @@ export class QQApi {
     return this.#request('GET', '/users/@me');
   }
 
+  /**
+   * 获取用户基本信息（公开接口）。
+   * GET /v2/users/{user_openid}/info
+   *
+   * 2026-11-16 新增。这是**第一次**能主动问出「这个人叫什么、头像是哪张、
+   * 收不收主动推送」——以前这三件事只能靠事件慢慢攒，攒不到就永远是 openid。
+   *
+   * 返回的关键字段：
+   *   · `username` / `avatar`      昵称、头像原图
+   *   · `allow_proactive_msg`      是否允许机器人主动推送（false 就别发，省额度）
+   *   · `union_openid`             跨应用统一 id（绑了 3 方应用才有）
+   *
+   * 限 **10 QPS**，而且**要求好友关系**——2026-11-16 用两个同群成员实测：
+   * 没私聊过的那个回 `40184001 无好友关系`，私聊过（好友）的正常返回。
+   * 所以「查群成员资料」不能只靠它，宿主那边还有 `people.list` 兜底。
+   *
+   * 别在消息热路径里每条都调——`msg.userName` / `msg.userAvatar` 事件里直接就有。
+   */
+  getUserInfo(userOpenid) {
+    return this.#request('GET', `/v2/users/${enc(userOpenid)}/info`);
+  }
+
   /* ---------------- 消息发送 ---------------- */
 
   /**

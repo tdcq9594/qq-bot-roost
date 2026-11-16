@@ -33,6 +33,11 @@ export function serializeMessage(msg, { groupName = '' } = {}) {
       groupUin: msg.groupUin ?? '',
       groupIdentityId: msg.groupIdentityId ?? '',
       groupAliases: Array.isArray(msg.groupAliases) ? msg.groupAliases : [],
+      /**
+       * 官方 2026-11-16 新加的跨应用群标识，**只透传**。它换不出对方机器人的
+       * openid，发消息只认 `groupId`；跨机器人关联走 identity 的群号绑定。
+       */
+      unionGroupId: msg.unionGroupId ?? '',
       name: groupName,
     },
     sender: {
@@ -40,7 +45,17 @@ export function serializeMessage(msg, { groupName = '' } = {}) {
       uin: msg.uin ?? '',
       identityId: msg.identityId ?? '',
       aliases: Array.isArray(msg.userAliases) ? msg.userAliases : [],
+      /**
+       * 显示名（群聊取群内昵称）。`nickname` / `card` 两个原始值也带上：
+       * 客户端要「群名片」和「QQ 昵称」分开显示时，用 name 是分不出来的。
+       */
       name: msg.userName ?? '',
+      nickname: msg.userNickname ?? '',
+      card: msg.userCard ?? '',
+      /** 头像原图 URL；官方没给就是空串（别拼默认头像，那是猜） */
+      avatar: msg.userAvatar ?? '',
+      /** 跨应用统一用户 id，绑了 3 方应用才有 */
+      unionOpenid: msg.unionUserId ?? '',
       isBot: msg.raw?.author?.bot === true,
     },
     msgId: msg.id ?? '',

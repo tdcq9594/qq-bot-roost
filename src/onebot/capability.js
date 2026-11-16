@@ -27,7 +27,7 @@ export const CAPABILITY = [
   { name: 'get_group_member_list', level: 'degrade', why: '内邀接口；否则只列「在群里说过话的人」' },
   { name: 'get_msg', level: 'degrade', why: '只记得最近 500 条' },
   { name: 'get_forward_msg', level: 'degrade', why: '只覆盖本次进程收到的' },
-  { name: 'get_stranger_info', level: 'unsupported', why: '官方没有用户资料接口' },
+  { name: 'get_stranger_info', level: 'support', note: '2026-11-16 官方新增用户资料接口；要好友关系，否则回 1404' },
   { name: 'get_friend_list', level: 'unsupported', why: '官方没有好友列表接口' },
   { name: 'get_group_msg_history', level: 'degrade', why: '用账本回放，只有本进程收到过的' },
   { name: 'get_friend_msg_history', level: 'degrade', why: '同上' },

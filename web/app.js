@@ -631,6 +631,26 @@ function labelWithId(name, id) {
   return n ? `${escapeHtml(n)}（${escapeHtml(s)}）` : escapeHtml(s);
 }
 
+/**
+ * 带头像的名字（权限页认人用）。
+ *
+ * 头像拿不到就只显示名字——**不塞默认头像**：一个通用小人像会让人以为
+ * 「这就是他」，两三个人并排时反而更难认，比空着更糟。
+ * `referrerpolicy` 是必须的：qlogo 的图对来源有校验，带 referer 会 403。
+ */
+function labelWithAvatar(name, id, avatar) {
+  const url = String(avatar ?? '').trim();
+  /**
+   * 只认 http(s)：头像来自平台事件，理论上不会有 `data:` / `javascript:`，
+   * 但这是拼进 `src` 的字符串，走白名单比"应该不会"便宜。
+   */
+  const ok = /^https?:\/\//i.test(url);
+  const head = ok
+    ? `<img class="who-av" src="${escapeHtml(url)}" alt="" loading="lazy" referrerpolicy="no-referrer">`
+    : '';
+  return head + labelWithId(name, id);
+}
+
 /* ---------------- Tab ---------------- */
 
 /** 找到某个页签的按钮：一级按钮，或分组菜单里的项 */
@@ -4097,7 +4117,9 @@ function renderGroups(list) {
   body.innerHTML = list
     .map((g) => `
       <tr data-id="${escapeHtml(g.groupOpenid)}">
-        <td title="${escapeHtml(g.groupOpenid)}">${labelWithId(g.groupName, g.groupOpenid)}</td>
+        <td title="${escapeHtml(g.groupOpenid)}">${labelWithId(g.groupName, g.groupOpenid)}${
+          g.memberNum ? `<span class="sub"> · ${g.memberNum} 人</span>` : ''
+        }</td>
         <td title="${escapeHtml(g.inviterOpenid || '')}">${g.inviterOpenid ? labelWithId(g.inviterName, g.inviterOpenid) : '-'}</td>
         <td title="${escapeHtml(g.ownerOpenid || '')}">${g.ownerOpenid ? labelWithId(g.ownerName, g.ownerOpenid) : '-'}</td>
         <td><span class="badge ${g.enabled ? 'on' : 'off'}">${g.enabled ? '在用' : '已移出'}</span></td>
@@ -4282,7 +4304,7 @@ function renderReach(d) {
           const v = REACH_VERDICT[u.verdict] ?? REACH_VERDICT.unknown;
           const extra = u.lastFailCode ? ` · 失败码 ${u.lastFailCode}` : '';
           return `<tr data-openid="${escapeHtml(u.openid)}">
-            <td title="${escapeHtml(u.openid)}">${labelWithId(u.name, u.openid)}</td>
+            <td title="${escapeHtml(u.openid)}">${labelWithAvatar(u.name, u.openid, u.avatar)}</td>
             <td>${triSelect('friend', u.friend)}</td>
             <td>${triSelect('c2cPush', u.c2cPush)}</td>
             <td><span class="badge ${v.cls}">${v.text}</span></td>
@@ -4297,7 +4319,9 @@ function renderReach(d) {
     ? groups
         .map(
           (g) => `<tr data-group="${escapeHtml(g.groupOpenid)}">
-            <td title="${escapeHtml(g.groupOpenid)}">${labelWithId(g.name, g.groupOpenid)}</td>
+            <td title="${escapeHtml(g.groupOpenid)}">${labelWithId(g.name, g.groupOpenid)}${
+              g.memberNum ? `<span class="sub"> · ${g.memberNum} 人</span>` : ''
+            }</td>
             <td>${triSelect('push', g.push, '开', '关')}</td>
             <td title="${escapeHtml(g.by || '')}">${g.by ? labelWithId('', g.by) : '-'}</td>
             <td title="${escapeHtml(g.evidence || '')}">${escapeHtml(evidenceText(g.evidence))}</td>

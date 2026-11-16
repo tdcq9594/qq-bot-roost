@@ -315,6 +315,24 @@ export function createActions({
   };
 
   /**
+   * 这个机器人最近见过的人。
+   *
+   * 2026-11-16 起 `#rememberPerson` 会一起记群名片（`card`）和头像
+   * （`avatar`），所以「查不到官方资料」时能给出比 openid 好得多的东西：
+   * 群里说过一句话的人，`get_group_member_info` 就能答出真名片。
+   * 只覆盖「说过话的人」——这是内存索引，不落盘。
+   */
+  const seenPerson = (openid) => {
+    const id = String(openid ?? '');
+    if (!id) return null;
+    try {
+      return (runtime.listRecentPeople?.(200) ?? []).find((p) => p.openid === id) ?? null;
+    } catch {
+      return null;
+    }
+  };
+
+  /**
    * 用账本回放历史消息。
    *
    * 官方没有历史接口，只能给「本进程收到过的」。`ledger.history()` 把 payload
@@ -346,6 +364,25 @@ export function createActions({
             segs.push({ type: 'file', data: { file: a.url, name: a.filename } });
           }
         }
+        /**
+         * 发送者从**原始事件**里取：账本存的是 `cleanPayload(raw)`，
+         * 所以 `author.member_nickname`（群名片）和 `avatar` 都还在。
+         * 以前这里 `nickname` / `card` 都填 `userName`——历史里的名片永远是
+         * 群内昵称，跟 QQ 昵称混成一份，客户端改名片时对不上。
+         */
+        const author = p.author && typeof p.author === 'object' ? p.author : null;
+        const nick = String(author?.username ?? '').trim();
+        /**
+         * **老账本没有 `member_nickname`**（2026-11-16 之前的事件），那时
+         * `user_name` 存的就是显示名（群昵称优先）。所以要分清「字段不存在」
+         * 和「字段存在但为空」：前者回退到 `userName`，后者就是真的没群名片。
+         * 不分的话，升级后翻开历史，老消息的名片会集体变成空串。
+         */
+        const hasMemberNick = Boolean(author) && Object.hasOwn(author, 'member_nickname');
+        const card = hasMemberNick
+          ? String(author.member_nickname ?? '').trim()
+          : String(r.userName ?? '').trim();
+        const avatar = String(author?.avatar ?? '').trim();
         return {
           time: Math.floor((Number(r.at) || Date.now()) / 1000),
           self_id: Number(selfUin) || 0,
@@ -361,9 +398,10 @@ export function createActions({
           font: 0,
           sender: {
             user_id: ids.user(r.userId),
-            nickname: String(r.userName ?? ''),
-            card: String(r.userName ?? ''),
-            role: 'member',
+            nickname: nick || card || String(r.userName ?? ''),
+            card,
+            role: String(author?.member_role ?? 'member'),
+            ...(avatar ? { avatar } : {}),
           },
         };
       });
@@ -444,12 +482,76 @@ export function createActions({
       const openid = ids.openidOfGroup(params?.group_id);
       if (!openid) throw obError(1404, '这个群号没有对应的 openid，先去面板「身份」页绑一下');
       const info = await api.getGroupInfo(openid);
+      /**
+       * 官方字段是 `group_member_num`（2026-11-16 文档）。
+       * 以前读 `member_count` / `max_member_count`——两个都不存在，所以这里
+       * **一直返回 0**，OneBot 客户端显示「群人数 0」也没人报警。
+       */
+      const count = Number(info?.group_member_num ?? info?.member_count ?? 0) || 0;
       return {
         group_id: Number(params?.group_id),
         group_name: String(info?.group_name ?? runtime.groupName?.(openid) ?? ''),
-        member_count: Number(info?.member_count ?? 0),
-        max_member_count: Number(info?.max_member_count ?? 0),
+        member_count: count,
+        /** 官方不提供成员上限，用同一个数顶上——客户端绝大多数只读 `member_count` */
+        max_member_count: count,
+        /** 非标准字段：2026-11-16 群信息接口新增，客户端不用就忽略 */
+        group_memo: String(info?.group_finger_memo ?? ''),
+        group_class: String(info?.group_class_text ?? ''),
+        group_tags: Array.isArray(info?.group_tags) ? info.group_tags.map(String) : [],
       };
+    },
+
+    /**
+     * 查陌生人资料（OneBot 标准动作）。
+     *
+     * 2026-11-16 官方才给 `GET /v2/users/{openid}/info`，所以这条以前是
+     * `unsupported`（「官方没有用户资料接口」）。现在能答昵称和头像了。
+     *
+     * `user_id` 既可能是绑过的 QQ 号，也可能客户端直接塞 openid：
+     * 前者走映射表，后者原样用——只在长得像 openid 时才认，别把 5 位 QQ 号
+     * 当 id 发出去。
+     */
+    async get_stranger_info(params) {
+      const raw = String(params?.user_id ?? '').trim();
+      if (!raw) throw obError(1400, '要给 user_id（绑过的 QQ 号，或 openid）');
+      const mapped = ids.openidOfUser(params?.user_id);
+      const openid = mapped || (/^(?=.*[A-Za-z])[0-9A-Za-z_-]{16,}$/.test(raw) ? raw : '');
+      if (!openid) throw obError(1404, '这个 QQ 号没有对应的 openid，先去面板「身份」页绑一下');
+
+      const uid = Number(params?.user_id);
+      try {
+        const r = await api.getUserInfo(openid);
+        return {
+          user_id: Number.isFinite(uid) ? uid : 0,
+          nickname: String(r?.username ?? ''),
+          sex: 'unknown',
+          age: 0,
+          /** 非标准字段：官方直给的头像原图，省得客户端自己按 QQ 号拼 qlogo */
+          avatar: String(r?.avatar ?? ''),
+          openid,
+        };
+      } catch (e) {
+        /**
+         * 群成员通常**不是好友**，实测就是 `40184001`（2026-11-16：同群两人，
+         * 没私聊过的那个被拒，私聊过的正常）。这条路走不通时，只要他在群里
+         * 说过话，框架就记着他的昵称 / 群名片 / 头像——和 `get_group_member_info`
+         * 同一条兜底，别在这里直接判"查不到"。
+         */
+        const seen = seenPerson(openid);
+        if (seen) {
+          return {
+            user_id: Number.isFinite(uid) ? uid : 0,
+            nickname: String(seen.nickname || seen.name || ''),
+            sex: 'unknown',
+            age: 0,
+            ...(seen.card ? { card: String(seen.card) } : {}),
+            ...(seen.avatar ? { avatar: String(seen.avatar) } : {}),
+            openid,
+            warning: '和机器人不是好友，资料来自他最近在群里说过的话',
+          };
+        }
+        throw obError(1404, `查不到这个人的资料：${e?.message ?? e}`);
+      }
     },
 
     async get_group_list() {
@@ -458,11 +560,13 @@ export function createActions({
       for (const g of list) {
         const openid = String(g.groupOpenid ?? g.group_openid ?? '');
         if (!openid) continue;
+        /** 群档案里现在存了人数（2026-11-16 群信息接口），有就填，没有才 0 */
+        const n = Number(g.memberNum) || 0;
         out.push({
           group_id: ids.group(openid),
-          group_name: String(runtime.groupName?.(openid) ?? ''),
-          member_count: 0,
-          max_member_count: 0,
+          group_name: String(g.name || runtime.groupName?.(openid) || ''),
+          member_count: n,
+          max_member_count: n,
         });
       }
       return out;
@@ -518,12 +622,18 @@ export function createActions({
         };
       } catch (e) {
         log.debug(`群成员信息降级：${e.message}`);
+        /**
+         * 降级路径也别只给 openid：这个人要是在群里说过话，`recentPeople`
+         * 里就有真名片（2026-11-16 起事件带 `member_nickname`）和头像。
+         */
+        const seen = seenPerson(uid);
         return {
           group_id: Number(params.group_id),
           user_id: Number(params.user_id),
-          nickname: String(identityName(uid) ?? ''),
-          card: '',
+          nickname: String(seen?.nickname || seen?.name || identityName(uid) || ''),
+          card: String(seen?.card ?? ''),
           role: 'member',
+          ...(seen?.avatar ? { avatar: String(seen.avatar) } : {}),
           warning: '官方群成员接口是内邀能力，这里只能给最小信息',
         };
       }
@@ -551,13 +661,17 @@ export function createActions({
       }
 
       const members = (await runtime.roles?.scopeMembers?.(`group:${openid}`)) ?? {};
-      return Object.keys(members).map((uid) => ({
-        group_id: Number(params.group_id),
-        user_id: ids.user(uid),
-        nickname: String(identityName(uid) ?? ''),
-        card: '',
-        role: 'member',
-      }));
+      return Object.keys(members).map((uid) => {
+        const seen = seenPerson(uid);
+        return {
+          group_id: Number(params.group_id),
+          user_id: ids.user(uid),
+          nickname: String(seen?.nickname || seen?.name || identityName(uid) || ''),
+          card: String(seen?.card ?? ''),
+          role: 'member',
+          ...(seen?.avatar ? { avatar: String(seen.avatar) } : {}),
+        };
+      });
     },
 
     /* ---------------- 历史（官方没有接口，用账本回放） ---------------- */

@@ -2684,11 +2684,15 @@ async function startWebServerInstance({
           const snapshot = async () => {
             const snap = (await rt?.reach?.snapshot?.()) ?? { users: {}, groups: {} };
             const people = rt?.listRecentPeople?.(200) ?? [];
-            const nameOf = (id) => people.find((p) => p.openid === id)?.name || '';
+            const personOf = (id) => people.find((p) => p.openid === id) ?? null;
 
             const users = Object.entries(snap.users).map(([openid, u]) => ({
               openid,
-              name: nameOf(openid),
+              name: personOf(openid)?.name || '',
+              /** 头像 / 群名片（2026-11-16 事件里直接带）；老记录没有就是空串 */
+              avatar: personOf(openid)?.avatar || '',
+              card: personOf(openid)?.card || '',
+              nickname: personOf(openid)?.nickname || '',
               friend: u.friend ?? null,
               c2cPush: u.c2cPush ?? null,
               unionOpenid: u.unionOpenid || '',
@@ -2710,6 +2714,10 @@ async function startWebServerInstance({
             const groups = Object.entries(snap.groups).map(([groupOpenid, g]) => ({
               groupOpenid,
               name: rt?.groupName?.(groupOpenid) || '',
+              /** 群档案缓存里的补充信息（2026-11-16 群信息接口扩充）；没拉过就是空 */
+              memberNum: rt?.groupInfo?.(groupOpenid)?.memberNum || 0,
+              fingerMemo: rt?.groupInfo?.(groupOpenid)?.fingerMemo || '',
+              tags: rt?.groupInfo?.(groupOpenid)?.tags || [],
               push: g.push ?? null,
               by: g.by || '',
               evidence: g.evidence || '',

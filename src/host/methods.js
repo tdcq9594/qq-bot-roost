@@ -565,6 +565,34 @@ export function createMethods({ runtime: R, getState, log = () => {}, extBridge 
     return out;
   };
 
+  /**
+   * 最近在这个机器人这儿说过话的人（内存索引）。
+   *
+   * 为什么需要：群成员资料本应「公开」，但官方 `getUserInfo` 要求**好友关系**
+   * （非好友回 `40184001`），而群成员绝大多数不是好友——只看官方接口的话，
+   * 「刚才那位是谁」永远查不到。`recentPeople` 是框架在每条消息上攒下来的
+   * （昵称 / 群名片 / 头像 / QQ号），正好补这个洞。
+   *
+   * 只读、只含「说过话的人」、不落盘：重启后为空，有人说话又会填上。
+   */
+  def('people.list', 'read', '最近说过话的人（昵称/群名片/头像/QQ号），给宿主认人用', async (p) => {
+    const limit = Math.min(Math.max(Number(p.limit) || 200, 1), 200);
+    const list = R.listRecentPeople ? R.listRecentPeople(limit) : [];
+    return {
+      people: (Array.isArray(list) ? list : []).map((x) => ({
+        openid: str(x.openid),
+        name: str(x.name),
+        card: str(x.card),
+        nickname: str(x.nickname),
+        avatar: str(x.avatar),
+        uin: str(x.uin),
+        unionOpenid: str(x.unionOpenid),
+        scope: str(x.scope),
+        at: Number(x.at) || 0,
+      })),
+    };
+  });
+
   def('group.info', 'read', '群信息 + 机器人在群里的角色 + 能不能管（没内邀也能读公开信息）', async (p) => {
     if (!R.api) throw notReady('官方接口未就绪');
     const groupOpenid = str(p.groupOpenid).trim();
@@ -581,7 +609,17 @@ export function createMethods({ runtime: R, getState, log = () => {}, extBridge 
     return {
       groupOpenid,
       name: str(info?.group_name ?? info?.name),
-      memberCount: Number(info?.member_count ?? info?.max_member_count) || 0,
+      /**
+       * 官方字段是 `group_member_num`（2026-11-16 文档）。
+       * 以前这里读 `member_count` / `max_member_count`——两个都不存在，
+       * 所以群人数**恒为 0**：面板和模型问「这个群多少人」永远答 0，
+       * 不报错、也不缺字段，属于最难发现的那种错。
+       */
+      memberCount: Number(info?.group_member_num ?? info?.member_count ?? 0) || 0,
+      /** 简介 / 分类 / 标签：2026-11-16 起群信息接口才给，用来回答「这是个什么群」 */
+      memo: str(info?.group_finger_memo),
+      classText: str(info?.group_class_text),
+      tags: Array.isArray(info?.group_tags) ? info.group_tags.map(String).filter(Boolean) : [],
       role: manage.role ?? null,
       canManage: manage.ok === true,
       manageReason: str(manage.reason),

@@ -53,6 +53,42 @@ function stripMention(content) {
 }
 
 /**
+ * 说话人昵称 / 头像的取值。
+ *
+ * 2026-11-16 官方补齐了事件里的昵称与头像：
+ *   · 单聊：`author.username` 以前经常是空串，现在稳定下发
+ *   · 群聊：新增 `author.member_nickname`（**群内昵称**，和 QQ 昵称不是一回事）
+ *   · 两种场景都带 `author.avatar`
+ *
+ * 群聊里说话人该显示群内昵称，所以 `userName` 按 member_nickname → username 取。
+ * QQ 昵称另外挂在 `userNickname` 上——OneBot 的 nickname / card 要靠它俩分开，
+ * 以前两个字段同值，客户端改群名片永远对不上。
+ *
+ * 驼峰/下划线两套都认，是防「文档写的键名和实测不一致」；都没有就是空串，
+ * 不影响消息本身。
+ */
+export function personCard(author) {
+  const a = author && typeof author === 'object' ? author : {};
+  return String(a.member_nickname ?? a.memberNickname ?? a.card ?? '').trim();
+}
+
+export function personNickname(author) {
+  const a = author && typeof author === 'object' ? author : {};
+  return String(a.username ?? a.nickname ?? '').trim();
+}
+
+/** 显示名：群内昵称优先，其次 QQ 昵称 */
+export function personName(author) {
+  return personCard(author) || personNickname(author);
+}
+
+/** 头像原图 URL（官方给的是 qlogo 地址）；拿不到是空串 */
+export function personAvatar(author) {
+  const a = author && typeof author === 'object' ? author : {};
+  return String(a.avatar ?? a.avatar_url ?? a.avatarUrl ?? '').trim();
+}
+
+/**
  * 图文卡片（`msg_type=8`）的官方硬约束，发之前先查一遍。
  *
  * 为什么要自己查：官方对参数不合规只回一个 `304061 消息内容无效`，
@@ -232,7 +268,10 @@ export function parseElements(list, depth = 0) {
       author: author
         ? {
           id: String(author.member_openid ?? author.user_openid ?? author.id ?? ''),
-          name: String(author.username ?? ''),
+          name: personName(author),
+          card: personCard(author),
+          nickname: personNickname(author),
+          avatar: personAvatar(author),
           isBot: Boolean(author.bot),
         }
         : null,
@@ -267,7 +306,16 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
    */
   let guildId = '';
   let channelId = '';
-  const userName = d.author?.username ?? '';
+  /**
+   * 说话人的三个名字，别混：
+   *   · `userName`     显示名（群内昵称优先）—— 插件要「喊人」时用它
+   *   · `userNickname` QQ 昵称 —— OneBot 的 `nickname`
+   *   · `userCard`     群名片/群内昵称 —— OneBot 的 `card`
+   */
+  const userName = personName(d.author);
+  const userNickname = personNickname(d.author);
+  const userCard = personCard(d.author);
+  const userAvatar = personAvatar(d.author);
   if (kind === 'group') {
     groupId = d.group_openid ?? '';
     userId = d.author?.member_openid ?? d.author?.id ?? '';
@@ -345,7 +393,21 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
     eventMeta: EVENTS[eventName] ?? null,
     groupId,
     userId,
+    /** 显示名：群聊取群内昵称，单聊取 QQ 昵称（2026-11-16 官方开始下发） */
     userName,
+    /** QQ 昵称（群聊里可能和 `userCard` 不同） */
+    userNickname,
+    /** 群名片/群内昵称；单聊与频道为空串 */
+    userCard,
+    /** 头像原图 URL；官方没给就是空串 */
+    userAvatar,
+    /**
+     * 官方 2026-11-16 新加的跨应用标识，**只透传、不做适配**：
+     * 只有同一开发者 + 绑了同一个 3 方应用才有值，且换不出对方的 openid。
+     * 跨机器人的身份/群关联一律走 `identity` 的「QQ号/群号 ↔ openid」绑定。
+     */
+    unionUserId: String(d?.author?.union_openid ?? ''),
+    unionGroupId: String(d?.union_group_openid ?? ''),
     chatId,
     /** 频道维度（群/单聊为空串）：guildId 是频道 ID，channelId 是子频道 ID */
     guildId,
@@ -390,7 +452,7 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
           id: m?.id ?? m?.member_openid ?? m?.user_openid ?? '',
           isBot: Boolean(m?.is_you || m?.bot),
           // 昵称带上：禁言/踢人成功时能回「已禁言 张三」，比一串 openid 好认
-          name: String(m?.username ?? '').trim(),
+          name: personName(m),
         }))
         .filter((m) => m.id);
       const fromText = mentionsFromContent(d?.content).map((id) => ({ id, isBot: false, name: '' }));
@@ -417,7 +479,7 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
         .map((m) => ({
           id: m?.id ?? m?.member_openid ?? m?.user_openid ?? '',
           isBot: Boolean(m?.is_you || m?.bot),
-          name: String(m?.username ?? '').trim(),
+          name: personName(m),
         }))
         .filter((m) => m.id);
       const fromText = mentionsFromContent(d?.content).map((id) => ({ id, isBot: false, name: '' }));

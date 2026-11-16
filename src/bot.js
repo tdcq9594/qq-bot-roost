@@ -89,15 +89,19 @@ export class BotRuntime {
      */
     this.recentPeople = new Map();
     /**
-     * 群名缓存：groupOpenid -> { name, at }
+     * 群名 / 群档案缓存：groupOpenid -> { name, memberNum, fingerMemo, …, at, ttl }
      *
      * **官方事件里没有群名**（实测 GROUP_AT_MESSAGE_CREATE 的字段只有
      * author/content/group_id/group_openid/id/message_scene/message_type/timestamp），
      * 而面板上只显示 `577C4A90…` 这种截断的 openid，用户根本认不出是哪个群。
      *
      * 所以在入群 / 首次收到消息时异步拉一次 `getGroupInfo` 补上，
-     * 之后面板直接读缓存。**不落盘**：群名会变，存下来反而是错的；
-     * 拉不到就退回显示 openid，不影响任何功能。
+     * 之后面板直接读缓存。
+     *
+     * 现在会往群档案里写一份（带 `infoAt`）。以前是「不落盘」，理由是
+     * 「群名会变，存下来反而错」——但那样重启后第一屏永远是一串 openid。
+     * 改成落盘 + 时间戳后，TTL 仍按 `at` 算：过期就重新拉，存的只是
+     * 上一次问到的结果，不是权威值。
      */
     this.groupNames = new Map();
     /** 同群并发补名时复用同一个请求，避免一条消息打两次接口 */
@@ -110,6 +114,32 @@ export class BotRuntime {
      */
     this.groupNameActive = 0;
     this.groupNameWaiters = [];
+    /**
+     * 启动预载：档案里存过群名的，直接灌进缓存。
+     *
+     * 不预载的话，重启后面板第一屏必然是一串 openid，要等群里有人说句话
+     * 才会慢慢补上。`at` 存的是上次真拉到的时间，所以过期条目第一次用到
+     * 就会按正常 TTL 重新拉，不会永远吃旧名字。
+     *
+     * 不 await：这是显示用的，挡在启动路径上没意义；失败就当时没有。
+     */
+    this.groups.list().then((list) => {
+      for (const g of list) {
+        const id = g?.groupOpenid;
+        if (!id || this.groupNames.has(id)) continue;
+        /** 一条信息都没有就别占位（有名字/人数/简介任一项就值得预载） */
+        if (!g.name && !g.memberNum && !g.fingerMemo) continue;
+        this.groupNames.set(id, {
+          name: g.name || '',
+          memberNum: Number(g.memberNum) || 0,
+          fingerMemo: g.fingerMemo || '',
+          classText: g.classText || '',
+          tags: Array.isArray(g.tags) ? g.tags : [],
+          at: Number(g.infoAt) || 0,
+          ttl: 10 * 60_000,
+        });
+      }
+    }).catch(() => {});
     this.roles = new RoleStore(this.paths.roles);
     /**
      * 可达性：谁能私聊、哪个群能主动推。
@@ -508,6 +538,15 @@ export class BotRuntime {
       openid: msg.userId,
       // 有的场景拿不到昵称（频道事件），保留上一次的
       name: msg.userName || prev?.name || '',
+      /** 群名片 / QQ 昵称分开存：面板上「群里的名字」和「QQ 昵称」经常不一样 */
+      card: msg.userCard || prev?.card || '',
+      nickname: msg.userNickname || prev?.nickname || '',
+      /** 头像原图；2026-11-16 起事件里直接带，面板能显示人脸比一串 openid 好认得多 */
+      avatar: msg.userAvatar || prev?.avatar || '',
+      /** 跨应用统一 id（绑 3 方应用才有），多机器人对齐同一个人靠它 */
+      unionOpenid: msg.unionUserId || prev?.unionOpenid || '',
+      /** QQ号（面板绑过才有）：宿主认人时号码比 openid 可靠，换机器人也不变 */
+      uin: msg.uin || prev?.uin || '',
       scope: msg.kind,
       chatId: msg.chatId,
       at: Date.now(),
@@ -532,6 +571,17 @@ export class BotRuntime {
   groupName(groupOpenid) {
     if (!groupOpenid) return undefined;
     return this.groupNames.get(groupOpenid)?.name || undefined;
+  }
+
+  /**
+   * 查群档案缓存（名字 / 人数 / 简介 / 标签 / 跨应用群标识）。
+   *
+   * 和 `groupName()` 是同一份缓存，只是把整份给出去。没有就 null——
+   * 调用方自己决定是显示 openid 还是先触发一次补拉（`fetchGroupNames`）。
+   */
+  groupInfo(groupOpenid) {
+    if (!groupOpenid) return null;
+    return this.groupNames.get(groupOpenid) ?? null;
   }
 
   /**
@@ -667,8 +717,25 @@ export class BotRuntime {
       await this.#groupNameSlot();
       try {
         const info = await this.api.getGroupInfo(groupOpenid);
-        const name = String(info?.group_name ?? info?.name ?? '').trim();
-        this.groupNames.set(groupOpenid, { name, at: Date.now(), ttl: 10 * 60_000 });
+        const profile = groupProfileOf(info);
+        this.groupNames.set(groupOpenid, { ...profile, at: Date.now(), ttl: 10 * 60_000 });
+
+        /**
+         * 顺手落盘一份。
+         *
+         * 群名 / 人数 / 简介 / 标签以前只在内存里活 10 分钟，重启就没了，
+         * 面板第一屏永远是一串 openid。档案里存一份，重启直接读。
+         *
+         * **只写非空字段**：接口少给某个字段时不能把已有值覆盖成空串
+         * （`upsert` 是浅合并，空串会盖掉旧值）。
+         */
+        const patch = { infoAt: Date.now() };
+        if (profile.name) patch.name = profile.name;
+        if (profile.memberNum) patch.memberNum = profile.memberNum;
+        if (profile.fingerMemo) patch.fingerMemo = profile.fingerMemo;
+        if (profile.classText) patch.classText = profile.classText;
+        if (profile.tags.length) patch.tags = profile.tags;
+        await this.groups?.upsert?.(groupOpenid, patch);
       } catch (e) {
         // 拉不到就算了：openid 也能认，只是没那么好认
         /** api.js 抛的是 `qqCode`，不是 code；读错字段会让 11253 永远按 30 秒重试 */
@@ -1321,6 +1388,27 @@ export function pluginFilterOf(spec) {
   if (mode === 'all') return () => true;
   if (mode === 'exclude') return (id) => !list.has(id);
   return (id) => list.has(id); // include
+}
+
+/**
+ * 群基本信息接口的返回 → 框架内部形状。
+ *
+ * 2026-11-16 官方把 `/v2/groups/{openid}/info` 从「只给群名」扩成一份完整档案
+ * （人数 / 简介 / 分类 / 标签）。字段都取一遍，缺的给空值——接口少给不该让
+ * 调用方拿到 undefined。
+ *
+ * **`union_group_openid` 不要**：跨机器人的群关联走 `identity` 的「群号 ↔ openid」
+ * 绑定，那个字段只在同一开发者 + 同一个 3 方应用下才有值，还换不出对方的 openid。
+ */
+function groupProfileOf(info) {
+  const src = info && typeof info === 'object' ? info : {};
+  return {
+    name: String(src.group_name ?? src.name ?? '').trim(),
+    memberNum: Number(src.group_member_num) || 0,
+    fingerMemo: String(src.group_finger_memo ?? '').trim(),
+    classText: String(src.group_class_text ?? '').trim(),
+    tags: Array.isArray(src.group_tags) ? src.group_tags.map(String).filter(Boolean) : [],
+  };
 }
 
 /**

@@ -147,6 +147,7 @@ export const OFFICIAL_ENDPOINTS = [
 
   /* ---------------- 用户 / 机器人 ---------------- */
   { method: 'GET', path: '/users/@me', api: 'getMe', group: '用户' },
+  { method: 'GET', path: '/v2/users/{user_openid}/info', api: 'getUserInfo', group: '用户', note: '2026-11-16 新增，10 QPS，需好友关系' },
   { method: 'GET', path: '/users/@me/guilds', api: 'getMyGuilds', group: '用户' },
 
   /* ---------------- 网关 ---------------- */
@@ -156,7 +157,7 @@ export const OFFICIAL_ENDPOINTS = [
   { method: 'POST', path: '/v2/generate_url_link', api: 'generateUrlLink', group: '分享链接', note: 'callback_data ≤ 32 字符' },
 
   /* ---------------- 群信息 ---------------- */
-  { method: 'GET', path: '/v2/groups/{group_openid}/info', api: 'getGroupInfo', group: '群·信息' },
+  { method: 'GET', path: '/v2/groups/{group_openid}/info', api: 'getGroupInfo', group: '群·信息', note: '30 QPM' },
   { method: 'GET', path: '/v2/groups/{group_openid}/bot_state', api: 'getBotGroupState', group: '群·信息', note: '内邀' },
 
   /* ---------------- 群成员 ---------------- */

@@ -16,7 +16,9 @@ const log = createLogger('groups');
  * {
  *   "<group_openid>": {
  *     groupOpenid, inviterOpenid, ownerOpenid,
- *     enabled, addedAt, lastActiveAt, note
+ *     enabled, addedAt, lastActiveAt, note,
+ *     // 2026-11-16 起：群基本信息（展示用）
+ *     name, memberNum, fingerMemo, classText, tags, infoAt
  *
  * 注意：这里**不存权限**。谁能在本群做什么，统一看 roles.json 的 group:<id> 作用域。
  * 群档案只负责「这个群是什么情况」。
@@ -85,6 +87,20 @@ export class GroupStore {
       addedAt: Date.now(),
       lastActiveAt: 0,
       note: '',
+      /**
+       * 群基本信息（2026-11-16 官方补齐）：名字 / 人数 / 简介 / 分类 / 标签。
+       *
+       * 都是展示用，拿不到就是空值。**不存 `union_group_openid`**——
+       * 跨机器人的群关联一律走 `identity` 的「群号 ↔ openid」绑定，
+       * 那个字段只在同一开发者 + 同一个 3 方应用下才有值，还换不出对方的
+       * openid，留着只会让人以为它能当群 id 用。
+       */
+      name: '',
+      memberNum: 0,
+      fingerMemo: '',
+      classText: '',
+      tags: [],
+      infoAt: 0,
     };
     d[groupOpenid] = { ...cur, ...patch, groupOpenid };
     this.#scheduleSave();

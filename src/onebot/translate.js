@@ -113,9 +113,13 @@ export function toMessageEvent({ msg, ids, selfUin }) {
     font: 0,
     sender: {
       user_id: ids.user(msg.userId),
-      nickname: String(msg.userName ?? ''),
-      // 官方没有群名片，回落昵称（能力表里标了）
-      card: String(msg.userName ?? ''),
+      /**
+       * 2026-11-16 起官方事件给了两个名字：QQ 昵称（`username`）和群内昵称
+       * （`member_nickname`）。OneBot 的 `nickname` / `card` 正好一一对应，
+       * 以前两个字段填同一个值，客户端改群名片永远对不上。
+       */
+      nickname: String(msg.userNickname || msg.userName || ''),
+      card: String(msg.userCard ?? ''),
       role: isGroup ? String(at.member_role || 'member') : 'member',
     },
     anonymous: null,
