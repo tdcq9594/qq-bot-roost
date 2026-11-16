@@ -7398,6 +7398,22 @@ async function loadDev() {
     paintDevBound();
   }
   devPaintStatus(st);
+  /**
+   * 老状态自愈：**用户明确取消过「记住」，但机器上还留着票据 / 扫码 profile**。
+   *
+   * 以前取消只删票据文件，扫码用的浏览器 profile 还在，于是后台续期照样能自动
+   * 登录——用户看到「我明明没让它记住，怎么每次打开还在登录」。后端已经改成
+   * 取消时连 profile 一起清，但**修复之前**取消过的人不会自己变干净，所以这里
+   * 按用户的选择补一刀（幂等，且只在偏好明确为 false 时做）。
+   */
+  if (devRememberPref() === false && (st?.remembered === true || st?.profile === true)) {
+    api('/api/dev/remember', { method: 'POST', body: JSON.stringify({ remember: false }) })
+      .then((out) => {
+        if (typeof out?.remembered === 'boolean') devPaintRemember(out.remembered);
+        devScanSay('已按你的选择清掉本机登录记录（后台不会再自动登录）', 'ok');
+      })
+      .catch(() => { /* 后台清理失败不影响当前会话 */ });
+  }
   // 回显手填的浏览器路径，用户不用记得自己上次填了什么
   const bp = $('#devBrowserPath');
   if (bp && document.activeElement !== bp) bp.value = String(st?.browserPath || '');

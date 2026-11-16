@@ -108,3 +108,49 @@ test('文件权限是 0600（能设的平台才检查）', { skip: process.platf
 test.after(async () => {
   await fs.rm(HOME, { recursive: true, force: true });
 });
+
+/* ---------------- 「不记住」要能跨重启生效 ---------------- */
+
+/**
+ * 主人报过：明明取消了「记住登录」，重启后日志里还是「用扫码 profile 换一张新票」。
+ *
+ * 根因是偏好只存在浏览器 localStorage 里，后端不知道——它只看磁盘上有没有票。
+ * 现在偏好落盘（`data/dev-remember.json`），启动时按它决定：
+ *   · 不记住 → 连旧版残留的票和 profile 一起清掉，不自动续期；
+ *   · 没存过 → 按记住（升级不能把大家的登录踢掉）。
+ */
+test('偏好「不记住」时，重启会把旧版残留（票 + profile）一起清掉', async () => {
+  const P1 = createDevPlatform({ fetchImpl: fakeFetch() });
+  await P1.loginImport('b-token=bt');
+  await P1.setRemember(false);
+
+  /** 模拟旧版本留下的现场：票文件 + 扫码 profile 都在 */
+  await fs.writeFile(sessionFile, JSON.stringify({ cookies: { 'b-token': 'old' }, savedAt: Date.now() }));
+  const prof = path.join(DIRS.data, 'dev-browser');
+  await fs.mkdir(prof, { recursive: true });
+
+  const P2 = createDevPlatform({ fetchImpl: fakeFetch() });
+  const st = await P2.status();
+  assert.equal(st.remembered, false);
+  assert.equal(st.profile, false);
+  assert.equal(await exists(sessionFile), false, '重启后票要被清掉');
+  assert.equal(await exists(prof), false, 'profile 也要清掉，否则后台照样能自动登录');
+});
+
+test('没存过偏好时按「记住」处理（升级不能踢掉已有登录）', async () => {
+  await fs.rm(path.join(DIRS.data, 'dev-remember.json'), { force: true });
+  await fs.writeFile(sessionFile, JSON.stringify({ cookies: { 'b-token': 'keep' }, savedAt: Date.now() }));
+
+  const P = createDevPlatform({ fetchImpl: fakeFetch() });
+  const st = await P.status();
+  assert.equal(st.remembered, true, '老用户升级后票据应保留');
+  assert.equal(await exists(sessionFile), true);
+});
+
+test('导入时选「不记住」：票不落盘，但偏好要记下来', async () => {
+  const P = createDevPlatform({ fetchImpl: fakeFetch() });
+  await P.loginImport('b-token=bt', { remember: false });
+  assert.equal(await exists(sessionFile), false);
+  const pref = JSON.parse(await fs.readFile(path.join(DIRS.data, 'dev-remember.json'), 'utf8'));
+  assert.equal(pref.remember, false);
+});

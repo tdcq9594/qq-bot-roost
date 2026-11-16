@@ -240,6 +240,72 @@ export function createDevPlatform({ log = () => {}, fetchImpl = fetch, lookup = 
   /** 本次扫码要不要把票据落到本机（面板上的「记住登录」，发起时定） */
   let scanRemember = false;
 
+  /**
+   * 用户明确关掉了「记住登录」。
+   *
+   * 光靠「文件在不在」判断不够：取消勾选是删文件，而**正在跑的自动续期**
+   * 可能在删之前已经判断过 `hasSaved()`，换票成功后一 `save` 就把文件写回来——
+   * 表现就是「取消了没用，刷新还是已记住」。所以除了删文件，还落一个会话级
+   * 标志，续期那条路径看到它就不许写盘。
+   */
+  let rememberOff = false;
+
+  /**
+   * 「记住登录」偏好**落到后端**。
+   *
+   * 之前这个选择只存在浏览器的 localStorage 里，后端完全不知道——于是重启时
+   * `devTicket` 看到磁盘上有票（哪怕早过期了）就照旧开无头浏览器换票，
+   * 用户看到的是「我都没登录，怎么又在后台登录」。
+   *
+   * 现在偏好写盘，启动时按它决定：
+   *   · `remember:false` → 连**历史残留**一起清（票 + 扫码 profile），不自动续期；
+   *   · 没存过 → 按 `true`（保持老行为，不能因为升级就把大家的登录踢掉）。
+   */
+  const prefFile = () => path.join(DIRS.data, 'dev-remember.json');
+  let prefLoaded = null;
+
+  async function loadPref() {
+    try {
+      const j = JSON.parse(await fs.readFile(prefFile(), 'utf8'));
+      rememberOff = j?.remember === false;
+    } catch {
+      /** 没存过 = 默认记住（老用户升级后行为不变） */
+      rememberOff = false;
+    }
+    if (rememberOff) {
+      /**
+       * 用户说过「别记住」：把上一版留下的东西收拾干净。
+       *
+       * 旧版本取消勾选只删票、不删 profile，所以升级后第一次启动必须补这一刀，
+       * 否则「我没登录」和「后台在换票」会同时成立。
+       */
+      await wipe();
+      try {
+        if (!scanner.status?.().busy) await scanner.purgeProfile?.();
+      } catch (e) {
+        log(`[dev] 清理扫码 profile 失败（不影响启动）：${e?.message ?? e}`);
+      }
+    }
+    return rememberOff;
+  }
+
+  /** 懒加载：构造函数是同步的，所以第一次用到时再读 */
+  function ensurePref() {
+    prefLoaded ??= loadPref();
+    return prefLoaded;
+  }
+
+  async function savePref(on) {
+    try {
+      await fs.mkdir(DIRS.data, { recursive: true });
+      await fs.writeFile(prefFile(), JSON.stringify({ remember: Boolean(on), at: Date.now() }, null, 2), {
+        mode: 0o600,
+      });
+    } catch (e) {
+      log(`[dev] 记住登录偏好没写成：${e?.message ?? e}`);
+    }
+  }
+
   /** 手填的浏览器路径，空 = 自动探测；扫码器每次 start 时现读，改了立刻生效 */
   let browserPath = '';
 
@@ -258,7 +324,8 @@ export function createDevPlatform({ log = () => {}, fetchImpl = fetch, lookup = 
       session.adopt(jar);
       try {
         const bots = await listBots();
-        if (scanRemember) await save(Object.fromEntries(session.jar()));
+        /** 扫码成功写盘同样要尊重「记住」开关：`scanRemember` 是发起时的选择，可能已过期 */
+        if (scanRemember && !rememberOff) await save(Object.fromEntries(session.jar()));
         return bots.length;
       } catch (e) {
         /**
@@ -309,6 +376,14 @@ export function createDevPlatform({ log = () => {}, fetchImpl = fetch, lookup = 
   let autoRenewBackoffUntil = 0;
 
   async function autoRelogin() {
+    /**
+     * 偏好先读出来：`remember:false` 的人，**任何路径都不该被开浏览器**。
+     *
+     * 这就是「我都没登录，怎么又在后台登录」的根：以前只看磁盘上有没有票，
+     * 而票是上一轮留下的、早就过期了。
+     */
+    await ensurePref();
+    if (rememberOff) return false;
     if (autoRenewDisabled || suspendAutoRenew || autoRenewing) return false;
     if (Date.now() < autoRenewBackoffUntil) return false;
 
@@ -423,7 +498,13 @@ export function createDevPlatform({ log = () => {}, fetchImpl = fetch, lookup = 
           }
           // 整份替换：新票和旧票混着用会 401（旧 cookie 可能已经被平台作废）
           session.adopt(r.jar);
-          if (await hasSaved()) await save(Object.fromEntries(session.jar())).catch(() => {});
+          /**
+           * 写回票据要同时满足两条：原本就存过 + 用户没关掉「记住」。
+           *
+           * 只看 `hasSaved()` 会有竞态：取消勾选删文件的同时续期正好在写，
+           * 文件被复活，面板又显示「已记住」。`rememberOff` 是会话内的硬否决。
+           */
+          if (!rememberOff && (await hasSaved())) await save(Object.fromEntries(session.jar())).catch(() => {});
           // 换票之后「账号下有几只」可能变（换号了），缓存必须作废
           botsCache = null;
           autoRenewBackoffUntil = 0;
@@ -632,7 +713,12 @@ export function createDevPlatform({ log = () => {}, fetchImpl = fetch, lookup = 
     suspendAutoRenew = true;
     try {
       const bots = await listBots();
+      /** 导入时勾没勾「记住」同样落一个否决位，后面自动续期才不会把文件写回来 */
+      rememberOff = !remember;
+      await savePref(remember);
       if (remember) await save(Object.fromEntries(session.jar()));
+      /** 选了「不记住」就把旧票也清掉：留着的话下次启动又会被当成「已记住」 */
+      else await wipe();
       // keys 只回**键名**，值不出后端：名字够用来判断「是不是漏了 httpOnly 的那个」
       return { ok: true, ...session.describe(), botCount: bots.length, keys };
     } catch (e) {
@@ -658,11 +744,29 @@ export function createDevPlatform({ log = () => {}, fetchImpl = fetch, lookup = 
    */
   async function setRemember(on) {
     const want = Boolean(on);
+    rememberOff = !want;
+    /** 偏好落到后端：重启后只有它知道该不该自动续期 */
+    await savePref(want);
     if (want) {
       requireReady();
       await save(Object.fromEntries(session.jar()));
     } else {
       await wipe();
+      /**
+       * **取消「记住登录」= 本机不再保留登录态**，所以连扫码用的浏览器 profile
+       * 一起清掉。
+       *
+       * 只删票据文件是不够的：那份 profile 里躺着 QQ 的长期登录 cookie，
+       * 后台续期会拿它自动换票——用户看到的是「我明明没让它记住，怎么还每次
+       * 都在后台登录」。清掉之后 `autoRelogin` 的前提（profile 或存过票）
+       * 不成立，自然不再开浏览器；内存里的票仍然可用，重启才需要重扫。
+       */
+      try {
+        /** 正在扫码时别清：那会把用户眼前那个窗口一起关掉，等他扫完再说 */
+        if (!scanner.status?.().busy) await scanner.purgeProfile?.();
+      } catch (e) {
+        log(`[dev] 清理扫码 profile 失败（不影响本次会话）：${e?.message ?? e}`);
+      }
     }
     return { ok: true, remembered: await hasSaved() };
   }
@@ -693,6 +797,11 @@ export function createDevPlatform({ log = () => {}, fetchImpl = fetch, lookup = 
       await autoRenewPromise.catch(() => false);
     }
     scanRemember = Boolean(remember);
+    /** 发起扫码时也同步一次否决位：面板可能刚把勾去掉，而 `scanRemember` 是上次的 */
+    rememberOff = !scanRemember;
+    await savePref(scanRemember);
+    /** 同上：本次不记就顺手清掉旧票，别让上次的选择继续生效 */
+    if (!scanRemember) await wipe();
     return scanner.start();
   }
 
@@ -701,9 +810,19 @@ export function createDevPlatform({ log = () => {}, fetchImpl = fetch, lookup = 
   }
 
   async function status() {
+    /** 读偏好时会顺手清理「取消记住」留下的残留，面板拿到的就是清理后的真实状态 */
+    await ensurePref();
     return {
       ...session.describe(),
       remembered: await hasSaved(),
+      /**
+       * 扫码 profile 还在不在。
+       *
+       * 面板要用它判断「取消记住之后是不是真清干净了」：只删票据文件、profile
+       * 还留着的话，后台续期照样能自动登录——用户看到的是「我没让它记住，
+       * 怎么每次打开还在登录」。
+       */
+      profile: Boolean(await scanner.hasProfile?.()),
       lastWrite,
       /** 手填的浏览器路径（空 = 自动探测）；面板要回显，改完不用猜 */
       browserPath,
