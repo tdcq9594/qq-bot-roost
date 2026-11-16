@@ -18,6 +18,8 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { DIRS } from '../paths.js';
+/** 二维码：扫码登录和面板画「资料卡链接」共用同一套实现，不各写一份 */
+import { toSvg as qrToSvg } from '../qq/qrsvg.js';
 import { saveBotConfig } from '../config.js';
 import { FILE_TYPE } from '../api.js';
 import {
@@ -187,6 +189,20 @@ export function registerOps(def, { R, err, log = () => {} }) {
     items: R.delivery?.recent?.({ limit: clamp(p.limit, 50, 200), state: str(p.state) }) ?? [],
     stats: R.delivery?.stats?.() ?? { available: false },
   }));
+
+  /**
+   * 把一段短文本画成二维码 SVG。
+   *
+   * 只在服务端画：前端（DSH 插件）只有一个 client.js 入口，塞 QR 库既占体积
+   * 又要改加载方式。`src/qq/qrsvg.js` 本来就在给扫码登录用，这里把它暴露出来，
+   * 面板画「机器人资料卡链接」就不用再实现一遍。
+   */
+  def('qr.svg', 'read', '把一段短文本画成二维码 SVG（登录码、资料卡链接共用一套实现）', async (p) => {
+    const text = str(p.text).trim();
+    if (!text) throw err.bad('要给 text');
+    if (text.length > 300) throw err.bad('文本太长（最多 300 字）');
+    return { svg: qrToSvg(text) };
+  }),
 
   def('roles.resolve', 'read', '算发送者权限档位 bucket/level/role（ai-chat senderInfo 等价）', async (p) => {
     const userId = str(p.userId).trim();

@@ -13,6 +13,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHostServer } from '../src/host/server.js';
 import { HostBridge } from '../src/host/index.js';
+import { serializeRpcError } from '../src/host/index.js';
 import * as extDeps from '../src/ext-deps.js';
 import {
   createMethods, effectiveScopes, HostError, HOST_PROTOCOL,
@@ -579,6 +580,16 @@ test('传输：/health 免 token，/rpc 缺 token 401，错 token 401', async (t
   assert.equal((await rpc(port, 'system.ping', {}, { Authorization: 'Bearer wrong' })).status, 401);
 });
 
+test('qr.svg：把一段文本画成二维码 SVG（扫码登录与面板共用同一套）', async () => {
+  const { methods } = makeMethods();
+  const r = await methods.call('qr.svg', { text: 'https://qun.qq.com/qunpro/robot/share?robot_appid=102056878' });
+  assert.match(String(r.svg), /^<svg/, '要给 SVG 字符串，前端一句 innerHTML 就能用');
+  assert.match(String(r.svg), /viewBox/, '没有 viewBox 就没法按容器缩放');
+
+  await assert.rejects(() => methods.call('qr.svg', { text: '' }), /text/);
+  await assert.rejects(() => methods.call('qr.svg', { text: 'x'.repeat(301) }), /太长/);
+});
+
 test('传输：/rpc 一问一答、id 原样回带、方法不存在 404', async (t) => {
   const { port } = await withServer(t);
   const ok = await rpc(port, 'system.ping');
@@ -610,8 +621,27 @@ test('传输：scope 在服务端生效，manage 方法被 403 NO_SCOPE', async 
   assert.equal(blocked.body.error.code, 'NO_SCOPE');
 });
 
-test('传输：带 Origin 且不同源直接拒，同源放行', async (t) => {
-  const { port } = await withServer(t);
+test('错误序列化：官方业务码 qqCode 必须透传（否则宿主分不清「没权限」和「发太频」）', () => {
+  const e = new Error('HTTP 400 PUT /channels/9/threads: appid no permission');
+  e.qqCode = 11253;
+  const s = serializeRpcError(e);
+  assert.equal(s.error.qqCode, 11253, '业务码丢了，宿主就只能把原文甩给用户');
+  assert.equal(s.http, 500);
+  assert.equal(s.error.code, 'INTERNAL');
+
+  // 没有业务码时不能凭空加字段（老客户端按 undefined 判「没有」）
+  assert.equal('qqCode' in serializeRpcError(new Error('boom')).error, false);
+  const zero = new Error('x');
+  zero.qqCode = 0;
+  assert.equal('qqCode' in serializeRpcError(zero).error, false, '0 等于没有，不该带');
+
+  // HostError 保自己的 code 与 http
+  const h = new HostError('NO_SCOPE', '没权限', 403);
+  assert.equal(serializeRpcError(h).http, 403);
+  assert.equal(serializeRpcError(h).error.code, 'NO_SCOPE');
+});
+
+test('传输：带 Origin 且不同源直接拒，同源放行', async (t) => {  const { port } = await withServer(t);
   const cross = await rpc(port, 'system.ping', {}, {
     ...auth, Origin: 'http://evil.example',
   });

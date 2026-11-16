@@ -31,6 +31,36 @@ import { serializeMessage, serializeNotice } from './serialize.js';
 
 const log = createLogger('host');
 
+/**
+ * rpc 失败的统一序列化。
+ *
+ * 抽成纯函数是为了能单测：这里出过一次真事故——`api.js` 把官方业务码放在
+ * `err.qqCode` 上（11253 没权限 / 503004 发帖太频 / 304018 没连上网关），
+ * 而这里只序列化 `code` + `message`，**业务码在跨进程那一步被丢掉**。
+ * 后果是宿主只能看到「HTTP 400 PUT …: 中文描述」，没法区分「去开放平台勾权限」
+ * 和「等十分钟再发」，只能把原文甩给用户。
+ *
+ * 没有业务码时**不加这个字段**：老客户端读到 undefined 等同于「没有」。
+ *
+ * @param {Error & { code?: string, http?: number, qqCode?: number }} e
+ * @returns {{ code: string, http: number, error: { code: string, message: string, qqCode?: number } }}
+ */
+export function serializeRpcError(e) {
+  const code = e instanceof HostError ? e.code : 'INTERNAL';
+  const http = Number(e?.http) || (code === 'NO_SCOPE' ? 403 : code === 'NOT_FOUND' ? 404
+    : code === 'NOT_READY' ? 503 : code === 'INTERNAL' ? 500 : 400);
+  const qqCode = Number(e?.qqCode);
+  return {
+    code,
+    http,
+    error: {
+      code,
+      message: String(e?.message ?? e),
+      ...(Number.isFinite(qqCode) && qqCode > 0 ? { qqCode } : {}),
+    },
+  };
+}
+
 /** 与 OneBot 的 6700–6799 分开，方便面板上两个出口各写各的端口 */
 const PORT_BASE = 6800;
 const PORT_SPAN = 100;
@@ -321,13 +351,8 @@ export class HostBridge {
       return { id, ok: true, data: data ?? null, http: 200 };
     } catch (e) {
       this.counters.fail += 1;
-      const code = e instanceof HostError ? e.code : 'INTERNAL';
-      const http = Number(e?.http) || (code === 'NO_SCOPE' ? 403 : code === 'NOT_FOUND' ? 404
-        : code === 'NOT_READY' ? 503 : code === 'INTERNAL' ? 500 : 400);
-      return {
-        id, ok: false, http,
-        error: { code, message: String(e?.message ?? e) },
-      };
+      const s = serializeRpcError(e);
+      return { id, ok: false, http: s.http, error: s.error };
     }
   }
 
