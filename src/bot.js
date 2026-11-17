@@ -22,6 +22,7 @@ import { createGate } from './gate.js';
 import { createDeliveryLedger } from './delivery.js';
 import { sharedIdentity } from './identity.js';
 import { OneBotBridge } from './onebot/index.js';
+import { onebotAllowsCore } from './onebot/keep.js';
 import { HostBridge } from './host/index.js';
 
 /**
@@ -1161,7 +1162,7 @@ export class BotRuntime {
       if (msg.mentioned || msg.isCommand) session.markAddressed(msg.chatId);
 
       /**
-       * 兼容模式「独占」：**插件**不再回话，但**内核命令照常工作**。
+       * 兼容模式「独占」：**插件**不再回话，内核命令也只留绑定那四条。
        *
        * 为什么不能直接 `return`（第一版就是这么写的，被主人指出来）：
        * `绑定qq` / `绑定群号` / `绑定成员` 这些是**内核命令**（pluginId `__core`），
@@ -1171,7 +1172,7 @@ export class BotRuntime {
        *
        * 所以这里**不提前 return**，只打一个标记：
        *   - 管线照跑（去重 / 白名单 / 限流 / 暂停闸都还在，别的地方也别想绕过）
-       *   - 命令只放 `__core`，插件命令静默忽略
+       *   - 命令只放 `onebot/keep.js` 里那四条绑定，其余（含 `/help`）静默忽略
        *   - 插件监听器整段跳过
        */
       const coreOnly = Boolean(this.onebot?.exclusive);
@@ -1203,12 +1204,17 @@ export class BotRuntime {
 
       if (msg.isCommand && commandEntry) {
         /**
-         * 独占模式下插件命令一律静默忽略（不提示「没有这个命令」）：
-         * 客户端已经接管了这些能力，群里再冒一句提示只是噪音。
-         * `__core` 是内核命令（绑定 / 管理 / help），必须留着——
-         * 否则 OneBot 的 ID 映射永远拿不到真 QQ 号。
+         * 独占模式只放行「绑定四件套」，其余内核命令一律静默。
+         *
+         * 以前是把整个 `__core` 都放行：绑定命令挂在 `__core` 上，而 OneBot 的
+         * ID 映射又离不开绑定表，为了不挡住那四条，把 help / ping / status /
+         * admin 这些一起放了出去。副作用是群里任何人发一句 `/help`，机器人都回
+         * 一大段菜单——而独占的语义恰恰是「对话交给客户端」，这条回复纯属噪音。
+         *
+         * 现在收窄成白名单（见 `onebot/keep.js`）：绑定必须留，其余全静默，包括
+         * `/help`。要查命令或改配置去面板、或去客户端，那里有完整上下文。
          */
-        if (coreOnly && commandEntry.pluginId !== '__core') {
+        if (coreOnly && !onebotAllowsCore(commandEntry.name)) {
           this.metrics.bump('ignored');
           return;
         }

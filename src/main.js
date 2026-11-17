@@ -199,7 +199,11 @@ function registerCoreCommands(rt) {
 
     /**
      * 独占模式（OneBot 兼容）下插件不回话，菜单里也就别再列它们——
-     * 列出来点了没反应，比不显示更让人困惑。内核命令照常列（绑定就在这里）。
+     * 列出来点了没反应，比不显示更让人困惑。
+     *
+     * 注意：1.1.5 起独占模式只放行绑定四件套，`/help` 在 `bot.js` 就被拦掉了，
+     * 这段正常走不到。留着是兜底——哪天放开 `help`（比如只对管理员回），
+     * `msg.coreOnly` 标记还在，这条过滤依然生效，不用回来重写一遍。
      */
     const pluginMenus = msg.coreOnly ? [] : [...registry.menus.values()].filter((m) => m.id !== '__core');
 
