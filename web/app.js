@@ -275,6 +275,8 @@ async function selectBot(id) {
   CURRENT_BOT = id;
   localStorage.setItem('qqbot_bot', id);
   closeBotMenu();
+  // 扫出来的是「当前这只鸟」的新凭证：换了机器人就不能再往新表单里灌
+  if (qrSlot === 'cfg') resetQr();
   updateBotTrigger();
   // SSE 在连接建立时就绑死了机器人，切换后必须重建，否则状态还是旧的
   connectStream();
@@ -330,7 +332,7 @@ async function deleteBot(id) {
   if (CURRENT_BOT) await selectBot(CURRENT_BOT);
 }
 
-/* ---------------- 扫码一键创建 ---------------- */
+/* ---------------- 扫码（新建机器人 / 更新凭证） ---------------- */
 
 /**
  * 官方有「绑定」接口，手机 QQ 扫一下就能拿到 AppID / AppSecret，
@@ -338,9 +340,56 @@ async function deleteBot(id) {
  *
  * 二维码内容是官方给的一个 URL，我们本地画成二维码（web/vendor/qrcode.js）。
  * 密钥（bindKey）留在服务端，前端只拿到 taskId。
+ *
+ * 两个入口共用这套逻辑，区别只在「扫完之后把值填哪」：
+ *   · `new` —— 新建机器人弹窗：填进 #nbAppId / #nbSecret，等用户补个 ID 再创建；
+ *   · `cfg` —— 配置页的连接凭证：填进 cfgForm，AppSecret 被重置、或者整只机器人
+ *     换账号时用，点「保存设置」才生效（自动保存会在用户没反应过来时重连一次，
+ *     扫码本来就可能是误点，不该顺带把在线连接掐掉）。
+ *
+ * 同一时刻只允许一个扫码任务：换位置扫会先把上一个收掉，免得两个 interval
+ * 抢同一个 taskId、或者把结果填到已经关掉的弹窗里。
  */
 let qrTaskId = '';
 let qrTimer = null;
+let qrSlot = '';
+
+const QR_SLOTS = {
+  new: {
+    box: '#nbQr', code: '#nbQrCode', tip: '#nbQrTip', btn: '#nbQrStart',
+    hint: '用手机 QQ 扫码，确认后会自动填好 AppID / AppSecret',
+    onDone(r) {
+      $('#nbAppId').value = r.appId || '';
+      $('#nbSecret').value = r.appSecret || '';
+      $('#nbQrTip').textContent = `✓ 已拿到 AppID ${r.appId}，填个 ID 就能创建`;
+      $('#nbId').focus();
+    },
+  },
+  cfg: {
+    box: '#cfgQr', code: '#cfgQrCode', tip: '#cfgQrTip', btn: '#cfgQrStart',
+    hint: '用手机 QQ 扫码，确认后自动填到上面，再点「保存设置」生效',
+    onDone(r) {
+      const f = $('#cfgForm');
+      f.appId.value = r.appId || '';
+      // 扫码给的是完整的一对，直接覆盖输入框；留空会被后端当成「不修改」
+      f.appSecret.value = r.appSecret || '';
+      /**
+       * 二维码已经用完了，留着只是一块黑白方块：清掉图纸，让提示单独留着，
+       * 这样用户视线落在「点保存设置」上，而不是再扫一次。
+       */
+      const code = $('#cfgQrCode');
+      if (code) code.innerHTML = '';
+      $('#cfgQrTip').textContent = `✓ 已换成 AppID ${r.appId}，点「保存设置」生效`;
+      $('#cfgSaveTop')?.focus();
+    },
+  },
+};
+
+function qrEls(name) {
+  const s = QR_SLOTS[name];
+  if (!s) return null;
+  return { s, box: $(s.box), code: $(s.code), tip: $(s.tip), btn: $(s.btn) };
+}
 
 function stopQrPoll() {
   if (qrTimer) {
@@ -349,19 +398,21 @@ function stopQrPoll() {
   }
 }
 
+/** 收掉两个位置的二维码，顺带清空任务——打开/关闭弹窗、重扫都走这里 */
 function resetQr() {
   stopQrPoll();
   qrTaskId = '';
-  const box = $('#nbQr');
-  if (box) box.hidden = true;
-  const code = $('#nbQrCode');
-  if (code) code.innerHTML = '';
-  const tip = $('#nbQrTip');
-  if (tip) tip.textContent = '';
+  qrSlot = '';
+  for (const name of Object.keys(QR_SLOTS)) {
+    const els = qrEls(name);
+    if (!els) continue;
+    if (els.box) els.box.hidden = true;
+    if (els.code) els.code.innerHTML = '';
+    if (els.tip) els.tip.textContent = '';
+  }
 }
 
-function drawQr(url) {
-  const code = $('#nbQrCode');
+function drawQr(url, code) {
   if (!code || typeof qrcode !== 'function') return false;
   const qr = qrcode(0, 'M'); // 0 = 自动选版本
   qr.addData(url);
@@ -370,21 +421,25 @@ function drawQr(url) {
   return true;
 }
 
-async function startQr() {
-  const btn = $('#nbQrStart');
-  const box = $('#nbQr');
-  const tip = $('#nbQrTip');
+async function startQr(name = 'new') {
+  const els = qrEls(name);
+  if (!els) return;
+  const { box, tip, btn } = els;
+  if (!box || !tip || !btn) return;
+
+  if (qrSlot && qrSlot !== name) resetQr();
+  qrSlot = name;
   box.hidden = false;
   tip.textContent = '正在生成二维码…';
   btn.disabled = true;
   try {
     const r = await api('/api/bots/qr/start', { method: 'POST', body: '{}' });
     qrTaskId = r.taskId;
-    if (!drawQr(r.qrUrl)) {
+    if (!drawQr(r.qrUrl, els.code)) {
       tip.textContent = '二维码库没加载上，刷新页面再试一次';
       return;
     }
-    tip.textContent = '用手机 QQ 扫码，确认后会自动填好 AppID / AppSecret';
+    tip.textContent = els.s.hint;
     stopQrPoll();
     qrTimer = setInterval(pollQr, 2000);
   } catch (e) {
@@ -396,7 +451,9 @@ async function startQr() {
 
 async function pollQr() {
   if (!qrTaskId) return stopQrPoll();
-  const tip = $('#nbQrTip');
+  const els = qrEls(qrSlot);
+  if (!els || !els.tip) return stopQrPoll();
+  const { tip } = els;
   try {
     const r = await api('/api/bots/qr/poll', {
       method: 'POST',
@@ -404,14 +461,9 @@ async function pollQr() {
     });
     if (r.status === 'pending') return;
     stopQrPoll();
-    if (r.status === 'done') {
-      $('#nbAppId').value = r.appId || '';
-      $('#nbSecret').value = r.appSecret || '';
-      tip.textContent = `✓ 已拿到 AppID ${r.appId}，填个 ID 就能创建`;
-      $('#nbId').focus();
-    } else {
-      tip.textContent = r.message || '二维码失效了，重新生成一个';
-    }
+    qrTaskId = '';
+    if (r.status === 'done') els.s.onDone(r);
+    else tip.textContent = r.message || '二维码失效了，重新生成一个';
   } catch (e) {
     stopQrPoll();
     if (tip) tip.textContent = e.message;
@@ -473,7 +525,9 @@ async function submitNewBot() {
   }
 }
 
-$('#nbQrStart')?.addEventListener('click', startQr);
+// 传箭头函数：直接把 startQr 挂上去会把 click 事件当成位置名传进去
+$('#nbQrStart')?.addEventListener('click', () => startQr('new'));
+$('#cfgQrStart')?.addEventListener('click', () => startQr('cfg'));
 
 $('#botTrigger')?.addEventListener('click', () => {
   if ($('#botMenu').hidden) openBotMenu();
@@ -1715,6 +1769,8 @@ $('#cfgForm').addEventListener('submit', async (e) => {
       : (renamed ? `已保存，机器人昵称同步为「${r.name}」` : '已保存') +
         (payload.appId ? '' : '（AppID 为空）');
     f.appSecret.value = '';
+    // 扫码换凭证的那条提示到此为止：凭证已落盘，再挂着「点保存设置」就是误导
+    resetQr();
     clearCfgDirty();
     setTimeout(() => ($('#cfgMsg').textContent = ''), 4000);
     await loadBots();

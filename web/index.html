@@ -741,8 +741,19 @@ curl 'https://bot.q.qq.com/cgi-bin/v2/info/list_bots' \
             </select>
           </label>
         </div>
+        <!--
+          扫码换凭证：AppSecret 会被重置、或者整只机器人换了账号时，
+          与其去 q.qq.com 后台翻两个值再复制，不如扫一下。
+          和「新建机器人」用的是同一个官方绑定接口，区别只是扫完**不建新机器人**，
+          把 AppID / AppSecret 填进当前这张表单里——仍然要点「保存设置」才生效。
+        -->
+        <div class="nb-qr" id="cfgQr" hidden>
+          <div class="nb-qr-code" id="cfgQrCode"></div>
+          <div class="nb-qr-tip" id="cfgQrTip"></div>
+        </div>
         <div class="cred-actions">
           <span class="hint" id="cfgMsgTop"></span>
+          <button type="button" class="btn" id="cfgQrStart">扫码更新凭证</button>
           <button type="submit" class="btn" id="cfgSaveTop">保存设置</button>
         </div>
         <div class="full intents-block">

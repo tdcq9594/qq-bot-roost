@@ -8,9 +8,9 @@
 
 <img src="https://img.shields.io/badge/Node.js-22.13%2B-339933?logo=node.js&logoColor=white" alt="Node.js 22.13+">
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
-<img src="https://img.shields.io/badge/tests-1273%20passed-brightgreen" alt="测试 1273 项">
+<img src="https://img.shields.io/badge/tests-1284%20passed-brightgreen" alt="测试 1284 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
-<img src="https://img.shields.io/badge/version-1.1.1-blueviolet" alt="版本 1.1.1">
+<img src="https://img.shields.io/badge/version-1.1.4-blueviolet" alt="版本 1.1.4">
 <img src="https://img.shields.io/badge/license-AGPL--3.0--only-blue" alt="AGPL-3.0-only">
 <a href="https://github.com/tdcq9594/qq-bot-roost/actions"><img src="https://img.shields.io/github/actions/workflow/status/tdcq9594/qq-bot-roost/ci.yml?branch=master" alt="CI"></a>
 
@@ -184,6 +184,10 @@ node -v      # 需要 >= 22.13
 1. <https://q.qq.com> → 创建机器人
 2. 「开发设置」里拿到 **AppID** 和 **AppSecret**
 3. **关键**：「功能配置」里开通 **群聊** 能力，否则连接会被拒（关闭码 4014）
+
+**换凭证（1.1.4+）**：AppSecret 被开放平台重置、或者整只机器人换了账号时，
+进面板「**配置 → 连接凭证**」点「**扫码更新凭证**」，扫完 AppID / AppSecret 填进输入框，
+再点「保存设置」生效——不用删机器人重建（重建会带走配置、权限、群档案和插件存档）。
 
 ### 3. 启动
 
@@ -502,9 +506,9 @@ openid 完全不同。共享 `roles.json` 等于所有权限记录全部对不�
 ## 开发
 
 ```bash
-npm test              # 自检 682 + qrlogin 8 + deps 11，另跑 17 个 node:test 文件（共 216 项）
-npm run test:e2e      # 端到端 168 项（起 mock 服务打全部接口，跑在临时目录）
-npm run test:all      # 全量约 618 项：自检 + 扫码 + 依赖 + e2e（真机驱动要真机，没配就跳过）
+npm test              # 自检 686 + qrlogin 8 + deps 11 + npm-registry 12 + deps-external 4，另跑 52 个 node:test 文件（共 563 项）
+npm run test:e2e      # 端到端 253 项（起 mock 服务打全部接口，跑在临时目录）
+npm run test:all      # 全量约 1537 项：自检 + 扫码 + 依赖 + e2e（真机驱动要真机，没配就跳过）
 npm run check:secrets # 扫硬编码凭据（CI 也跑这个，提交前建议过一遍）
 node src/main.js --mock          # 不连 QQ，命令行发假消息调插件
 node src/main.js --mock --serve  # 只开面板，调界面
