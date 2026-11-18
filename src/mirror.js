@@ -254,8 +254,22 @@ export function mirrorCandidates(url) {
 /**
  * 带镜像兜底的 fetch。
  *
- * 只有「网络层失败 / 5xx / 403 限流」才换源；4xx（除了 403）说明地址本身有问题，
- * 换源也没用，直接返回给调用方判断。
+ * 默认策略：只有「网络层失败 / 5xx / 403 限流」才换源；4xx（除了 403）说明地址
+ * 本身有问题，换源也没用，直接返回给调用方判断。
+ *
+ * `opts.retry4xx` 打开后，4xx 也会继续试后面的候选；**所有候选都 4xx 时把第一个
+ * 4xx 原样返回**（不抛错，调用方原有判断照旧生效）。
+ *
+ * 为什么需要这个开关：市场索引地址是**落盘**的，仓库迁移（个人仓 → 组织仓）后
+ * 用户配置里还留着旧 owner 的地址。这层旧路径目前**还活着**——2026-11-19 实测
+ * `zeit/next.js`、`sindresorhus/chalk`、`facebookincubator/create-react-app`
+ * 这些 2018~2020 年转移/改名的仓库，旧 owner 的 raw 路径仍返回 200——但那是
+ * GitHub 的历史重定向，官方文档没有任何承诺；而 Gitee 镜像只建在老 owner 下，
+ * 新 owner 拼出来的 gitee 地址是不存在的。所以 404 也换源兜一层，
+ * 别把「GitHub 恰好还记得」当成协议。
+ *
+ * 默认不开：A 源 404 不等于 B 源有同名内容，对第三方仓库静默换成别人的索引
+ * 比报错更危险，所以由调用方（官方市场地址）显式声明。
  *
  * **3xx 必须算成功。** 这是踩过的坑：`checkUpdate` 用 `redirect: 'manual'`
  * 去读 `releases/latest` 的 302 Location，而 `Response.ok` 只对 2xx 为真。
@@ -265,11 +279,15 @@ export function mirrorCandidates(url) {
  *
  * @param {string} url
  * @param {RequestInit} [init]
+ * @param {{retry4xx?: boolean}} [opts]
  * @returns {Promise<Response>}
  */
-export async function fetchViaMirror(url, init = {}) {
+export async function fetchViaMirror(url, init = {}, opts = {}) {
   const candidates = mirrorCandidates(url);
+  const retry4xx = opts.retry4xx === true;
   let lastErr = null;
+  /** 第一个 4xx 响应：候选全灭时原样交给调用方 */
+  let clientErr = null;
 
   for (let i = 0; i < candidates.length; i++) {
     const target = candidates[i];
@@ -281,16 +299,23 @@ export async function fetchViaMirror(url, init = {}) {
        */
       const res = await netFetch(target, init);
       // 3xx：调用方多半在等 Location，不能当失败
-      const accepted =
-        res.ok ||
-        (res.status >= 300 && res.status < 400) ||
-        (res.status >= 400 && res.status < 500 && res.status !== 403);
-      if (accepted) {
+      if (res.ok || (res.status >= 300 && res.status < 400)) {
         // 成功了，记一下是哪个源（只有 auto 且不是直连时才记）
         if (res.ok && i > 0) rememberPick(target, url);
+        // 之前攒下的 4xx 不要了，放掉连接
+        await discard(clientErr);
+        clientErr = null;
         return res;
       }
+
       lastErr = new Error(`HTTP ${res.status}`);
+      const isClientErr = res.status >= 400 && res.status < 500 && res.status !== 403;
+      if (isClientErr && !retry4xx) return res; // 老行为：地址问题，不折腾
+      if (isClientErr) {
+        // 留着第一个，后面的放掉，别攒一堆连接
+        if (!clientErr) clientErr = res;
+        else await discard(res);
+      }
     } catch (e) {
       lastErr = e;
     }
@@ -299,7 +324,18 @@ export async function fetchViaMirror(url, init = {}) {
     }
   }
 
+  if (clientErr) return clientErr;
   throw lastErr ?? new Error('所有下载源都失败了');
+}
+
+/** 把不要的响应体放掉，别占着连接 */
+async function discard(res) {
+  if (!res) return;
+  try {
+    await res.body?.cancel();
+  } catch {
+    /* 已经关了 */
+  }
 }
 
 /** 从成功的地址反推是哪个源，记下来下次优先 */

@@ -181,8 +181,15 @@ const GLOBAL_DEFAULTS = {
     autoInstallDeps: true,
     /** Go 插件用的 go 可执行文件路径，留空则用 PATH 里的 go 或 GO_BIN 环境变量 */
     goBin: '',
-    /** 插件市场索引地址，换成你自己的插件仓库即可 */
-    marketUrl: 'https://raw.githubusercontent.com/tdcq9594/qq-bot-roost-plugins/main/index.json',
+    /**
+     * 插件市场索引地址，换成你自己的插件仓库即可。
+     *
+     * **默认留空**：真正的默认值只有一处——`src/plugin/market.js` 的
+     * `DEFAULT_INDEX_URL`，加载配置时由 `normalizeMarketUrl` 填进来。
+     * 这里再写一遍就等于埋了个「改一边忘了另一边」的坑：仓库迁移（owner 变了）
+     * 时改了 market.js 没改这里，老用户照旧拿到旧地址，而且查不出原因。
+     */
+    marketUrl: '',
     /**
      * 插件热重载：改完插件代码存盘两秒后自动生效。
      * 默认开——开发插件时不用反复重启或点「重载」。
@@ -536,6 +543,28 @@ const exists = (p) =>
 /* 全局配置                                                            */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 规范化插件市场地址（历史官方地址 → 当前官方地址）。
+ *
+ * **为什么用动态 import**：`market.js → semver.js → config.js` 是一条真实存在的
+ * 依赖链，静态引入 market.js 会把 config.js 卷进循环依赖，模块初始化阶段可能读到
+ * 还没赋值的绑定。放在函数体里引入时，本模块已经求值完毕，循环就断了。
+ *
+ * 失败就按原值用——地址规范化不该让框架起不来。
+ *
+ * @param {string} [url]
+ * @returns {Promise<string>}
+ */
+async function normalizeOfficialMarketUrl(url) {
+  try {
+    const { normalizeMarketUrl } = await import('./plugin/market.js');
+    return normalizeMarketUrl(url);
+  } catch (e) {
+    log.debug(`市场地址规范化失败，按原值使用：${e.message}`);
+    return url;
+  }
+}
+
 export async function loadGlobalConfig() {
   await ensureDirs();
   const file = (await readJson(PATHS.globalConfig)) ?? {};
@@ -546,6 +575,13 @@ export async function loadGlobalConfig() {
     cfg.webui.accessKey = cfg.webui.token;
     delete cfg.webui.token;
   }
+
+  /**
+   * 市场地址：`plugins.marketUrl` 是落盘的，改默认值救不了老用户——他们配置里
+   * 存着旧 owner 的地址，出问题也不知道原因。这里统一换成当前官方地址（幂等），
+   * 面板里显示的也就是新地址。用户自己填的第三方源原样保留。
+   */
+  cfg.plugins.marketUrl = await normalizeOfficialMarketUrl(cfg.plugins.marketUrl);
 
   /**
    * 环境变量覆盖（容器部署用）。
