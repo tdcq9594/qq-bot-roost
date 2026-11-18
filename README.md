@@ -492,7 +492,6 @@ openid 完全不同。共享 `roles.json` 等于所有权限记录全部对不�
 | [DSH 接入指南](docs/DSH接入.md) | 装进 DeepSeek Harness，用 AI 管机器人：安装、配置、验证、排查 |
 | [AI 宿主接入](docs/AI宿主接入.md) | 外部 AI 驱动 Roost：SSE 消息下行、通用能力上行、能力清单 |
 | [宿主协议 v1](docs/宿主协议v1.md) | 框架自有外接协议全文：传输、握手、方法表、scope、补拉与鉴权 |
-| [OneBot v11 兼容层](docs/OneBot兼容层设计.md) | 把 Roost 当 OneBot 服务端用：能力表、ID 映射、语音、鉴权 |
 
 ### 相关仓库
 

@@ -288,7 +288,7 @@ const BOT_DEFAULTS = {
     enabled: false,
     host: '127.0.0.1',
     port: 0,
-    /** 空 = 拒绝启用（见 docs/OneBot兼容层设计.md 的校验表） */
+    /** 空 = 拒绝启用：OneBot 端点能执行任意动作，不带 token 不许开 */
     token: '',
     /** 机器人 QQ 号。官方接口拿不到，只能填；未绑定身份时 ID 映射会降级成合成号 */
     selfUin: '',

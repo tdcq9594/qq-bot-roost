@@ -108,19 +108,49 @@ async function updatedButNotRestarted(pkgPath = path.join(ROOT, 'package.json'))
 /**
  * 拉 SHA256SUMS，得到「版本 → 内容指纹」的映射。
  *
- * 两个源都试：GitHub raw（经下载源改写）和 Gitee raw。任何一边拿到都行，
- * 因为指纹是「代码内容」的，与从哪个源下载无关。
+ * **清单和它的签名必须来自同一个发布快照**，所以这里按「成对」的候选走，
+ * 而不是「清单一个源、签名另一个源」：
  *
+ *   SHA256SUMS 是**追加式**的——每发一版就多一行。Release 里的 `.sig`
+ *   签的是那一版发布时的全文，而 master 上的全文通常已经多出几行。
+ *   混着取必然验签失败，而且报出来是「内容与签名不一致」，
+ *   看着像被篡改，实际只是取错了快照——这种假警报最消耗信任。
+ *
+ * 顺序：
+ *   1. 目标版本的 Release 附件（`releases/download/v<ver>/`）——自洽、可复现
+ *   2. GitHub master 全量——Release 还没建、或附件缺失时的退路
+ *   3. Gitee master 全量——国内直连 GitHub 不通时的退路（Release 附件 Gitee 镜像不到）
+ *
+ * 指纹是「代码内容」的，与从哪个源下载无关，所以任一组拿到都能用。
+ *
+ * @param {string} [version] 目标版本；传了就优先试它的 Release 附件
  * @returns {Promise<{map: Map<string,string>, trust: object}>} 版本号 → 64 位十六进制，以及验签结论
  */
-async function fetchSums() {
-  const urls = [
-    `https://raw.githubusercontent.com/${REPO}/master/SHA256SUMS`,
-    `https://gitee.com/${REPO}/raw/master/SHA256SUMS`,
-  ];
-  for (const u of urls) {
+async function fetchSums(version) {
+  const v = String(version ?? '').replace(/^v/i, '');
+  const groups = [];
+
+  if (v) {
+    groups.push({
+      sums: `https://github.com/${REPO}/releases/download/v${v}/SHA256SUMS`,
+      sig: `https://github.com/${REPO}/releases/download/v${v}/SHA256SUMS.sig`,
+      label: `Release v${v}`,
+    });
+  }
+  groups.push({
+    sums: `https://raw.githubusercontent.com/${REPO}/master/SHA256SUMS`,
+    sig: `https://raw.githubusercontent.com/${REPO}/master/SHA256SUMS.sig`,
+    label: 'GitHub master',
+  });
+  groups.push({
+    sums: `https://gitee.com/${REPO}/raw/master/SHA256SUMS`,
+    sig: `https://gitee.com/${REPO}/raw/master/SHA256SUMS.sig`,
+    label: 'Gitee master',
+  });
+
+  for (const g of groups) {
     try {
-      const res = await fetchViaMirror(u, {
+      const res = await fetchViaMirror(g.sums, {
         headers: { 'User-Agent': 'qq-bot-roost-updater' },
         signal: AbortSignal.timeout(8000),
       });
@@ -133,16 +163,25 @@ async function fetchSums() {
       }
       if (!map.size) continue;
 
+      // 目标版本不在这份清单里：说明拿到的是旧快照（比如 Release 附件比目标旧），
+      // 换下一组。继续用它会得到「没有指纹 → 拒绝更新」的错误结论。
+      if (v && !map.has(v)) {
+        log.debug(`${g.label} 的 SHA256SUMS 里没有 v${v}，换下一个源`);
+        continue;
+      }
+
       /**
        * 验签。指纹和代码同仓，只验指纹等于「让被篡改的清单自己证明自己」——
        * 必须由独立密钥签过的 `SHA256SUMS.sig` 背书。
+       *
+       * 签名**只从同一组取**：见上面的说明，跨组混用必然对不上。
        *
        * 本版只记录结论、不阻断（`enforce` 还没接进来）；`bad` 要打 error，
        * 因为它意味着「清单内容和签名对不上」，比「没签名」严重得多。
        */
       let sigText = '';
       try {
-        const sres = await fetchViaMirror(`${u}.sig`, {
+        const sres = await fetchViaMirror(g.sig, {
           headers: { 'User-Agent': 'qq-bot-roost-updater' },
           signal: AbortSignal.timeout(8000),
         });
@@ -156,8 +195,8 @@ async function fetchSums() {
         trust: resolveTrust({}),
         kind: 'SHA256SUMS',
       });
-      if (trust.status === 'bad' || trust.status === 'invalid') log.error(trust.why);
-      else if (trust.status === 'ok') log.info('SHA256SUMS 签名校验通过');
+      if (trust.status === 'bad' || trust.status === 'invalid') log.error(`${g.label}：${trust.why}`);
+      else if (trust.status === 'ok') log.info(`SHA256SUMS 签名校验通过（${g.label}）`);
 
       return { map, trust };
     } catch {
@@ -173,7 +212,9 @@ async function fetchSums() {
  */
 async function fetchTreeSha256(version) {
   try {
-    const { map, trust } = await fetchSums();
+    // 把目标版本传下去：能拿到它的 Release 附件时，清单与签名天然同源，
+    // 不受「master 上又多了几行」影响。
+    const { map, trust } = await fetchSums(version);
     return { sha: map.get(String(version).replace(/^v/, '')) ?? null, trust };
   } catch {
     return { sha: null, trust: { status: 'unavailable', why: '查询指纹失败' } };

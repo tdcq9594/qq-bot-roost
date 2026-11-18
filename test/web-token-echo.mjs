@@ -19,6 +19,10 @@
  *
  * 真实 HTTP 行为的验证由临时探针完成（见会话记录），本文件负责防止以后
  * 有人把明文回传 / 常驻死按钮悄悄加回来。
+ *
+ * 早先这里还断言「设计文档与实现一致」（读 `docs/OneBot兼容层设计.md`）；
+ * 该设计文档 2026-11-19 起不入库（归档在开发机），断言随之移除——
+ * 现在以 `src/` `web/` 的实际代码为唯一事实来源。
  */
 
 import test from 'node:test';
@@ -68,7 +72,6 @@ const server = read('src/web/server.js');
 const html = read('web/index.html');
 const app = read('web/app.js');
 const css = read('web/style.css');
-const doc = read('docs/OneBot兼容层设计.md');
 
 for (const [name, marker] of [
   ['/api/host', "if (pathname === '/api/host' && req.method === 'GET') {"],
@@ -176,12 +179,4 @@ test('「生成」仍是唯一的明文出口，并让复制按钮出现', () =>
 test('面板输入不回填旧 token，保存时空值不会被误当成清除', () => {
   assert.doesNotMatch(app, /\.value = cfg\.token/, '输入框不能指望 GET 回填明文');
   assert.match(app, /if \(token\) body\.token = token/, '空值 = 不传，不能变成清空');
-});
-
-test('设计文档与实现一致：不再写「回环给明文」', () => {
-  assert.doesNotMatch(doc, /回环请求给明文/);
-  assert.doesNotMatch(doc, /非本机访问拿不到明文/);
-  assert.match(doc, /一律只给 `tokenSet`/);
-  assert.match(doc, /「显示」按钮删掉/);
-  assert.match(doc, /btn\.hidden = !input\.value/, '文档要写清显隐机制');
 });

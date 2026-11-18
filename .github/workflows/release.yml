@@ -19,6 +19,31 @@ name: 发版
 # 为什么建 tag / Release / npm 都在 release 这一个 job：
 #   GITHUB_TOKEN 触发的事件不会启动别的 workflow（dispatch 除外），
 #   所以不能「建 tag → 触发另一个 job 建 Release」，必须一次做完。
+#
+# 签名怎么走（2026-11-19 定为「随 Release 发布」）：
+#   `SHA256SUMS` 和 `SHA256SUMS.sig` 作为 **Release 附件**发布，updater 优先从
+#   `releases/download/v<ver>/` **成对**拉取。这样不必往 master 回写签名——
+#   个人仓的 GITHUB_TOKEN 在 require PR 的保护分支上推不动，而个人仓又配不了
+#   bypass（实测 classic 接口 500、ruleset 422，文档也写明 bypass 列表仅组织仓可用），
+#   回写这条路根本走不通。
+#
+#   签名已于 2026-11-19 改成 **CI 全自动**（主人定）：
+#     仓库变量 SIGN_IN_CI=true + Release environment secret TRUST_PRIVATE_PEM。
+#     私钥只在 release job 里、人工批准 environment 之后才注入，用完立刻删，
+#     不落盘、不进日志。发版机上不必再跑 scripts/sign.mjs。
+#   这个 job 负责：
+#     ① 代签——SHA256SUMS 变了就重签，签名仍有效则跳过（resume 幂等）；
+#     ② 验签门禁——签完用内嵌公钥验一遍，私钥公钥不配对就红，别让坏版本出去；
+#     ③ 把清单和签名作为附件挂到 Release 上，供 updater 拉取。
+#   Ed25519 是确定性签名，CI 签出的 `.sig` 与本地签的字节完全相同，
+#   所以这个开关不改变任何验证结果，只改变「谁执行」。
+#
+#   仓库里不再跟踪 `SHA256SUMS.sig`（2026-11-19 删除并入 .gitignore）：签名只存在
+#   于 Release 附件里，每次发版都是新的。留一份在仓库会随版本迭代过期，让走
+#   master / Gitee 路径的用户拿到 `bad`（"内容和签名对不上"，看着像被篡改）；
+#   现在这条路拿到的是 `unsigned`（"没有签名文件"），诚实且不误导。
+#   代价：Gitee 镜像、很老的 updater 拿不到签名。`enforce` 没开，只影响日志。
+#   等迁到组织仓（能用 bypass 直推 master）时再把 master 路径闭环。
 
 on:
   push:
@@ -58,18 +83,36 @@ jobs:
 
           # 三段式判定：看当前版本的 tag 在不在、指向哪。
           # 递增校验在下面的独立块做，这里只认「这个版本的 tag 建没建」，不重复比大小。
+          mode=''
           if git rev-parse -q --verify "refs/tags/v$ver" >/dev/null 2>&1; then
             tag_sha=$(git rev-list -n 1 "v$ver")
             if [ "$tag_sha" = "$GITHUB_SHA" ]; then
               echo "v$ver 的 tag 已指向当前提交 → resume"
-              echo "mode=resume" >> "$GITHUB_OUTPUT"
+              mode=resume
             else
               echo "v$ver 的 tag 指向别的提交，当前是普通改动 → skip"
-              echo "mode=skip" >> "$GITHUB_OUTPUT"
+              mode=skip
             fi
           else
             echo "v$ver 尚无 tag → release"
-            echo "mode=release" >> "$GITHUB_OUTPUT"
+            mode=release
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+
+          # skip 时显式说清「为什么没发版」——否则这类「改了代码却没发版」的情况
+          # 完全静默：两个 PR 都 bump 到同一版本时，后合并的那个就落在这里，
+          # 改动进了 master 却没有对应版本，事后很难发现。
+          if [ "$mode" = "skip" ]; then
+            {
+              echo "### 本次不发版（skip）"
+              echo ""
+              echo "版本号是 \`$ver\`，但 tag \`v$ver\` 已经存在且**不指向**这次提交。"
+              echo ""
+              echo "两种可能："
+              echo "- 这是发版后的普通改动（没 bump 版本）——正常，无需处理；"
+              echo "- 你 bump 到的版本号已被别人先发了——本次改动**没有**对应版本，"
+              echo "  要发就再 bump 一个更高的版本号重开 PR。"
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
 
           # 递增校验（发版必须增版本）：取已发布的最大 vX.Y.Z，用 sort -V 比数值
@@ -108,15 +151,17 @@ jobs:
         run: npm run sums:verify
 
   release:
-    name: 建 tag / Release / 发 npm
+    name: 建 tag / 验签 / Release / 发 npm / 发后自检
     needs: check
     if: needs.check.outputs.mode != 'skip'
     runs-on: ubuntu-latest
     environment: Release       # required reviewers = 主人；合并后仍需人工点批准才发
     permissions:
-      contents: write          # 建 tag + Release
-      id-token: write          # npm OIDC trusted publishing
+      contents: write          # 建 tag + Release + 上传 Release 附件
+      id-token: write          # npm OIDC trusted publishing / dist-tag
     steps:
+      # 默认 checkout（触发本次运行的提交）。不指定 ref、不用 PAT：
+      # 这个 job 不再往分支上写任何东西，签名走 Release 附件。
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -129,11 +174,113 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           package-manager-cache: false   # 官方建议：发布构建不要缓存
 
+      - name: 升级 npm（OIDC 改 dist-tag 要 >= 11.21.0，Node 24 自带的版本不够新）
+        shell: bash
+        run: npm i -g npm@^11.21.0
+
+      # CI 代签（2026-11-19 起默认开启：仓库变量 SIGN_IN_CI=true）。
+      # 私钥来自 Release environment 的 secret，只有人工批准 environment 后才注入。
+      # 想退回本地签：把 SIGN_IN_CI 改成 false，发版 PR 里带上本地签的 .sig 即可。
+      - name: CI 代签（SIGN_IN_CI=true 时）
+        if: vars.SIGN_IN_CI == 'true'
+        shell: bash
+        env:
+          TRUST_PRIVATE_PEM: ${{ secrets.TRUST_PRIVATE_PEM }}
+        run: |
+          if [ -z "$TRUST_PRIVATE_PEM" ]; then
+            echo "::error::SIGN_IN_CI=true 但 Release environment 缺 secret TRUST_PRIVATE_PEM" >&2
+            echo "  把发版机上的 keys/trust-private.pem 内容加进去，或把 SIGN_IN_CI 改回 false。" >&2
+            exit 1
+          fi
+          key="$RUNNER_TEMP/trust-private.pem"
+          umask 077
+          # 网页粘贴的 pem 常带 CRLF / 首尾空行 / 行尾空格；Ed25519 只有 3 行，
+          # 多一个空行 OpenSSL 就报看不懂的 "no start line"，先清一遍。
+          printf '%s\n' "$TRUST_PRIVATE_PEM" \
+            | sed -e 's/\r$//' -e 's/[[:space:]]*$//' -e '/^[[:space:]]*$/d' > "$key"
+          node -e "
+            const { createPrivateKey } = require('node:crypto');
+            const fs = require('node:fs');
+            try {
+              const k = createPrivateKey(fs.readFileSync(process.argv[1], 'utf8'));
+              console.log('私钥可解析：' + k.asymmetricKeyType);
+            } catch (e) {
+              console.error('::error::私钥解析失败：' + e.message);
+              process.exit(1);
+            }
+          " "$key"
+
+          # 幂等：工作区已有有效签名就跳过重签。
+          # 正常情况下仓库不跟踪 .sig，CI checkout 里没有这个文件 → 每次现签；
+          # 留着这个判断是为了「退回本地签」时（.sig 用 git add -f 强制提交）不重复签，
+          # 以及 resume 重跑时不白改一次文件。
+          if node --input-type=module -e "
+            import fs from 'node:fs';
+            import { checkTrust, normalizeText, EMBEDDED_PUBKEY } from './src/trust.js';
+            const r = checkTrust({
+              data: normalizeText(fs.readFileSync('SHA256SUMS', 'utf8')),
+              sigText: fs.existsSync('SHA256SUMS.sig') ? fs.readFileSync('SHA256SUMS.sig', 'utf8') : '',
+              trust: { pubkey: EMBEDDED_PUBKEY },
+              kind: 'SHA256SUMS',
+            });
+            process.exit(r.status === 'ok' ? 0 : 1);
+          "; then
+            echo "SHA256SUMS.sig 已存在且有效，跳过重签"
+          else
+            node scripts/sign.mjs SHA256SUMS --key "$key" --key-id "roost-$(date +%Y-%m)"
+          fi
+
+      - name: 清掉私钥
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/trust-private.pem"
+
+      # 验签门禁：**签名必须与当前 SHA256SUMS 匹配**。
+      #
+      # 拦的是四类真出过或很容易出的事故：
+      #   ① 改了 sums 忘了重签（最常见）——签名还是上一版内容的
+      #   ② 忘了签名，.sig 根本没更新
+      #   ③ 密钥用错（换过 key 但没同步公钥）
+      #   ④ .sig 被误改
+      #
+      # 注意 PR 阶段的 CI 不能做这个检查：那时 SHA256SUMS 已改、.sig 还是上一版，
+      # 必然红。只有到了这里（工作区就是将要发布的内容 + 签名已就位）才准。
+      - name: 验签门禁（SHA256SUMS.sig 必须有效）
+        shell: bash
+        env:
+          SIGN_IN_CI: ${{ vars.SIGN_IN_CI }}
+        run: |
+          node --input-type=module -e "
+            import fs from 'node:fs';
+            import { checkTrust, normalizeText, EMBEDDED_PUBKEY } from './src/trust.js';
+            const text = fs.readFileSync('SHA256SUMS', 'utf8');
+            let sigText = '';
+            try { sigText = fs.readFileSync('SHA256SUMS.sig', 'utf8'); } catch {}
+            const r = checkTrust({ data: normalizeText(text), sigText, trust: { pubkey: EMBEDDED_PUBKEY }, kind: 'SHA256SUMS' });
+            if (r.status === 'ok') {
+              console.log('OK：SHA256SUMS 签名有效（keyId ' + (r.keyId || '未标注') + '）');
+              process.exit(0);
+            }
+            const inCi = process.env.SIGN_IN_CI === 'true';
+            console.error('::error::验签失败：' + r.status + ' — ' + r.why);
+            console.error('');
+            if (inCi) {
+              console.error('当前 SIGN_IN_CI=true，签名本应由上一步在 CI 里生成。请查：');
+              console.error('  ① Release environment 的 secret TRUST_PRIVATE_PEM 是否还是那把配对私钥');
+              console.error('  ② 上一步「CI 代签」的日志里 sign.mjs 有没有报错');
+              console.error('  ③ SHA256SUMS 是否被上一步之后的其他步骤改动过');
+            } else {
+              console.error('用户会因此拒绝自动更新。修法：在发版机上重签并一起提交');
+              console.error('  node scripts/sign.mjs SHA256SUMS --key keys/trust-private.pem --key-id roost-YYYY-MM');
+            }
+            process.exit(1);
+          "
+
       - name: 生成 Release 正文（check job 的临时目录不共享，这里重取）
         shell: bash
         run: awk '/^## v/{n++} n==1' RELEASE_NOTES.md > "$RUNNER_TEMP/release-body.md"
 
-      - name: 建 tag（已存在则跳过）
+      - name: 建 tag（已存在则跳过 · 指向本次发布的提交）
         if: needs.check.outputs.mode == 'release'
         shell: bash
         run: |
@@ -160,13 +307,99 @@ jobs:
           fi
           gh release create "$tag" --title "${{ needs.check.outputs.title }}" --notes-file "$RUNNER_TEMP/release-body.md"
 
-      - name: 发 npm（OIDC trusted publishing）
+      # 清单和签名**成对**挂在 Release 上，updater 优先从这里拉（见 src/updater.js 的 fetchSums）。
+      #
+      # 为什么不从 tag 的 tarball 里取：签名覆盖的是整份 SHA256SUMS 正文，而这份文件
+      # 是追加式的。成对发布在 Release 上，才能保证「这个版本的清单 + 它的签名」
+      # 永远一起可取，且不会被后续版本改写。
+      #
+      # --clobber：resume 重跑时覆盖已有附件，不会因为「附件已存在」而失败。
+      - name: 上传清单与签名到 Release 附件
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 403 previously published = 已写过，不是失败，别换版本号重发。
-          # 这里不吞错误：真失败要让审批人看见，人工判断后再决定补发。
+          tag="v${{ needs.check.outputs.version }}"
+          gh release upload "$tag" SHA256SUMS SHA256SUMS.sig --clobber
+          echo "已上传 SHA256SUMS 与 SHA256SUMS.sig 到 $tag"
+
+      - name: 发 npm（OIDC trusted publishing · 已发布则跳过）
+        shell: bash
+        env:
+          VER: ${{ needs.check.outputs.version }}
+        run: |
+          pkg="qq-bot-roost"
+          # 幂等：resume 重跑 / 手动 dispatch 时这一版已经发过了，npm 只会回
+          # `403 previously published`。那不是失败——先查一次，已发布就跳过，
+          # 否则「补建 Release」这种重跑会被这一步拦成红，看着像发版坏了。
+          published=$(npm view "$pkg@$VER" version 2>/dev/null || true)
+          if [ "$published" = "$VER" ]; then
+            echo "$pkg@$VER 已在 npm 上，跳过发布（幂等）"
+            exit 0
+          fi
           if ! npm publish --access public; then
-            echo "npm publish 失败。若是 403 previously published 说明该版本已入库（幂等正常）；" >&2
+            echo "npm publish 失败。若日志是 403 previously published，说明并发/刚已入库，重跑即可；" >&2
             echo "其余失败需人工排查，不要在 workflow 里改版本号重发。" >&2
             exit 1
           fi
+
+      - name: 发后自检：Release + npm 版本都指向新版本
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ver="${{ needs.check.outputs.version }}"
+          pkg="qq-bot-roost"
+          # registry 和 GitHub 都有传播延迟，轮询等它们追上（12 次 × 15s ≈ 3 分钟）
+          ok=0
+          for i in $(seq 1 12); do
+            pub=$(npm view "$pkg" version 2>/dev/null || true)
+            rel=$(gh api repos/${{ github.repository }}/releases/latest --jq .tag_name 2>/dev/null || true)
+            if [ "$pub" = "$ver" ] && [ "$rel" = "v$ver" ]; then ok=1; break; fi
+            echo "等待传播（$i/12）：npm=$pub release=$rel"
+            sleep 15
+          done
+          if [ "$ok" != 1 ]; then
+            echo "::error::发后自检失败：npm 或 releases/latest 没指向 v$ver，去核对再决定是否补发" >&2
+            exit 1
+          fi
+          echo "OK：npm 与 releases/latest 都是 v$ver"
+
+          # 签名附件必须真的挂上去了——updater 靠它验签，缺了等于签名白做。
+          # 单独查而不是只看「上传 step 没报错」：gh upload 报成功但附件被吞
+          # （网络抖动、Release 正在编辑）是有过的情况。
+          assets=$(gh release view "v$ver" --json assets --jq '.assets[].name' 2>/dev/null | tr '\n' ' ')
+          for need in SHA256SUMS SHA256SUMS.sig; do
+            case " $assets " in
+              *" $need "*) ;;
+              *)
+                echo "::error::Release v$ver 缺附件 $need（现有：${assets:-无}）——updater 会拿不到指纹或验不了签" >&2
+                exit 1
+                ;;
+            esac
+          done
+          echo "OK：Release 附件齐全（$assets）"
+
+      - name: beta 标签对齐（OIDC dist-tag · 幂等）
+        shell: bash
+        run: |
+          pkg="qq-bot-roost"
+          beta=$(npm view "$pkg" dist-tags.beta 2>/dev/null || true)
+          latest=$(npm view "$pkg" dist-tags.latest 2>/dev/null || true)
+          if [ -z "$beta" ]; then
+            echo "该包没有 beta 标签，跳过对齐"
+            exit 0
+          fi
+          if [ "$beta" = "$latest" ]; then
+            echo "beta 已等于 latest=$latest，无需对齐"
+            exit 0
+          fi
+          # 规则：正式版高于 beta 就把 beta 指到最新版；beta 更高就保留测试通道不动。
+          # 预发布号（1.2.3-beta.1）按 sort -V 也比正式版大，正好落入「不动」。
+          bigger=$(printf '%s\n%s\n' "$beta" "$latest" | sort -V | tail -1)
+          if [ "$bigger" = "$beta" ]; then
+            echo "beta=$beta 不低于 latest=$latest，保留测试通道不动"
+            exit 0
+          fi
+          npm dist-tag add "$pkg@$latest" beta
+          echo "beta 已从 $beta 对齐到 $latest"
