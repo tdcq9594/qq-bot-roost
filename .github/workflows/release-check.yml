@@ -39,3 +39,48 @@ jobs:
             echo "tag 和 package.json 的版本号不一致，发布出去的包会自报错误版本"
             exit 1
           fi
+
+  # 推 tag 自动建 GitHub Release——七步里的第⑤步交给机器，根治「只推 tag 没建 Release
+  # 导致 releases/latest 停在旧版」。插件仓 ci.yml 现在从 releases/latest 取框架版本，
+  # 漏建 Release 会让它一直测旧框架，所以这一步必须可靠。
+  # needs: verify —— 指纹或版本号不对就不建，别把坏版本推到 latest。
+  release:
+    name: 建 GitHub Release
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 建 Release 需要；verify job 保持默认只读
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 生成 Release 标题与正文
+        shell: bash
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          head_line=$(grep -m1 '^## v' RELEASE_NOTES.md || true)
+          if [ -z "$head_line" ]; then
+            echo "RELEASE_NOTES.md 里没有 '## vX.Y.Z：' 开头的段落" >&2
+            exit 1
+          fi
+          notes_ver=$(printf '%s' "$head_line" | sed -nE 's/^## v([0-9.]+).*/\1/p')
+          tag_ver="${tag#v}"
+          if [ "$notes_ver" != "$tag_ver" ]; then
+            echo "RELEASE_NOTES 顶部段是 v$notes_ver，tag 是 v$tag_ver——先把新版 notes 写到最上面" >&2
+            exit 1
+          fi
+          title=$(printf '%s' "$head_line" | sed -E 's/^## (v[0-9.]+)：/\1 — /')
+          printf 'RELEASE_TITLE=%s\n' "$title" >> "$GITHUB_ENV"
+          # 正文取顶部段（第一个 ## v 到下一个 ## v 之前），对齐发版清单第 92 行
+          awk '/^## v/{n++} n==1' RELEASE_NOTES.md > "$RUNNER_TEMP/release-body.md"
+
+      - name: 建 Release（已存在则跳过，不覆盖人工内容）
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag 已存在，跳过（不覆盖人工内容）"
+            exit 0
+          fi
+          gh release create "$tag" --title "$RELEASE_TITLE" --notes-file "$RUNNER_TEMP/release-body.md"
