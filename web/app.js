@@ -7463,12 +7463,28 @@ async function loadDev() {
    * 按用户的选择补一刀（幂等，且只在偏好明确为 false 时做）。
    */
   if (devRememberPref() === false && (st?.remembered === true || st?.profile === true)) {
-    api('/api/dev/remember', { method: 'POST', body: JSON.stringify({ remember: false }) })
-      .then((out) => {
-        if (typeof out?.remembered === 'boolean') devPaintRemember(out.remembered);
-        devScanSay('已按你的选择清掉本机登录记录（后台不会再自动登录）', 'ok');
-      })
-      .catch(() => { /* 后台清理失败不影响当前会话 */ });
+    try {
+      const out = await api('/api/dev/remember', {
+        method: 'POST',
+        body: JSON.stringify({ remember: false }),
+      });
+      if (typeof out?.remembered === 'boolean') devPaintRemember(out.remembered);
+      devPaintStatus(out);
+      /**
+       * 后端顺带作废了那张已过期的票（`droppedExpired`）时要把话说全：
+       * 用户以为只是「不保存」，实际内存里那份也用不了了，得重新扫码。
+       */
+      devScanSay(
+        out?.droppedExpired
+          ? '已按你的选择清掉本机登录记录，那张已过期的票也一并作废（后台不会再自动登录）'
+          : '已按你的选择清掉本机登录记录（后台不会再自动登录）',
+        'ok',
+      );
+      /** 用清理后的真实状态继续往下走，否则后面还会拿着旧状态去拉机器人列表（bound 保留） */
+      st = { ...st, ...out };
+    } catch {
+      /* 后台清理失败不影响当前会话 */
+    }
   }
   // 回显手填的浏览器路径，用户不用记得自己上次填了什么
   const bp = $('#devBrowserPath');
@@ -7814,10 +7830,17 @@ async function devSave(patch, what) {
       devSetRememberPref(actual);
       devPaintRemember(actual);
       devPaintStatus(out);
+      /**
+       * `droppedExpired`：这张票本来就已被平台判过期，后端在取消「记住」时
+       * 一并作废了。必须说出来——否则用户会以为「我只是取消保存」，
+       * 下次要改机器人时才发现得重新扫码。
+       */
       devRememberSay(
-        out?.remembered
-          ? '已记住：重启框架不用重扫（票据存在 data/dev-session.json，权限 0600）'
-          : '已取消：票据只在这次进程里有效，重启要重新扫码',
+        out?.droppedExpired
+          ? '已取消：本机票据已删，那张已被判过期的票也一并作废——需要时重新扫码登录'
+          : out?.remembered
+            ? '已记住：重启框架不用重扫（票据存在 data/dev-session.json，权限 0600）'
+            : '已取消：票据只在这次进程里有效，重启要重新扫码',
         'ok',
       );
     } catch (e) {

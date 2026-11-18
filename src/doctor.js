@@ -11,7 +11,6 @@ import fs from 'node:fs/promises';
 import { constants as FS } from 'node:fs';
 import { DIRS } from './paths.js';
 import { INTENT_META } from './events.js';
-import { mirrorCandidates } from './mirror.js';
 
 /** 判断某个 intent 位有没有开 */
 function hasIntent(intents, name) {
@@ -146,21 +145,7 @@ export async function runDoctor({ cfg, globalCfg, rt, mock = false }) {
     );
   }
 
-  /* ---------- 5. 下载源 ---------- */
-  const candidates = mirrorCandidates('https://github.com/tdcq9594/qq-bot-roost/archive/refs/heads/main.tar.gz');
-  if (candidates.length > 1) {
-    add('mirror', 'ok', '下载源有兜底', `${candidates.length} 个候选（含镜像）`);
-  } else {
-    add(
-      'mirror',
-      'warn',
-      '下载源只有直连',
-      '直连 GitHub 失败时不会自动换镜像，装插件可能超时。',
-      '面板「插件市场」右上角把下载源改成「自动」。',
-    );
-  }
-
-  /* ---------- 6. 面板暴露面 ---------- */
+  /* ---------- 5. 面板暴露面 ---------- */
   const wc = globalCfg?.webui ?? {};
   const keyed = Boolean(wc.accessKey);
   const localOnly = !wc.host || wc.host === '127.0.0.1' || wc.host === 'localhost';
@@ -178,7 +163,7 @@ export async function runDoctor({ cfg, globalCfg, rt, mock = false }) {
     );
   }
 
-  /* ---------- 7. 统计 ---------- */
+  /* ---------- 6. 统计 ---------- */
   if (rt?.stats) {
     if (rt.stats.available) add('stats', 'ok', '统计可用', 'SQLite 正常');
     else
@@ -191,7 +176,7 @@ export async function runDoctor({ cfg, globalCfg, rt, mock = false }) {
       );
   }
 
-  /* ---------- 8. 有没有人跟它说过话 ---------- */
+  /* ---------- 7. 有没有人跟它说过话 ---------- */
   const people = rt?.listRecentPeople?.(1) ?? [];
   if (people.length) {
     add('traffic', 'ok', '收到过消息', `最近一条来自 ${people[0].name || people[0].openid}`);

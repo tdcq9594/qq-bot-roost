@@ -741,12 +741,19 @@ export function createDevPlatform({ log = () => {}, fetchImpl = fetch, lookup = 
    *
    * 现在勾/取消勾立刻落到本机：勾上 = 把内存里这份票写盘，取消 = 删文件
    * （内存里的登录态保留，重启才需要重登）。返回 `remembered` 供面板回显。
+   *
+   * **例外：这张票已经被平台判过 401 时，取消「记住」会连内存票一起作废。**
+   * 那种票留着没有任何用处——自动换票被 `rememberOff` 挡住了，它自愈不了，
+   * 面板只会一直挂着「登录已过期」，而用户刚说过「别记住」，他以为自己退干净了。
+   * 返回值里用 `droppedExpired` 告诉面板这一刀砍了。
    */
   async function setRemember(on) {
     const want = Boolean(on);
     rememberOff = !want;
     /** 偏好落到后端：重启后只有它知道该不该自动续期 */
     await savePref(want);
+    /** 取消时顺手作废的废票：面板据此把话说全 */
+    let droppedExpired = false;
     if (want) {
       requireReady();
       await save(Object.fromEntries(session.jar()));
@@ -767,8 +774,18 @@ export function createDevPlatform({ log = () => {}, fetchImpl = fetch, lookup = 
       } catch (e) {
         log(`[dev] 清理扫码 profile 失败（不影响本次会话）：${e?.message ?? e}`);
       }
+      /**
+       * 票还活着就留着（用户不该为了「不记住」重扫一次）；
+       * 已经被判过 401 的直接作废——留一张换不掉的废票只会让面板一直红字。
+       */
+      if (session.has() && session.describe().expired) {
+        session.clear();
+        botsCache = null;
+        droppedExpired = true;
+        log('[dev] 这张票已被平台判过期，取消「记住登录」时一并作废');
+      }
     }
-    return { ok: true, remembered: await hasSaved() };
+    return { ok: true, remembered: await hasSaved(), droppedExpired };
   }
 
   async function logout() {

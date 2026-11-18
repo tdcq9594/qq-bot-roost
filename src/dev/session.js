@@ -170,6 +170,17 @@ export function createDevSession({
   let cooldownUntil = 0;
   /** 连续命中次数：决定这次锁多久（见 COOLDOWN_STEPS），成功一次归零 */
   let cooldownStep = 0;
+  /**
+   * 平台明确判过 401 的记账（0 = 没判过）。
+   *
+   * 为什么要记：用户取消「记住登录」后，内存里这张票按设计还留着，但自动换票
+   * 已经被否决位挡住——**它没有任何自愈路径**。如果这张票本来就已经被判过期，
+   * 面板会一直红字「登录已过期」，而用户刚说过「别记住」，他以为自己退干净了。
+   * 上层拿这个标记就能把废票一起作废（见 `setRemember(false)`）。
+   *
+   * 只记时间，不记内容；`adopt` / `clear` 会归零。
+   */
+  let expiredAt = 0;
 
   /**
    * 有没有可以发请求的登录态。
@@ -187,6 +198,8 @@ export function createDevSession({
     // 换了票就是换了会话，上一份票攒下的冷却（含递进计数）不该继续拦着
     cooldownUntil = 0;
     cooldownStep = 0;
+    /** 新票还没被平台判过——上一张的「过期」结论不能带到这张票头上 */
+    expiredAt = 0;
     return describe();
   }
 
@@ -201,6 +214,7 @@ export function createDevSession({
     updatedAt = 0;
     cooldownUntil = 0;
     cooldownStep = 0;
+    expiredAt = 0;
   }
 
   function describe() {
@@ -212,6 +226,8 @@ export function createDevSession({
       hasQuid: Boolean(jar.get('quid')),
       hasDeveloperId: Boolean(jar.get('developer_id_lite')),
       updatedAt,
+      /** 平台判过 401：这张票留着也用不了（上层据此决定要不要直接作废） */
+      expired: Boolean(expiredAt),
       /** 还要等多久才解封（毫秒）；0 表示当前可用 */
       cooldownMs: Math.max(0, cooldownUntil - Date.now()),
     };
@@ -297,6 +313,7 @@ export function createDevSession({
 
     const retcode = Number(json?.retcode ?? 0);
     if (res.status === 401 || retcode === 401) {
+      expiredAt = Date.now();
       throw devError('TICKET_EXPIRED', '登录已过期，请重新登录开放平台');
     }
     if (retcode !== 0) {
@@ -309,6 +326,8 @@ export function createDevSession({
     }
     // 成功就归零：下次再忙还是从 10 秒起步，而不是接着上次的 60 秒
     cooldownStep = 0;
+    /** 这一发通了，说明票是活的（可能被网关的 Set-Cookie 续过），撤掉过期结论 */
+    expiredAt = 0;
     log(`[dev] ${path} ok`);
     return json?.data ?? {};
   }
@@ -330,12 +349,14 @@ export function createDevSession({
     }
     const retcode = Number(json?.retcode ?? 0);
     if (res.status === 401 || retcode === 401) {
+      expiredAt = Date.now();
       throw devError('TICKET_EXPIRED', '登录已过期，请重新登录开放平台');
     }
     if (retcode !== 0) {
       if (retcode === 10000) throw busyNow(json, retcode);
       throw devError('PLATFORM_ERROR', String(json?.msg || `开放平台返回 retcode=${retcode}`), { retcode });
     }
+    expiredAt = 0;
     log(`[dev] ${path} ok`);
     return json?.data ?? {};
   }

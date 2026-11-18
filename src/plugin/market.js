@@ -10,6 +10,7 @@ import { hashDir } from '../hashdir.js';
 import { compareVersion } from '../semver.js';
 import { fetchViaMirror, currentMirror } from '../mirror.js';
 import { fetchGiteeTree } from '../gitee.js';
+import { CORE_SKIP } from '../skipdirs.js';
 import { resolveTrust, checkTrust } from '../trust.js';
 
 const log = createLogger('market');
@@ -39,6 +40,44 @@ export const DEFAULT_INDEX_URL =
   'https://raw.githubusercontent.com/tdcq9594/qq-bot-roost-plugins/main/index.json';
 
 /**
+ * 历史上的官方索引地址。
+ *
+ * `plugins.marketUrl` 是**落盘**的（config/bot.json）。改默认值只影响新装用户，
+ * 老用户配置里存着旧地址——而且用户根本不知道自己配置里有什么，出问题也报不清。
+ *
+ * 旧地址能不能继续用不该赌：GitHub 目前对转移过的仓库还保留旧的 raw 路径
+ * （2026-11-19 实测 `zeit/next.js` 等仍 200），但那是历史重定向、没有文档承诺，
+ * Gitee 镜像也只建在老 owner 下。所以读取配置时把旧地址换成当前的
+ * `DEFAULT_INDEX_URL`（幂等）。
+ *
+ * **迁移当天只需要做两件事**：改上面的 `DEFAULT_INDEX_URL`、把旧值挪进这个数组。
+ * 注意 Gitee 镜像仓库仍挂在老 owner 下，所以这里**不**替换 gitee 地址。
+ */
+const LEGACY_INDEX_URLS = [
+  'https://raw.githubusercontent.com/tdcq9594/qq-bot-roost-plugins/main/index.json',
+];
+
+/**
+ * 市场地址规范化：空值 / 历史官方地址 → 当前官方地址，其余（用户自建源）原样返回。
+ *
+ * `opts` 一般不用传。它的用途是**让这套映射在迁移前就能被验证**：
+ * 只要旧地址和当前地址还是同一个字符串，直接拿真实常量去断言就是空转，
+ * 真正的「旧 → 新」替换要等迁移当天才第一次执行——那正是最不该赌的时刻。
+ * 测试传一对假地址进来，就能把替换逻辑跑实。
+ *
+ * @param {string} [url]
+ * @param {{fallback?: string, legacy?: string[]}} [opts]
+ * @returns {string}
+ */
+export function normalizeMarketUrl(url, opts = {}) {
+  const fallback = String(opts.fallback ?? DEFAULT_INDEX_URL);
+  const legacy = Array.isArray(opts.legacy) ? opts.legacy : LEGACY_INDEX_URLS;
+  const s = String(url ?? '').trim();
+  if (!s) return fallback;
+  return legacy.includes(s) ? fallback : s;
+}
+
+/**
  * 这个索引地址算不算「官方源」。
  *
  * 只有官方源强制验签。用户把 `plugins.marketUrl` 指向自己的仓库时，
@@ -53,7 +92,12 @@ export const DEFAULT_INDEX_URL =
 export function isOfficialSource(url, cfg = {}) {
   const u = String(url || DEFAULT_INDEX_URL);
   const extra = cfg?.security?.trust?.officialUrls;
-  const list = [DEFAULT_INDEX_URL, ...(Array.isArray(extra) ? extra.map(String) : [])];
+  const list = [
+    DEFAULT_INDEX_URL,
+    // 历史官方地址在迁移过渡期仍算官方：面板 / API 传进来的可能是旧值
+    ...LEGACY_INDEX_URLS,
+    ...(Array.isArray(extra) ? extra.map(String) : []),
+  ];
   return list.includes(u);
 }
 
@@ -102,6 +146,11 @@ function assertSafeIndexUrl(raw) {
  *   （毫秒，默认 60 秒；传 0 表示强制重新拉取，写路径必须这么传）
  */
 export async function fetchIndex(url = DEFAULT_INDEX_URL, opts = {}) {
+  /**
+   * 先规范化再当缓存键：老用户配置里的历史官方地址会被换成当前地址，
+   * 否则「旧地址」和「新地址」会算成两份缓存、各打一次网络。
+   */
+  url = normalizeMarketUrl(url);
   const key = String(url || DEFAULT_INDEX_URL);
   assertSafeIndexUrl(key);
 
@@ -185,7 +234,7 @@ async function fetchIndexSig(url, bust) {
     return '';
   }
   try {
-    const res = await fetchViaMirror(sigUrl, { signal: AbortSignal.timeout(8000) });
+    const res = await fetchViaMirror(sigUrl, { signal: AbortSignal.timeout(8000) }, { retry4xx: true });
     if (!res.ok) return '';
     return await res.text();
   } catch {
@@ -211,8 +260,14 @@ async function fetchIndexOnce(url, opts = {}) {
 
     let res;
     try {
-      // 走下载源：直连超时会自动换镜像（见 src/mirror.js）
-      res = await fetchViaMirror(bust, { signal: AbortSignal.timeout(20000) });
+      /**
+       * 走下载源：直连超时会自动换镜像（见 src/mirror.js）。
+       *
+       * `retry4xx`：官方索引的老地址在仓库迁移后是 404（raw 不 301），
+       * 而 Gitee 镜像还在老 owner 下——4xx 也换源才救得回来。
+       * 只有这里开，第三方仓库的 404 仍然不降级（见 fetchViaMirror 注释）。
+       */
+      res = await fetchViaMirror(bust, { signal: AbortSignal.timeout(20000) }, { retry4xx: true });
     } catch (e) {
       lastErr = new Error(`连不上插件市场：${e.message}`);
       continue;
@@ -683,11 +738,97 @@ async function resolvePluginDir(tmp, entry) {
 }
 
 /**
+ * 目录被外部进程按住时，Windows 上**目录级**操作会拿到的错误码。
+ *
+ * 典型来源：资源管理器停在那个目录、杀软正在扫、IDE 建了索引，
+ * 或者插件自己的子进程把 cwd 设成了这里（`subprocess.js` 就是这么启动的）。
+ * 这些情况下 `rename` / `rm -r` 整个目录必然失败，**但目录里的文件照样能
+ * 创建、覆盖、删除**——所以还能用「就地覆盖」把更新做完。
+ */
+const LOCK_CODES = new Set(['EPERM', 'EACCES', 'EBUSY', 'ENOTEMPTY', 'EEXIST']);
+
+/** 插件目录里属于「运行态」的一级子目录：不备份、不覆盖、不删 */
+const KEEP_STATE = new Set([...CORE_SKIP, 'data', 'logs', 'config', 'env', '.cache', '.roost-cache']);
+
+/**
+ * 整目录换掉之后要从备份搬回来的运行态目录。
+ *
+ * 不含 `node_modules`（重装比搬快，而且新版可能删了依赖）与
+ * `.roost-cache`（loader 会重新生成快照，搬回旧的反倒会跑到过期代码）。
+ */
+const PRESERVE_ON_SWAP = ['data', 'logs', 'config', 'env', '.cache'];
+
+/** 递归复制代码文件（跳过 keepTop 里的一级子目录），返回复制个数 */
+async function copyCodeTree(src, dest, keepTop) {
+  let n = 0;
+  async function walk(s, d, depth) {
+    await fs.mkdir(d, { recursive: true });
+    for (const e of await fs.readdir(s, { withFileTypes: true })) {
+      if (depth === 0 && keepTop.has(e.name)) continue;
+      const from = path.join(s, e.name);
+      const to = path.join(d, e.name);
+      if (e.isDirectory()) {
+        await walk(from, to, depth + 1);
+        continue;
+      }
+      if (!e.isFile()) continue;
+      await fs.copyFile(from, to);
+      n++;
+    }
+  }
+  await walk(src, dest, 0);
+  return n;
+}
+
+/**
+ * 就地同步：把 src 的代码覆盖进 dest，并删掉新版里已经没有的文件。
+ *
+ * 后一步不能省。插件从「拆成 src/a.js + src/b.js」改成「合并进 index.js」时，
+ * 旧文件留着会被整目录扫描 / 相对 import 命中，表现是「更新成功了但还在跑老逻辑」。
+ */
+export async function syncCodeTree(src, dest, keepTop) {
+  const seen = new Set();
+  async function walk(s, d, rel, depth) {
+    await fs.mkdir(d, { recursive: true });
+    for (const e of await fs.readdir(s, { withFileTypes: true })) {
+      if (depth === 0 && keepTop.has(e.name)) continue;
+      const from = path.join(s, e.name);
+      const to = path.join(d, e.name);
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) {
+        await walk(from, to, r, depth + 1);
+        continue;
+      }
+      if (!e.isFile()) continue;
+      await fs.copyFile(from, to);
+      seen.add(r.toLowerCase()); // Windows 大小写不敏感
+    }
+  }
+  await walk(src, dest, '', 0);
+
+  async function prune(d, rel, depth) {
+    for (const e of await fs.readdir(d, { withFileTypes: true })) {
+      if (depth === 0 && keepTop.has(e.name)) continue;
+      const p = path.join(d, e.name);
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) {
+        await prune(p, r, depth + 1);
+        await fs.rmdir(p).catch(() => {}); // 空了才删得掉，非空会 ENOTEMPTY
+        continue;
+      }
+      // 删不掉的（被占用）就留着，不能因此让整次更新失败
+      if (!seen.has(r.toLowerCase())) await fs.rm(p, { force: true }).catch(() => {});
+    }
+  }
+  await prune(dest, '', 0);
+}
+
+/**
  * 从已同步的仓库里更新一批插件。
  *
- * 每个插件都是「先备份到临时目录 → 复制新的 → 失败则还原」，
- * 单个插件失败不影响其他插件。备份放在调用方传入的 tmp 里，
- * 不放在 plugins/ 旁边——否则会被 loader 扫成幽灵插件。
+ * 每个插件都是「先备份 → 复制新的 → 失败则还原」，单个插件失败不影响其他插件。
+ * 备份放在**插件目录旁边**（`plugins/.bak-<id>`），不放 `os.tmpdir()`：Windows 上
+ * 项目在 D:、TEMP 在 C: 时跨盘 rename 会抛 EXDEV，那等于所有更新都失败。
  *
  * @param {object} p
  * @param {string} p.tmp        syncRepo 返回的临时目录
@@ -743,14 +884,59 @@ export async function updatePlugins({ tmp, index, pluginsDir, ids, localVersions
       }
 
       const hadOld = await fs.stat(dest).catch(() => null);
-      if (hadOld) await fs.rename(dest, backup);
+
+      /**
+       * 优先「整目录 rename」——原子、最干净。
+       *
+       * 但 Windows 上这一步很容易 EPERM：只要**任何**进程按住了这个目录
+       * （资源管理器停在上面、杀软正在扫、IDE 建了索引，或插件自己的子进程
+       * 把 cwd 设成了这里），目录就改不了名——而目录里的文件照样能读写。
+       * 以前这里直接抛出去，用户看到的就是「插件更新失败: EPERM」且无法补救。
+       *
+       * 所以失败时退化成「复制备份 + 逐文件覆盖」：慢一点，但不需要目录级独占。
+       * 两条路径都可还原，区别只是还原方式不同。
+       */
+      let inPlace = false;
+      if (hadOld) {
+        try {
+          await fs.rename(dest, backup);
+        } catch (e) {
+          if (!LOCK_CODES.has(e.code)) throw e;
+          inPlace = true;
+          log.warn(`插件 ${entry.id} 的目录被其它进程占用（${e.code}），改为就地覆盖更新`);
+          await fs.rm(backup, { recursive: true, force: true }).catch(() => {});
+          await copyCodeTree(dest, backup, KEEP_STATE);
+        }
+      }
 
       try {
-        await fs.cp(src, dest, { recursive: true });
+        if (inPlace) {
+          await syncCodeTree(src, dest, KEEP_STATE);
+        } else {
+          await fs.cp(src, dest, { recursive: true });
+          /**
+           * 整目录换掉会把插件自己写在目录里的运行态（`data/` 等）一起带走。
+           * 官方数据目录在 `data/plugins/<id>`，但插件往自己目录写并不违规，
+           * 而且「被占用时保留、没被占用时丢掉」这种不一致最难排查。
+           * 只搬回真正属于运行态的目录：`node_modules` 交给 ensurePluginDeps 重装，
+           * `.roost-cache` 让 loader 重新生成（旧的快照反而会跑到过期代码）。
+           */
+          for (const name of PRESERVE_ON_SWAP) {
+            const fromB = path.join(backup, name);
+            if (!(await fs.stat(fromB).catch(() => null))) continue;
+            const toD = path.join(dest, name);
+            if (await fs.stat(toD).catch(() => null)) continue;
+            await fs.cp(fromB, toD, { recursive: true }).catch(() => {});
+          }
+        }
       } catch (e) {
         // 复制失败：把旧的放回去，别让用户丢插件
-        await fs.rm(dest, { recursive: true, force: true }).catch(() => {});
-        await fs.rename(backup, dest).catch(() => {});
+        if (inPlace) {
+          await syncCodeTree(backup, dest, KEEP_STATE).catch(() => {});
+        } else {
+          await fs.rm(dest, { recursive: true, force: true }).catch(() => {});
+          await fs.rename(backup, dest).catch(() => {});
+        }
         throw new Error(`复制失败，已还原：${e.message}`);
       }
 

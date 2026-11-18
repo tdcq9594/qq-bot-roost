@@ -154,3 +154,51 @@ test('导入时选「不记住」：票不落盘，但偏好要记下来', async
   const pref = JSON.parse(await fs.readFile(path.join(DIRS.data, 'dev-remember.json'), 'utf8'));
   assert.equal(pref.remember, false);
 });
+
+/* ---------------- 废票不该继续装成「已登录」 ---------------- */
+
+/**
+ * 主人报过：取消「记住登录」后，面板还一直挂着红字「登录已过期，请重新登录」，
+ * 看着像后台还在尝试登录。
+ *
+ * 实情是：取消只清盘不清内存，那张票本来就已被平台判过 401，而自动换票又被
+ * `rememberOff` 挡住了——它没有任何自愈路径。所以取消时应当把这张废票一起作废。
+ */
+test('票已被判过期时，取消「记住」会把这张废票一起作废', async () => {
+  await fs.rm(path.join(DIRS.data, 'dev-remember.json'), { force: true });
+  await fs.rm(sessionFile, { force: true });
+
+  /** 先给一张好票登录成功，再把平台切成「一律 401」 */
+  let expired = false;
+  const P = createDevPlatform({
+    fetchImpl: async (url) => {
+      if (String(url).includes('list_bots') && expired) {
+        return jsonRes({ retcode: 401, msg: 'miss ticket' });
+      }
+      return fakeFetch()(url);
+    },
+  });
+  await P.loginImport('b-token=bt', { remember: false });
+  assert.equal((await P.status()).loggedIn, true);
+
+  expired = true;
+  // maxAgeMs:0 绕开 list_bots 的 30 秒缓存，确保真发一次请求拿到 401
+  await assert.rejects(() => P.listBots({ maxAgeMs: 0 }), (e) => e.code === 'TICKET_EXPIRED');
+  assert.equal((await P.status()).expired, true, '平台判过 401 要记账');
+
+  const off = await P.setRemember(false);
+  assert.equal(off.droppedExpired, true);
+  assert.equal(off.remembered, false);
+  const st = await P.status();
+  assert.equal(st.loggedIn, false, '废票不该继续显示「已登录」');
+  assert.equal(st.expired, false, '作废后不该再留着过期标记');
+});
+
+test('票还是好的时候取消「记住」不动内存票（不该逼用户重扫）', async () => {
+  await fs.rm(sessionFile, { force: true });
+  const P = createDevPlatform({ fetchImpl: fakeFetch() });
+  await P.loginImport('b-token=bt');
+  const off = await P.setRemember(false);
+  assert.equal(off.droppedExpired, false);
+  assert.equal((await P.status()).loggedIn, true);
+});

@@ -8,9 +8,9 @@
 
 <img src="https://img.shields.io/badge/Node.js-22.13%2B-339933?logo=node.js&logoColor=white" alt="Node.js 22.13+">
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
-<img src="https://img.shields.io/badge/tests-1289%20passed-brightgreen" alt="测试 1289 项">
+<img src="https://img.shields.io/badge/tests-1307%20passed-brightgreen" alt="测试 1307 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
-<img src="https://img.shields.io/badge/version-1.1.5-blueviolet" alt="版本 1.1.5">
+<img src="https://img.shields.io/badge/version-1.1.6-blueviolet" alt="版本 1.1.6">
 <img src="https://img.shields.io/badge/license-AGPL--3.0--only-blue" alt="AGPL-3.0-only">
 <a href="https://github.com/tdcq9594/qq-bot-roost/actions"><img src="https://img.shields.io/github/actions/workflow/status/tdcq9594/qq-bot-roost/ci.yml?branch=master" alt="CI"></a>
 
@@ -155,7 +155,7 @@
 - **分组导航**：一级只留 4 个入口（概览 / 数据 / 设置 / 插件），
   统计、事件、日志收进「数据」，配置、群组、权限收进「设置」，
   **插件自己注册的页面也挂在「插件」下**——插件装多了不会把顶栏挤爆
-- **体检**：打开面板先跑一遍，凭证 / 连接 / intents / 目录权限 / 下载源 / 面板暴露面
+- **体检**：打开面板先跑一遍，凭证 / 连接 / intents / 目录权限 / 面板暴露面
   一次查完，出问题直接摆在最上面并告诉你该去哪儿改
 - 实时日志流（SSE），按级别和来源着色
 - 一个面板管多个机器人，顶栏随时切换
@@ -461,8 +461,8 @@ bot/
 │   ├── web/server.js           面板服务端（REST + SSE）
 │   └── plugin/                 插件加载、配置、依赖、子进程宿主、面板页面注册
 ├── test/
-│   ├── selftest.mjs            框架自检（622 项）
-│   ├── e2e.mjs                 端到端测试（245 项，起真实服务打接口）
+│   ├── selftest.mjs            框架自检（686 项）
+│   ├── e2e.mjs                 端到端测试（253 项，起真实服务打接口）
 │   ├── qrlogin.mjs             扫码建机器人（8 项）
 │   └── deps.mjs                插件依赖安装（11 项）
 ├── web/                        面板前端（原生 JS/CSS，无构建）
