@@ -24,9 +24,8 @@ import { saveBotConfig } from '../config.js';
 import { FILE_TYPE } from '../api.js';
 import {
   fetchIndex, installPlugin, syncRepo, cleanupRepo, updatePlugins,
-  mergeWithInstalled, detectUpdates, compareVersion, isOfficialSource,
+  mergeWithInstalled, detectUpdates, compareVersion,
 } from '../plugin/market.js';
-import { resolveTrust, blockReason } from '../trust.js';
 import { suspendPluginWatch } from '../services/plugin-watch.js';
 import { toggleGroupPlugin } from '../plugin/groupscope.js';
 import { scopeOf, levelName, NO_PERM } from '../roles.js';
@@ -89,22 +88,17 @@ async function ensurePluginInList(R, id, enabled, err) {
   return true;
 }
 
-/** 市场写操作的共同前置：最新索引 + 信任闸 */
-async function freshIndex(R, err) {
+/**
+ * 市场写操作的共同前置：拿一份最新索引。
+ *
+ * 以前这里还有个「信任闸」（按索引签名状态决定装不装）；2026-11-19 起取消插件
+ * 索引的签名门禁——市场是社区内容，用签名卡整个生态代价太大。**框架自更新**的
+ * 验签仍在（src/updater.js），不受影响。安装时依旧校验 tarball 的 sha256。
+ */
+async function freshIndex(R) {
   const src = R.globalCfg?.plugins?.marketUrl || undefined;
-  const idx = await fetchIndex(src, { trust: resolveTrust(R.globalCfg ?? {}), maxAge: 0 });
+  const idx = await fetchIndex(src, { maxAge: 0 });
   return { src, idx };
-}
-
-function trustGate(R, idx, src, id, err) {
-  const official = isOfficialSource(src, R.globalCfg ?? {});
-  const why = blockReason(
-    resolveTrust(R.globalCfg ?? {}),
-    idx?._trust?.status || 'unavailable',
-    id,
-    { official },
-  );
-  if (why) throw err.forbidden(why);
 }
 
 /**
@@ -334,7 +328,7 @@ export function registerOps(def, { R, err, log = () => {} }) {
 
   def('plugin.market', 'read', '插件市场索引 + 已装标记 + 可更新列表', async (p) => {
     const src = str(p.source) || R.globalCfg?.plugins?.marketUrl || undefined;
-    const idx = await fetchIndex(src, { trust: resolveTrust(R.globalCfg ?? {}) });
+    const idx = await fetchIndex(src);
     const installed = new Set(plugins().loaded.keys());
     try {
       for (const d of await fs.readdir(DIRS.plugins, { withFileTypes: true })) {
@@ -349,7 +343,6 @@ export function registerOps(def, { R, err, log = () => {} }) {
         id: u.id, current: u.current, latest: u.latest,
       })),
       localVersions: localVers,
-      trust: idx?._trust?.status || 'unavailable',
       stale: idx.stale === true, staleAge: idx.staleAge || '',
     };
   });
@@ -359,17 +352,16 @@ export function registerOps(def, { R, err, log = () => {} }) {
   }));
 
   def('plugin.updates', 'read', '检查哪些插件有新版', async () => {
-    const { idx } = await freshIndex(R, err);
+    const { idx } = await freshIndex(R);
     const localVers = await plugins().localVersions();
     return { updates: detectUpdates(idx.plugins, localVers), stale: idx.stale === true };
   });
 
   def('plugin.install', 'manage', '从市场安装插件（装完自动 rescan 加载）', async (p) => {
     const id = safeId(p.id, err);
-    const { src, idx } = await freshIndex(R, err);
+    const { idx } = await freshIndex(R);
     const entry = idx.plugins.find((x) => x.id === id);
     if (!entry) throw err.notFound(`市场里没有 ${id}`);
-    trustGate(R, idx, src, id, err);
 
     /** 下载解包期间挂起热重载：文件是一个个复制进来的，中途会读到半个插件 */
     suspendPluginWatch(30_000);
@@ -420,10 +412,9 @@ export function registerOps(def, { R, err, log = () => {} }) {
     const id = safeId(p.id, err);
     let repo = null;
     try {
-      const { src, idx } = await freshIndex(R, err);
+      const { src, idx } = await freshIndex(R);
       const entry = idx.plugins.find((x) => x.id === id);
       if (!entry) throw err.notFound(`市场里没有 ${id}`);
-      trustGate(R, idx, src, id, err);
       const localVers = await plugins().localVersions();
       const cur = localVers[id];
       if (!cur) throw err.bad(`本地没装 ${id}，先用 plugin.install`);

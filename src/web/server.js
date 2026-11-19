@@ -19,7 +19,6 @@ import {
   mergeWithInstalled,
   detectUpdates,
   compareVersion,
-  isOfficialSource,
 } from '../plugin/market.js';
 import {
   checkUpdate as checkFrameworkUpdate,
@@ -46,7 +45,8 @@ import { devErrorPayload, devErrorTable } from '../dev/errors.js';
 import * as extDeps from '../ext-deps.js';
 import { runDoctor, summarize } from '../doctor.js';
 import { createBindTask, pollBindResult } from '../qq/qrlogin.js';
-import { resolveTrust, blockReason, pubkeyUsable } from '../trust.js';
+// 自更新验签状态还要给面板看，resolveTrust / pubkeyUsable 保留；插件市场不再走信任闸
+import { resolveTrust, pubkeyUsable } from '../trust.js';
 import { toSvg as qrToSvg } from '../qq/qrsvg.js';
 import {
   PRESETS,
@@ -994,7 +994,7 @@ async function startWebServerInstance({
   const refreshUpdates = async (r) => {
     const out = { at: Date.now(), updates: [], error: '' };
     try {
-      const idx = await fetchIndex(globalCfg.plugins?.marketUrl || undefined, { trust: resolveTrust(globalCfg) });
+      const idx = await fetchIndex(globalCfg.plugins?.marketUrl || undefined);
       const localVers = await r.plugins.localVersions();
       out.updates = detectUpdates(idx.plugins, localVers).map((u) => ({
         id: u.id,
@@ -1528,6 +1528,16 @@ async function startWebServerInstance({
               await dev.cancelScan();
               return json(res, 200, { ok: true, ...(await dev.status()) });
             }
+            /**
+             * 手动核一次登录态。
+             *
+             * 扫码轮询有自己的节奏和退避，偶尔会漏（页面登录慢半拍、票刚种上又
+             * 被刷掉、窗口被随手关掉）。这个入口让人自己点一下：窗口还在就先读
+             * 窗口里的票，窗口没了就拿手里的票真发一次 `list_bots`。
+             */
+            if (pathname === '/api/dev/login/recheck' && req.method === 'POST') {
+              return json(res, 200, { ok: true, ...(await dev.recheckLogin({ bound })) });
+            }
             if (pathname === '/api/dev/login/import' && req.method === 'POST') {
               const b = await readBody(req);
               const r = await dev.loginImport(b?.input, { remember: b?.remember ?? true });
@@ -1888,7 +1898,7 @@ async function startWebServerInstance({
             },
             logLevel: globalCfg.logLevel ?? 'info',
             /**
-             * 插件来源校验（全局设置）。只回「开没开」和「有没有公钥」——
+             * 自更新签名校验（全局设置；字段仍是 security.trust.*）。只回「开没开」和「有没有公钥」——
              * 公钥本身是公开的，但配置里可能是整段 PEM，回显没意义还占地方。
              * `pubkeySet: false` 时面板要提示「开关不起作用」。
              */
@@ -1965,7 +1975,7 @@ async function startWebServerInstance({
             configureProxy(globalCfg);
           }
           /**
-           * 插件来源校验开关（全局，默认关）。
+           * 自更新签名校验开关（全局，默认关；字段仍是 security.trust.enforce）。
            *
            * 只接受布尔值：面板传字符串 "false" 时如果按真值判断，会把「关」
            * 读成「开」——这类错误在安全开关上代价最大，所以这里严格比类型。
@@ -2648,7 +2658,7 @@ async function startWebServerInstance({
         if (pathname === '/api/market' && req.method === 'GET') {
           const url2 = url.searchParams.get('source') || globalCfg.plugins?.marketUrl || undefined;
           try {
-            const idx = await fetchIndex(url2, { trust: resolveTrust(globalCfg) });
+            const idx = await fetchIndex(url2);
             const installedIds = new Set(plugins.loaded.keys());
             // 目录里存在但没加载成功的也算「已装」
             try {
@@ -2670,8 +2680,6 @@ async function startWebServerInstance({
                 latest: u.latest,
               })),
               localVersions: localVers,
-              // 索引签名状态：ok / unsigned / bad / unavailable（面板可据此提示）
-              trust: idx?._trust?.status || 'unavailable',
               // 网络挂了用的是本地缓存，面板要提示用户「这是旧数据」
               stale: idx.stale === true,
               staleAge: idx.staleAge || '',
@@ -2693,18 +2701,12 @@ async function startWebServerInstance({
              * 恰好最容易撞上那 60 秒——作者发完版立刻装自己那个。
              * 用旧索引会 404（市场里还没有这个 id）或者装到上一个版本。
              */
-            const idx = await fetchIndex(src, { trust: resolveTrust(globalCfg), maxAge: 0 });
+            const idx = await fetchIndex(src, { maxAge: 0 });
             const entry = idx.plugins.find((p) => p.id === id);
             if (!entry) return json(res, 404, { error: `市场里没有 ${id}` });
 
-            /**
-             * 信任闸。**只对官方源生效**：手写插件走 `plugins/` 目录，根本不经过
-             * 市场索引；用户自己填的市场源是他自己的信任决定，不拦。
-             * 本版 `enforce` 默认 false，所以这里恒放行。
-             */
-            const official = isOfficialSource(src, globalCfg);
-            const trustWhy = blockReason(resolveTrust(globalCfg), idx?._trust?.status || 'unavailable', id, { official });
-            if (trustWhy) return json(res, 403, { error: trustWhy });
+            /* 2026-11-19 起不再按索引签名拦截（详见 src/plugin/market.js）；
+               框架自更新的验签在 src/updater.js，与此无关。 */
 
             /**
              * 下载 + 解包期间要挂起插件热重载。
@@ -4530,18 +4532,12 @@ async function startWebServerInstance({
           try {
             const src = globalCfg.plugins?.marketUrl || undefined;
             // 更新是写路径：索引必须是最新的，不能吃 60 秒内存缓存
-            const idx = await fetchIndex(src, { trust: resolveTrust(globalCfg), maxAge: 0 });
+            const idx = await fetchIndex(src, { maxAge: 0 });
             const entry = idx.plugins.find((p) => p.id === id);
             if (!entry) return json(res, 404, { error: `市场里没有 ${id}` });
 
-            /**
-             * 信任闸。**只对官方源生效**：手写插件走 `plugins/` 目录，根本不经过
-             * 市场索引；用户自己填的市场源是他自己的信任决定，不拦。
-             * 本版 `enforce` 默认 false，所以这里恒放行。
-             */
-            const official = isOfficialSource(src, globalCfg);
-            const trustWhy = blockReason(resolveTrust(globalCfg), idx?._trust?.status || 'unavailable', id, { official });
-            if (trustWhy) return json(res, 403, { error: trustWhy });
+            /* 2026-11-19 起不再按索引签名拦截（详见 src/plugin/market.js）；
+               框架自更新的验签在 src/updater.js，与此无关。 */
 
             const localVers = await plugins.localVersions();
             const cur = localVers[id];

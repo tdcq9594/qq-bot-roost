@@ -605,7 +605,7 @@ async function applyUpdateOnce(info) {
   if (trustWhy) {
     throw new Error(
       `自更新被拒绝：${trustWhy}\n` +
-        '你的代码没有任何改动。可以到 GitHub Releases 手动下载安装，或先在设置里关掉「插件来源校验」。',
+        '你的代码没有任何改动。可以到 GitHub Releases 手动下载安装，或先在设置里关掉「自更新签名校验」。',
     );
   }
 
