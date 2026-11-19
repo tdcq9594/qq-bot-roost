@@ -1703,6 +1703,12 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
   border-radius: 10px;
   line-height: 0;
 }
+/**
+ * 图纸被清空时必须连白底一起去掉。
+ * 只写 background 的话，`innerHTML = ''` 之后元素只剩 8px 内边距——
+ * 页面上就是一颗 16px 的白色圆点（扫码换完凭证后会出现，2026-11-20 反馈）。
+ */
+.nb-qr-code:empty { display: none; }
 .nb-qr-code svg {
   display: block;
 }
