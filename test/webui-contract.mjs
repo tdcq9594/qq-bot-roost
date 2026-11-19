@@ -37,7 +37,8 @@ const REQUIRED_IDS = [
 ];
 const REQUIRED_FNS = [
   'function activateTab', 'function closeTabMenus', 'function tabButton',
-  'function loadPluginPages', 'function pluginPageUrl', 'function setTheme',
+  // 主题入口在「外观」改版里从 setTheme 换成了 applyAppearance（唯一写入口）
+  'function loadPluginPages', 'function pluginPageUrl', 'function applyAppearance', 'function initAppearance',
   'function connectStream', 'function pollStatus',
 ];
 

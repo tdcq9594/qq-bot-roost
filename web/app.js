@@ -547,91 +547,672 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !$('#botMenu').hidden) closeBotMenu();
 });
 
-/* ---------------- 主题 ---------------- */
+/* ---------------- 主题与外观 ---------------- */
 
+/**
+ * 三个 localStorage 键的分工（改这段之前先看一眼，顺序很容易搞反）：
+ *
+ *   qqbot_appearance  新结构，唯一真相：{ mode, preset, base, seed, ink, bg }
+ *   qqbot_theme       老键，只存 light / dark —— 降级回旧版本时还认得明暗
+ *   qqbot_palette     老键，只存 a/b/c/d —— 降级时至少认得四套底色
+ *
+ * 后两个**只写不读**；只有在没有新键时（从旧版本升上来的用户）才拿来迁移。
+ */
 const THEME_KEY = 'qqbot_theme';
 const PALETTE_KEY = 'qqbot_palette';
-// 四套配色轮换：A 是默认值（style.css 不写覆盖规则），B/C/D 由
-// :root[data-palette="..."] 覆盖。亮 / 暗是独立的另一维，不受这里影响。
-const PALETTES = [
-  { id: 'a', mark: '暖', name: '归巢暖琥珀' },
-  { id: 'b', mark: '夜', name: '夜航靛蓝' },
-  { id: 'c', mark: '暮', name: '暮羽青灰' },
-  { id: 'd', mark: '星', name: '星夜紫' },
+const APPEARANCE_KEY = 'qqbot_appearance';
+
+/**
+ * 五组底色。id 沿用 a/b/c/d/w：CSS 里本来就写着这五块。
+ *
+ * 现在**没有单独入口**了（「外观」页的底色那一行已撤）：底色由预设隐含，
+ * 换底色 = 换预设。这张表留着是为了校验存下来的 base 是否合法，
+ * 以及给自定义配色提供 ink 的候选色。
+ *
+ * **只在浅色下生效**——黑夜是固定黑白，不跟配色走（见 style.css 的
+ * [data-theme="dark"]）。
+ */
+const BASES = [
+  { id: 'a', name: '暖褐', light: '#f8f5f1', dark: '#0a0a0a' },
+  { id: 'b', name: '冷蓝', light: '#f2f5fb', dark: '#0a0a0a' },
+  { id: 'c', name: '青绿', light: '#f2efea', dark: '#0a0a0a' },
+  { id: 'd', name: '紫调', light: '#f5f2fb', dark: '#0a0a0a' },
+  // 默认：纯白底 + 蓝主色，不染色（黑夜不用它，黑夜是固定黑白）
+  { id: 'w', name: '默认', light: '#ffffff', dark: '#0a0a0a' },
 ];
 
-function setPalette(id, { persist = true } = {}) {
-  const p = PALETTES.find((x) => x.id === id) || PALETTES[0];
-  document.documentElement.dataset.palette = p.id;
+/** 浅色下按钮深字的候选：取该底色暗侧的面板色，跟着底色走才不脏 */
+const BASE_INK = { a: '#1f1813', b: '#222a3b', c: '#182c2c', d: '#322e45', w: '#26262b' };
+
+/**
+ * 十套配色（**只在浅色下可用**）。
+ *
+ * 前四套 `native: true` 不参与派生：它们的 `--primary-*` 是 CSS 里手挑的，
+ * 走原路径才能保证像素级零回归。后四套的 seed 会派生出 hover/fill/soft/border，
+ * 取自主流暗色项目的原生强调色（Catppuccin red / Tokyo Night yellow /
+ * One Dark green / Catppuccin pink），落在 8 个高星配色项目实测的
+ * L 0.70–0.85 / C 0.08–0.14 区间内。
+ */
+const PRESETS = [
+  { id: 'a', name: '琥珀', base: 'a', seed: '#af5504', native: true },
+  { id: 'rose', name: '玫红', base: 'a', seed: '#b02a48' },
+  { id: 'b', name: '靛蓝', base: 'b', seed: '#3b55d9', native: true },
   /**
-   * 按钮上原来是配色名的首字（暖 / 夜 / 暮 / 星）。问题是一个字既不自解释、
-   * 也看不出「点它能换」——不熟悉的用户只会当它是装饰。现在按钮固定写
-   * 「更换主题」，当前是哪套放 title / aria-label，视觉上不再变。
+   * 浅蓝：满大街按钮的那个蓝（Element UI 主色 #409EFF）。
+   * 它比靛蓝亮一档、色相偏青，走派生配色——底色也会跟着变成极浅的蓝。
+   * 按钮文字由 inkFor 自动选：白字在这个亮度上只有 2.6:1，会落到深色字上。
    */
-  const btn = $('#btnPalette');
-  if (btn) {
-    btn.title = `当前配色：${p.name}（点击更换）`;
-    btn.setAttribute('aria-label', `更换配色主题，当前是${p.name}`);
-  }
-  if (persist) {
-    try { localStorage.setItem(PALETTE_KEY, p.id); } catch {}
-  }
-  // 插件页的变量由服务端按亮 / 暗注入，配色不参与，不需要重载 iframe
+  { id: 'sky', name: '浅蓝', base: 'b', seed: '#409eff' },
+  { id: 'gold', name: '姜黄', base: 'b', seed: '#8a6400' },
+  { id: 'c', name: '青', base: 'c', seed: '#2e6e76', native: true },
+  { id: 'green', name: '松绿', base: 'c', seed: '#3f7d20' },
+  { id: 'd', name: '紫罗兰', base: 'd', seed: '#5a48cf', native: true },
+  { id: 'pink', name: '品红', base: 'd', seed: '#a03a72' },
+  { id: 'default', name: '默认', base: 'w', seed: '#2563eb', native: true },
+];
+
+/** 当前外观（已收敛过的）。全站只有这一份，改外观一律走 applyAppearance() */
+let APPEARANCE = null;
+/** 背景图的 objectURL：换图 / 清除时要 revoke，不 then 会一直占内存 */
+let bgObjectUrl = '';
+
+/* --- 色彩小工具：只用来选黑/白，不做派生（派生交给 CSS） --- */
+
+function hexToRgb(hex) {
+  const s = String(hex || '').replace('#', '');
+  return [0, 2, 4].map((i) => parseInt(s.slice(i, i + 2), 16) / 255);
 }
 
-function initPalette() {
-  let saved = 'a';
-  try { saved = localStorage.getItem(PALETTE_KEY) || 'a'; } catch {}
-  setPalette(saved, { persist: false });
-  $('#btnPalette')?.addEventListener('click', () => {
-    const cur = document.documentElement.dataset.palette || 'a';
-    const i = PALETTES.findIndex((x) => x.id === cur);
-    setPalette(PALETTES[(i + 1) % PALETTES.length].id);
+function relLuminance(hex) {
+  const [r, g, b] = hexToRgb(hex)
+    .map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function contrastRatio(a, b) {
+  const [x, y] = [relLuminance(a), relLuminance(b)].sort((m, n) => n - m);
+  return (x + 0.05) / (y + 0.05);
+}
+
+/**
+ * 浅色下主色按钮上的字用白还是用该底色的深色。
+ *
+ * 深色主题不用这套：那边按钮固定白底黑字（--primary-ink 写死在 CSS 里）。
+ * 浅黄 seed 上白字只有 1.44:1，必须翻深色——所以比两个候选的对比度，谁高用谁。
+ */
+function inkFor(seed, base) {
+  const dark = BASE_INK[base] || BASE_INK.a;
+  return contrastRatio(seed, '#ffffff') >= contrastRatio(seed, dark) ? '#ffffff' : dark;
+}
+
+const HEX_RE = /^#[0-9a-f]{6}$/i;
+const isHex = (v) => HEX_RE.test(String(v || ''));
+
+/**
+ * 这个浏览器会不会算相对色（`oklch(from …)`）。
+ *
+ * 不会的话，CSS 里那块派生被 @supports 挡住了，**自定义主色不会生效**——
+ * 页面必须说清楚，否则用户拖半天取色器以为坏了。内置四套不受影响。
+ */
+const CAN_DERIVE = (() => {
+  try { return CSS.supports('color', 'oklch(from red l c h)'); } catch { return false; }
+})();
+
+/**
+ * 把任意输入（localStorage / 导入的 JSON / 页面上的临时改动）收敛成合法结构。
+ *
+ * 兼容旧版存下来的 `seed: {light, dark}`：深色现在不参与渲染，取 light 就够。
+ * seed 或 base 一旦和预设本身不一致，就把 preset 降级成 `custom`，免得
+ * 用户改了主色、预设名却还写着「琥珀」。
+ */
+function normalizeAppearance(input) {
+  const src = input && typeof input === 'object' ? input : {};
+  const byId = PRESETS.find((p) => p.id === src.preset) || null;
+  const base = BASES.some((b) => b.id === src.base) ? src.base : (byId?.base || 'a');
+  const fallback = byId || PRESETS[0];
+  const rawSeed = typeof src.seed === 'string' ? src.seed : src.seed?.light;
+  const seed = isHex(rawSeed) ? rawSeed : fallback.seed;
+  let preset = byId ? byId.id : 'custom';
+  if (byId && (byId.base !== base || byId.seed !== seed)) preset = 'custom';
+
+  /**
+   * custom = **用户自己挑的那个色**，与 seed（当前生效色）分开存。
+   *
+   * 不分开的话，切一次预设就把用户的色覆盖掉了，再点「自定义」看到的
+   * 是上一个预设的颜色——那就等于没记住（2026-11-19 主人反馈）。
+   * 空串表示「还没自定义过」，UI 上显示成彩虹点。
+   */
+  const custom = isHex(src.custom) ? src.custom : (preset === 'custom' ? seed : '');
+
+  const bg = src.bg && typeof src.bg === 'object' ? src.bg : {};
+  const clamp = (v, lo, hi, dflt) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.min(hi, Math.max(lo, Math.round(n))) : dflt;
+  };
+
+  return {
+    v: 1,
+    mode: ['auto', 'light', 'dark'].includes(src.mode) ? src.mode : 'auto',
+    preset,
+    base,
+    seed,
+    custom,
+    ink: inkFor(seed, base),
+    bg: {
+      on: Boolean(bg.on),
+      blur: clamp(bg.blur, 0, 24, 10),
+      bright: clamp(bg.bright, 40, 100, 88),
+      alpha: clamp(bg.alpha, 60, 96, 78),
+    },
+  };
+}
+
+function readAppearance() {
+  try {
+    const raw = localStorage.getItem(APPEARANCE_KEY);
+    if (raw) return normalizeAppearance(JSON.parse(raw));
+  } catch { /* 坏 JSON 当没有，往下走迁移 */ }
+
+  /**
+   * 迁移：旧版本只存「明暗 + 四选一」。
+   * 映射成对应的内置预设，浅色画面和升级前一模一样。
+   */
+  let mode = 'auto';
+  let base = 'a';
+  try {
+    const t = localStorage.getItem(THEME_KEY);
+    if (t === 'light' || t === 'dark') mode = t;
+    const p = localStorage.getItem(PALETTE_KEY);
+    if (['a', 'b', 'c', 'd'].includes(p)) base = p;
+  } catch {}
+  const preset = PRESETS.find((x) => x.id === base) || PRESETS[0];
+  return normalizeAppearance({ v: 1, mode, preset: preset.id, base: preset.base, seed: preset.seed });
+}
+
+function resolveTheme(mode = APPEARANCE?.mode || 'auto') {
+  if (mode === 'light' || mode === 'dark') return mode;
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+/** 插件页的变量由服务端按明暗注入，主题一变就得让 iframe 重新取一次 */
+function reloadPluginFrames() {
+  $$('.plugin-page').forEach((f) => {
+    if (!f.dataset.key || !f.getAttribute('src')) return;
+    const url = pluginPageUrl(f.dataset.key, f.dataset.token);
+    if (f.getAttribute('src') !== url) f.src = url;
   });
+}
+
+/* ---------------- 背景图（IndexedDB 存原图，不进 localStorage） ---------------- */
+
+/**
+ * 为什么放 IndexedDB 而不是 localStorage：
+ * 一张 1080p 的 JPEG 转成 base64 就是 2–4 MB，localStorage 上限 5 MB，
+ * 而且它每次读都是同步的——`theme-boot.js` 在首屏前读一次会明显卡。
+ * Blob 存 IndexedDB、渲染时 `URL.createObjectURL`，和 kun-galgame-forum 一样。
+ */
+const BG_DB = 'roost-ui';
+const BG_STORE = 'kv';
+const BG_KEY = 'background';
+
+function bgDb() {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') return reject(new Error('这个浏览器不支持 IndexedDB'));
+    const req = indexedDB.open(BG_DB, 1);
+    req.onupgradeneeded = () => {
+      if (!req.result.objectStoreNames.contains(BG_STORE)) req.result.createObjectStore(BG_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error('打不开本地图片库'));
+  });
+}
+
+async function bgGet() {
+  const db = await bgDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(BG_STORE, 'readonly');
+    const req = tx.objectStore(BG_STORE).get(BG_KEY);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function bgPut(blob) {
+  const db = await bgDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(BG_STORE, 'readwrite');
+    tx.objectStore(BG_STORE).put(blob, BG_KEY);
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function bgDel() {
+  const db = await bgDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(BG_STORE, 'readwrite');
+    tx.objectStore(BG_STORE).delete(BG_KEY);
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+/**
+ * 把背景图落到 CSS 变量上。
+ *
+ * 亮度是真的去压整张图（`filter: brightness()`），不是盖一层黑——盖黑会把
+ * 图片的对比也压平，看起来灰蒙蒙；压亮度还能保留层次。
+ */
+function paintBackground() {
+  const root = document.documentElement;
+  const bg = APPEARANCE?.bg;
+  if (!bg) return;
+  root.style.setProperty('--bg-blur', `${bg.blur}px`);
+  root.style.setProperty('--bg-bright', `${bg.bright}%`);
+  root.style.setProperty('--surface-alpha', `${bg.alpha}%`);
+  if (bg.on && bgObjectUrl) {
+    root.style.setProperty('--bg-img', `url("${bgObjectUrl}")`);
+    root.dataset.bg = 'image';
+  } else {
+    root.removeAttribute('data-bg');
+    root.style.removeProperty('--bg-img');
+  }
+}
+
+/** 启动时把图读回来（boot 只能先按 localStorage 的开关铺好半透明，这里补上图） */
+async function loadBackground() {
+  if (!APPEARANCE?.bg?.on) {
+    paintBackground();
+    return;
+  }
+  try {
+    const blob = await bgGet();
+    if (!blob) {
+      // 开关在、图没了（清过缓存 / 换过浏览器）：老实关掉，别让面板悬空
+      APPEARANCE.bg.on = false;
+      saveAppearance();
+      paintBackground();
+      return;
+    }
+    if (bgObjectUrl) URL.revokeObjectURL(bgObjectUrl);
+    bgObjectUrl = URL.createObjectURL(blob);
+  } catch (e) {
+    appearanceSay(`背景图读取失败：${e?.message || e}`, 'error');
+  }
+  paintBackground();
+}
+
+/* ---------------- 落地 ---------------- */
+
+/**
+ * 落地一次外观。
+ *
+ * 全站只有这一个写入口：页头按钮、外观页、导入，最后都走到这里。
+ *
+ * 深色是固定黑白：**不加 data-appearance，也不写种子**——CSS 那边
+ * 派生块被 `:not([data-theme="dark"])` 挡着，双保险。
+ */
+function applyAppearance(input, { persist = true } = {}) {
+  const next = normalizeAppearance(input);
+  const root = document.documentElement;
+  const native = Boolean(PRESETS.find((p) => p.id === next.preset)?.native);
+  const prevTheme = root.dataset.theme;
+
+  APPEARANCE = next;
+  const theme = resolveTheme(next.mode);
+  root.dataset.theme = theme;
+  /**
+   * 黑夜不写 data-palette：CSS 里浅色块虽然已经用 :not([data-theme="dark"])
+   * 挡住了，这里再摘掉属性是第二道保险——属性不在，选择器根本不匹配。
+   */
+  if (theme === 'light') root.dataset.palette = next.base;
+  else root.removeAttribute('data-palette');
+  /**
+   * 写上 preset：CSS 用它区分「内置预设」和「派生配色」——派生配色要把背景
+   * 也按主色色相重新生成，预设则保持各自设计好的底色。
+   */
+  root.dataset.preset = next.preset;
+  /**
+   * native  = 四套内置（手挑底色，CSS 里定死）
+   * derived = 其余（含自定义）：底色按主色色相现场生成，见 style.css
+   */
+  root.dataset.colorway = native ? 'native' : 'derived';
+
+  if (theme === 'light' && !native) {
+    root.dataset.appearance = 'custom';
+    root.style.setProperty('--seed-light', next.seed);
+    root.style.setProperty('--ink-light', next.ink);
+  } else {
+    root.removeAttribute('data-appearance');
+    root.style.removeProperty('--seed-light');
+    root.style.removeProperty('--ink-light');
+  }
+  // 深色下这两个变量不再参与渲染，清掉免得残留
+  root.style.removeProperty('--seed-dark');
+  root.style.removeProperty('--ink-dark');
+
+  updateThemeBtn(theme);
+  updatePaletteBtn();
+  paintBackground();
+
+  if (persist) saveAppearance();
+  if (prevTheme && prevTheme !== theme) reloadPluginFrames();
+}
+
+function saveAppearance() {
+  if (!APPEARANCE) return;
+  try { localStorage.setItem(APPEARANCE_KEY, JSON.stringify(APPEARANCE)); } catch {}
+  /**
+   * 老键同时写一份：降级回旧版本时，明暗和四套底色还在。
+   * 只有「明确选了明或暗」才写 THEME_KEY：跟随系统时留空，旧版本才会继续跟着系统走。
+   */
+  try {
+    if (APPEARANCE.mode === 'auto') localStorage.removeItem(THEME_KEY);
+    else localStorage.setItem(THEME_KEY, document.documentElement.dataset.theme || 'light');
+    localStorage.setItem(PALETTE_KEY, APPEARANCE.base);
+  } catch {}
 }
 
 function updateThemeBtn(t) {
   const btn = $('#btnTheme');
-  if (btn) btn.title = t === 'dark' ? '切换到日间模式' : '切换到夜间模式';
+  if (btn) btn.title = t === 'dark' ? '切换到白天模式' : '切换到黑夜模式';
 }
 
-function setTheme(t, { persist = true } = {}) {
-  document.documentElement.dataset.theme = t;
-  if (persist) {
-    try { localStorage.setItem(THEME_KEY, t); } catch {}
-  }
-  updateThemeBtn(t);
-  // 插件页面的 CSS 变量是跟着主题走的，切了要让它重新加载一次
-  $$('.plugin-page').forEach((f) => {
-    if (!f.dataset.key || !f.getAttribute('src')) return;
-    const url = pluginPageUrl(f.dataset.key, f.dataset.token);
-    if (f.getAttribute('src') !== url) f.src = url; // 主题没变就别重载
+/** 页头按钮只报「当前是哪套」，配色细节交给外观页 */
+function updatePaletteBtn() {
+  const btn = $('#btnPalette');
+  if (!btn || !APPEARANCE) return;
+  const dark = document.documentElement.dataset.theme === 'dark';
+  const name = dark
+    ? '黑白（黑夜固定）'
+    : (PRESETS.find((p) => p.id === APPEARANCE.preset)?.name || '自定义配色');
+  btn.title = `当前配色：${name}（点击打开外观设置）`;
+  btn.setAttribute('aria-label', `打开外观设置，当前配色是${name}`);
+}
+
+/* ---------------- 外观页 ---------------- */
+
+/** 背景图区的提示。单独一个函数：这个框在页面中部，错误不能写到最底下的 #apMsg 去 */
+let bgNote = '';
+function bgSay(text, kind = '') {
+  bgNote = String(text ?? '');
+  const el = $('#apBgMsg');
+  if (!el) return;
+  el.textContent = bgNote;
+  el.style.color = kind === 'error' ? 'var(--err)' : kind === 'ok' ? 'var(--ok)' : '';
+}
+
+function appearanceSay(text, kind = '') {
+  const el = $('#apMsg');
+  if (!el) return;
+  el.textContent = String(text ?? '');
+  el.style.color = kind === 'error' ? 'var(--err)' : kind === 'ok' ? 'var(--ok)' : '';
+}
+
+/**
+ * 重画外观页。
+ *
+ * 这一页本身就是预览：色块、边框、按钮都用当前变量渲染，改主色时整页跟着变。
+ * 深色下配色区整块禁用——不是藏掉，是让人看见「深色固定黑白」这件事。
+ */
+function renderAppearance() {
+  if (!APPEARANCE) return;
+  const dark = document.documentElement.dataset.theme === 'dark';
+
+  $$('#apMode [data-mode]').forEach((b) => {
+    const on = b.dataset.mode === APPEARANCE.mode;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', String(on));
   });
+
+  // 配色区在深色下整体禁用 + 说明
+  const colorWrap = $('#apColors');
+  if (colorWrap) {
+    colorWrap.classList.toggle('ap-off', dark);
+    colorWrap.querySelectorAll('button, input').forEach((el) => { el.disabled = dark; });
+  }
+  const darkNote = $('#apDarkNote');
+  if (darkNote) darkNote.hidden = !dark;
+
+  const presets = $('#apPresets');
+  if (presets) {
+    presets.innerHTML = PRESETS.map((p) => `
+      <button type="button" class="ap-preset${p.id === APPEARANCE.preset ? ' on' : ''}"
+              data-preset="${p.id}" aria-pressed="${p.id === APPEARANCE.preset}">
+        <i style="background:${p.seed}"></i>${escapeHtml(p.name)}
+      </button>`).join('');
+    /**
+     * 「自定义」常驻：不选中时显示彩虹点（= 自己挑），选中时显示当前主色。
+     * 点它才弹取色器——取色器本身不再占一行，平时藏着。
+     */
+    const isCustom = APPEARANCE.preset === 'custom';
+    const customDot = isHex(APPEARANCE.custom)
+      ? ` style="background:${APPEARANCE.custom}"`
+      : ' class="ap-rainbow"';
+    presets.insertAdjacentHTML('beforeend', `
+      <button type="button" class="ap-preset ap-custom${isCustom ? ' on' : ''}"
+              data-preset="custom" aria-pressed="${isCustom}" title="用自己的主色">
+        <i${customDot}></i>自定义
+      </button>`);
+  }
+
+  const seedInput = $('#apSeed');
+  if (seedInput) seedInput.value = APPEARANCE.seed;
+
+  const hint = $('#apSeedHint');
+  if (hint) {
+    if (dark) {
+      hint.textContent = '';
+      hint.style.color = '';
+    } else if (!CAN_DERIVE) {
+      hint.textContent = '这个浏览器不支持相对色语法（Chrome / Edge 119+、Safari 16.4+），'
+        + '自定义主色不会生效；内置预设不受影响。';
+      hint.style.color = 'var(--warn-text)';
+    } else {
+      const ratio = contrastRatio(APPEARANCE.seed, APPEARANCE.ink);
+      hint.textContent = `按钮文字对比度 ${ratio.toFixed(1)}:1`
+        + (ratio >= 4.5 ? '' : '（偏低，把主色调深或调浅一点）');
+      hint.style.color = ratio >= 4.5 ? '' : 'var(--warn-text)';
+    }
+  }
+
+  // 背景图控件
+  const sliders = [
+    ['#apBgBlur', '#apBgBlurVal', APPEARANCE.bg.blur, 'px'],
+    ['#apBgBright', '#apBgBrightVal', APPEARANCE.bg.bright, '%'],
+    ['#apBgAlpha', '#apBgAlphaVal', APPEARANCE.bg.alpha, '%'],
+  ];
+  for (const [sel, labelSel, val, unit] of sliders) {
+    const el = $(sel);
+    if (el) el.value = String(val);
+    const lb = $(labelSel);
+    if (lb) lb.textContent = `${val}${unit}`;
+  }
+  const bgMsg = $('#apBgMsg');
+  if (bgMsg) {
+    bgMsg.textContent = bgNote || (APPEARANCE.bg.on ? '已启用（存在这台浏览器里）' : '未设置');
+    if (!bgNote) bgMsg.style.color = '';
+  }
+  const clearBtn = $('#apBgClear');
+  if (clearBtn) clearBtn.disabled = !APPEARANCE.bg.on;
+}
+
+function initAppearance() {
+  APPEARANCE = readAppearance();
+  // 先落地再画：boot 已经写过一次属性，这里补齐行内变量并纠正坏数据
+  applyAppearance(APPEARANCE, { persist: false });
+  renderAppearance();
+  loadBackground();
+
+  $('#apMode')?.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-mode]');
+    if (!b) return;
+    applyAppearance({ ...APPEARANCE, mode: b.dataset.mode });
+    renderAppearance();
+  });
+
+  $('#apPresets')?.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-preset]');
+    if (!b) return;
+    if (b.dataset.preset === 'custom') {
+      applyAppearance({ ...APPEARANCE, preset: 'custom', seed: APPEARANCE.custom || APPEARANCE.seed });
+      renderAppearance();
+      // 必须在这次点击的调用栈里触发，否则浏览器不给开取色器
+      $('#apSeed')?.click();
+      return;
+    }
+    const p = PRESETS.find((x) => x.id === b.dataset.preset);
+    if (!p) return;
+    applyAppearance({ ...APPEARANCE, preset: p.id, base: p.base, seed: p.seed });
+    renderAppearance();
+    appearanceSay('');
+  });
+
+  $('#apSeed')?.addEventListener('input', (e) => {
+    const v = e.target.value;
+    if (!isHex(v)) return;
+    applyAppearance({ ...APPEARANCE, preset: 'custom', seed: v, custom: v });
+    renderAppearance();
+  });
+
+  /* --- 背景图 --- */
+  $('#apBgPick')?.addEventListener('click', () => {
+    bgNote = '';           // 上一轮的报错别带进这次选择
+    renderAppearance();
+    $('#apBgFile')?.click();
+  });
+
+  $('#apBgFile')?.addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // 允许重复选同一张
+    if (!file) return;
+    if (!/^image\//.test(file.type)) {
+      bgSay(`「${file.name}」不是图片文件`, 'error');
+      renderAppearance();
+      return;
+    }
+    if (file.size > 12 * 1024 * 1024) {
+      const mb = (file.size / 1024 / 1024).toFixed(1);
+      bgSay(`「${file.name}」有 ${mb} MB，超过 12 MB 上限——先压到 1080p 级别再试`, 'error');
+      renderAppearance();
+      return;
+    }
+    try {
+      /**
+       * 先让浏览器解一次：HEIC / 改过扩展名的假图片在这里就会失败。
+       * 不校验的话，图存进去了却画不出来，表现得就和「没有反应」一样。
+       */
+      try {
+        const bmp = await createImageBitmap(file);
+        bmp.close?.();
+      } catch {
+        bgSay('这张图浏览器解不开，换 JPG / PNG / WebP 试试', 'error');
+        renderAppearance();
+        return;
+      }
+      await bgPut(file);
+      if (bgObjectUrl) URL.revokeObjectURL(bgObjectUrl);
+      bgObjectUrl = URL.createObjectURL(file);
+      applyAppearance({ ...APPEARANCE, bg: { ...APPEARANCE.bg, on: true } });
+      bgSay('已设为背景（存在这台浏览器里）', 'ok');
+      renderAppearance();
+    } catch (err) {
+      bgSay(`存不进本地图片库：${err?.message || err}`, 'error');
+      renderAppearance();
+    }
+  });
+
+  $('#apBgClear')?.addEventListener('click', async () => {
+    try { await bgDel(); } catch { /* 已经没有了 */ }
+    if (bgObjectUrl) {
+      URL.revokeObjectURL(bgObjectUrl);
+      bgObjectUrl = '';
+    }
+    applyAppearance({ ...APPEARANCE, bg: { ...APPEARANCE.bg, on: false } });
+    bgSay('背景已清除', 'ok');
+    renderAppearance();
+  });
+
+  $('#apBgBlur')?.addEventListener('input', (e) => {
+    applyAppearance({ ...APPEARANCE, bg: { ...APPEARANCE.bg, blur: Number(e.target.value) } });
+    renderAppearance();
+  });
+
+  $('#apBgBright')?.addEventListener('input', (e) => {
+    applyAppearance({ ...APPEARANCE, bg: { ...APPEARANCE.bg, bright: Number(e.target.value) } });
+    renderAppearance();
+  });
+
+  $('#apBgAlpha')?.addEventListener('input', (e) => {
+    applyAppearance({ ...APPEARANCE, bg: { ...APPEARANCE.bg, alpha: Number(e.target.value) } });
+    renderAppearance();
+  });
+
+  $('#apExport')?.addEventListener('click', () => {
+    const el = $('#apJson');
+    if (!el || !APPEARANCE) return;
+    el.value = JSON.stringify(APPEARANCE, null, 2);
+    appearanceSay('已导出到上面，可以复制走或存成文件（背景图不包含在内）', 'ok');
+  });
+
+  $('#apImport')?.addEventListener('click', () => {
+    const raw = $('#apJson')?.value?.trim() || '';
+    if (!raw) {
+      appearanceSay('先把 JSON 粘到上面', 'error');
+      return;
+    }
+    let cfg;
+    try {
+      cfg = JSON.parse(raw);
+    } catch (e) {
+      appearanceSay('不是合法 JSON：' + (e?.message || e), 'error');
+      return;
+    }
+    if (!cfg || typeof cfg !== 'object' || (!cfg.seed && !cfg.preset)) {
+      appearanceSay('这份 JSON 里没有 seed / preset，不像是外观配置', 'error');
+      return;
+    }
+    // 导入不带背景图：图存在本地库里，导出的 JSON 里只有开关
+    applyAppearance({ ...cfg, bg: { ...APPEARANCE.bg, on: APPEARANCE.bg.on } });
+    renderAppearance();
+    appearanceSay('已导入', 'ok');
+  });
+
+  $('#apReset')?.addEventListener('click', () => {
+    applyAppearance({ v: 1, mode: 'auto', preset: 'a', base: 'a', seed: PRESETS[0].seed });
+    renderAppearance();
+    appearanceSay('已恢复默认：琥珀，跟随系统明暗；背景图未动（用「清除」单独删）', 'ok');
+  });
+
+  updatePaletteBtn();
 }
 
 function initTheme() {
-  initPalette();
+  initAppearance();
+
   const btn = $('#btnTheme');
-  const saved = (() => { try { return localStorage.getItem(THEME_KEY); } catch { return null; } })();
-  const sysDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-
-  // 没手动选过就跟随系统，且不写入 localStorage，保持「跟随系统」状态
-  setTheme(saved || (sysDark ? 'dark' : 'light'), { persist: Boolean(saved) });
-
   btn?.addEventListener('click', () => {
     const cur = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
-    setTheme(cur);
+    applyAppearance({ ...APPEARANCE, mode: cur });
+    renderAppearance();
   });
 
-  // 用户没手动选过时，系统主题变了跟着变
+  /** 页头「更换主题」跳外观页：轮换四套的行为在有了外观页之后只会让人错过想要的那套 */
+  $('#btnPalette')?.addEventListener('click', () => {
+    activateTab('appearance');
+    history.replaceState(null, '', '#appearance');
+  });
+
+  // 跟随系统：只在 mode=auto 时生效；手动选过明暗就不该被系统改回去
   const mq = window.matchMedia('(prefers-color-scheme: dark)');
-  mq.addEventListener?.('change', (e) => {
-    let hasSaved = null;
-    try { hasSaved = localStorage.getItem(THEME_KEY); } catch {}
-    if (!hasSaved) setTheme(e.matches ? 'dark' : 'light', { persist: false });
+  mq.addEventListener?.('change', () => {
+    if (APPEARANCE?.mode !== 'auto') return;
+    applyAppearance({ ...APPEARANCE }, { persist: false });
+    renderAppearance();
   });
 }
 
+/* ---------------- 工具 ---------------- */
 /* ---------------- 工具 ---------------- */
 
 /**
@@ -841,6 +1422,11 @@ function activateTab(name) {
     }
   }
   if (name === 'config') safeLoad('config', loadConfig);
+  /**
+   * 外观页没有网络请求，只有一次重画：页头切明暗、别处导入之后回到这一页，
+   * 色块和取色器要跟当前状态对齐。
+   */
+  if (name === 'appearance') renderAppearance();
   if (name === 'dev') safeLoad('dev', loadDev);
   if (name === 'groups') safeLoad('groups', loadGroups);
   if (name === 'reach') safeLoad('reach', loadReach);
@@ -1344,18 +1930,21 @@ function fillForm(c) {
   f.mediaPlaceholderSpace.checked = c.media?.placeholderSpace === true;
 
   /**
-   * 插件来源校验开关。`pubkeySet: false` 时必须说清楚「开了也没用」——
-   * 否则用户打开开关、以为已经受保护，实际什么都没发生，这比没有开关更糟。
+   * 自更新签名校验开关（字段名仍是 security.trust.enforce，自更新那边要读）。
+   *
+   * 只管「框架升级」这一条链路：插件市场从 2026-11-19 起不再做签名校验。
+   * `pubkeySet: false` 时必须说清楚「开了也没用」——否则用户打开开关、
+   * 以为已经受保护，实际什么都没发生，这比没有开关更糟。
    */
   const trust = c.security?.trust ?? {};
   f.trustEnforce.checked = Boolean(trust.enforce);
   const trustHint = $('#trustHint');
   if (trustHint) {
     trustHint.textContent = !trust.pubkeySet
-      ? '当前框架没有内置信任公钥，这个开关即使打开也不起作用（所有插件照常放行）。'
+      ? '当前框架没有内置信任公钥，这个开关即使打开也不起作用（框架自更新照常放行）。'
       : !trust.pubkeyValid
         ? '信任公钥配错了，解析不了——这个开关打开也不会生效。检查配置里的 security.trust.pubkey。'
-        : '开启后，官方市场里未签名或签名不符的插件会被拒绝安装和更新；手写插件、以及你自己配置的市场源不受影响。';
+        : '开启后，框架自更新会校验 SHA256SUMS 签名，不符或缺失时拒绝更新；插件市场不做签名校验。';
   }
 }
 
@@ -1421,22 +2010,26 @@ function intentValueOf(bit) {
 }
 
 function renderIntents() {
+  const tick = `<span class="tick"><svg viewBox="0 0 12 12" fill="none" aria-hidden="true">
+          <path d="M2 6.2 4.6 8.8 10 3.4" stroke="currentColor" stroke-width="1.8"
+                stroke-linecap="round" stroke-linejoin="round"/></svg></span>`;
+
   for (const group of ['chat', 'guild']) {
     const box = $(group === 'chat' ? '#intentGroupChat' : '#intentGroupGuild');
     box.innerHTML = INTENTS.filter((it) => it.group === group)
       .map(
         (it) => `
-        <label class="intent-item" data-bit="${it.bit}">
+        <label class="intent-card" data-bit="${it.bit}">
           <input type="checkbox" data-bit="${it.bit}">
-          <span class="intent-body">
-            <span class="intent-name">
-              ${it.name}
-              ${it.needsApply ? '<span class="tag-need">需申请</span>' : '<span class="tag-free">默认可用</span>'}
-            </span>
-            <span class="intent-events">${it.events}</span>
-            ${it.note ? `<span class="intent-note">${it.note}</span>` : ''}
-          </span>
-          <span class="intent-value">${intentValueOf(it.bit)}</span>
+          <div class="card-top">
+            ${tick}
+            <span class="card-name">${it.name}</span>
+          </div>
+          <span class="card-desc">${it.events}</span>
+          <div class="card-foot">
+            ${it.needsApply ? '<span class="pill req">需申请</span>' : '<span class="pill free">默认可用</span>'}
+            <span class="card-grp">${group === 'chat' ? '群聊' : '频道'}</span>
+          </div>
         </label>`,
       )
       .join('');
@@ -1450,9 +2043,13 @@ function renderIntents() {
   });
 }
 
+/** 最后一次「加载 / 应用」的 intents 值。用来判断有没有未应用的改动 */
+let intentsApplied = null;
+
 /** 从数值反推勾选状态 */
 function setIntents(value) {
   const v = Number(value) || 0;
+  intentsApplied = v;
   const unknown = v & ~KNOWN_MASK;
 
   $$('#intentGroupChat input[type=checkbox], #intentGroupGuild input[type=checkbox]').forEach((cb) => {
@@ -1463,10 +2060,12 @@ function setIntents(value) {
   // 含未知位（比如官方新加的事件），自动切到高级模式，避免静默丢配置
   const adv = unknown !== 0;
   $('#intentsAdvanced').checked = adv;
-  $('#intentsManual').style.display = adv ? '' : 'none';
+  const advRow = $('#intentsAdvRow');
+  if (advRow) advRow.hidden = !adv;
   $('#intentsManual').value = v;
   $('#intentsValue').textContent = v;
   renderIntentSummary(v, adv);
+  renderIntentsDirty();
 }
 
 /** 由勾选状态算出数值 */
@@ -1478,42 +2077,72 @@ function updateIntentsValue() {
   $('#cfgForm').intents.value = v;
   $('#intentsValue').textContent = v;
   renderIntentSummary(v, false);
-  // 勾选即生效：不用再点保存
-  autoSaveIntents();
+  /**
+   * **不自动保存**：intents 是连接参数，改一次就要重连一次网关。
+   * 自动保存会让「连勾五个」变成「重连五次」，机器人反复掉线。
+   * 这里只标记未应用，由用户点「应用订阅」统一提交一次。
+   */
+  renderIntentsDirty();
+}
+
+/** 当前表单里的值是否还没应用 */
+function intentsDirty() {
+  return Number($('#cfgForm').intents.value) !== intentsApplied;
+}
+
+function renderIntentsDirty() {
+  const dirty = intentsDirty();
+  const btn = $('#intentsApply');
+  if (btn) btn.disabled = !dirty;
+  const st = $('#intentsStatus');
+  if (!st) return;
+  if (dirty) {
+    st.textContent = '有改动未应用（会重连一次）';
+    st.style.color = 'var(--warn-text)';
+  } else if (st.textContent.startsWith('有改动')) {
+    st.textContent = '';
+    st.style.color = '';
+  }
 }
 
 /**
- * 订阅事件自动保存。
+ * 应用订阅（由「应用订阅」按钮触发）。
  *
- * 防抖 900ms——连着勾 5 个只提交一次。
- * 每次提交都会让后端**重连网关**（intents 是连接参数），
- * 不做防抖的话勾几个就重连几次，机器人会反复掉线。
+ * 不做自动保存：intents 是**连接参数**，每次提交都会让网关重连，
+ * 连着勾五个就要重连五次。改成先勾完、再点一次按钮只提交一次。
  */
-let intentsSaveTimer = null;
-function autoSaveIntents() {
+async function applyIntents() {
   const tip = $('#cfgMsgTop');
-  if (intentsSaveTimer) clearTimeout(intentsSaveTimer);
-  if (tip) tip.textContent = '事件订阅待应用…';
-
-  intentsSaveTimer = setTimeout(async () => {
-    intentsSaveTimer = null;
-    const v = Number($('#cfgForm').intents.value) || 0;
-    if (tip) tip.textContent = '正在应用（会重连）…';
-    try {
-      await api('/api/config', {
-        method: 'PUT',
-        body: JSON.stringify({ intents: v }),
-      });
-      if (tip) {
-        tip.textContent = `已生效（intents=${v}），网关正在重连`;
-        setTimeout(() => {
-          if (tip.textContent.startsWith('已生效')) tip.textContent = '';
-        }, 4000);
-      }
-    } catch (e) {
-      if (tip) tip.textContent = '应用失败: ' + e.message;
+  const local = $('#intentsStatus');
+  const btn = $('#intentsApply');
+  const v = Number($('#cfgForm').intents.value) || 0;
+  if (btn) btn.disabled = true;
+  if (tip) tip.textContent = '正在应用事件订阅（会重连）…';
+  if (local) { local.textContent = '正在应用…'; local.style.color = 'var(--muted)'; }
+  try {
+    await api('/api/config', {
+      method: 'PUT',
+      body: JSON.stringify({ intents: v }),
+    });
+    intentsApplied = v;
+    if (tip) {
+      tip.textContent = `已生效（intents=${v}），网关正在重连`;
+      setTimeout(() => {
+        if (tip.textContent.startsWith('已生效')) tip.textContent = '';
+      }, 4000);
     }
-  }, 900);
+    if (local) {
+      local.textContent = `已生效（${v}），网关重连中`;
+      local.style.color = 'var(--ok)';
+      setTimeout(() => {
+        if (local.textContent.startsWith('已生效')) local.textContent = '';
+      }, 6000);
+    }
+  } catch (e) {
+    if (tip) tip.textContent = '应用失败: ' + e.message;
+    if (local) { local.textContent = '应用失败：' + e.message; local.style.color = 'var(--err)'; }
+    if (btn) btn.disabled = false;
+  }
 }
 
 function renderIntentSummary(v, advanced) {
@@ -1533,6 +2162,11 @@ function renderIntentSummary(v, advanced) {
   desc.textContent = picked.length ? picked.join(' + ') : '自定义组合';
 
   const needsApply = INTENTS.filter((it) => (v & (1 << it.bit)) && it.needsApply).map((it) => it.name);
+  const stat = $('#intentsStat');
+  if (stat) {
+    stat.innerHTML = `已选 <b>${picked.length}</b> 项`
+      + (needsApply.length ? ` · 其中 <b>${needsApply.length}</b> 项需申请` : '');
+  }
   const msgs = [];
   if (needsApply.length) {
     msgs.push(`「${needsApply.join('、')}」需要先在开放平台申请权限，否则连接会被拒（关闭码 4014）。`);
@@ -1547,7 +2181,12 @@ function renderIntentSummary(v, advanced) {
 function bindIntentsUI() {
   renderIntents();
 
-  $$('[data-preset]').forEach((btn) => {
+  /**
+   * 只用 data-intent-preset：外观页的配色块也叫 data-preset，
+   * 早先这里用 `$$('[data-preset]')` 会把它们一起绑上——在外观页点个配色，
+   * 就会走到 `map[undefined] ?? []` 把订阅清空并自动保存。
+   */
+  $$('#tab-config [data-intent-preset]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const map = {
         chat: [25],
@@ -1555,9 +2194,10 @@ function bindIntentsUI() {
         all: INTENTS.map((it) => it.bit),
         none: [],
       };
-      const bits = map[btn.dataset.preset] ?? [];
+      const bits = map[btn.dataset.intentPreset] ?? [];
       $('#intentsAdvanced').checked = false;
-      $('#intentsManual').style.display = 'none';
+      const advRow = $('#intentsAdvRow');
+      if (advRow) advRow.hidden = true;
       $$('#intentGroupChat input[type=checkbox], #intentGroupGuild input[type=checkbox]').forEach((cb) => {
         cb.checked = bits.includes(Number(cb.dataset.bit));
       });
@@ -1567,7 +2207,8 @@ function bindIntentsUI() {
 
   $('#intentsAdvanced').addEventListener('change', (e) => {
     const on = e.target.checked;
-    $('#intentsManual').style.display = on ? '' : 'none';
+    const advRow = $('#intentsAdvRow');
+    if (advRow) advRow.hidden = !on;
     if (on) {
       // 进入高级模式时，用当前勾选结果作为起点
       let v = 0;
@@ -1582,13 +2223,15 @@ function bindIntentsUI() {
     }
   });
 
+  $('#intentsApply')?.addEventListener('click', applyIntents);
+
   $('#intentsManual').addEventListener('input', (e) => {
     const v = Number(e.target.value) || 0;
     $('#intentsValue').textContent = v;
     renderIntentSummary(v, true);
-    // 高级模式手填数值同样立即生效
+    // 高级模式手填也只是改配置，由「应用订阅」统一生效
     $('#cfgForm').intents.value = v;
-    autoSaveIntents();
+    renderIntentsDirty();
   });
 }
 
@@ -1596,7 +2239,7 @@ async function loadConfig() {
   try {
     fillForm(await api('/api/config'));
   } catch (e) {
-    $('#cfgMsg').textContent = '读取配置失败: ' + e.message;
+    $('#cfgMsgTop').textContent = '读取配置失败: ' + e.message;
   }
   refreshInstances();
 }
@@ -1681,7 +2324,7 @@ document.addEventListener('click', async (e) => {
 
 /**
  * 「保存配置」按钮在表单顶部/底部，离这块设置很远，勾完还得滚过去点一下才生效。
- * 这里跟 `autoSaveIntents` 一个套路：change 时局部 PUT 只提交 media 一个字段，
+ * 这里跟 intents 那块不同：media 是纯配置、改了不影响连接，可以即改即存；
  * 后端 `/api/config` 是合并语义，其它配置项不会被这次请求碰。
  * 不需要防抖——勾一下就是一次，且不会像 intents 那样触发重连。
  */
@@ -1707,6 +2350,88 @@ $('#mediaPlaceholderSpace').addEventListener('change', async (e) => {
   }
 });
 
+/* ---------------- 改动即生效（除连接凭证 / 事件订阅） ---------------- */
+
+/**
+ * 这部分设置**不需要保存按钮**：改完就落盘。
+ *
+ * 为什么不和凭证一起提交：
+ *   · 凭证（AppID/Secret/baseUrl/连接方式）改一半就落盘会直接断线，
+ *     必须让人确认一次；
+ *   · 事件订阅是连接参数，每次提交都要重连，所以单独一个「应用订阅」。
+ * 其余都是纯配置，即改即存最省事。
+ *
+ * 只用 `change` 事件（失焦 / 勾选才触发），不用 `input`：
+ * 数字框边打字边存会把 "1520" 存成 "1"、"15"、"152"，端口也能被存坏。
+ */
+function collectAutoPayload(f) {
+  const lines = (v) => v.split(/[\n,]/).map((x) => x.trim()).filter(Boolean);
+  return {
+    logLevel: f.logLevel.value,
+    whitelist: {
+      enabled: f.whitelistEnabled.checked,
+      groups: lines(f.whitelistGroups.value),
+      users: lines(f.whitelistUsers.value),
+    },
+    rateLimit: {
+      enabled: f.rateLimitEnabled.checked,
+      perChatPerMinute: Number(f.perChatPerMinute.value) || 30,
+    },
+    dedupWindowSec: Number(f.dedupWindowSec.value) || 0,
+    messageLog: {
+      enabled: f.messageLogEnabled.checked,
+      muteKinds: [
+        f.muteGroup.checked ? 'group' : null,
+        f.muteC2c.checked ? 'c2c' : null,
+        f.muteGuild.checked ? 'guild' : null,
+        f.muteDm.checked ? 'dm' : null,
+      ].filter(Boolean),
+    },
+    webui: {
+      host: f.webuiHost.value.trim() || '127.0.0.1',
+      port: Number(f.webuiPort.value) || 15207,
+      accessKey: f.webuiAccessKey.value.trim(),
+    },
+    groupManage: { invited: f.groupInvited.checked },
+    media: { placeholderSpace: f.mediaPlaceholderSpace.checked },
+    security: { trust: { enforce: f.trustEnforce.checked } },
+  };
+}
+
+let autoSaveTimer = null;
+function bindAutoSave() {
+  const form = $('#cfgForm');
+  if (!form) return;
+
+  /**
+   * 拦住「回车提交」：凭证区填到一半按回车就会把这半截 AppID 存下去，
+   * 而保存凭证还会触发重连。其它字段都是即改即存，回车没有任何理由提交表单。
+   */
+  form.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    const t = e.target;
+    if (t.tagName === 'INPUT' && t.type !== 'checkbox' && t.type !== 'radio') e.preventDefault();
+  });
+  const locked = (el) =>
+    Boolean(el.closest('[data-cfg="creds"]')) || Boolean(el.closest('.intents-block'));
+
+  form.addEventListener('change', (e) => {
+    const el = e.target;
+    if (!el?.name || locked(el)) return;
+    if (autoSaveTimer) clearTimeout(autoSaveTimer);
+    // 500ms 合并连点：勾一串开关只存一次
+    autoSaveTimer = setTimeout(async () => {
+      autoSaveTimer = null;
+      try {
+        await api('/api/config', { method: 'PUT', body: JSON.stringify(collectAutoPayload(form)) });
+        toast('已生效', 'ok');
+      } catch (err) {
+        toast('保存失败：' + (err?.message || err), 'error');
+      }
+    }, 500);
+  });
+}
+
 $('#cfgForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const f = e.target;
@@ -1717,7 +2442,11 @@ $('#cfgForm').addEventListener('submit', async (e) => {
     baseUrl: f.baseUrl.value.trim(),
     commandPrefix: f.commandPrefix.value.trim() || '/',
     connection: { mode: f.connectionMode.value === 'webhook' ? 'webhook' : 'websocket' },
-    intents: Number(f.intents.value),
+    /**
+     * 事件订阅有独立的「应用订阅」按钮，这里不能拿表单值去提交——
+     * 否则「只改凭证」也会把待应用的订阅一起生效并重连。
+     */
+    intents: intentsApplied ?? Number(f.intents.value),
     logLevel: f.logLevel.value,
     whitelist: {
       enabled: f.whitelistEnabled.checked,
@@ -1758,29 +2487,39 @@ $('#cfgForm').addEventListener('submit', async (e) => {
 
   const btn = f.querySelector('button[type=submit]');
   btn.disabled = true;
-  $('#cfgMsg').textContent = '保存中…';
+  $('#cfgMsgTop').textContent = '保存中…';
   try {
     const r = await api('/api/config', { method: 'PUT', body: JSON.stringify(payload) });
     // 后端在填完 AppID / AppSecret 后会把占位名换成官方昵称，这里同步显示
     const renamed = r?.name && r.name !== botById(CURRENT_BOT)?.name;
     // 换连接方式要重启才生效，后端会带 restartRequired + message，原样转达
-    $('#cfgMsg').textContent = r?.message
+    $('#cfgMsgTop').textContent = r?.message
       ? r.message
       : (renamed ? `已保存，机器人昵称同步为「${r.name}」` : '已保存') +
         (payload.appId ? '' : '（AppID 为空）');
     f.appSecret.value = '';
+    /**
+     * 这份表单**包含 intents**，所以保存成功后要把「已应用值」跟上，
+     * 否则事件订阅那边会一直挂着「有改动未应用」。
+     * 订阅区自己的「应用订阅」按钮仍然保留——只改订阅时才用它。
+     */
+    intentsApplied = Number(payload.intents) || 0;
+    renderIntentsDirty();
     // 扫码换凭证的那条提示到此为止：凭证已落盘，再挂着「点保存设置」就是误导
     resetQr();
     clearCfgDirty();
-    setTimeout(() => ($('#cfgMsg').textContent = ''), 4000);
+    setTimeout(() => ($('#cfgMsgTop').textContent = ''), 4000);
     await loadBots();
     pollStatus();
   } catch (err) {
-    $('#cfgMsg').textContent = '保存失败: ' + err.message;
+    $('#cfgMsgTop').textContent = '保存失败: ' + err.message;
   } finally {
     btn.disabled = false;
   }
 });
+
+// 除连接凭证 / 事件订阅外的设置：改动即存
+bindAutoSave();
 
 /* ---------------- 通知：SMTP 邮箱配置 ---------------- */
 
@@ -6298,29 +7037,26 @@ function initTableLabels() {
   bodies.forEach((tb) => mo.observe(tb, { childList: true, subtree: true }));
 }
 
-/** 手机浏览器地址栏跟随深浅色与配色，纯展示，不碰 setTheme() */
+/** 手机浏览器地址栏跟随当前页面底色，纯展示，不碰主题 */
 function initThemeColor() {
   const meta = document.querySelector('meta[name="theme-color"]');
   if (!meta) return;
-  // 亮 / 暗各一个底色，顺序与 PALETTES 的 a/b/c/d 对应
-  const CHROME = {
-    a: ['#f8f5f1', '#19120e'],
-    b: ['#f2f5fb', '#0b1020'],
-    c: ['#f2efea', '#10191c'],
-    d: ['#f5f2fb', '#120e24'],
-  };
+  /**
+   * 直接读算出来的 `--bg`，不再维护「配色 → 两个颜色」的表。
+   *
+   * 表的问题是新加一套配色就得记得补一行，忘一次手机地址栏就是旧颜色；
+   * 读计算值则连自定义主色、换底色都自动正确。rAF 是为了等这一帧的
+   * 样式重算结束——属性刚改完时取计算值，读到的可能还是上一帧。
+   */
   const apply = () => {
-    const p = CHROME[document.documentElement.dataset.palette] || CHROME.a;
-    meta.setAttribute(
-      'content',
-      document.documentElement.dataset.theme === 'dark' ? p[1] : p[0],
-    );
+    const bg = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
+    if (bg) meta.setAttribute('content', bg);
   };
   apply();
   if (typeof MutationObserver === 'undefined') return;
-  new MutationObserver(apply).observe(document.documentElement, {
+  new MutationObserver(() => requestAnimationFrame(apply)).observe(document.documentElement, {
     attributes: true,
-    attributeFilter: ['data-theme', 'data-palette'],
+    attributeFilter: ['data-theme', 'data-palette', 'data-appearance'],
   });
 }
 
@@ -6437,28 +7173,17 @@ document.addEventListener('click', (e) => {
   EMPTY_ACTIONS[btn.dataset.emptyAct]?.();
 });
 
-/* ---- 配置页：sticky 锚点目录 + 未保存标记 ---- */
+/* ---- 配置页：锚点目录 + 凭证区未保存标记 ----
+   只有「连接凭证」会出现未保存状态（其余区块都是改动即存），
+   所以标记就落在区块自己身上（.is-dirty 的黄边），不再额外挂文字。
+   底部保存条删掉之后，原来插在那里的 #cfgDirtyMark 已经没有容身之处。 */
 function clearCfgDirty() {
   $$('#cfgForm > .box.is-dirty').forEach((b) => b.classList.remove('is-dirty'));
-  const mark = $('#cfgDirtyMark');
-  if (mark) { mark.hidden = true; mark.textContent = ''; }
   $('#cfgForm')?.classList.remove('is-dirty');
 }
 
 function markCfgDirty(box) {
-  if (!box) return;
-  box.classList.add('is-dirty');
-  const bar = $('#cfgForm .sticky-actions');
-  if (!bar) return;
-  let mark = $('#cfgDirtyMark');
-  if (!mark) {
-    mark = document.createElement('span');
-    mark.id = 'cfgDirtyMark';
-    mark.className = 'hint cfg-dirty-mark';
-    bar.insertBefore(mark, bar.firstChild);
-  }
-  mark.textContent = '● 有未保存改动';
-  mark.hidden = false;
+  if (box) box.classList.add('is-dirty');
 }
 
 function initConfigNav() {
@@ -6487,14 +7212,17 @@ function initConfigNav() {
   });
   form.parentNode.insertBefore(toc, form);
 
-  // 「改动即生效」的控件自己走局部提交，不该被算成未保存
-  const instantIds = new Set(['mediaPlaceholderSpace', 'intentsManual', 'intentsAdvanced']);
-  const isInstant = (el) => Boolean(el.closest('.intents-block')) || instantIds.has(el.id);
+  /**
+   * 只有「连接凭证」需要标记未保存：其余区块都改完就落盘了，
+   * 再给它们加黄边等于骗人。事件订阅有自己的「有改动未应用」。
+   */
   const onEdit = (e) => {
     const el = e.target;
-    if (!el?.closest || isInstant(el)) return;
+    if (!el?.closest) return;
+    // 事件订阅块装在凭证 box 里，但它有自己的「有改动未应用」，别再给凭证挂黄边
+    if (el.closest('.intents-block')) return;
     const box = el.closest('.box');
-    if (box && box.parentElement === form) markCfgDirty(box);
+    if (box && box.parentElement === form && box.dataset.cfg === 'creds') markCfgDirty(box);
   };
   form.addEventListener('input', onEdit);
   form.addEventListener('change', onEdit);
@@ -6506,10 +7234,17 @@ function initConfigNav() {
     b.textContent = '改动即生效';
     return b;
   };
-  const intentsTitle = form.querySelector('.intents-title');
-  if (intentsTitle && !intentsTitle.querySelector('.instant-badge')) intentsTitle.appendChild(badge());
-  const mediaLabel = $('#mediaPlaceholderSpace')?.closest('label');
-  if (mediaLabel && !mediaLabel.querySelector('.instant-badge')) mediaLabel.appendChild(badge());
+  /**
+   * 只给「改动即存」的区块挂徽标。
+   * 事件订阅**不能挂**：它要点「应用订阅」才生效（每次应用都会重连网关），
+   * 挂上去等于告诉用户勾完就算数。
+   */
+  // 除凭证区之外，每个区块标题都挂一个，省得用户找保存按钮
+  $$('#cfgForm > .box').forEach((box) => {
+    if (box.dataset.cfg === 'creds') return;
+    const hd = box.querySelector('.box-hd h3');
+    if (hd && !hd.querySelector('.instant-badge')) hd.appendChild(badge());
+  });
 }
 
 /* ---- Ctrl+K 页面搜索 / Ctrl+S 保存配置 ---- */
@@ -7292,8 +8027,12 @@ function devRememberSay(text, kind = '') {
  *
  * `loggedIn` 一起传进来：**没登录过就不谈换票**。续期的前提是「本机留着
  * 长期登录态」，前提不成立时它本来就不该跑，面板也不该在上面写换票的事。
+ *
+ * `updatedAt` 是当前票据的到手时间：**比失败还新的票 = 那条失败已经翻篇了**。
+ * 后端在你登录成功时也会清掉这条记录，这里再兜一刀是为了老版本后端 / 老页面
+ * 混跑时不把一句过期的结论一直挂在「已登录」下面。
  */
-function devPaintAuto(a, loggedIn = true) {
+function devPaintAuto(a, loggedIn = true, updatedAt = 0) {
   const el = $('#devAutoMsg');
   if (!el) return;
   /** 「什么事都没发生」时的那句话，下面好几个分支要回到它 */
@@ -7346,6 +8085,18 @@ function devPaintAuto(a, loggedIn = true) {
     el.textContent = idleText;
     return;
   }
+  /**
+   * 失败结论过期了：**手里这张票比那次失败还新**。
+   *
+   * 典型场面：扫码过程中自动换票被钩起来、跑满 25 秒只拿到半份票，留一条红字；
+   * 几秒后人真的扫上了，票也换了一份，面板上却还挂着「自动换票没成功……3 分钟内
+   * 不会再尝试」。人看到的是「已登录」和「登录失败」同时存在，只能反复点扫码。
+   * 票已经换了，这条结论就不成立了，回到默认说明。
+   */
+  if (!last.ok && updatedAt && Number(last.at) < Number(updatedAt)) {
+    el.textContent = idleText;
+    return;
+  }
   const t = new Date(last.at).toLocaleTimeString('zh-CN');
   if (last.ok) {
     el.textContent = `${t} 票据过期，已自动换新${last.message ? `（${last.message}）` : ''}。`;
@@ -7360,7 +8111,7 @@ function devPaintStatus(st) {
   const el = $('#devLoginState');
   if (!el) return;
   devPaintScan(st?.scan);
-  devPaintAuto(st?.autoRelogin, Boolean(st?.loggedIn));
+  devPaintAuto(st?.autoRelogin, Boolean(st?.loggedIn), Number(st?.updatedAt) || 0);
   /**
    * 勾选状态：**用户选过就按用户的**（localStorage），没选过才看磁盘。
    *
@@ -7890,6 +8641,39 @@ async function devSave(patch, what) {
       devPaintStatus(await api('/api/dev/login/scan/cancel', { method: 'POST' }));
     } catch (e) {
       devScanSay('取消失败：' + errText(e), 'error');
+    }
+  });
+
+  /* ---------------- 手动检查登录状态（自动检测漏了时的兜底） ----------------
+   *
+   * 自动检测再稳也有漏的时候：轮询正在退避、页面登录慢半拍、票刚种上又被页面
+   * 刷掉、或者用户扫完顺手把窗口关了。以前唯一的自救办法是「再扫一次码」，
+   * 扫多了窗口和限频反而更难恢复。这个按钮只做一件小事：立刻核一次。
+   */
+  $('#devRecheckBtn')?.addEventListener('click', async () => {
+    const btn = $('#devRecheckBtn');
+    const label = btn?.textContent || '检查登录状态';
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '检查中…';
+    }
+    try {
+      const out = await api('/api/dev/login/recheck', { method: 'POST' });
+      devPaintStatus(out);
+      const r = out?.recheck || {};
+      if (r.ok) {
+        devScanSay(r.message || '已确认登录', 'ok');
+        await loadDevBots();
+      } else {
+        devScanSay(r.message || '没检测到登录态', 'error');
+      }
+    } catch (e) {
+      devScanSay('检查失败：' + errText(e), 'error');
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = label;
+      }
     }
   });
 
