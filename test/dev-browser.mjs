@@ -281,6 +281,79 @@ test('扫码：校验一直不过也不判死，继续等', async () => {
 });
 
 /* ------------------------------------------------------------------ */
+/* 手动检查：自动检测漏了的时候，人点一下就得有结论                      */
+/* ------------------------------------------------------------------ */
+
+test('手动检查：窗口里还没有票 → 明确说没登录态，不假装成功', async () => {
+  const dir = await tmpProfile();
+  const cookies = [];
+  // 轮询间隔拉长，保证下面两次 recheck 之间轮询没有插进来
+  const scan = makeScan({ dir, cookies, verify: async () => 7, ttlMs: 60_000, pollMs: 5_000 });
+
+  await scan.start();
+  const early = await scan.recheck();
+  assert.equal(early.ok, false);
+  assert.equal(early.reason, 'no-ticket');
+  assert.match(early.message, /还没有登录态/);
+  assert.equal(scan.status().state, 'waiting', '没票就不能把状态推到 ok');
+});
+
+test('手动检查：只种了半份票 → incomplete，不抢跑', async () => {
+  const dir = await tmpProfile();
+  const cookies = [];
+  const scan = makeScan({ dir, cookies, verify: async () => 7, ttlMs: 60_000, pollMs: 5_000 });
+
+  await scan.start();
+  cookies.push({ name: 'b-token', value: 'bt', domain: '.qq.com' });
+
+  const r = await scan.recheck();
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'incomplete');
+  assert.match(r.message, /半份票据/);
+});
+
+test('手动检查：扫完了但轮询还没转到 → 点一下立刻 ok', async () => {
+  const dir = await tmpProfile();
+  const cookies = [];
+  let verified = 0;
+  const scan = makeScan({
+    dir,
+    cookies,
+    verify: async (jar) => {
+      verified += 1;
+      assert.equal(jar.get('b-token'), 'bt');
+      return 4;
+    },
+    ttlMs: 60_000,
+    pollMs: 5_000,
+  });
+
+  await scan.start();
+  cookies.push(
+    { name: 'b-token', value: 'bt', domain: '.qq.com' },
+    { name: 'developer_id_lite', value: 'dev', domain: '.qq.com' },
+  );
+
+  const r = await scan.recheck();
+  assert.equal(r.ok, true);
+  assert.equal(r.botCount, 4);
+  assert.equal(verified, 1);
+  const st = scan.status();
+  assert.equal(st.state, 'ok');
+  assert.equal(st.alive, true, '手动检查不该顺手把窗口关掉');
+});
+
+test('手动检查：窗口已经关了 → no-window，让人重新扫码', async () => {
+  const dir = await tmpProfile();
+  const scan = makeScan({ dir, cookies: [], verify: async () => 2, ttlMs: 5_000 });
+
+  const r = await scan.recheck();
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'no-window');
+  assert.match(r.message, /扫码窗口/);
+});
+
+/* ------------------------------------------------------------------ */
 /* 自动续期：票据过期时开窗换票，拿到就关                                */
 /* ------------------------------------------------------------------ */
 

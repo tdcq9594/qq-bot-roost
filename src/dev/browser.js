@@ -375,6 +375,8 @@ export function createScanLogin({
   let cdpPort = 0;
   let running = false;
   let closing = false;
+  /** 手动检查正在跑：挡住连点，也挡住和轮询同时打 `list_bots` */
+  let rechecking = false;
   let st = blank();
   /**
    * 本轮等待登录的时长。
@@ -968,6 +970,84 @@ export function createScanLogin({
   }
 
   /**
+   * 手动再查一次（面板上的「检查登录状态」）。
+   *
+   * 为什么需要它：轮询有自己的节奏——校验失败要退避（最慢 15 秒一轮），限频时
+   * 更慢；而「扫完码」那一刻人是盯着屏幕等结果的。自动检测也真会漏：页面登录
+   * 慢半拍、票刚种上又被页面刷掉、窗口被随手关掉，都会让面板一直停在「等待扫码」。
+   *
+   * 所以这条路径**不重开窗、不动轮询**，只做一件事：立刻读一次窗口里的 cookie，
+   * 够用就真发一次校验，验过了当场把状态推到 ok。半份票不认（见
+   * `hasUsableTickets`）——抢跑拿走半份票，下一次请求又是 401。
+   */
+  async function recheck() {
+    if (!cdp || closing) {
+      return {
+        ok: false,
+        reason: 'no-window',
+        message: running
+          ? '浏览器还在启动，过一秒再点一次'
+          : '扫码窗口已经不在了（票据还在手上的话不影响接口）；要重新取票请点「扫码登录」',
+      };
+    }
+    /**
+     * 轮询正在校验时别插队：两个 `list_bots` 并发只会把自己打进限频。
+     * 等它自己出结果通常就是几百毫秒。
+     */
+    if (rechecking || st.state === 'verifying') {
+      return { ok: false, reason: 'busy', message: '正在校验，过一秒再看' };
+    }
+
+    rechecking = true;
+    try {
+      const jar = pickTickets(await readAllCookies());
+      if (!hasTickets(jar)) {
+        return {
+          ok: false,
+          reason: 'no-ticket',
+          message: '窗口里还没有登录态：扫码可能还没完成，或者页面刚跳转；过两秒再点一次',
+        };
+      }
+      if (!hasUsableTickets(jar)) {
+        return {
+          ok: false,
+          reason: 'incomplete',
+          message: '只拿到半份票据（b-token 有了，developer_id_lite 还没种），等页面加载完再点一次',
+        };
+      }
+
+      const prevState = st.state;
+      st.state = 'verifying';
+      st.message = '手动检查：已取到登录态，正在校验…';
+      try {
+        const botCount = verify ? await verify(jar) : 0;
+        st.state = 'ok';
+        st.botCount = Number(botCount) || 0;
+        st.error = '';
+        st.message = st.botCount
+          ? `登录成功，读到 ${st.botCount} 个机器人；窗口可以留着看，也可以关掉`
+          : '登录成功；窗口可以留着看，也可以关掉';
+        // 同上：状态与 running 之间不能隔 await，否则会露出「已登录但还在扫」的中间态
+        running = false;
+        log('[dev] 手动检查通过：票据已就绪');
+        return { ok: true, botCount: st.botCount, message: st.message };
+      } catch (e) {
+        st.state = prevState === 'ok' ? 'ok' : 'waiting';
+        const rateLimited = /繁忙|频繁|限频|rate\s*limit/i.test(String(e?.message ?? ''));
+        st.message = rateLimited
+          ? '平台限频了：票可能没问题，过一会再点「检查登录状态」'
+          : '已取到登录态，但平台还没认（选完主体后通常几秒）；过两秒再点一次';
+        st.error = String(e?.message ?? e);
+        return { ok: false, reason: 'verify-failed', message: st.message, error: st.error };
+      }
+    } catch (e) {
+      return { ok: false, reason: 'error', message: String(e?.message ?? e) };
+    } finally {
+      rechecking = false;
+    }
+  }
+
+  /**
    * 主动关窗（退出登录 / 面板关闭时用）。
    *
    * 和 `cancel()` 的区别：`cancel()` 只对「正在等扫码」有意义，
@@ -1016,6 +1096,7 @@ export function createScanLogin({
   return {
     start,
     refresh,
+    recheck,
     cancel,
     close,
     hasProfile,
