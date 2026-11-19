@@ -6,6 +6,9 @@ import { DIRS } from './paths.js';
 
 const log = createLogger('outbound');
 
+/** 队列空闲多久后回收（分钟）。有会话在发就一直续，停了才删键 */
+const QUEUE_IDLE_MS = 60 * 1000;
+
 /**
  * 出站消息调度器。
  *
@@ -293,8 +296,10 @@ export class Outbound {
    * @param {object} opts.cfg            全局配置
    * @param {() => boolean} opts.isOnline 机器人是否已连上网关
    */
-  constructor({ api, cfg, isOnline = () => true, quotaFile, delivery = null, ledger = null }) {
+  constructor({ api, cfg, isOnline = () => true, quotaFile, delivery = null, ledger = null, queueIdleMs = QUEUE_IDLE_MS }) {
     this.api = api;
+    /** 队列空闲回收时长（毫秒）。默认 60s，测试可传短值 */
+    this.queueIdleMs = Math.max(1, Number(queueIdleMs) || QUEUE_IDLE_MS);
     /** 投递账本（阶段 5）。没有它就退回原来的「发一次算一次」 */
     this.delivery = delivery;
     /**
@@ -337,7 +342,7 @@ export class Outbound {
 
     // 额度账本按机器人分开，不同机器人的额度互不影响
     this.quota = new QuotaLedger(quotaFile ?? path.join(DIRS.data, 'quota.json'));
-    /** chatKey -> { chain: Promise, history: number[] } */
+    /** chatKey -> { chain: Promise, history: number[], idleTimer } */
     this.queues = new Map();
 
     this.stats = {
@@ -798,9 +803,16 @@ export class Outbound {
   #enqueue(chatKey, task) {
     let q = this.queues.get(chatKey);
     if (!q) {
-      q = { chain: Promise.resolve(), history: [] };
+      q = { chain: Promise.resolve(), history: [], idleTimer: null, idleGen: 0 };
       this.queues.set(chatKey, q);
     }
+    // 有活了：撤销上一次排的空闲回收（连同它那代编号一起作废）
+    if (q.idleTimer) {
+      clearTimeout(q.idleTimer);
+      q.idleTimer = null;
+    }
+    q.idleGen += 1;
+    const gen = q.idleGen;
     const run = q.chain.then(async () => {
       await this.#throttle(q);
       return task();
@@ -810,7 +822,22 @@ export class Outbound {
       () => {},
       () => {},
     );
+    // 这一批任务跑完后排空闲回收：只有「仍是同一个 q、代号没变」才删，
+    // 这样后来入队的任务撤销旧 timer 后，旧回调不会误删正在用的队列。
+    q.chain.then(() => this.#retireIdleQueue(chatKey, q, gen));
     return run;
+  }
+
+  /** 队列空闲 QUEUE_IDLE_MS 后删键；代号不匹配说明期间又有新任务，放弃本次回收 */
+  #retireIdleQueue(chatKey, q, gen) {
+    const timer = setTimeout(() => {
+      q.idleTimer = null;
+      if (q.idleGen !== gen) return;
+      if (this.queues.get(chatKey) !== q) return;
+      this.queues.delete(chatKey);
+    }, this.queueIdleMs);
+    timer.unref?.();
+    q.idleTimer = timer;
   }
 
   async #throttle(q) {

@@ -1259,6 +1259,8 @@ export class QQApi {
 
     const hit = this.roleCache.get(key);
     if (hit && Date.now() - hit.at < maxAgeMs) return hit.value;
+    // 过期就删键，别让它只在读时跳过、键却永久留着（群一多就是只增不减）。
+    if (hit) this.roleCache.delete(key);
 
     let value;
     try {
@@ -1278,6 +1280,10 @@ export class QQApi {
 
     // 失败结果也缓存，避免每次调用都去撞一次 11253
     this.roleCache.set(key, { at: Date.now(), value });
+    // 群数有上限，但查询过的历史群数没有；封顶，淘汰最早插入的（同 seqMap 写法）。
+    if (this.roleCache.size > 2000) {
+      this.roleCache.delete(this.roleCache.keys().next().value);
+    }
     return value;
   }
 

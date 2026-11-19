@@ -82,3 +82,50 @@ test('dry 截获：最多留 50 条', async (t) => {
   assert.equal(r.ob.dryLog.length, 50);
   assert.equal(r.ob.dryLog.at(-1).text, '第 59 条', '留最新的一批');
 });
+
+/* ------------------------------------------------------------------ */
+/* 队列空闲回收：每个 chatKey 的串行队列不能永久留着                    */
+/*                                                                     */
+/* 注意：dry 模式在最顶层就截住了，不进 enqueue，所以这里用真发 + mock api */
+/* ------------------------------------------------------------------ */
+
+test('队列：空闲后回收 chatKey，不在发就删键', async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'roost-idle-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
+  const ob = new Outbound({
+    api: { async sendC2C() { return { id: 'm' }; } },
+    cfg: { outbound: { dryRun: false, perSec: 100, activePerMinute: 100, dailyActive: 1000 } },
+    isOnline: () => true,
+    quotaFile: path.join(dir, 'quota.json'),
+    queueIdleMs: 30,
+  });
+  await ob.send({
+    kind: 'c2c', target: 'idle-chat', chatKey: 'my-chat', payload: { content: 'hi' },
+  });
+  assert.equal(ob.queues.has('my-chat'), true, '发完先留着队列');
+  await new Promise((r) => setTimeout(r, 90));
+  assert.equal(ob.queues.has('my-chat'), false, '空闲后应回收，不能只增不减');
+});
+
+test('队列：期间再来消息会续期，旧 timer 不误删在用的队列', async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'roost-idle2-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
+  const ob = new Outbound({
+    api: { async sendC2C() { return { id: 'm' }; } },
+    cfg: { outbound: { dryRun: false, perSec: 100, activePerMinute: 100, dailyActive: 1000 } },
+    isOnline: () => true,
+    quotaFile: path.join(dir, 'quota.json'),
+    queueIdleMs: 60,
+  });
+  const send = () => ob.send({
+    kind: 'c2c', target: 'busy-chat', chatKey: 'busy-chat', payload: { content: 'x' },
+  });
+  await send();
+  await new Promise((r) => setTimeout(r, 40));
+  await send();
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(ob.queues.has('busy-chat'), true, '第二条续期后旧 timer 不能删队列');
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(ob.queues.has('busy-chat'), false, '最后安静下来才回收');
+});
+

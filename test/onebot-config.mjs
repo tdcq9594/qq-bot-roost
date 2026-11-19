@@ -81,3 +81,29 @@ test('onebot 会被写盘（重启不丢）', async () => {
   assert.equal(raw.onebot.token, 'tok-1234567890abcd');
   assert.equal(raw.onebot.port, 6700);
 });
+
+/* ------------------------------------------------------------------ */
+/* 合成号（OneBotIds）：跨重启稳定 + 反查正确                           */
+/* ------------------------------------------------------------------ */
+
+test('合成号：同一 openid 跨重新 load 不变，反查能回到原 openid', async () => {
+  const { OneBotIds } = await import('../src/onebot/ids.js');
+  const file = path.join(home, 'data', 'ids-test.json');
+  await fs.mkdir(path.dirname(file), { recursive: true });
+
+  const a = new OneBotIds({ file, botId: 'b' });
+  await a.load();
+  const u = a.user('openid-unbound-1');
+  const g = a.group('group-unbound-1');
+  assert.ok(u >= 9_000_000_000_000, '未绑定要给 13 位合成号');
+  assert.equal(a.openidOfUser(u), 'openid-unbound-1', '用户号能反查');
+  assert.equal(a.openidOfGroup(g), 'group-unbound-1', '群号能反查');
+  await a.flush();
+
+  // 模拟重启：新实例从磁盘读回，号必须一致（否则客户端手里的 id 全失效）
+  const b = new OneBotIds({ file, botId: 'b' });
+  await b.load();
+  assert.equal(b.user('openid-unbound-1'), u, '重启后号码不能变');
+  assert.equal(b.openidOfUser(u), 'openid-unbound-1');
+  assert.equal(b.openidOfGroup(g), 'group-unbound-1');
+});

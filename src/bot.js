@@ -1,4 +1,4 @@
-import { createLogger, attachLogFile } from './logger.js';
+import { createLogger, attachLogFile, detachLogFile } from './logger.js';
 import { TokenManager } from './token.js';
 import { QQApi } from './api.js';
 import { Gateway } from './gateway.js';
@@ -717,11 +717,30 @@ export class BotRuntime {
       if (!id) continue;
       const hit = this.groupNames.get(id);
       if (hit && Date.now() - hit.at < (hit.ttl ?? 10 * 60_000)) continue;
+      // 过期就删键：面板每刷一次都会走到这里，只在读时跳过会让键永久堆积。
+      if (hit) this.groupNames.delete(id);
       if (this.groupNameInflight.has(id)) continue;
       queued += 1;
       this.#ensureGroupName(id).catch(() => {});
     }
     return queued;
+  }
+
+  /**
+   * groupNames 封顶：群数有上限，但「查过一次就再也不见的群」没有。
+   * 超了就按缓存时间淘汰最旧的一条；已落盘的名字重启还能从档案读回。
+   */
+  #capGroupNames() {
+    if (this.groupNames.size <= 2000) return;
+    let oldestKey = null;
+    let oldest = Infinity;
+    for (const [k, v] of this.groupNames) {
+      if (v.at < oldest) {
+        oldest = v.at;
+        oldestKey = k;
+      }
+    }
+    if (oldestKey !== null) this.groupNames.delete(oldestKey);
   }
 
   /**
@@ -741,6 +760,7 @@ export class BotRuntime {
     const hit = this.groupNames.get(groupOpenid);
     /** ttl 由写入时决定：成功 10 分钟；11253（无权限）一天；其它失败 30 秒 */
     if (hit && Date.now() - hit.at < (hit.ttl ?? 10 * 60_000)) return;
+    if (hit) this.groupNames.delete(groupOpenid);
 
     /**
      * 同一条群消息可能触发两次（消息事件里一次、面板补一次），
@@ -757,6 +777,7 @@ export class BotRuntime {
         const info = await this.api.getGroupInfo(groupOpenid);
         const profile = groupProfileOf(info);
         this.groupNames.set(groupOpenid, { ...profile, at: Date.now(), ttl: 10 * 60_000 });
+        this.#capGroupNames();
 
         /**
          * 顺手落盘一份。
@@ -784,6 +805,7 @@ export class BotRuntime {
           // 11253 = 应用无接口访问权限（仅白名单机器人可用），别每 30 秒重试
           ttl: code === 11253 ? 24 * 3600_000 : 30_000,
         });
+        this.#capGroupNames();
       } finally {
         this.#freeGroupNameSlot();
         this.groupNameInflight.delete(groupOpenid);
@@ -846,6 +868,13 @@ export class BotRuntime {
     this.stats?.close();
     this.ledger?.close();
     if (!this.mock) await releaseInstance(this.cfg.appId).catch(() => {});
+    /**
+     * 释放这只鸟的日志文件句柄。
+     * init() 里 attach 过，原来 stop/删除都没有 detach —— 面板每建一次再删一次，
+     * 就永久残留一个 WriteStream；Windows 上还占着 logs/bots/<id> 让 purge 删不干净。
+     * detachLogFile 内部 closeSink 已带 catch，不抛、无需 await。
+     */
+    detachLogFile(`bot:${this.id}`);
     this.state = 'stopped';
   }
 
@@ -994,7 +1023,13 @@ export class BotRuntime {
 
     this.metrics.lastEventAt = Date.now();
     this.metrics.messageEvent = eventName;
-    this.metrics.bumpEvent(eventName);
+    /**
+     * 事件计数按「已知事件名」收敛：未知类型统一记到 __unknown__，
+     * 否则平台每加一种新事件、或来一个拼错的类型，就会在 eventCounts 里
+     * 永久多一个键。计数仍保留，面板 /status 能看出收到过未知事件。
+     * 归并放这里而不是 runtime.js —— 后者是零依赖模块，isKnownEvent 已在本文件导入。
+     */
+    this.metrics.bumpEvent(isKnownEvent(eventName) ? eventName : '__unknown__');
 
     /* ---- 非消息事件 ---- */
     if (!isMessageEvent(eventName)) {
