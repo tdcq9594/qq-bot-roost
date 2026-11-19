@@ -322,10 +322,20 @@ export function createDevPlatform({ log = () => {}, fetchImpl = fetch, lookup = 
     browserPath: () => browserPath,
     verify: async (jar) => {
       session.adopt(jar);
+      /**
+       * 换了票就可能换了号：上一份票缓存下来的「账号下有哪几只」必须作废，
+       * 否则刚登进去的 30 秒里读到的仍是上一个账号的列表。
+       */
+      botsCache = null;
       try {
         const bots = await listBots();
         /** 扫码成功写盘同样要尊重「记住」开关：`scanRemember` 是发起时的选择，可能已过期 */
         if (scanRemember && !rememberOff) await save(Object.fromEntries(session.jar()));
+        /**
+         * 人已经手动登上了 → 之前那条「自动换票没成功」是上一轮的结论，作废。
+         * 不清的话它会一直挂在「已登录」下面，看着像还得再扫一次。
+         */
+        resetRenewState();
         return bots.length;
       } catch (e) {
         /**
@@ -599,6 +609,27 @@ export function createDevPlatform({ log = () => {}, fetchImpl = fetch, lookup = 
     log(`[dev] 已排定 ${Math.round(wait / 1000)} 秒后补拉一次`);
   }
 
+  /**
+   * 「人已经登录成功了」→ 把上一轮换票的**结论**作废。
+   *
+   * 踩过的场面：扫码过程中 `verify` 撞了一次 401，自动换票被钩起来，跑满 25 秒
+   * 只拿到半份票（`b-token` 有了、`developer_id_lite` 没种），于是在面板上留下
+   * 一条红字「自动换票没成功……3 分钟内不会再自动尝试」。人其实已经登进去了，
+   * 这条红字却一直挂在「已登录」下面——用户以为还得再扫一次，越点越乱。
+   *
+   * 清的是**结论**，不是能力：退避归零、排定的补拉撤掉，之后再真过期，401 还能
+   * 立刻触发一次换票。
+   */
+  function resetRenewState() {
+    autoRenewInfo = { at: 0, ok: null, reason: '', message: '' };
+    autoRenewBackoffUntil = 0;
+    if (warmupTimer) {
+      clearTimeout(warmupTimer);
+      warmupTimer = null;
+    }
+    warmupInfo = { at: 0, ok: null, botCount: null, reason: '' };
+  }
+
   /** 挂到会话上：只有「平台明确说 401」才会走到这里 */
   renewHandler = autoRelogin;
 
@@ -719,6 +750,8 @@ export function createDevPlatform({ log = () => {}, fetchImpl = fetch, lookup = 
       if (remember) await save(Object.fromEntries(session.jar()));
       /** 选了「不记住」就把旧票也清掉：留着的话下次启动又会被当成「已记住」 */
       else await wipe();
+      // 手动粘进来的票已经验通了：上一轮「换票失败」的红字不该继续挂着
+      resetRenewState();
       // keys 只回**键名**，值不出后端：名字够用来判断「是不是漏了 httpOnly 的那个」
       return { ok: true, ...session.describe(), botCount: bots.length, keys };
     } catch (e) {
@@ -824,6 +857,68 @@ export function createDevPlatform({ log = () => {}, fetchImpl = fetch, lookup = 
 
   async function cancelScan() {
     return scanner.cancel();
+  }
+
+  /**
+   * 面板上的「检查登录状态」。
+   *
+   * 存在的理由：自动检测再稳也有漏的时候——轮询在退避里、页面登录慢半拍、
+   * 票刚种上又被页面刷掉、窗口被用户随手关掉。用户扫完了却看不到「已登录」，
+   * 唯一的自救方式不该是「再扫一次码」。
+   *
+   * 两条路，按「窗口还在不在」分：
+   *   · 窗口还在 → 让扫码器立刻读一次 cookie 并真发一次校验（可能顺手换到更新的票）
+   *   · 窗口没了 → 用手里这张票直接 `list_bots`，至少给一个明确结论
+   *
+   * 返回里 `recheck` 单独一包，不跟 HTTP 的 `ok` 混——「请求成功」和
+   * 「检查结果是已登录」是两件事。
+   */
+  async function recheckLogin({ bound = null } = {}) {
+    const r = await scanner.recheck();
+    if (r?.ok) {
+      botsCache = null;
+      resetRenewState();
+      return {
+        ...(await status()),
+        recheck: { ok: true, message: `已确认登录：读到 ${Number(r.botCount) || 0} 个机器人` },
+      };
+    }
+
+    /**
+     * 窗口不在了，但手里还有票：拿它真发一次请求。
+     *
+     * 这一条不能省。扫码成功后窗口可以随手关掉（票已经落到 Node 这边），
+     * 此时「检查登录状态」如果只会回一句「没有窗口」，用户会以为按钮坏了。
+     */
+    if (r?.reason === 'no-window' && session.has()) {
+      const out = await checkSession({ verify: true, bound });
+      /**
+       * 这五个状态都说明**票据是好的**（只是可能登错了号 / 没填 AppID）；
+       * `busy` / `renewed-wait` / `expired` / `error` 是「没核成」或「票废了」，
+       * 不能算「已确认登录」——否则按钮会把一次失败说成成功。
+       */
+      const usable = ['ready', 'logged-in', 'no-appid', 'account-empty', 'bot-missing']
+        .includes(String(out?.state || ''));
+      return {
+        ...(await status()),
+        recheck: {
+          ok: usable,
+          state: out?.state || '',
+          message: usable
+            ? `${out?.message || '票据可用'}（扫码窗口已关，用的是手里这张票）`
+            : `${out?.message || '票据不可用'}${out?.hint ? `：${out.hint}` : ''}`,
+        },
+      };
+    }
+
+    return {
+      ...(await status()),
+      recheck: {
+        ok: false,
+        reason: r?.reason || 'unknown',
+        message: r?.message || '没检测到登录态，请点「扫码登录」重新登一次',
+      },
+    };
   }
 
   async function status() {
@@ -1490,6 +1585,7 @@ export function createDevPlatform({ log = () => {}, fetchImpl = fetch, lookup = 
     checkSession,
     startScan,
     cancelScan,
+    recheckLogin,
     loginImport,
     logout,
     setBrowserPath,

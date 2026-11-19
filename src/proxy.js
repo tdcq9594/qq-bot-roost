@@ -354,6 +354,9 @@ function candidatesFor(target) {
   if (!c.list.length) return [];
   if (shouldBypass(target.hostname, target.port, c.bypass)) return [];
   const now = Date.now();
+  // 顺手清掉到期的判死记录：判死地址只会来自配置（一两个），但只增不删
+  // 会让改过的旧地址永久留在表里。读取时清理，语义与原来的 <= now 判断一致。
+  for (const [raw, until] of deadUntil) if (until <= now) deadUntil.delete(raw);
   return c.list.filter((p) => (deadUntil.get(p.raw) ?? 0) <= now);
 }
 

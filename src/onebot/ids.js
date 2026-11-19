@@ -52,6 +52,17 @@ export class OneBotIds {
     /** openid → 合成号（反查用） */
     this.synthUsers = new Map();
     this.synthGroups = new Map();
+    /**
+     * 合成号占用表，与上面两个 Map 严格同增同存（本类不淘汰合成号）。
+     * #synth 原来每次 `new Set([...bucket.values()])` 做碰撞检测是 O(n) 分配，
+     * 几万路人时每次新 openid 都要全量扫一遍。这里按 bucket 各留一份 Set，
+     * 判碰撞变 O(1) 查。
+     */
+    this.usedUserNums = new Set();
+    this.usedGroupNums = new Set();
+    /** 合成号 → openid 反查索引，替掉 openidOfUser/Group 的 O(n) 遍历 */
+    this.userNumToOpenid = new Map();
+    this.groupNumToOpenid = new Map();
     /** onebot message_id → {m: 官方 msg_id, i: msgIdx, c: chatId, t: 时间} */
     this.msgs = new Map();
     /** 官方 msg_id → onebot message_id（同一条消息重复推送时复用） */
@@ -76,8 +87,18 @@ export class OneBotIds {
     this.data.groups ??= {};
     this.data.msgs ??= [];
 
-    for (const [openid, id] of Object.entries(this.data.users)) this.synthUsers.set(openid, Number(id));
-    for (const [openid, id] of Object.entries(this.data.groups)) this.synthGroups.set(openid, Number(id));
+    for (const [openid, id] of Object.entries(this.data.users)) {
+      const n = Number(id);
+      this.synthUsers.set(openid, n);
+      this.usedUserNums.add(n);
+      this.userNumToOpenid.set(n, openid);
+    }
+    for (const [openid, id] of Object.entries(this.data.groups)) {
+      const n = Number(id);
+      this.synthGroups.set(openid, n);
+      this.usedGroupNums.add(n);
+      this.groupNumToOpenid.set(n, openid);
+    }
     for (const row of this.data.msgs) {
       if (!Array.isArray(row) || row.length !== 2) continue;
       const [id, v] = row;
@@ -92,15 +113,17 @@ export class OneBotIds {
   /* ---------------- 号码 ---------------- */
 
   /** 合成号：稳定、13 位、9 开头 */
-  #synth(openid, bucket) {
+  #synth(openid, bucket, used, reverse) {
     const hit = bucket.get(openid);
     if (hit) return hit;
     const h = crypto.createHash('sha1').update(String(openid)).digest();
     let n = SYNTH_BASE + (h.readUIntBE(0, 6) % SYNTH_MOD);
-    // 理论上可能撞（同一机器人下的两个 openid 截断到同一值），撞了就顺延
-    const used = new Set([...bucket.values()]);
+    // 理论上可能撞（同一机器人下的两个 openid 截断到同一值），撞了就顺延。
+    // 用常驻 Set 判占用，不再每次 new Set 全量扫（见构造函数注释）。
     while (used.has(n)) n += 1;
     bucket.set(openid, n);
+    used.add(n);
+    reverse.set(n, openid);
     this.#touch();
     return n;
   }
@@ -111,7 +134,7 @@ export class OneBotIds {
     if (!id) return 0;
     const uin = this.identity?.uinOf?.(id) ?? '';
     if (uin) return Number(uin);
-    return this.#synth(id, this.synthUsers);
+    return this.#synth(id, this.synthUsers, this.usedUserNums, this.userNumToOpenid);
   }
 
   /** group_openid → OneBot group_id（真号优先） */
@@ -120,28 +143,22 @@ export class OneBotIds {
     if (!id) return 0;
     const uin = this.identity?.groupUinOf?.(id) ?? '';
     if (uin) return Number(uin);
-    return this.#synth(id, this.synthGroups);
+    return this.#synth(id, this.synthGroups, this.usedGroupNums, this.groupNumToOpenid);
   }
 
   /** OneBot user_id → openid；找不到返回空串 */
   openidOfUser(id) {
     const n = Number(id);
     if (!Number.isFinite(n) || n <= 0) return '';
-    // 合成号段：只可能是我们发出去的，反查表里一定有
-    if (n >= SYNTH_BASE) {
-      for (const [openid, v] of this.synthUsers) if (v === n) return openid;
-      return '';
-    }
+    // 合成号段：只可能是我们发出去的，反查索引里一定有
+    if (n >= SYNTH_BASE) return this.userNumToOpenid.get(n) ?? '';
     return this.identity?.openidOf?.(this.botId, String(n)) ?? '';
   }
 
   openidOfGroup(id) {
     const n = Number(id);
     if (!Number.isFinite(n) || n <= 0) return '';
-    if (n >= SYNTH_BASE) {
-      for (const [openid, v] of this.synthGroups) if (v === n) return openid;
-      return '';
-    }
+    if (n >= SYNTH_BASE) return this.groupNumToOpenid.get(n) ?? '';
     return this.identity?.groupOpenidOf?.(this.botId, String(n)) ?? '';
   }
 

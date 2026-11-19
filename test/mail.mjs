@@ -386,6 +386,9 @@ test('验证码：5 次错误作废、过期、重发冷却、发信失败可撤
   v.cancel('A');
   assert.throws(() => v.issue({ openid: 'A', uin: '123456' }), /发得太勤/);
   now.t += 60_001;
+  // 冷却窗过后，任意一次 sweep（这里用 has 触发）都该把过期的 lastSent 清掉
+  v.has('A');
+  assert.equal(v.lastSent.size, 0, '过期发信记录应随 sweep 回收，不能永久驻留');
   const b = v.issue({ openid: 'A', uin: '123456' });
   assert.match(b.code, /^\d{6}$/);
   now.t += VERIFY_TTL_MS + 1;

@@ -55,6 +55,9 @@ export class VerifyStore {
   #sweep() {
     const t = this.now();
     for (const [k, v] of this.pending) if (v.expiresAt <= t) this.pending.delete(k);
+    // 发信冷却窗过后这条记录就没用了；不清的话请求过验证码的 openid 会永久驻留。
+    // 语义不变：issue() 里 since 一旦 >= GAP 本来就不拦，删掉等于同一次判断。
+    for (const [k, at] of this.lastSent) if (t - at >= VERIFY_RESEND_GAP_MS) this.lastSent.delete(k);
     const day = dayKey(new Date(t));
     for (const k of this.uinDaily.keys()) if (!k.startsWith(`${day}:`)) this.uinDaily.delete(k);
   }
