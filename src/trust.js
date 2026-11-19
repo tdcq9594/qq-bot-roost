@@ -29,8 +29,8 @@ export const EMBEDDED_PUBKEY = 'bqmZDZi/gnW7FppqKCOa5Zvc1XUvT/vw7fiiHR2hcIo=';
  * **发版时把它改成 `true`，所有没显式配置的用户就默认开启强制验签**——
  * 这就是「后续一个更新就能马上打开」的那个开关。
  *
- * 为什么不在这次直接开：签名文件还没铺到索引里，现在开会让所有安装失败。
- * 顺序必须是「先发签名 → 再开开关」。
+ * 为什么不默认开：自更新签名是 beta，`SHA256SUMS.sig` 还没跟着一次正式发版
+ * 走完流程，现在开会让还没铺到签名的用户更新失败。
  *
  * 优先级（见 `resolveTrust`）：
  *   配置 `security.trust.enforce` > 环境变量 `ROOST_TRUST_ENFORCE` > 本常量
@@ -38,10 +38,12 @@ export const EMBEDDED_PUBKEY = 'bqmZDZi/gnW7FppqKCOa5Zvc1XUvT/vw7fiiHR2hcIo=';
 export const EMBEDDED_ENFORCE = false;
 
 /**
- * **发版时保持 false。** 签名链路是 beta：
- *   · `index.json.sig` 还没跟着一次正式发版走完流程
- *   · 现在打开会让没签名的插件装不上
+ * **发版时保持 false。** 自更新签名链路是 beta：
+ *   · `SHA256SUMS.sig` 还没跟着一次正式发版走完流程
+ *   · 现在打开会让还没铺到签名的用户更新失败
  * 等发版验证过一轮，再决定是否默认开启（或继续让用户自己在面板里开）。
+ * 注意：2026-11-19 起插件市场索引已不验签，本开关**只管框架自更新**，
+ * 不影响官方插件市场安装（下载内容仍校验 sha256）。
  */
 
 /**

@@ -57,8 +57,8 @@ function makeIndex(id, version = '1.0.0') {
 /**
  * 把 globalThis.fetch 换成桩，返回 `{ state, restore }`。
  *
- * `state.calls` 只数**索引本身**的请求：框架内置了索引公钥，`fetchIndexOnce`
- * 还会顺带拉一次 `index.json.sig`，那个不能算进来（它每次都会发）。
+ * `state.calls` 数索引请求。2026-11-19 起 `fetchIndexOnce` 不再拉
+ * `index.json.sig`（插件市场索引验签已取消），所以不再有额外的签名请求要排除。
  *
  * `state.mode = 'fail'` 用 404 模拟网络失败是有意的：`fetchIndexOnce` 对 4xx
  * 直接抛、不重试，测试不用真等那 1.5 秒的重试间隔（超时类失败要等两次 20 秒）。
@@ -69,9 +69,6 @@ function stubFetch() {
 
   globalThis.fetch = async (input) => {
     const url = String(input);
-    // 签名文件：一律「没有」，别计入索引请求数（它会带 _t 参数，别用 endsWith）
-    if (url.includes('.sig')) return new Response('', { status: 404 });
-
     state.calls += 1;
     if (state.mode === 'fail') {
       return new Response('not found', { status: 404 });
