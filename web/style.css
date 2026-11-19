@@ -9,9 +9,17 @@
 
   /* 背景与表面：暖纸色，不是冷灰 */
   --bg: #f8f5f1;
-  --panel: #fffdfb;
-  --panel-2: #f6f2ed;
-  --panel-3: #efeae4;
+  /**
+   * --panel 统一由 --panel-solid 派生，各配色只改 --panel-solid。
+   * 这样「有背景图时把 --panel 换成半透明」那条规则才压得住配色块——
+   * 否则 :root[data-palette="b"] 的实心 --panel 会把它盖回去（2026-11-19 事故）。
+   */
+  --panel-solid: #fffdfb;
+  --panel: var(--panel-solid);
+  --panel-2-solid: #f6f2ed;
+  --panel-2: var(--panel-2-solid);
+  --panel-3-solid: #efeae4;
+  --panel-3: var(--panel-3-solid);
   --border: #e2dbd4;
   --border-strong: #c5bcb3;
 
@@ -72,146 +80,245 @@
   --display: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia,
     "Songti SC", "STSong", "SimSun", serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+
+  /**
+   * 主色种子（「外观」页用）。
+   *
+   * 这四个值由 JS 按用户选的配色写到 :root 的行内样式上；下面 --seed / --seed-ink
+   * 只是把「当前主题该用哪一个」接起来——明暗切换纯靠 CSS，JS 不参与重算。
+   * 没写过时用 A 配色的值兜底，和内置配色一致。
+   */
+  --seed-light: #af5504;
+  --seed-dark: #eca342;
+  --ink-light: #ffffff;
+  /* 深色字取该底色暗色下的 --bg（跟着底色走才不脏，见实施方案 §1.2） */
+  --ink-dark: #15100d;
+  --seed: var(--seed-light);
+  --seed-ink: var(--ink-light);
+  --shift: -0.06;
+
+  /* 背景图：JS 会覆盖这三个；没图时是 none，html::before 那条规则就不生效 */
+  --bg-img: none;
+  --bg-blur: 0px;
+  --bg-bright: 100%;
+  --surface-alpha: 84%;
+
+  /**
+   * 主色的文字用色。
+   *
+   * 内置四套直接用 --primary（手挑值本来就能当文字），**零变化**；
+   * 自定义配色会换成「限过亮度」的版本——不然用户挑个浅黄，导航高亮、
+   * 链接、标签这些「主色当文字」的地方就全糊在底上了。
+   */
+  --primary-text: var(--primary);
+
+  /**
+   * 实心填充（按钮、logo、选中的分段按钮）。
+   *
+   * 亮色主题里就等于主色；暗色主题里是「主色深压 + 降饱和」的一版——
+   * 暗底上直接铺一块亮纯色会像贴上去的色卡，压暗之后才像这个界面的按钮。
+   * 文字（导航高亮、链接、标签）继续用 --primary-text / --primary 的亮色。
+   */
+  --primary-fill: var(--primary);
+  --primary-fill-hover: var(--primary-hover);
 }
 
 [data-theme="dark"] {
   color-scheme: dark;
 
   /**
-   * 深褐黑，不是纯黑——纯黑配暖色显廉价。
+   * 深色主题是**固定的黑白**，不跟配色走。
    *
-   * 分层策略：表面层之间只留很淡的差（1.06 / 1.11 / 1.13），**靠 --border 勾形状**，
-   * 不靠把每层背景逐级提亮。上一版把四层表面拉到 ≥1.15、border 到 2.00，
-   * 结果整个面板发棕灰、格子感重 —— 主人反馈「太亮，黑夜模式该暗一点」。
-   * 成熟暗色 UI（shadcn / Grafana）本来就是 card 与 bg 近乎同色、靠边框分界。
+   * 参考 kun-galgame-forum：深色只给一套中性色，不提供换色入口——暗底上任何
+   * 「品牌色」都容易显脏或刺眼，选项越多越难选对。所以这一块**不再有**
+   * `[data-palette]` 覆盖：五套底色与十套配色只在浅色下生效。
+   *
+   * 分层靠 border 勾形状（卡片与页面底近乎同色），不靠逐级提亮背景：
    *   --bg      页面底，最深
    *   --panel   卡片 / .box
    *   --panel-2 输入框底、hover、次级块
    *   --panel-3 标签 / 胶囊 / 进度条槽
-   *
-   * 唯一不能退让的：--border 必须比最亮的 --panel-3 还亮一档（1.30），
-   * 否则标签和输入框上的线又消失在背景里 —— 更早期那组只差 3、实测 1.03。
-   * 现在五层 RGB 总和比上一版低约 34%，边框对比也从 2.00 收到 1.63。
+   * 唯一不能退让的：--border 要比 --panel-3 再亮一档，否则线会消失在背景里。
    */
-  --bg: #0a0705;
-  --panel: #15100d;
-  --panel-2: #221b16;
-  --panel-3: #2d251f;
-  --border: #41372e;
-  --border-strong: #574b40;
+  --bg: #0a0a0a;
+  --panel-solid: #131313;
+  --panel-2-solid: #1a1a1a;
+  --panel-3-solid: #222222;
+  --border: #2e2e2e;
+  --border-strong: #3f3f3f;
 
-  /* 底色压暗后文字对比只升不降，这里把文字也收一点，避免夜里刺眼 */
-  --text: #e6e0d8;
-  --text-2: #bab2aa;
-  --muted: #99928b;
-  --faint: #6b645d;
+  /* 文字：不用纯白，避免夜里刺眼；层级靠明度拉开。
+     比早期整体提了一档：有背景图时卡片是半透明的，越暗的灰越容易糊在图上。 */
+  --text: #f2f2f2;
+  --text-2: #c8c8c8;
+  --muted: #9e9e9e;
+  --faint: #747474;
 
-  --primary: #eca342;
-  --primary-hover: #fdbd63;
-  --primary-soft: #331f10;
-  --primary-border: #643d1e;
-  --primary-ring: rgba(236, 163, 66, .22);
-  --primary-ink: #1a1108;
+  /* 主色 = 白：导航高亮 / 链接 / 焦点环；按钮是白底黑字 */
+  --primary: #f2f2f2;
+  --primary-hover: #ffffff;
+  --primary-soft: #232323;
+  --primary-border: #3a3a3a;
+  --primary-ring: rgba(255, 255, 255, .16);
+  --primary-fill: #ededed;
+  --primary-fill-hover: #ffffff;
+  --primary-ink: #0a0a0a;
+  --primary-text: #f2f2f2;
 
-  --ok: #63d18f;
-  --ok-soft: #0f2a1b;
-  --warn: #f5b75b;
-  --warn-text: #f5b75b;
-  --warn-soft: #33200a;
-  --warn-border: #653e0a;
-  --err: #f97676;
-  --err-soft: #3c1618;
-  --err-border: #7a3334;
+  /**
+   * 语义色不参与「黑白」：红=失败、绿=成功是信息，不是装饰。
+   * 只把饱和度收一点，避免在纯中性底上显得跳。
+   */
+  --ok: #5ec98a;
+  --ok-soft: #0e2417;
+  --warn: #e8b25c;
+  --warn-text: #e8b25c;
+  --warn-soft: #2b1f0b;
+  --warn-border: #54400f;
+  --err: #f07171;
+  --err-soft: #2e1416;
+  --err-border: #5e2b2c;
 
-  /* 日志区比页面底再深一档（终端该是最暗的），时间/调试色跟随 faint / muted */
-  --log-bg: #080504;
-  --log-hover: #1c1611;
-  --log-time: #6b645d;
-  --log-debug: #99928b;
+  /* 日志区比页面底再深一档（终端该是最暗的） */
+  --log-bg: #070707;
+  --log-hover: #171717;
+  --log-time: #5f5f5f;
+  --log-debug: #8a8a8a;
 
-  --c-teal: #7cd2ae;    --c-teal-soft: #0d251b;
-  --c-blue: #88c1ff;    --c-blue-soft: #112033;
-  --c-violet: #caacff;  --c-violet-soft: #221a30;
-  --c-green: #98cf8b;   --c-green-soft: #152412;
-  --c-amber: #f6ab6b;   --c-amber-soft: #2e1a09;
-  --c-cyan: #64d1d7;    --c-cyan-soft: #062426;
-  --c-sky: #6bcbf7;     --c-sky-soft: #08232e;
-  --c-slate: #adc0d4;   --c-slate-soft: #1b2025;
-  --c-pink: #f89dc9;    --c-pink-soft: #2e1722;
+  /* 模块色是「按来源区分」的信息色，同样保留 */
+  --c-teal: #7cd2ae;    --c-teal-soft: #10241b;
+  --c-blue: #88c1ff;    --c-blue-soft: #121f31;
+  --c-violet: #caacff;  --c-violet-soft: #1e1a2c;
+  --c-green: #98cf8b;   --c-green-soft: #142113;
+  --c-amber: #f6ab6b;   --c-amber-soft: #2a1a0c;
+  --c-cyan: #64d1d7;    --c-cyan-soft: #072022;
+  --c-sky: #6bcbf7;     --c-sky-soft: #091f29;
+  --c-slate: #adc0d4;   --c-slate-soft: #191d22;
+  --c-pink: #f89dc9;    --c-pink-soft: #2a1520;
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, .3);
   --shadow: 0 2px 10px rgba(0, 0, 0, .35), 0 1px 2px rgba(0, 0, 0, .3);
   --shadow-lg: 0 16px 40px rgba(0, 0, 0, .5);
+
+  /* 种子在深色下不参与渲染，但定义要留着（契约测试会查悬空 var） */
+  --seed: var(--seed-dark);
+  --seed-ink: var(--ink-dark);
+  --shift: 0.05;
 }
 
 /* ============================================================
-   配色主题：四套轮换，亮 / 暗各一组
+   配色主题：**只在浅色下生效**
    ------------------------------------------------------------
-   A 归巢暖琥珀是默认值（:root 与 [data-theme="dark"]），不写覆盖规则；
-   B 夜航靛蓝 / C 暮羽青灰 / D 星夜紫只覆盖底色、文字与主色相关的变量。
-   变量名一个不新增，插件页主题契约不受影响；阴影与语义色沿用现有值。
-   暗色规则带 :root[data-theme=...] 才能压过上面的 [data-theme="dark"]。
+   A 琥珀是 :root 的默认值，不写覆盖规则；B 靛蓝 / C 青 / D 紫罗兰只覆盖
+   底色、文字与主色相关的变量，变量名一个不新增，插件页主题契约不受影响。
+
+   黑夜主题是固定黑白（见上面 [data-theme="dark"]），所以这里没有暗色覆盖，
+   而且选择器都带 `:not([data-theme="dark"])`：`:root[data-palette="b"]` 的
+   特异性是 (0,2,0)，压得过 `[data-theme="dark"]` 的 (0,1,0)——不带这个 :not，
+   只要换过底色，黑夜就会被这几块重新染成浅色（2026-11-19 的事故）。
    ============================================================ */
 
 /* B 夜航靛蓝 · 亮 */
-:root[data-palette="b"] {
-  --bg: #f2f5fb; --panel: #ffffff; --panel-2: #eef2f9; --panel-3: #e4eaf5;
+:root[data-palette="b"]:not([data-theme="dark"]) {
+  --bg: #f2f5fb; --panel-solid: #ffffff; --panel-2-solid: #eef2f9; --panel-3-solid: #e4eaf5;
   --border: #d5dcea; --border-strong: #b3bfd3;
   --text: #172033; --text-2: #3c4961; --muted: #64708a; --faint: #8b96ad;
   --primary: #3b55d9; --primary-hover: #2c44bd; --primary-soft: #e6ecff;
   --primary-border: #b9c8f5; --primary-ring: rgba(59, 86, 219, .16); --primary-ink: #ffffff;
   --log-bg: #fcfdff; --log-hover: #eef3fc;
 }
-/* B 夜航靛蓝 · 暗 */
-:root[data-palette="b"][data-theme="dark"] {
-  --bg: #0b1020; --panel: #121a31; --panel-2: #1a2440; --panel-3: #24304f;
-  --border: #2e3b5c; --border-strong: #3e4d73;
-  --text: #e6ecf8; --text-2: #b9c4dc; --muted: #93a0bd; --faint: #6c7898;
-  --primary: #8aa6ff; --primary-hover: #a8bcff; --primary-soft: #1a2447;
-  --primary-border: #33468a; --primary-ring: rgba(138, 166, 255, .22); --primary-ink: #0b1020;
-  --log-bg: #080d1a; --log-hover: #16203a;
-}
-
 /* C 暮羽青灰 · 亮 */
-:root[data-palette="c"] {
-  --bg: #f2efea; --panel: #fffdf9; --panel-2: #f0ede6; --panel-3: #e5e1d8;
+:root[data-palette="c"]:not([data-theme="dark"]) {
+  --bg: #f2efea; --panel-solid: #fffdf9; --panel-2-solid: #f0ede6; --panel-3-solid: #e5e1d8;
   --border: #d7d2c7; --border-strong: #b8b1a3;
   --text: #1b2628; --text-2: #3d4c4e; --muted: #667574; --faint: #8d9a98;
   --primary: #2e6e76; --primary-hover: #23565c; --primary-soft: #dceceb;
   --primary-border: #a8cecc; --primary-ring: rgba(46, 110, 118, .16); --primary-ink: #ffffff;
   --log-bg: #fcfbf7; --log-hover: #f0ede5;
 }
-/* C 暮羽青灰 · 暗 */
-:root[data-palette="c"][data-theme="dark"] {
-  --bg: #10191c; --panel: #162225; --panel-2: #1d2c30; --panel-3: #27383c;
-  --border: #33474b; --border-strong: #445c61;
-  --text: #e2ebe9; --text-2: #b6c7c5; --muted: #8fa5a3; --faint: #687f7e;
-  --primary: #79c6c2; --primary-hover: #98dad5; --primary-soft: #142e30;
-  --primary-border: #2f5b5d; --primary-ring: rgba(121, 198, 194, .22); --primary-ink: #10191c;
-  --log-bg: #0d1517; --log-hover: #1a282b;
-}
-
 /* D 星夜紫 · 亮 */
-:root[data-palette="d"] {
-  --bg: #f5f2fb; --panel: #fdfbff; --panel-2: #f1edfa; --panel-3: #e8e1f6;
+:root[data-palette="d"]:not([data-theme="dark"]) {
+  --bg: #f5f2fb; --panel-solid: #fdfbff; --panel-2-solid: #f1edfa; --panel-3-solid: #e8e1f6;
   --border: #d9cfec; --border-strong: #bcafd9;
   --text: #201a35; --text-2: #443a5e; --muted: #6f6587; --faint: #958cab;
   --primary: #5a48cf; --primary-hover: #4938b2; --primary-soft: #e9e3fb;
   --primary-border: #c4b6ef; --primary-ring: rgba(90, 72, 207, .16); --primary-ink: #ffffff;
   --log-bg: #fdfbff; --log-hover: #f3eefc;
 }
-/* D 星夜紫 · 暗 */
-:root[data-palette="d"][data-theme="dark"] {
-  --bg: #120e24; --panel: #1a1533; --panel-2: #221b40; --panel-3: #2c2450;
-  --border: #372e60; --border-strong: #483c78;
-  --text: #eae4f8; --text-2: #c0b6dc; --muted: #9a8fbd; --faint: #726894;
-  --primary: #a79bff; --primary-hover: #bdb4ff; --primary-soft: #251c4a;
-  --primary-border: #463a80; --primary-ring: rgba(167, 155, 255, .22); --primary-ink: #120e24;
-  --log-bg: #0e0a1c; --log-hover: #1d1636;
+/**
+ * W 默认：白底 + 最常见的那种蓝按钮（#2563eb，白字 4.9:1）。
+ *
+ * 「正常网页最简单的默认配色」就是这个组合：白底、近黑文字、蓝主色、
+ * 灰色描边——不做任何色相染色，也就不会被我们的配色逻辑带偏。
+ * （只在白天生效；黑夜是固定黑白。）
+ */
+:root[data-palette="w"]:not([data-theme="dark"]) {
+  --bg: #ffffff; --panel-solid: #ffffff; --panel-2-solid: #f6f6f7; --panel-3-solid: #ededee;
+  --border: #e4e4e7; --border-strong: #cfcfd4;
+  --text: #18181b; --text-2: #3f3f46; --muted: #71717a; --faint: #a1a1aa;
+  --primary: #2563eb; --primary-hover: #1d4ed8; --primary-soft: #eff6ff;
+  --primary-border: #bfdbfe; --primary-ring: rgba(37, 99, 235, .18); --primary-ink: #ffffff;
+  --log-bg: #fafafa; --log-hover: #f0f0f1;
 }
 
-/* 配色轮换按钮：用当前主色显示当前配色名，一眼可辨 */
-#btnPalette { color: var(--primary); }
+/* ============================================================
+   主色派生（「外观」页的自定义配色）
+   ------------------------------------------------------------
+   内置四套配色（a/b/c/d）走上面那些手挑值，**不**加 data-appearance，
+   所以它们一个像素都不会变；只有新预设和用户自己调的主色才走到这里。
+
+   为什么整块包 @supports：oklch(from …) 不被支持时，自定义属性里的值会在
+   「替换阶段」判定无效，结果是 background 整体失效（按钮变透明），而不是
+   回退到上一行的静态值。包起来才能干净降级成该底色的内置色。
+
+   混比 12% / 36% 是拿现有手挑值反解出来的（见实施方案 §1.2）。
+   注意 soft / border 会带入底色色相——这是有意的：胶囊和边框看起来属于
+   当前界面，而不是贴上去的色块。
+   ============================================================ */
+@supports (color: oklch(from red l c h)) {
+  /* 只在浅色下派生：深色是固定黑白，不允许被自定义染上去 */
+  :root[data-appearance="custom"]:not([data-theme="dark"]) {
+    --primary: var(--seed);
+    /* 亮色压暗、暗色提亮，方向由 --shift 的符号给 */
+    --primary-hover: oklch(from var(--seed) calc(l + var(--shift)) c h);
+    --primary-soft: color-mix(in oklch, var(--seed) 12%, var(--panel));
+    --primary-border: color-mix(in oklch, var(--seed) 36%, var(--panel));
+    --primary-ring: color-mix(in oklch, var(--seed) 22%, transparent);
+    --primary-ink: var(--seed-ink);
+    /**
+     * 文字用色限亮度：浅色底上压到 L≤0.52，深色底上抬到 L≥0.62。
+     * 实测浅黄 #ffd166 不限的话，导航高亮和链接的对比度只有 1.4:1。
+     */
+    --primary-text: oklch(from var(--seed) min(l, 0.52) c h);
+  }
+
+  /**
+   * **派生配色**（玫红 / 姜黄 / 松绿 / 品红 / 自定义）的底色也按主色生成。
+   *
+   * 为什么要这样：底色原本只有 4 套，8 个配色两两共用（琥珀+玫红都吃暖褐、
+   * 靛蓝+姜黄都吃冷蓝…），于是「换个配色底色没变」——2026-11-19 主人反馈的
+   * 就是这个。内置四套（a/b/c/d）保留手挑底色，非内置的统一按各自色相生成，
+   * 八套就各不相同了。
+   *
+   * 明度取固定档、色度按比例收，保证还是「浅底深字」。
+   */
+  :root[data-colorway="derived"]:not([data-theme="dark"]) {
+    --bg: oklch(from var(--seed) 0.970 calc(c * 0.25) h);
+    --panel-solid: oklch(from var(--seed) 0.995 calc(c * 0.12) h);
+    --panel-2-solid: oklch(from var(--seed) 0.955 calc(c * 0.18) h);
+    --panel-3-solid: oklch(from var(--seed) 0.925 calc(c * 0.22) h);
+    --border: oklch(from var(--seed) 0.885 calc(c * 0.30) h);
+    --border-strong: oklch(from var(--seed) 0.795 calc(c * 0.38) h);
+    --text: oklch(from var(--seed) 0.26 calc(c * 0.35) h);
+    --text-2: oklch(from var(--seed) 0.42 calc(c * 0.28) h);
+    --muted: oklch(from var(--seed) 0.55 calc(c * 0.22) h);
+    --faint: oklch(from var(--seed) 0.67 calc(c * 0.18) h);
+    --log-bg: oklch(from var(--seed) 0.985 calc(c * 0.10) h);
+  }
+}
+
+/* 配色按钮：用当前主色显示，一眼可辨 */
+#btnPalette { color: var(--primary-text); }
 #btnPalette span { font-size: 12px; line-height: 1; letter-spacing: 0; }
 
 /**
@@ -258,7 +365,7 @@ body {
 .brand { display: flex; align-items: center; gap: 10px; min-width: 190px; }
 .logo {
   width: 34px; height: 34px; border-radius: 9px;
-  background: var(--primary); color: var(--primary-ink);
+  background: var(--primary-fill); color: var(--primary-ink);
   display: grid; place-items: center;
   font-family: var(--display);
   font-weight: 700; font-size: 18px; line-height: 1;
@@ -302,7 +409,7 @@ body {
 .about-logo { width: 52px; height: 52px; border-radius: 14px; font-size: 26px; }
 .about-name { font-family: var(--display); font-weight: 700; font-size: 20px; line-height: 1.35; }
 .about-hero .hint { margin-top: 2px; }
-#tab-about a { color: var(--primary); text-decoration: none; }
+#tab-about a { color: var(--primary-text); text-decoration: none; }
 #tab-about a:hover { text-decoration: underline; }
 
 .tabs { display: flex; gap: 2px; flex: 1; align-self: stretch; }
@@ -325,7 +432,7 @@ body {
   transition: transform .24s var(--ease);
 }
 .tab:hover { color: var(--text); }
-.tab.active { color: var(--primary); font-weight: 600; }
+.tab.active { color: var(--primary-text); font-weight: 600; }
 .tab.active::after { transform: scaleX(1); }
 
 .status-pill {
@@ -566,8 +673,8 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 }
 .btn:active:not(:disabled) { transform: translateY(1px); }
 .btn:hover { border-color: var(--border-strong); background: var(--panel-2); }
-.btn.primary { background: var(--primary); border-color: var(--primary); color: var(--primary-ink); font-weight: 500; }
-.btn.primary:hover { background: var(--primary-hover); }
+.btn.primary { background: var(--primary-fill); border-color: var(--primary-fill); color: var(--primary-ink); font-weight: 500; }
+.btn.primary:hover { background: var(--primary-fill-hover); border-color: var(--primary-fill-hover); }
 .btn.small { padding: 5px 10px; font-size: 12.5px; }
 /* [hidden] 是 UA 样式，优先级低于类选择器；以后谁给 .btn 加 display 就会顶掉它 */
 .btn[hidden] { display: none; }
@@ -590,16 +697,6 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 }
 
 /* 配置页底部的保存条。要压住滚动内容，否则滑到一半看不见按钮 */
-.sticky-actions {
-  position: sticky; bottom: 0; z-index: 20;
-  display: flex; justify-content: flex-end; align-items: center; gap: 14px;
-  margin-top: 8px; padding: 12px 16px;
-  background: var(--panel);
-  border-top: 1px solid var(--border);
-  border-radius: 0 0 10px 10px;
-  box-shadow: 0 -8px 20px rgba(60, 40, 20, .10);
-}
-.sticky-actions .btn { min-width: 110px; }
 /* 配置页顶部也放一个保存按钮，省得用户滚到底才找到 */
 .box-hd-right { display: flex; align-items: center; gap: 12px; margin-left: auto; }
 
@@ -685,7 +782,7 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 .log-line.warn .m  { color: var(--warn-text); }
 .log-line.error .m { color: var(--err); }
 
-.log-line .m.msg-in  { color: var(--primary); }
+.log-line .m.msg-in  { color: var(--primary-text); }
 .log-line .m.msg-ok  { color: var(--c-green); }
 .log-line .m.msg-err { color: var(--err); font-weight: 500; }
 .log-line .m.msg-cmd { color: var(--c-violet); }
@@ -709,12 +806,12 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 .chip {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 4px 6px 4px 12px; border-radius: 999px;
-  background: var(--primary-soft); color: var(--primary);
+  background: var(--primary-soft); color: var(--primary-text);
   font-family: var(--mono); font-size: 12.5px;
 }
 .chip-x {
   border: 0; background: none; cursor: pointer;
-  color: var(--primary); opacity: .55;
+  color: var(--primary-text); opacity: .55;
   font-size: 15px; line-height: 1; padding: 0 4px;
 }
 .chip-x:hover { opacity: 1; color: var(--err); }
@@ -732,85 +829,113 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 .tips { margin: 0 0 0 18px; padding: 0; font-size: 12.5px; color: var(--muted); line-height: 1.9; }
 .tips b { color: var(--text); font-weight: 600; }
 
-/* ---------- 事件订阅 intents ---------- */
+/* ---------- 事件订阅 intents（卡片网格） ----------
+   12 个事件排成一片卡片，不再按「群聊 / 频道」分成两条长列表：
+   长列表会把「应用订阅」顶到几百像素之外，而按钮又必须随手够得着。
+
+   两组容器（#intentGroupChat / #intentGroupGuild）用 display:contents，
+   id 保住、卡片仍然流进同一个网格。分组信息降级成卡片角上的小字。
+   ------------------------------------------------------------ */
 .intents-block { margin-top: 16px; }
-.intents-head { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
-.intents-title { font-size: 13px; color: var(--text-2); }
-
-.intent-group { margin-bottom: 14px; }
-.intent-group-title {
-  font-size: 12px; color: var(--muted);
-  margin-bottom: 6px; padding-left: 2px;
-  letter-spacing: .3px;
+.intents-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap; margin-bottom: 10px;
 }
-.intent-list { display: grid; gap: 8px; }
+.intents-title { font-size: 15px; font-weight: 600; color: var(--text); }
+.intents-stat { font-size: 12.5px; color: var(--muted); }
+.intents-stat b { font-family: var(--mono); color: var(--primary-text); }
 
-.intent-item {
-  /* 关键：显式覆盖全局 label 的 column 布局，否则勾选框会被挤到上面 */
-  display: flex;
-  flex-direction: row;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 11px 14px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: var(--panel);
-  cursor: pointer;
-  transition: border-color .15s, background .15s, box-shadow .15s;
+/* 吸顶工具条：top 让开 60px 的顶栏，否则会钻到顶栏底下 */
+.intent-bar {
+  position: sticky; top: 68px; z-index: 6;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 10px; margin-bottom: 12px;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--border); border-radius: 10px;
 }
-.intent-item:hover { border-color: var(--border-strong); background: var(--panel-2); }
-.intent-item:has(input:checked) {
+.intent-bar .spacer { flex: 1; min-width: 8px; }
+.intent-bar .hint { margin: 0; }
+
+/* 「高级」做成按钮样子的开关：勾选态仍在 #intentsAdvanced 上，逻辑不用改 */
+.intent-adv { position: relative; display: inline-flex; align-items: center; gap: 6px; }
+.intent-adv input { position: absolute; opacity: 0; pointer-events: none; }
+.intent-adv:has(input:checked) {
   border-color: var(--primary-border);
   background: var(--primary-soft);
-  box-shadow: inset 3px 0 0 var(--primary);
+  color: var(--primary-text);
 }
-.intent-item input[type=checkbox] {
-  /* 全局 input 是 width:100%，这里必须收回 */
-  width: 16px;
-  height: 16px;
-  margin: 1px 0 0;
-  flex: none;
-  accent-color: var(--primary);
+.intent-adv-row {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.intent-adv-row[hidden] { display: none; }
+.intent-adv-row input { max-width: 260px; }
+
+.intent-grid {
+  display: grid; gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
+}
+.intent-list { display: contents; }
+
+.intent-card {
+  position: relative;
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 12px 13px;
+  border: 1px solid var(--border); border-radius: 12px;
+  background: var(--panel);
   cursor: pointer;
+  transition: border-color .15s, background .15s, box-shadow .15s, transform .15s;
 }
+.intent-card:hover { border-color: var(--border-strong); transform: translateY(-1px); }
+.intent-card:has(input:checked) {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  box-shadow: 0 0 0 2px var(--primary-ring);
+}
+/* 真勾选框藏起来，用自绘方块——原生 16px 方框在卡片里太抢眼 */
+.intent-card input[type=checkbox] {
+  position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none;
+}
+.intent-card input[type=checkbox]:focus-visible + .card-top .tick {
+  outline: 2px solid var(--primary); outline-offset: 2px;
+}
+.card-top { display: flex; align-items: center; gap: 7px; }
+.tick {
+  width: 15px; height: 15px; flex: none; border-radius: 4px;
+  border: 1.5px solid var(--border-strong); background: var(--panel);
+  display: grid; place-items: center; color: var(--primary-ink);
+}
+.tick svg { width: 10px; height: 10px; opacity: 0; transition: opacity .12s; }
+.intent-card:has(input:checked) .tick {
+  border-color: var(--primary); background: var(--primary-fill);
+}
+.intent-card:has(input:checked) .tick svg { opacity: 1; }
 
-.intent-body {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  flex: 1;
-  min-width: 0;
+.card-name { font-size: 13.5px; font-weight: 600; color: var(--text); line-height: 1.4; }
+.card-desc {
+  font-size: 12px; color: var(--muted); line-height: 1.55;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
 }
-.intent-name {
-  font-size: 13.5px; font-weight: 600; color: var(--text);
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  line-height: 1.45;
-}
-.intent-events { font-size: 12.5px; color: var(--muted); line-height: 1.55; }
-.intent-note { font-size: 12px; color: var(--warn-text); line-height: 1.5; }
-.intent-value {
-  font-family: var(--mono); font-size: 11.5px; color: var(--faint);
-  flex: none; padding-top: 2px; min-width: 74px; text-align: right;
-}
+.card-foot { display: flex; align-items: center; gap: 6px; margin-top: auto; padding-top: 4px; }
+.card-grp { font-size: 10.5px; color: var(--faint); }
 
-.tag-need, .tag-free {
-  font-size: 11px; font-weight: 400; padding: 1px 7px; border-radius: 999px;
+.pill {
+  font-size: 10.5px; padding: 1px 7px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--muted);
 }
-.tag-need { background: var(--warn-soft); color: var(--warn-text); }
-.tag-free { background: var(--ok-soft); color: var(--c-green); }
-
-.intents-summary {
-  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-  margin-top: 4px; padding: 10px 12px;
-  background: var(--panel-2); border-radius: 8px; font-size: 13px;
-}
-.intents-summary b { font-family: var(--mono); font-size: 14px; color: var(--primary); }
+.pill.req { border-color: var(--warn-border); color: var(--warn-text); background: color-mix(in srgb, var(--warn-soft) 60%, transparent); }
+.pill.free { border-color: color-mix(in srgb, var(--ok) 40%, var(--border)); color: var(--ok); }
 
 .intent-warn {
   margin-top: 10px; padding: 9px 12px;
   background: var(--warn-soft); border: 1px solid var(--warn-border); border-radius: 8px;
   font-size: 12.5px; color: var(--warn-text); line-height: 1.6;
 }
+.intents-foot { margin-top: 10px; display: flex; gap: 10px; flex-wrap: wrap; }
+.intents-foot b { font-family: var(--mono); color: var(--primary-text); }
+.intents-foot .hint { margin: 0; }
 
 .mute-row {
   display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
@@ -820,7 +945,7 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 .mute-row .switch { margin: 0; }
 
 .perm-legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); }
-.perm-legend b { color: var(--primary); font-family: var(--mono); margin-right: 4px; }
+.perm-legend b { color: var(--primary-text); font-family: var(--mono); margin-right: 4px; }
 
 /* ---------- 日志图例 ---------- */
 .log-legend {
@@ -839,7 +964,7 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
   font-family: var(--mono); font-size: 10.5px; font-weight: 600;
   padding: 0 5px; border-radius: 4px; line-height: 16px;
 }
-.lg-chip.info  { background: var(--primary-soft); color: var(--primary); }
+.lg-chip.info  { background: var(--primary-soft); color: var(--primary-text); }
 .lg-chip.warn  { background: var(--warn-soft); color: var(--warn-text); }
 .lg-chip.error { background: var(--err-soft); color: var(--err); }
 .lg-sep { width: 1px; height: 14px; background: var(--border); }
@@ -851,7 +976,7 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
   padding: 1px 6px; border-radius: 4px;
   font-family: var(--mono);
 }
-.kind-tag.int { background: var(--primary-soft); color: var(--primary); }
+.kind-tag.int { background: var(--primary-soft); color: var(--primary-text); }
 .kind-tag.ext { background: var(--c-teal-soft); color: var(--c-teal); }
 
 /* ============================================================
@@ -1073,7 +1198,7 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
   padding: 7px 14px; font-size: 13px; color: var(--muted);
   border-bottom: 2px solid transparent; margin-bottom: -1px;
 }
-.pp-tab.active { color: var(--primary); border-bottom-color: var(--primary); font-weight: 600; }
+.pp-tab.active { color: var(--primary-text); border-bottom-color: var(--primary); font-weight: 600; }
 /* 弹窗高度由内容决定，超过 58vh 才滚动——否则指标卡会被裁在可视区外 */
 .pp-body { overflow: auto; flex: 0 1 auto; max-height: 58vh; }
 .pp-body[hidden] { display: none; }
@@ -1162,11 +1287,11 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
   font-size: 12.5px; color: var(--text-2);
 }
 .upd-tip:not(:empty) { display: block; }
-.upd-tip a { color: var(--primary); font-weight: 600; margin-left: 8px; cursor: pointer; }
+.upd-tip a { color: var(--primary-text); font-weight: 600; margin-left: 8px; cursor: pointer; }
 .upd-tag {
   display: inline-block; margin-left: 8px; padding: 1px 7px;
   border-radius: 999px; font-size: 11px; font-weight: 600;
-  background: var(--primary-soft, var(--panel-3)); color: var(--primary);
+  background: var(--primary-soft, var(--panel-3)); color: var(--primary-text);
 }
 
 /* 插件分级标签：官方 / 已复核 / 作者自证 / 未验证 */
@@ -1175,7 +1300,7 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
   border-radius: 4px; font-size: 10.5px; font-weight: 600;
   vertical-align: 1px;
 }
-.verify-tag.vt-official { background: var(--primary-soft); color: var(--primary); }
+.verify-tag.vt-official { background: var(--primary-soft); color: var(--primary-text); }
 .verify-tag.vt-reviewed { background: var(--c-teal-soft); color: var(--c-teal); }
 .verify-tag.vt-self { background: var(--warn-soft); color: var(--warn); }
 .verify-tag.vt-none { background: var(--panel-3); color: var(--muted); }
@@ -1390,7 +1515,7 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 .doctor-body { min-width: 0; }
 .doctor-body b { font-size: 13px; }
 .doctor-detail { font-size: 12.5px; opacity: .72; margin-top: 2px; word-break: break-word; }
-.doctor-fix { font-size: 12.5px; margin-top: 4px; color: var(--primary); }
+.doctor-fix { font-size: 12.5px; margin-top: 4px; color: var(--primary-text); }
 .err-text { color: var(--err); }
 
 /* ---------------- 市场筛选 ---------------- */
@@ -1415,10 +1540,10 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
   color: var(--text-2); font-size: 12.5px;
   transition: border-color .15s var(--ease), color .15s var(--ease), background .15s var(--ease);
 }
-.cat-chip:hover { border-color: var(--primary); color: var(--primary); }
+.cat-chip:hover { border-color: var(--primary); color: var(--primary-text); }
 .cat-chip.on {
   background: var(--primary-soft); border-color: var(--primary);
-  color: var(--primary); font-weight: 600;
+  color: var(--primary-text); font-weight: 600;
 }
 .cat-chip b { font-size: 11.5px; font-weight: 600; opacity: .72; }
 
@@ -1493,7 +1618,7 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 }
 .tab-item:hover { background: var(--panel-2); color: var(--text); }
 .tab-item.active {
-  background: transparent; color: var(--primary); font-weight: 600;
+  background: transparent; color: var(--primary-text); font-weight: 600;
   /* 对标同类：当前页用 3px 左竖线，不用整块底色 */
   box-shadow: inset 3px 0 0 var(--primary);
 }
@@ -1578,6 +1703,12 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
   border-radius: 10px;
   line-height: 0;
 }
+/**
+ * 图纸被清空时必须连白底一起去掉。
+ * 只写 background 的话，`innerHTML = ''` 之后元素只剩 8px 内边距——
+ * 页面上就是一颗 16px 的白色圆点（扫码换完凭证后会出现，2026-11-20 反馈）。
+ */
+.nb-qr-code:empty { display: none; }
 .nb-qr-code svg {
   display: block;
 }
@@ -1736,7 +1867,7 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 }
 .app-nav .tab-item:hover { background: var(--panel-2); color: var(--text); }
 .app-nav .tab-item.active {
-  background: transparent; color: var(--primary); font-weight: 600;
+  background: transparent; color: var(--primary-text); font-weight: 600;
   /* 对标同类：当前页用 3px 左竖线，不用整块底色 */
   box-shadow: inset 3px 0 0 var(--primary);
 }
@@ -1816,7 +1947,7 @@ main > .panel { max-width: 1400px; margin-inline: auto; }
     transition: color .18s var(--ease), box-shadow .18s var(--ease);
   }
   .app-nav .tab-item[data-primary].active {
-    background: transparent; color: var(--primary);
+    background: transparent; color: var(--primary-text);
     box-shadow: inset 0 2px 0 var(--primary);
   }
   .app-nav .nav-more {
@@ -1918,7 +2049,7 @@ main > .panel { max-width: 1400px; margin-inline: auto; }
   .modal-actions > .btn { min-width: 0; flex: 1 1 auto; }
   .modal-actions > .act-left { margin-right: 0; }
   .plugin-page { height: calc(100dvh - 170px); min-height: 320px; }
-  .sticky-actions { bottom: calc(58px + env(safe-area-inset-bottom)); }
+
 }
 
 /* ---------- 触摸设备：达标触控目标（参考 snowluma 的 pointer:coarse 分支） ---------- */
@@ -2031,7 +2162,7 @@ main > .panel { max-width: 1400px; margin-inline: auto; }
    ============================================================ */
 
 /* 1. 切页：内容轻微上移淡入，不再瞬间闪现。
-      弹窗 DOM 在 </main> 之外、sticky-actions 是 position:sticky，
+      弹窗 DOM 在 </main> 之外、toast 之类是 fixed，
       所以动画期间的 transform 不会把 fixed 元素锚到面板上。 */
 @keyframes panel-in {
   from { opacity: 0; transform: translateY(8px); }
@@ -2269,10 +2400,10 @@ main { transition: margin-left .34s var(--ease); }
   padding: 3px 9px; border-radius: 999px;
   border: 1px solid var(--border); background: var(--panel-2); white-space: nowrap;
 }
-.cfg-toc a:hover { color: var(--primary); border-color: var(--primary-border); }
+.cfg-toc a:hover { color: var(--primary-text); border-color: var(--primary-border); }
 #cfgForm > .box { scroll-margin-top: 76px; }
 .box.is-dirty { box-shadow: inset 3px 0 0 var(--primary), var(--shadow-sm); }
-.cfg-dirty-mark { color: var(--primary); font-size: 12.5px; margin-right: auto; }
+.cfg-dirty-mark { color: var(--primary-text); font-size: 12.5px; margin-right: auto; }
 .cfg-dirty-mark[hidden] { display: none; }
 .instant-badge {
   display: inline-block; margin-left: 8px; padding: 1px 7px;
@@ -2312,7 +2443,7 @@ main { transition: margin-left .34s var(--ease); }
   padding: 9px 12px; border-radius: var(--radius-sm); cursor: pointer;
   font-size: 13.5px; color: var(--text);
 }
-.cmd-item:hover, .cmd-item.cmd-active { background: var(--primary-soft); color: var(--primary); }
+.cmd-item:hover, .cmd-item.cmd-active { background: var(--primary-soft); color: var(--primary-text); }
 .cmd-item .cmd-key { font-size: 11.5px; color: var(--muted); }
 .cmd-empty { padding: 20px; text-align: center; color: var(--muted); font-size: 13px; }
 .cmd-foot {
@@ -2358,7 +2489,6 @@ main { transition: margin-left .34s var(--ease); }
    * 会被它压住下半截（配置页「保存设置」按钮曾只露一半）。
    * 全部抬到状态条之上；手机档状态条 display:none，下面这几条都不生效。
    */
-  body.has-status-strip .sticky-actions { bottom: 24px; }
   body.has-status-strip .app-nav { bottom: 24px; }
   body.has-status-strip .toast-host { bottom: 32px; }
 }
@@ -2424,7 +2554,7 @@ main { transition: margin-left .34s var(--ease); }
 /* ---------- P2 · 表格分组 / 批量 / 表尾计数 ---------- */
 .table-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 6px; }
 .table-tools .btn { font-size: 12px; padding: 4px 9px; }
-.table-tools .btn.on { color: var(--primary); border-color: var(--primary-border); background: var(--primary-soft); }
+.table-tools .btn.on { color: var(--primary-text); border-color: var(--primary-border); background: var(--primary-soft); }
 .table-foot {
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   padding: 7px 2px 0; font-size: 12px; color: var(--muted);
@@ -2445,7 +2575,7 @@ tr[data-group-head] td::before { content: none; }
   min-width: 0; padding: 4px 9px; color: var(--muted);
 }
 .btn.plugin-more[aria-expanded="false"] {
-  color: var(--primary); border-color: var(--primary-border); background: var(--primary-soft);
+  color: var(--primary-text); border-color: var(--primary-border); background: var(--primary-soft);
 }
 
 /* ---------- 开放平台 · 每个字段自己一行、自己一个保存按钮 ----------
@@ -2513,3 +2643,214 @@ tr[data-group-head] td::before { content: none; }
 .dev-scope-item-warn { margin-left: auto; color: var(--warn, #d68a00); font-size: 12px; white-space: nowrap; }
 .dev-scope-item > .btn { flex: 0 0 auto; }
 .dev-scope-empty { color: var(--text-2); font-size: 13px; padding: 6px 2px; }
+
+/* ============================================================
+   外观页
+   ------------------------------------------------------------
+   全部颜色走变量，所以这一页自己也会跟着用户选的配色变——
+   它就是最好的预览，不再单独做一个预览窗格。
+   ============================================================ */
+.ap-row {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin-top: 12px;
+}
+.ap-label {
+  flex: none; width: 52px; font-size: 12.5px; color: var(--muted);
+}
+.ap-seg { display: inline-flex; gap: 6px; }
+.ap-seg .btn.on {
+  background: var(--primary-fill); border-color: var(--primary-fill);
+  color: var(--primary-ink); font-weight: 500;
+}
+
+/* 底色：四张卡，卡面直接用该底色在当前明暗下的页面底 */
+/* 「自定义」常驻色块：未选中时彩虹点 + 虚线边，表示「自己挑」 */
+.ap-preset.ap-custom { border-style: dashed; }
+.ap-preset.ap-custom.on { border-style: solid; }
+.ap-preset i.ap-rainbow {
+  background: conic-gradient(from 210deg, #e06c75, #e5c07b, #98c379, #56b6c2, #61afef, #c678dd, #e06c75);
+}
+
+/* 预设：色点 + 名字，选中给描边 */
+.ap-presets {
+  display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  margin-top: 4px;
+}
+.ap-preset {
+  display: flex; align-items: center; gap: 8px; text-align: left;
+  padding: 8px 10px; font-size: 12.5px; color: var(--text-2); cursor: pointer;
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.ap-preset:hover { border-color: var(--border-strong); background: var(--panel); }
+.ap-preset.on { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-ring); color: var(--text); }
+.ap-preset i {
+  width: 16px; height: 16px; border-radius: 50%; flex: none;
+  border: 1px solid var(--border-strong);
+}
+
+/* 取色器：全局 input 是 width:100%，这里必须收回来 */
+/**
+ * 取色器不再占一行：藏起来，由「自定义」色块点击触发。
+ * 不能 display:none —— Chrome 对隐藏元素的 click() 不一定弹取色器；
+ * 用 1px + 透明放在原地，触发器点得到。
+ */
+input.ap-seed-input {
+  position: absolute; width: 1px; height: 1px; padding: 0; border: 0;
+  opacity: 0; pointer-events: none; overflow: hidden;
+}
+.ap-color { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); }
+.ap-color input[type="color"] {
+  width: 34px; height: 26px; padding: 2px; cursor: pointer;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.ap-color input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
+.ap-color input[type="color"]::-webkit-color-swatch { border: none; border-radius: 3px; }
+
+.ap-json { margin-top: 10px; min-height: 96px; }
+
+/* ============================================================
+   背景图片
+   ------------------------------------------------------------
+   图铺在 html::before 上（z-index:-1），面板表面转半透明 + 背景模糊，
+   文字才压得住底图。模糊/亮度由 JS 写 --bg-blur / --bg-bright。
+
+   为什么用「压亮度」而不是盖一层黑：盖黑会把图的对比一起压平，看起来
+   灰蒙蒙；brightness() 压完还保留层次。
+   ============================================================ */
+/**
+ * 有背景图时**页面底色不参与渲染**：画布透明，底下只有图片。
+ * 以前这里画 `--bg`，图一旦没铺满（加载中、宽高比极端）就露出底色，
+ * 看着像「底色盖在图上」。
+ */
+html[data-bg="image"] {
+  background-color: transparent;
+}
+html[data-bg="image"]::before {
+  content: "";
+  position: fixed;
+  inset: -32px;              /* 留出模糊扩边的空间，不然四周会露出一圈底色 */
+  z-index: -1;
+  pointer-events: none;
+  background: var(--bg-img) center / cover no-repeat;
+  filter: blur(var(--bg-blur, 0px)) brightness(var(--bg-bright, 100%));
+}
+html[data-bg="image"] body { background: transparent; }
+
+/* ---------- 有背景图时：磨砂玻璃 ----------
+   核心一招：**把 --panel 本身换成半透明**。
+   `background: var(--panel)` 在样式表里出现三十多次（.box / .card / .menu /
+   侧栏里的分组块 / 各种浮层），逐个列选择器永远漏；改变量就一次性全中。
+
+   --panel-solid 是原始的实心值（在 :root / 暗色 / 三套配色里各留一份），
+   不能写 `--panel-solid: var(--panel)` —— 自定义属性是延迟解析的，会自我循环。 */
+html[data-bg="image"] {
+  --glass-alpha: var(--surface-alpha, 78%);
+  --glass-border: color-mix(in srgb, var(--border) 55%, transparent);
+  --glass-sheen: color-mix(in srgb, var(--text) 7%, transparent);
+  --glass-shadow: 0 10px 28px rgba(0, 0, 0, .16), 0 2px 6px rgba(0, 0, 0, .08);
+  --glass-radius: 14px;
+  /**
+   * 玻璃底座**去掉色相**（chroma 归零，只留明度）：
+   * 直接用 `--panel-solid` 的话，照片会被底色染成一层（白底染色最明显，
+   * 看着就是「底色盖在图上」）。中性化之后照片显示自己的颜色，
+   * 文字对比靠明度而不是色相来保证。
+   */
+  --glass-neutral: oklch(from var(--panel-solid) l 0 h);
+  --panel: color-mix(in srgb, var(--glass-neutral) var(--glass-alpha), transparent);
+  /* 输入框/胶囊（panel-2）保持和卡片同档，再透就压不住字 */
+  --panel-2: color-mix(in srgb, oklch(from var(--panel-2-solid) l 0 h) var(--glass-alpha), transparent);
+  /* 轨道/浅色块（panel-3）本就该更淡 */
+  --panel-3: color-mix(in srgb, var(--panel-3-solid) calc(var(--glass-alpha) - 8%), transparent);
+}
+html[data-bg="image"][data-theme="dark"] {
+  /* 黑夜：纯 panel 压在深色照片上会糊成一团，抬一档到 panel-2 附近 */
+  --panel-solid: #1a1a1a;
+  /**
+   * 透明度下限 82%：滑杆仍可往实了调（到 96%），但不允许低于 82%。
+   * 底图是亮色时（照片、浅色插画），78% 的卡片会让 --muted 文字掉到 2:1 左右，
+   * 直接读不出来——主人 2026-11-19 的截图就是这个情况。
+   */
+  --glass-alpha: clamp(82%, var(--surface-alpha), 96%);
+  --glass-sheen: color-mix(in srgb, #ffffff 9%, transparent);
+  --glass-shadow: 0 10px 30px rgba(0, 0, 0, .38), 0 2px 8px rgba(0, 0, 0, .22);
+}
+
+/* 玻璃卡片：圆角放大一档 + 背景模糊 + 顶部内高光。
+   .tab-menu 只处理顶栏里那份下拉，侧栏里的分组块（同样叫 .tab-menu）
+   要跟着侧栏走，不能套圆角和阴影。 */
+html[data-bg="image"] .box,
+html[data-bg="image"] .card,
+html[data-bg="image"] .modal,
+html[data-bg="image"] .tab-menu:not(.app-nav .tab-menu) {
+  border-radius: var(--glass-radius);
+  border-color: var(--glass-border);
+  box-shadow: inset 0 1px 0 var(--glass-sheen), var(--glass-shadow);
+  backdrop-filter: blur(16px) saturate(1.06);
+}
+
+/* 顶栏与侧栏：保持通栏，不加圆角/阴影，只把描边收淡 */
+html[data-bg="image"] .topbar,
+html[data-bg="image"] .app-nav {
+  border-color: var(--glass-border);
+}
+
+/**
+ * 背景模糊**不能**给 .topbar / .app-nav：`.app-nav`（#mainNav）就装在
+ * `<header class="topbar">` 里，backdrop-filter 会让它变成固定定位后代的
+ * 包含块，侧栏的 top/bottom 会按顶栏高度换算 → 高度塌成 0（2026-11-19 事故）。
+ */
+
+/**
+ * 嵌在侧栏里的分组块（.tab-menu）要**完全透明**。
+ *
+ * 它自己也带 `background: var(--panel)`，于是变成「侧栏 78% 再叠 78%」——
+ * 两层一合成就是 95%，看着还是块实心白板。让内层透干净，只留侧栏那层玻璃。
+ */
+html[data-bg="image"] .app-nav .tab-menu {
+  background: transparent;
+  box-shadow: none;
+}
+
+/* 表头是 sticky 的，必须挡住下面滚过来的行，所以比卡片实一点 */
+html[data-bg="image"] th {
+  background: color-mix(in srgb, var(--panel-solid) calc(var(--glass-alpha) + 14%), transparent);
+}
+/**
+ * 语义色的软底（警告条 / 危险区 / 提示 chip）也要跟玻璃走，
+ * 否则它们就是在磨砂卡上贴了一张实心色标。
+ * 这几个变量不能像 --panel 那样在变量层派生（会自我循环），只能按类名覆盖。
+ */
+html[data-bg="image"] .intent-warn,
+html[data-bg="image"] .beta-tag,
+html[data-bg="image"] .lg-chip.warn {
+  background-color: color-mix(in srgb, var(--warn-soft) 72%, transparent);
+}
+html[data-bg="image"] .danger-zone,
+html[data-bg="image"] .bot-form-err,
+html[data-bg="image"] .lg-chip.error {
+  background-color: color-mix(in srgb, var(--err-soft) 72%, transparent);
+}
+html[data-bg="image"] .upd-tip,
+html[data-bg="image"] .lg-chip.info {
+  background-color: color-mix(in srgb, var(--primary-soft) 72%, transparent);
+}
+html[data-bg="image"] .lg-chip.ok {
+  background-color: color-mix(in srgb, var(--ok-soft) 72%, transparent);
+}
+html[data-bg="image"] .log-view {
+  background-color: color-mix(in srgb, var(--log-bg) 82%, transparent);
+}
+
+/* 深色下配色区整体禁用（不是藏掉：让人看见「深色固定黑白」这件事） */
+#apColors.ap-off .ap-presets,
+#apColors.ap-off .ap-row {
+  opacity: .42;
+}
+#apColors.ap-off .ap-preset { cursor: not-allowed; }
+
+/* 滑杆：全局 input 有 padding/border/width:100%，这里要收回来 */
+input.ap-range {
+  width: 220px; max-width: 46vw; padding: 0; border: 0; background: transparent;
+  accent-color: var(--primary-fill);
+}
