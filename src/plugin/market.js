@@ -11,7 +11,6 @@ import { compareVersion } from '../semver.js';
 import { fetchViaMirror, currentMirror } from '../mirror.js';
 import { fetchGiteeTree } from '../gitee.js';
 import { CORE_SKIP } from '../skipdirs.js';
-import { resolveTrust, checkTrust } from '../trust.js';
 
 const log = createLogger('market');
 
@@ -142,7 +141,7 @@ function assertSafeIndexUrl(raw) {
 
 /**
  * @param {string} [url]
- * @param {{trust?: object, maxAge?: number}} [opts] 信任策略；`maxAge` 是内存缓存的新鲜期
+ * @param {{maxAge?: number}} [opts] `maxAge` 是内存缓存的新鲜期
  *   （毫秒，默认 60 秒；传 0 表示强制重新拉取，写路径必须这么传）
  */
 export async function fetchIndex(url = DEFAULT_INDEX_URL, opts = {}) {
@@ -163,7 +162,7 @@ export async function fetchIndex(url = DEFAULT_INDEX_URL, opts = {}) {
   const running = indexInFlight.get(key);
   if (running) return running;
 
-  const task = fetchIndexOnce(key, opts)
+  const task = fetchIndexOnce(key)
     .then(async (data) => {
       indexCache.set(key, { at: Date.now(), data });
       await writeIndexCache(key, data).catch(() => {});
@@ -216,33 +215,7 @@ async function readIndexCache(url) {
   return { data: obj.data, age };
 }
 
-/**
- * 拉 `.sig`。**只有配了公钥才拉**——没配就是本版不验签，多一次请求纯属浪费，
- * 也会让离线/镜像用户多等一次超时。
- *
- * 地址构造用 `URL` 而不是字符串拼接：自定义市场源可能带 query，
- * 直接拼 `.sig` 会拼到 query 后面去。
- */
-async function fetchIndexSig(url, bust) {
-  let sigUrl;
-  try {
-    const u = new URL(url);
-    u.pathname = `${u.pathname}.sig`;
-    u.searchParams.set('_t', bust);
-    sigUrl = u.toString();
-  } catch {
-    return '';
-  }
-  try {
-    const res = await fetchViaMirror(sigUrl, { signal: AbortSignal.timeout(8000) }, { retry4xx: true });
-    if (!res.ok) return '';
-    return await res.text();
-  } catch {
-    return '';
-  }
-}
-
-async function fetchIndexOnce(url, opts = {}) {
+async function fetchIndexOnce(url) {
   let lastErr = null;
   for (let attempt = 0; attempt < 2; attempt++) {
     if (attempt > 0) await new Promise((r) => setTimeout(r, 1500));
@@ -288,22 +261,12 @@ async function fetchIndexOnce(url, opts = {}) {
     if (!Array.isArray(data?.plugins)) throw new Error('插件市场索引格式不对（缺少 plugins 数组）');
 
     /**
-     * 验签。**默认不阻断**（`trust.enforce` 为 false），只把结论挂在 `_trust` 上，
-     * 由安装接口决定拦不拦。这是两段式上线的第一段：先把签名铺出去，
-     * 让生态有时间跟上，下一版才默认拒绝。
+     * 这里**不再做索引验签**（2026-11-19 决定）：插件市场是社区内容，
+     * 用签名把整个生态挡在门外代价太大。安装时仍然校验 tarball 的 sha256
+     * （见 verifyPluginDir），内容完整性没有丢。
+     *
+     * 框架**自更新**的 SHA256SUMS.sig 验签不受影响，在 src/updater.js。
      */
-    const trust = opts.trust ?? resolveTrust({});
-    let sigText = '';
-    if (trust.pubkey) sigText = await fetchIndexSig(url, `${Date.now()}-${attempt}`);
-
-    const verdict = checkTrust({ data, sigText, trust, kind: '插件索引' });
-    data._trust = verdict;
-    // `why` 里已经带了「插件索引」前缀，这里不要再加一遍
-    if (verdict.status === 'bad') log.error(verdict.why);
-    else if (verdict.status === 'invalid') log.error(verdict.why);
-    else if (verdict.status === 'unsigned') log.warn(`${verdict.why}（本版只警告，不阻断）`);
-    else if (verdict.status === 'ok') log.info('插件索引签名校验通过');
-
     return data;
   }
   throw lastErr ?? new Error('连不上插件市场');
