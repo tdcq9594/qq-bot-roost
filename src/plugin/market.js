@@ -36,7 +36,7 @@ const indexCache = new Map();
 
 /** 官方插件仓库。改这里就能指向你自己的插件源 */
 export const DEFAULT_INDEX_URL =
-  'https://raw.githubusercontent.com/tdcq9594/qq-bot-roost-plugins/main/index.json';
+  'https://raw.githubusercontent.com/roost-qq/qq-bot-roost-plugins/main/index.json';
 
 /**
  * 历史上的官方索引地址。
@@ -53,7 +53,7 @@ export const DEFAULT_INDEX_URL =
  * 注意 Gitee 镜像仓库仍挂在老 owner 下，所以这里**不**替换 gitee 地址。
  */
 const LEGACY_INDEX_URLS = [
-  'https://raw.githubusercontent.com/tdcq9594/qq-bot-roost-plugins/main/index.json',
+  'https://raw.githubusercontent.com/roost-qq/qq-bot-roost-plugins/main/index.json',
 ];
 
 /**
@@ -285,7 +285,7 @@ async function fetchIndexOnce(url) {
  * @param {object} p
  * @param {object} p.entry    index.json 里的一条
  * @param {string} p.pluginsDir 目标插件目录
- * @param {string} [p.repo]   仓库，如 tdcq9594/qq-bot-roost-plugins
+ * @param {string} [p.repo]   仓库，如 roost-qq/qq-bot-roost-plugins
  * @param {string} [p.branch] 分支
  * @param {(id:string)=>boolean} [p.exists] 判断插件是否已存在
  * @param {string|null} [p.sha256] 索引里给的仓库包校验值，有就验

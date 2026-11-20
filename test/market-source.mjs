@@ -38,7 +38,7 @@ const { DEFAULT_INDEX_URL, normalizeMarketUrl, isOfficialSource, fetchIndex } = 
 const { loadGlobalConfig, PATHS } = await import('../src/config.js');
 
 /** 老版本的官方索引地址（迁移后应被识别并换掉） */
-const LEGACY = 'https://raw.githubusercontent.com/tdcq9594/qq-bot-roost-plugins/main/index.json';
+const LEGACY = 'https://raw.githubusercontent.com/roost-qq/qq-bot-roost-plugins/main/index.json';
 const GITEE = 'https://gitee.com/tdcq9594/qq-bot-roost-plugins/raw/main/index.json';
 
 test.after(async () => {
@@ -169,7 +169,7 @@ test('fetchIndex：直连 404 时靠镜像拿到索引', async () => {
   configureMirror({ network: { mirror: 'auto' } });
   const index = {
     schema: 1,
-    repo: 'tdcq9594/qq-bot-roost-plugins',
+    repo: 'roost-qq/qq-bot-roost-plugins',
     branch: 'main',
     updated: '2026-11-19',
     plugins: [{ id: 'demo', name: 'demo', version: '1.0.0', path: 'plugins/demo/' }],

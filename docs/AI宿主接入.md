@@ -3,7 +3,7 @@
 Roost 可以被**外部 AI 宿主**驱动：它收消息、发消息、调官方接口，
 宿主（DeepSeek Harness 等）只管想和说。
 
-这条通道最初是为 [dsh-roost](https://github.com/tdcq9594/dsh-roost) 做的，
+这条通道最初是为 [dsh-roost](https://github.com/roost-qq/dsh-roost) 做的，
 但它是通用的——任何能发 HTTP 的程序都能接。
 
 > 本文是**接入指南**（怎么连、怎么调、常见错）。方法表、握手、scope、补拉语义的

@@ -21,6 +21,7 @@ import { fetchAndExtract } from './tarball.js';
 import { netFetch } from './proxy.js';
 import { fetchViaMirror, currentMirror } from './mirror.js';
 import { fetchGiteeTree, detectGiteeRef, giteeRawUrl } from './gitee.js';
+import { FW_REPO as REPO, giteeRepoOf } from './repo.js';
 import { hashDir } from './hashdir.js';
 import { CODE_ENTRIES, PROTECTED_ENTRIES as PROTECTED } from './update-scope.js';
 import { ROOT } from './config.js';
@@ -29,8 +30,7 @@ import { checkTrust, resolveTrust, normalizeText, blockReason } from './trust.js
 
 const log = createLogger('update');
 
-/** 仓库信息。换成自己的 fork 就改这里 */
-const REPO = 'tdcq9594/qq-bot-roost';
+/** 仓库归属常量在 ./repo.js，换成自己的 fork 就改那里 */
 
 /**
  * 允许被更新覆盖的顶层条目、以及绝对不能碰的目录，都在 ./update-scope.js。
@@ -143,8 +143,8 @@ async function fetchSums(version) {
     label: 'GitHub master',
   });
   groups.push({
-    sums: `https://gitee.com/${REPO}/raw/master/SHA256SUMS`,
-    sig: `https://gitee.com/${REPO}/raw/master/SHA256SUMS.sig`,
+    sums: `https://gitee.com/${giteeRepoOf(REPO)}/raw/master/SHA256SUMS`,
+    sig: `https://gitee.com/${giteeRepoOf(REPO)}/raw/master/SHA256SUMS.sig`,
     label: 'Gitee master',
   });
 
@@ -356,7 +356,7 @@ async function checkViaGitee(cur) {
   if (!/^\d+\.\d+\.\d+/.test(latest)) throw new Error('Gitee 上的 package.json 读不到版本号');
   return buildResult(cur, `v${latest}`, {
     source: 'gitee',
-    htmlUrl: `https://gitee.com/${REPO}`,
+    htmlUrl: `https://gitee.com/${giteeRepoOf(REPO)}`,
     giteeRef: ref,
   });
 }

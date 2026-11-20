@@ -88,14 +88,14 @@ npx @deepseek-ai/dsh plugin --profile desktop add dsh-roost
 ### 方式三：从 GitHub
 
 ```bash
-npx @deepseek-ai/dsh plugin --profile desktop add github:tdcq9594/qq-bot-roost
+npx @deepseek-ai/dsh plugin --profile desktop add github:roost-qq/qq-bot-roost
 ```
 
 **这条目前装不了。** 原因：`dsh plugin add github:...` 会把整个仓库当插件包，
 但插件的 `package.json` 在 `integrations/dsh-roost/` 子目录里，
 而 pnpm 的 git 依赖没有可靠的「指定子目录」语法。
 
-要支持这种方式，得把插件拆成独立仓库（`tdcq9594/dsh-roost`）。
+要支持这种方式，得把插件拆成独立仓库（`roost-qq/dsh-roost`）。
 **在拆之前，用方式一。**
 
 ---
@@ -237,7 +237,7 @@ AI 看到后者只会瞎猜，看到前者才知道该建议你启动 Roost。
 ## 后续
 
 - [ ] 发到 npm，让 `dsh plugin add dsh-roost` 可用
-- [ ] 拆独立仓库，支持 `github:tdcq9594/dsh-roost`
+- [ ] 拆独立仓库，支持 `github:roost-qq/dsh-roost`
 - [ ] 提交到 DSH 插件市场收录
 
 ---

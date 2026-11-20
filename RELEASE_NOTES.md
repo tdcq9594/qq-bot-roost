@@ -1859,7 +1859,7 @@ ctx.on('message', async (msg) => {
 ## v0.8.0：AI 宿主通道（消息下行 + 通用能力上行）
 
 让外部 AI 宿主（DeepSeek Harness 等）能驱动 Roost：它收消息、发消息、调官方接口，
-宿主只管想和说。首个使用者是 [dsh-roost](https://github.com/tdcq9594/dsh-roost)。
+宿主只管想和说。首个使用者是 [dsh-roost](https://github.com/roost-qq/dsh-roost)。
 
 ### ① 事件下行：`/api/stream` 新增 `event: message`
 

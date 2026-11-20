@@ -42,7 +42,7 @@ dsh plugin --profile desktop add /path/to/qq-bot-roost/integrations/dsh-roost
 `package.json` 在 `integrations/dsh-roost/` 子目录里，而 pnpm 的 git
 依赖没有可靠的「指定子目录」语法。
 
-要支持这种方式，得把插件拆成独立仓库（`tdcq9594/dsh-roost`）。
+要支持这种方式，得把插件拆成独立仓库（`roost-qq/dsh-roost`）。
 在那之前用方式一。
 
 ### 方式三：从 npm（发布后可用）

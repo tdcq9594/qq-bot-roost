@@ -6,12 +6,12 @@
   "license": "AGPL-3.0-only",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tdcq9594/qq-bot-roost.git"
+    "url": "git+https://github.com/roost-qq/qq-bot-roost.git"
   },
   "bugs": {
-    "url": "https://github.com/tdcq9594/qq-bot-roost/issues"
+    "url": "https://github.com/roost-qq/qq-bot-roost/issues"
   },
-  "homepage": "https://github.com/tdcq9594/qq-bot-roost#readme",
+  "homepage": "https://github.com/roost-qq/qq-bot-roost#readme",
   "keywords": [
     "qq-bot",
     "qqbot",

@@ -28,6 +28,9 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createLogger } from './logger.js';
 import { netFetch } from './proxy.js';
+import { giteeRepoOf } from './repo.js';
+
+export { giteeRepoOf };
 
 const log = createLogger('gitee');
 
@@ -55,12 +58,12 @@ export function giteeRawUrl(repo, ref, filePath) {
     .split('/')
     .map((s) => encodeURIComponent(s))
     .join('/');
-  return `https://gitee.com/${repo}/raw/${encodeURIComponent(ref)}/${p}`;
+  return `https://gitee.com/${giteeRepoOf(repo)}/raw/${encodeURIComponent(ref)}/${p}`;
 }
 
 /** blob 地址：`https://gitee.com/api/v5/repos/{repo}/git/blobs/{sha}` */
 export function giteeBlobUrl(repo, sha) {
-  return `${API}/repos/${repo}/git/blobs/${encodeURIComponent(sha)}`;
+  return `${API}/repos/${giteeRepoOf(repo)}/git/blobs/${encodeURIComponent(sha)}`;
 }
 
 /**
@@ -133,7 +136,7 @@ export async function fetchGiteeTree({
   // 1) 列清单（整个下载只用这一次 API）
   const q = new URLSearchParams({ recursive: '1' });
   if (token) q.set('access_token', token);
-  const apiUrl = `${API}/repos/${repo}/git/trees/${encodeURIComponent(ref)}?${q}`;
+  const apiUrl = `${API}/repos/${giteeRepoOf(repo)}/git/trees/${encodeURIComponent(ref)}?${q}`;
   let tree;
   try {
     const res = await netFetch(apiUrl, {

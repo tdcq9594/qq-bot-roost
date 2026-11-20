@@ -2960,6 +2960,19 @@ await testMirror();
 
 async function testGitee() {
   const { fetchGiteeTree, detectGiteeRef, giteeRawUrl } = await import('../src/gitee.js');
+  const { FW_REPO, MARKET_REPO, giteeRepoOf } = await import('../src/repo.js');
+  check(
+    '仓库归属: 框架与插件仓的 GitHub slug',
+    FW_REPO === 'roost-qq/qq-bot-roost' && MARKET_REPO === 'roost-qq/qq-bot-roost-plugins',
+  );
+  check(
+    '仓库归属: Gitee 换算只改 owner',
+    giteeRepoOf(FW_REPO) === 'tdcq9594/qq-bot-roost' && giteeRepoOf('a/b') === 'a/b',
+  );
+  check(
+    '仓库归属: raw 地址走换算',
+    giteeRawUrl(FW_REPO, 'master', 'package.json') === 'https://gitee.com/tdcq9594/qq-bot-roost/raw/master/package.json',
+  );
   const fs = await import('node:fs/promises');
   const os = await import('node:os');
   const path = await import('node:path');

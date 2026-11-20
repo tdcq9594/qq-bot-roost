@@ -4,7 +4,7 @@
  * ================
  *
  *   npm run market:index -- ../qq-bot-roost-plugins
- *   npm run market:index -- ../qq-bot-roost-plugins --repo tdcq9594/qq-bot-roost-plugins
+ *   npm run market:index -- ../qq-bot-roost-plugins --repo roost-qq/qq-bot-roost-plugins
  *
  * 扫一遍插件仓库里每个目录的 `plugin.json`（内建插件读 `index.js` 的默认导出），
  * 生成 `index.json`。以前这一步是手写的——版本号忘改、路径写错、

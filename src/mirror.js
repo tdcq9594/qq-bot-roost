@@ -26,6 +26,7 @@
 import { createLogger } from './logger.js';
 import { netFetch } from './proxy.js';
 import { configureRegistry } from './npm-registry.js';
+import { GH_OWNER, GITEE_OWNER } from './repo.js';
 
 const log = createLogger('mirror');
 
@@ -58,7 +59,7 @@ const FALLBACK_ORDER = ['gitee'];
  * 实际是探测地址本身错了。真实用户也会遇到：fork 出去改名分支的话，
  * 这里要跟着改，或者用下面的 PROBE_FALLBACKS 多试几个。
  */
-export const PROBE_URL = 'https://raw.githubusercontent.com/tdcq9594/qq-bot-roost/master/package.json';
+export const PROBE_URL = 'https://raw.githubusercontent.com/roost-qq/qq-bot-roost/master/package.json';
 
 /**
  * 主探测地址失败时按顺序换分支再试。
@@ -70,8 +71,8 @@ export const PROBE_URL = 'https://raw.githubusercontent.com/tdcq9594/qq-bot-roos
 const PROBE_FALLBACKS = [
   PROBE_URL,
   PROBE_URL.replace('/master/', '/main/'),
-  'https://raw.githubusercontent.com/tdcq9594/qq-bot-roost/master/README.md',
-  'https://raw.githubusercontent.com/tdcq9594/qq-bot-roost/main/README.md',
+  'https://raw.githubusercontent.com/roost-qq/qq-bot-roost/master/README.md',
+  'https://raw.githubusercontent.com/roost-qq/qq-bot-roost/main/README.md',
 ];
 
 /** 当前配置。由 main / 保存配置 / 配置热加载三处调用 configureMirror() 更新 */
@@ -171,7 +172,9 @@ function toGiteeRaw(url) {
     if (seg.length < 4) return url;
     const [owner, name, ref, ...rest] = seg;
     if (!owner || !name || !ref || !rest.length) return url;
-    return `https://gitee.com/${owner}/${name}/raw/${ref}/${rest.join('/')}`;
+    // 两边 owner 不同，统一从 repo.js 取（见文件头）
+    const giteeOwner = owner === GH_OWNER ? GITEE_OWNER : owner;
+    return `https://gitee.com/${giteeOwner}/${name}/raw/${ref}/${rest.join('/')}`;
   } catch {
     return url;
   }
