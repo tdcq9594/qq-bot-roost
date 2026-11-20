@@ -615,7 +615,7 @@ mock 模式下：直接输入文本 = 模拟一条群 @ 消息；`!as <openid>` 
 
 ## 许可
 
-本项目采用 **GNU Affero General Public License v3.0 only（AGPL-3.0-only）**，是 OSI 认证的开源许可证。完整条款见 [LICENSE](LICENSE)。版权持有人另有明确授权的场景，见 [LICENSE-EXCEPTIONS.md](LICENSE-EXCEPTIONS.md)；未列出的场景仍按 AGPL 处理。
+本项目采用 **GNU Affero General Public License v3.0 only（AGPL-3.0-only）**，是 OSI 认证的开源许可证。完整条款见 [LICENSE](LICENSE)。
 
 | 场景 | 允许？ |
 |------|--------|
@@ -623,7 +623,7 @@ mock 模式下：直接输入文本 = 模拟一条群 @ 消息；`!as <openid>` 
 | 商业使用、收费分发、集成进商业产品 | ✅ 允许，但受下列条件约束 |
 | 分发源码或二进制给他人 | ✅ 必须同样以 AGPL-3.0-only 授权、保留声明并提供完整对应源码 |
 | 修改后通过网络向用户提供服务 | ✅ 视为分发，须向使用者提供对应源码（AGPL 第 13 条） |
-| 改用更宽松许可、闭源再分发 | ❌ 不允许（除 [LICENSE-EXCEPTIONS.md](LICENSE-EXCEPTIONS.md) 明确列出的场景） |
+| 改用更宽松许可、闭源再分发 | ❌ 不允许 |
 
 两点要说明白：
 
