@@ -65,6 +65,7 @@
 
   --radius: 9px;
   --radius-sm: 6px;
+  --radius-lg: 12px;
 
   /* 阴影：暖调、极淡，只用来分层 */
   --shadow-sm: 0 1px 2px rgba(60, 40, 20, .05);
@@ -701,17 +702,126 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 .box-hd-right { display: flex; align-items: center; gap: 12px; margin-left: auto; }
 
 /* ---------- 插件 ---------- */
-.plugin-list { display: grid; gap: 10px; }
+
+/*
+ * 筛选栏：搜索/状态/排序在左，视图切换在右。
+ * 用面板底色 + 1px 边框做成一条独立的工具带，和下面的卡片拉开层次。
+ */
+.plugin-filter {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; flex-wrap: wrap;
+  padding: 9px 12px; margin-bottom: 12px;
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.filter-fields { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: 1; min-width: 0; }
+.filter-fields .mini-input { width: 210px; }
+.filter-count { font-variant-numeric: tabular-nums; white-space: nowrap; margin-right: 2px; }
+
+/* 视图切换：胶囊分段控件，当前项用主色淡底，键盘焦点有描边 */
+.view-switch {
+  display: inline-flex; gap: 2px; flex: none;
+  padding: 3px; border: 1px solid var(--border);
+  border-radius: 999px; background: var(--panel);
+}
+.view-btn {
+  display: grid; place-items: center;
+  width: 28px; height: 26px; padding: 0;
+  border: 0; border-radius: 999px; background: transparent;
+  color: var(--muted); cursor: pointer;
+  transition: background .15s var(--ease), color .15s var(--ease);
+}
+.view-btn svg { width: 15px; height: 15px; }
+.view-btn:hover { background: var(--panel-3); color: var(--text); }
+.view-btn.on { background: var(--primary-soft); color: var(--primary); }
+.view-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+
+/*
+ * 三种视图只切容器 class，不重建卡片、不重新请求后端。
+ * align-items:start 让每张卡片高度独立——某个插件的报错堆栈不再把整行拉齐。
+ */
+.plugin-list { display: grid; gap: 14px; align-items: start; }
+.plugin-list.view-list { grid-template-columns: 1fr; gap: 8px; }
+.plugin-list.view-grid { grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); }
+.plugin-list.view-large { grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 18px; }
+
 .plugin {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-  padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 12px 14px; min-width: 0;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--panel);
+  transition: border-color .18s var(--ease), box-shadow .18s var(--ease), transform .18s var(--ease);
 }
-/* 右侧一排操作按钮：不压缩，窄屏时整体换行而不是被挤扁 */
-.plugin > .btn, .plugin > .badge { flex: none; }
-.plugin .info { flex: 1; min-width: 0; }
-.plugin .name { font-weight: 600; font-size: 13.5px; }
-.plugin .meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
-.plugin .err { font-size: 12px; color: var(--err); margin-top: 4px; }
+/* 卡片视图：纵向排布 + 12px 圆角 + 16px 内边距；hover 轻抬升 2px */
+.view-grid .plugin, .view-large .plugin {
+  flex-direction: column; align-items: stretch;
+  padding: 16px; border-radius: var(--radius-lg);
+}
+.view-grid .plugin:hover, .view-large .plugin:hover {
+  border-color: var(--border-strong); box-shadow: var(--shadow); transform: translateY(-2px);
+}
+.view-large .plugin { padding: 18px; }
+
+/* 操作区：列表视图横排贴在右侧；卡片视图独占卡片底部一行 */
+.plugin-actions { display: flex; align-items: center; gap: 6px; flex: none; flex-wrap: wrap; }
+.view-grid .plugin-actions, .view-large .plugin-actions {
+  justify-content: flex-end; margin-top: auto;
+  padding-top: 10px; border-top: 1px solid var(--border);
+}
+/* ---------- 卡片内部排布 ---------- */
+/*
+ * 统一的分层结构：head（标题 + 状态徽章）/ desc（描述）/ meta（标签行）
+ * / metrics（运行指标）/ err（报错）/ actions（底部操作）。
+ * 三种视图用同一套子元素，只改内层对齐与显隐——卡片的按钮不再平铺挤在文字右边。
+ */
+.plugin-body { flex: 1; min-width: 0; }
+.plugin-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; min-width: 0; }
+/* 标题行不折行：中文名一旦被挤窄就会逐字竖排，改为截断省略号 */
+.plugin-title { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; min-width: 0; }
+.plugin .name {
+  font-weight: 600; font-size: 13.5px; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 更新标记可收缩截断：窄卡片里不能撑破卡片或盖住徽章 */
+.plugin-title .upd-tag {
+  flex: 0 1 auto; min-width: 0; max-width: 45%;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.plugin-title .plugin-status { flex: none; }
+.plugin .plugin-id { font-size: 11.5px; color: var(--muted); word-break: break-all; }
+.plugin .plugin-ver { white-space: nowrap; }
+.plugin .plugin-status { flex: none; align-self: flex-start; }
+.plugin .plugin-desc {
+  font-size: 12px; color: var(--text-2); line-height: 1.6; margin-top: 7px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.plugin .plugin-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 7px; }
+.plugin-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.plugin-tags .tag {
+  font-size: 10.5px; padding: 2px 7px; border-radius: 999px;
+  background: var(--panel-3); color: var(--muted); white-space: nowrap;
+}
+.plugin .err { font-size: 12px; color: var(--err); margin-top: 7px; }
+/* 报错详情在卡片视图里保持可展开，但不要顶开其他卡片 */
+.view-grid .plugin .err-stack, .view-large .plugin .err-stack { max-height: 110px; overflow: auto; }
+
+/*
+ * 紧凑列表：标题行独占一行（徽章在最右），描述压 1 行，标签/按钮各占一行。
+ * 不改回「标题和 5 个按钮挤同一行」——那样中文名会被挤成省略号甚至逐字竖排。
+ * 靠更小的内边距和间距来体现「紧凑」，而不是靠牺牲可读性。
+ */
+.view-list .plugin { flex-direction: column; align-items: stretch; padding: 10px 12px; }
+.view-list .plugin .plugin-desc { margin-top: 4px; -webkit-line-clamp: 1; }
+.view-list .plugin .plugin-meta { margin-top: 5px; }
+.view-list .plugin .plugin-tags { margin-top: 5px; }
+.view-list .plugin-actions { margin-top: 0; padding-top: 8px; border-top: 1px solid var(--border); justify-content: flex-end; }
+
+/* 卡片 / 大卡片：徽章右上角，描述独立一段，按钮独占底行右对齐 */
+.view-grid .plugin .plugin-desc { -webkit-line-clamp: 2; }
+.view-large .plugin .plugin-desc { -webkit-line-clamp: 4; font-size: 12.5px; }
+.view-large .plugin .name { font-size: 15px; }
+.view-large .plugin .plugin-icon { width: 22px; height: 22px; border-radius: 6px; }
+.view-large .plugin .plugin-meta { margin-top: 10px; }
 .badge {
   font-size: 11.5px; padding: 2px 8px; border-radius: 999px;
   background: var(--panel-3); color: var(--muted); white-space: nowrap;
@@ -1289,7 +1399,7 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 .upd-tip:not(:empty) { display: block; }
 .upd-tip a { color: var(--primary-text); font-weight: 600; margin-left: 8px; cursor: pointer; }
 .upd-tag {
-  display: inline-block; margin-left: 8px; padding: 1px 7px;
+  display: inline-block; padding: 1px 7px; white-space: nowrap;
   border-radius: 999px; font-size: 11px; font-weight: 600;
   background: var(--primary-soft, var(--panel-3)); color: var(--primary-text);
 }
@@ -1524,7 +1634,15 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
   display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
   margin-bottom: 10px;
 }
-.market-filter .mini-input { flex: 1 1 220px; width: auto; }
+.market-filter .mini-input { flex: 1 1 200px; width: auto; min-width: 130px; }
+.market-filter .view-switch { margin-left: auto; }
+
+/* 窄屏：网格退回单列，筛选控件占满一行，避免挤成两三个字 */
+@media (max-width: 720px) {
+  .plugin-list.view-grid, .plugin-list.view-large { grid-template-columns: 1fr; }
+  .filter-fields .mini-input { width: 100%; }
+  .market-filter .view-switch { margin-left: 0; }
+}
 
 /* 分类计数 chip：横向滚动而不是换行，几十个标签换行会把列表顶下去一大截 */
 .cat-chips {
