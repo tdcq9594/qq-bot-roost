@@ -146,28 +146,87 @@ export async function findMediaImage(api, imageId) {
   return null;
 }
 
+/** 翻遍素材列表收集 imageId → item；批量删除一次校验所有 id，别逐张翻页打爆限频 */
+async function listAllMediaImages(api, maxPages = 100) {
+  const found = new Map();
+  let cursor = '';
+  const seen = new Set();
+  for (let i = 0; i < maxPages; i++) {
+    const page = await api.listMediaImages({ cursor });
+    for (const x of (Array.isArray(page?.images) ? page.images : [])) {
+      if (x?.imageId) found.set(x.imageId, x);
+    }
+    const next = String(page?.nextCursor ?? '');
+    if (!next || seen.has(next)) break;
+    seen.add(next);
+    cursor = next;
+  }
+  return found;
+}
+
 /**
- * POST /api/media-images/delete —— body:{ bot?, imageId, confirm:true }
- * 先确认「这张图确实在当前机器人的素材库里」再放行 allowUnowned。
+ * POST /api/media-images/delete
+ *   body:{ bot?, imageId, confirm:true }          —— 单张，兼容原返回结构
+ *   body:{ bot?, imageIds:[...], confirm:true }   —— 批量，一次翻页校验后逐张删
+ *
+ * 批量返回的 deleted / missing / failed 让前端能逐张反馈；只要删掉至少一张就算 200，
+ * 全失败才按 404 / 502 返回。归属校验同单张：必须在当前机器人素材库里才 allowUnowned。
  */
 export async function handleMediaDelete({ runtimes = [], body = {}, fallbackRuntime = null, log = null } = {}) {
-  const imageId = String(body?.imageId ?? '').trim();
-  if (!imageId) return { code: 400, body: { ok: false, error: '缺少 imageId' } };
+  const isBatch = Array.isArray(body?.imageIds);
+  const ids = isBatch
+    ? [...new Set(body.imageIds.map((x) => String(x).trim()).filter(Boolean))]
+    : [String(body?.imageId ?? '').trim()].filter(Boolean);
+  if (!ids.length) return { code: 400, body: { ok: false, error: '缺少 imageId' } };
+  if (ids.length > MEDIA_IMAGE_QUOTA) {
+    return { code: 400, body: { ok: false, error: `一次最多删 ${MEDIA_IMAGE_QUOTA} 张` } };
+  }
   if (body?.confirm !== true) {
     return { code: 403, body: { ok: false, error: '删除素材需要显式确认（confirm: true）' } };
   }
   const { rt, err } = resolveRuntime({ runtimes, bot: body.bot, fallbackRuntime });
   if (err) return err;
   try {
-    const hit = await findMediaImage(rt.api, imageId);
-    if (!hit) {
-      return { code: 404, body: { ok: false, error: '这张图片不在当前机器人的素材库里（可能已过期或被删）' } };
+    const found = await listAllMediaImages(rt.api);
+    const deleted = [];
+    const missing = [];
+    const failedItems = [];
+    let lastError = null;
+    for (const id of ids) {
+      const hit = found.get(id);
+      if (!hit) {
+        missing.push(id);
+        continue;
+      }
+      try {
+        await rt.api.deleteMediaImage(id, { allowUnowned: true });
+        deleted.push({ imageId: id, fileName: hit.fileName ?? '' });
+        log?.info?.(`media.delete ${rt.id} ${id} ✓`);
+      } catch (e) {
+        lastError = lastError || e;
+        failedItems.push({ imageId: id, error: humanMediaError(e) });
+        log?.warn?.(`media.delete ${rt.id} ${id} ✗ ${e?.message ?? e}`);
+      }
     }
-    await rt.api.deleteMediaImage(imageId, { allowUnowned: true });
-    log?.info?.(`media.delete ${rt.id} ${imageId} ✓`);
-    return { code: 200, body: { ok: true, imageId, fileName: hit.fileName ?? '' } };
+    // 单张：原样返回，老前端和单测都不用改
+    if (!isBatch) {
+      if (deleted.length) return { code: 200, body: { ok: true, imageId: ids[0], fileName: deleted[0].fileName } };
+      if (missing.length) {
+        return { code: 404, body: { ok: false, error: '这张图片不在当前机器人的素材库里（可能已过期或被删）' } };
+      }
+      return failed(lastError || new Error('删除失败'));
+    }
+    const code = deleted.length ? 200 : (missing.length ? 404 : 502);
+    const out = { ok: deleted.length > 0, deleted, missing, failed: failedItems };
+    if (code !== 200) {
+      out.error = [
+        missing.length ? `${missing.length} 张已不存在` : '',
+        failedItems.length ? `${failedItems.length} 张删除失败：${failedItems[0].error}` : '',
+      ].filter(Boolean).join('；');
+    }
+    return { code, body: out };
   } catch (e) {
-    log?.warn?.(`media.delete ${rt.id} ${imageId} ✗ ${e?.message ?? e}`);
+    log?.warn?.(`media.delete ${rt.id} ✗ ${e?.message ?? e}`);
     return failed(e);
   }
 }

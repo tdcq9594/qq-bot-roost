@@ -130,6 +130,79 @@ test('delete 拒绝不属于当前机器人的 image_id', async () => {
   assert.equal(calls.filter((c) => c[0] === 'deleteMediaImage').length, 0);
 });
 
+test('delete 批量：一次翻遍所有页校验，去重后逐张删', async () => {
+  const { rt, calls } = runtime({
+    listMediaImages: async ({ cursor }) => (cursor === ''
+      ? { images: [{ imageId: 'a', fileName: 'a.png' }], nextCursor: 'p2', total: 2, quota: 100 }
+      : { images: [{ imageId: 'b', fileName: 'b.png' }], nextCursor: '', total: 2, quota: 100 }),
+  });
+  const out = await handleMediaDelete({
+    runtimes: [rt],
+    body: { bot: 'main', imageIds: ['a', 'b', 'a'], confirm: true },
+    fallbackRuntime: null,
+  });
+  assert.equal(out.code, 200);
+  assert.equal(out.body.deleted.length, 2);
+  assert.deepEqual(out.body.missing, []);
+  assert.deepEqual(out.body.failed, []);
+  assert.deepEqual(calls.map((c) => c[0]), [
+    'listMediaImages', 'listMediaImages', 'deleteMediaImage', 'deleteMediaImage',
+  ]);
+  assert.deepEqual(calls[2], ['deleteMediaImage', 'a', { allowUnowned: true }]);
+  assert.deepEqual(calls[3], ['deleteMediaImage', 'b', { allowUnowned: true }]);
+});
+
+test('delete 批量：不在库的 id 进 missing，不发起删除', async () => {
+  const { rt, calls } = runtime({
+    listMediaImages: async () => ({ images: [{ imageId: 'a' }], nextCursor: '', total: 1, quota: 100 }),
+  });
+  const out = await handleMediaDelete({
+    runtimes: [rt],
+    body: { imageIds: ['a', 'ghost'], confirm: true },
+    fallbackRuntime: rt,
+  });
+  assert.equal(out.code, 200);
+  assert.equal(out.body.deleted.length, 1);
+  assert.deepEqual(out.body.missing, ['ghost']);
+  assert.deepEqual(calls.filter((c) => c[0] === 'deleteMediaImage').map((c) => c[1]), ['a']);
+});
+
+test('delete 批量：单张失败只记 failed，不影响其他张', async () => {
+  const { rt } = runtime({
+    listMediaImages: async () => ({
+      images: [{ imageId: 'a' }, { imageId: 'b' }], nextCursor: '', total: 2, quota: 100,
+    }),
+    deleteMediaImage: async (id) => {
+      if (id === 'b') throw Object.assign(new Error('boom'), { qqCode: 40035008 });
+      return {};
+    },
+  });
+  const out = await handleMediaDelete({
+    runtimes: [rt],
+    body: { imageIds: ['a', 'b'], confirm: true },
+    fallbackRuntime: rt,
+  });
+  assert.equal(out.code, 200);
+  assert.equal(out.body.deleted.length, 1);
+  assert.equal(out.body.failed.length, 1);
+  assert.match(out.body.failed[0].error, /不存在或已被删除/);
+});
+
+test('delete 批量：全不在库回 404，一次最多 100 张', async () => {
+  const { rt, calls } = runtime();
+  const base = { runtimes: [rt], body: { confirm: true }, fallbackRuntime: rt };
+  const gone = await handleMediaDelete({ ...base, body: { ...base.body, imageIds: ['x', 'y'] } });
+  assert.equal(gone.code, 404);
+  assert.match(gone.body.error, /2 张已不存在/);
+  assert.equal(calls.filter((c) => c[0] === 'deleteMediaImage').length, 0);
+
+  const tooMany = await handleMediaDelete({
+    ...base,
+    body: { ...base.body, imageIds: Array.from({ length: 101 }, (_, i) => `i${i}`) },
+  });
+  assert.equal(tooMany.code, 400);
+});
+
 test('findMediaImage 翻页找得到，也认得出循环游标', async () => {
   const pages = [
     { images: [], nextCursor: 'p2' },

@@ -483,8 +483,8 @@
         单机器人上限 100 张，连续 90 天没被引用会失效。
       </div>
       <div class="media-drop" id="mediaDrop">
-        <div>把图片拖到这里，或 <label class="media-pick" for="mediaFile">选择文件</label></div>
-        <input type="file" id="mediaFile" accept="image/png,image/jpeg,image/gif,image/webp" hidden>
+        <div>把图片拖到这里，或 <label class="media-pick" for="mediaFile">选择文件</label>（可多选）</div>
+        <input type="file" id="mediaFile" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
         <div class="hint" id="mediaPick">还没选文件</div>
       </div>
       <div class="btn-row">
@@ -497,13 +497,17 @@
       <div class="box-hd">
         <h3>素材库</h3>
         <div class="box-hd-right">
+          <button type="button" class="btn small" id="mediaBatchBtn">批量管理</button>
+          <button type="button" class="btn small" id="mediaSelectAll" hidden>全选</button>
+          <button type="button" class="btn small danger" id="mediaDeleteSelected" hidden disabled>删除所选</button>
           <button type="button" class="btn small" id="mediaRefresh">刷新</button>
         </div>
       </div>
-      <div class="hint">缩略图是平台给的短时效预览链接，只在这里看一眼，不会存到本机。</div>
+      <div class="hint" id="mediaListHint">缩略图是平台给的短时效预览链接，只在这里看一眼，不会存到本机。</div>
       <div id="mediaList" class="media-list"><div class="empty">加载中…</div></div>
       <div class="btn-row">
         <button type="button" class="btn small" id="mediaMore" hidden>加载更多</button>
+        <span class="hint" id="mediaSelCount" hidden>已选 0 张</span>
         <span class="hint" id="mediaListMsg"></span>
       </div>
     </div>

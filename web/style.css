@@ -3170,6 +3170,9 @@ input.ap-range {
   display: flex; gap: 12px; padding: 10px; min-width: 0;
   border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel-2);
 }
+.media-list.batch .media-item { cursor: pointer; }
+.media-list.batch .media-actions { display: none; }
+.media-item.selected { border-color: var(--primary); background: var(--primary-soft); }
 .media-thumb {
   width: 64px; height: 64px; flex: 0 0 64px; object-fit: cover;
   border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--panel-3);

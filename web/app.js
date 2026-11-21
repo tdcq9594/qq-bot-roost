@@ -9311,7 +9311,7 @@ async function devSave(patch, what) {
 var MEDIA_STATE = null;
 function mediaState() {
   if (!MEDIA_STATE) {
-    MEDIA_STATE = { images: [], cursor: '', total: 0, quota: 100, loading: false, file: null };
+    MEDIA_STATE = { images: [], cursor: '', total: 0, quota: 100, loading: false, files: [], selected: new Set(), batchMode: false };
   }
   return MEDIA_STATE;
 }
@@ -9358,12 +9358,44 @@ async function loadMedia({ more = false } = {}) {
   }
 }
 
+function updateMediaSelection() {
+  const st = mediaState();
+  const n = st.selected.size;
+  const batch = st.batchMode;
+  const batchBtn = $('#mediaBatchBtn');
+  const all = $('#mediaSelectAll');
+  const del = $('#mediaDeleteSelected');
+  const cnt = $('#mediaSelCount');
+  const hint = $('#mediaListHint');
+  if (batchBtn) batchBtn.textContent = batch ? '退出批量' : '批量管理';
+  if (all) {
+    all.hidden = !batch;
+    all.textContent = (n && n === st.images.length) ? '取消全选' : '全选';
+  }
+  if (del) {
+    del.hidden = !batch;
+    del.disabled = !n;
+    del.textContent = n ? `删除所选 (${n})` : '删除所选';
+  }
+  if (cnt) { cnt.hidden = !batch; cnt.textContent = `已选 ${n} 张`; }
+  if (hint) {
+    hint.textContent = batch
+      ? '批量模式：直接点卡片选中或取消，再点「删除所选」；点「退出批量」返回普通模式。'
+      : '缩略图是平台给的短时效预览链接，只在这里看一眼，不会存到本机。';
+  }
+}
+
 function renderMedia() {
   const list = $('#mediaList');
   if (!list) return;
   const st = mediaState();
   const quota = $('#mediaQuota');
   if (quota) quota.textContent = `已用 ${st.total} / ${st.quota} 张`;
+  // 切机器人 / 刷新后清掉已不在列表里的选中项
+  const ids = new Set(st.images.map((x) => x.imageId));
+  for (const id of st.selected) if (!ids.has(id)) st.selected.delete(id);
+  list.classList.toggle('batch', st.batchMode);
+  updateMediaSelection();
   if (!st.images.length) {
     list.innerHTML = '<div class="empty">还没有素材，先在上面传一张</div>';
     return;
@@ -9373,19 +9405,22 @@ function renderMedia() {
     const name = escapeHtml(it.fileName || '未命名');
     const url = escapeHtml(it.url);
     const md = escapeHtml(`![${it.fileName || '图片'}](${it.url || ''})`);
+    const picked = st.selected.has(it.imageId) ? ' selected' : '';
     const thumb = it.previewUrl
       ? `<img class="media-thumb" src="${escapeHtml(it.previewUrl)}" alt="" loading="lazy">`
       : '<div class="media-thumb"></div>';
-    return `<div class="media-item">
+    // 批量模式下不生成卡片按钮：点卡片任意位置都是选中，不会误触到复制 / 单张删除
+    const actions = st.batchMode ? '' : `<div class="media-actions">
+      <button type="button" class="btn small" data-media-copy="url" data-id="${id}">复制引用</button>
+      <button type="button" class="btn small" data-media-copy="md" data-value="${md}">复制 Markdown</button>
+      <button type="button" class="btn small danger" data-media-del="${id}">删除</button>
+    </div>`;
+    return `<div class="media-item${picked}" data-media-id="${id}">
       ${thumb}
       <div class="media-meta">
         <div class="media-name">${name}</div>
         <span class="hint">${mediaTime(it.createdAt)} · ${escapeHtml(mediaLeft(it.expiresAt))}</span>
-        <div class="media-actions">
-          <button type="button" class="btn small" data-media-copy="url" data-id="${id}">复制引用</button>
-          <button type="button" class="btn small" data-media-copy="md" data-value="${md}">复制 Markdown</button>
-          <button type="button" class="btn small danger" data-media-del="${id}">删除</button>
-        </div>
+        ${actions}
       </div>
     </div>`;
   }).join('');
@@ -9412,71 +9447,153 @@ async function copyMediaText(text) {
   }
 }
 
-function pickMediaFile(file) {
+function pickMediaFiles(files) {
   const st = mediaState();
   const pick = $('#mediaPick');
   const btn = $('#mediaUploadBtn');
   const msg = $('#mediaMsg');
-  st.file = null;
+  st.files = [];
   if (btn) btn.disabled = true;
-  if (!file) {
+  if (msg) msg.textContent = '';
+  if (!files || !files.length) {
     if (pick) pick.textContent = '还没选文件';
     return;
   }
-  if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) {
-    if (pick) pick.textContent = '只支持 png / jpeg / gif / webp';
-    if (msg) msg.textContent = '';
+  const skipped = [];
+  for (const file of Array.from(files)) {
+    if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) {
+      skipped.push(`${file.name}（格式不支持）`);
+    } else if (file.size > 10 * 1024 * 1024) {
+      skipped.push(`${file.name}（${(file.size / 1024 / 1024).toFixed(1)}MB 超限）`);
+    } else {
+      st.files.push(file);
+    }
+  }
+  if (btn) btn.disabled = !st.files.length;
+  if (!st.files.length) {
+    if (pick) pick.textContent = skipped.join('、') || '没有可用图片';
     return;
   }
-  if (file.size > 10 * 1024 * 1024) {
-    if (pick) pick.textContent = `图片有 ${(file.size / 1024 / 1024).toFixed(1)}MB，超过 10MB 上限`;
-    if (msg) msg.textContent = '';
-    return;
-  }
-  st.file = file;
-  if (pick) pick.textContent = `${file.name} · ${(file.size / 1024).toFixed(0)} KB`;
-  if (msg) msg.textContent = '';
-  if (btn) btn.disabled = false;
+  const names = st.files.slice(0, 3).map((f) => f.name).join('、');
+  const more = st.files.length > 3 ? ` 等 ${st.files.length} 张` : '';
+  const skipTip = skipped.length ? `；跳过 ${skipped.length} 张：${skipped.slice(0, 2).join('、')}` : '';
+  if (pick) pick.textContent = `已选 ${st.files.length} 张：${names}${more}${skipTip}`;
 }
 
-async function uploadMediaFile() {
+async function uploadMediaFiles() {
   const st = mediaState();
-  const file = st.file;
-  if (!file) return;
+  const files = st.files.slice();
+  if (!files.length) return;
   const btn = $('#mediaUploadBtn');
   const msg = $('#mediaMsg');
   if (btn) btn.disabled = true;
+  const done = [];
+  const failed = [];
   try {
-    if (msg) msg.textContent = '正在读取图片…';
-    const dataUrl = await new Promise((resolve, reject) => {
-      const fr = new FileReader();
-      fr.onload = () => resolve(String(fr.result || ''));
-      fr.onerror = () => reject(new Error('读取图片失败'));
-      fr.readAsDataURL(file);
-    });
-    const data = dataUrl.slice(dataUrl.indexOf(',') + 1);
-    if (msg) msg.textContent = '正在上传：申请 → 直传 → 完成…';
-    const r = await api('/api/media-images/upload', {
-      method: 'POST',
-      body: JSON.stringify({ name: file.name, data }),
-    });
-    if (msg) msg.textContent = '';
-    toast(`已上传 ${r?.image?.fileName || file.name}`, 'ok');
-    st.file = null;
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      if (msg) msg.textContent = `正在上传 ${i + 1}/${files.length}：${file.name}（申请 → 直传 → 完成）…`;
+      try {
+        const dataUrl = await new Promise((resolve, reject) => {
+          const fr = new FileReader();
+          fr.onload = () => resolve(String(fr.result || ''));
+          fr.onerror = () => reject(new Error('读取图片失败'));
+          fr.readAsDataURL(file);
+        });
+        const data = dataUrl.slice(dataUrl.indexOf(',') + 1);
+        await api('/api/media-images/upload', {
+          method: 'POST',
+          body: JSON.stringify({ name: file.name, data }),
+        });
+        done.push(file.name);
+      } catch (e) {
+        failed.push(`${file.name}：${errText(e)}`);
+      }
+    }
+    st.files = [];
     const input = $('#mediaFile');
     if (input) input.value = '';
-    pickMediaFile(null);
-    if ($('#mediaPick')) $('#mediaPick').textContent = '上传完成，可以继续选图';
+    if (msg) msg.textContent = failed.length ? failed.join('；') : '';
+    if ($('#mediaPick')) {
+      $('#mediaPick').textContent = failed.length
+        ? `本次 ${done.length} 张成功、${failed.length} 张失败，可重新选择`
+        : `已上传 ${done.length} 张，可以继续选图`;
+    }
+    if (failed.length) {
+      toast(`成功 ${done.length} 张，失败 ${failed.length} 张`, 'error');
+    } else {
+      toast(`已上传 ${done.length} 张`, 'ok');
+    }
+    await loadMedia();
+  } finally {
+    if (btn) btn.disabled = !st.files.length;
+  }
+}
+
+async function deleteSelectedMedia() {
+  const st = mediaState();
+  const ids = [...st.selected];
+  if (!ids.length) return;
+  const ok = await confirmDialog({
+    title: '批量删除素材',
+    message: `确定删除选中的 <b>${ids.length}</b> 张吗？删除后 <b>qqbot-media://</b> 引用立即失效；已经发出去的消息不受影响。`,
+    okText: `删除 ${ids.length} 张`,
+    danger: true,
+  });
+  if (!ok) return;
+  const btn = $('#mediaDeleteSelected');
+  const msg = $('#mediaListMsg');
+  if (btn) btn.disabled = true;
+  try {
+    if (msg) msg.textContent = `正在删除 ${ids.length} 张…`;
+    const r = await api('/api/media-images/delete', {
+      method: 'POST',
+      body: JSON.stringify({ imageIds: ids, confirm: true }),
+    });
+    st.selected.clear();
+    const d = r?.deleted?.length || 0;
+    const m = r?.missing?.length || 0;
+    const f = r?.failed?.length || 0;
+    const tip = [d && `成功 ${d} 张`, m && `${m} 张已不存在`, f && `${f} 张失败`].filter(Boolean).join('，');
+    if (msg) msg.textContent = r?.error || tip;
+    toast(tip || '已删除', (f || m) ? 'error' : 'ok');
     await loadMedia();
   } catch (e) {
     if (msg) msg.textContent = errText(e);
     toast(errText(e), 'error');
   } finally {
-    if (btn) btn.disabled = !st.file;
+    updateMediaSelection();
   }
 }
 
 document.addEventListener('click', async (e) => {
+  if (e.target?.closest?.('#mediaBatchBtn')) {
+    const st = mediaState();
+    st.batchMode = !st.batchMode;
+    if (!st.batchMode) st.selected.clear();
+    renderMedia();
+    return;
+  }
+  if (e.target?.closest?.('#mediaSelectAll')) {
+    const st = mediaState();
+    if (st.selected.size === st.images.length) st.selected.clear();
+    else st.images.forEach((x) => st.selected.add(x.imageId));
+    renderMedia();
+    return;
+  }
+  if (e.target?.closest?.('#mediaDeleteSelected')) return deleteSelectedMedia();
+  if (mediaState().batchMode) {
+    const item = e.target?.closest?.('.media-item');
+    if (item) {
+      const st = mediaState();
+      const id = item.dataset.mediaId;
+      if (st.selected.has(id)) st.selected.delete(id);
+      else st.selected.add(id);
+      item.classList.toggle('selected', st.selected.has(id));
+      updateMediaSelection();
+      return;
+    }
+  }
   const copyBtn = e.target?.closest?.('[data-media-copy]');
   if (copyBtn) {
     const kind = copyBtn.dataset.mediaCopy;
@@ -9500,6 +9617,7 @@ document.addEventListener('click', async (e) => {
         method: 'POST',
         body: JSON.stringify({ imageId: id, confirm: true }),
       });
+      mediaState().selected.delete(id);
       toast('已删除', 'ok');
       await loadMedia();
     } catch (err) {
@@ -9507,7 +9625,7 @@ document.addEventListener('click', async (e) => {
     }
     return;
   }
-  if (e.target?.closest?.('#mediaUploadBtn')) return uploadMediaFile();
+  if (e.target?.closest?.('#mediaUploadBtn')) return uploadMediaFiles();
   if (e.target?.closest?.('#mediaRefresh')) return loadMedia();
   if (e.target?.closest?.('#mediaMore')) return loadMedia({ more: true });
 });
@@ -9527,10 +9645,10 @@ if (mediaDrop) {
   mediaDrop.addEventListener('drop', (e) => {
     e.preventDefault();
     mediaDrop.classList.remove('drag');
-    pickMediaFile(e.dataTransfer?.files?.[0]);
+    pickMediaFiles(e.dataTransfer?.files);
   });
 }
-$('#mediaFile')?.addEventListener('change', (e) => pickMediaFile(e.target.files?.[0]));
+$('#mediaFile')?.addEventListener('change', (e) => pickMediaFiles(e.target.files));
 
 // hash 直达 #media 时，activateTab 可能在本块执行前就跑过了，补一次
 if (location.hash.slice(1) === 'media') activateTab('media');
