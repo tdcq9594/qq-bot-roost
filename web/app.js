@@ -294,6 +294,7 @@ async function selectBot(id) {
   if (tab === 'delivery') loadDelivery();
   if (tab === 'groups') loadGroups();
   if (tab === 'roles') { loadRoles(); loadPeople(); }
+  if (tab === 'media') loadMedia();
   if (tab === 'stats') loadStats();
   // 体检是按机器人做的，切了要重查
   loadDoctor();
@@ -1462,6 +1463,7 @@ function activateTab(name) {
     safeLoad('roles', loadPeople);
   }
   if (name === 'identity') safeLoad('identity', loadIdentity);
+  if (name === 'media') safeLoad('media', loadMedia);
   if (name === 'notify') safeLoad('notify', loadNotify);
   if (name === 'onebot') safeLoad('onebot', loadOnebot);
   // 纯展示同步：侧栏 / 底栏高亮、面包屑、抽屉收起。不碰任何数据加载。
@@ -9300,3 +9302,235 @@ async function devSave(patch, what) {
     lastLoggedIn = logged;
   }, 4000)?.unref?.();
 })();
+
+/* ---------------- 素材页（机器人级 Markdown 图床） ----------------
+ * 三条接口都在后端做了鉴权 / CSRF / 归属校验，前端只负责选文件、base64 编码
+ * 和展示。用 var 是刻意的：activateTab 可能在脚本执行到这里之前就被 hash 触发，
+ * let/const 会撞 TDZ，safeLoad 把异常吞成「页面加载失败」很难查。
+ */
+var MEDIA_STATE = null;
+function mediaState() {
+  if (!MEDIA_STATE) {
+    MEDIA_STATE = { images: [], cursor: '', total: 0, quota: 100, loading: false, file: null };
+  }
+  return MEDIA_STATE;
+}
+
+function mediaTime(sec) {
+  const n = Number(sec) || 0;
+  return n ? new Date(n * 1000).toLocaleString('zh-CN', { hour12: false }) : '—';
+}
+
+function mediaLeft(sec) {
+  const n = Number(sec) || 0;
+  if (!n) return '—';
+  const days = Math.ceil((n * 1000 - Date.now()) / 86400000);
+  return days <= 0 ? '已过期' : `剩 ${days} 天`;
+}
+
+async function loadMedia({ more = false } = {}) {
+  const st = mediaState();
+  if (st.loading) return;
+  st.loading = true;
+  const listEl = $('#mediaList');
+  const moreBtn = $('#mediaMore');
+  const msgEl = $('#mediaListMsg');
+  if (msgEl) msgEl.textContent = '加载中…';
+  if (moreBtn) moreBtn.disabled = true;
+  try {
+    const q = !more || !st.cursor ? '' : `?cursor=${encodeURIComponent(st.cursor)}`;
+    const r = await api(`/api/media-images${q}`);
+    st.images = more ? [...st.images, ...(r?.images || [])] : (r?.images || []);
+    st.cursor = String(r?.nextCursor || '');
+    st.total = Number(r?.total) || 0;
+    st.quota = Number(r?.quota) || 100;
+    renderMedia();
+    if (msgEl) msgEl.textContent = '';
+  } catch (e) {
+    if (listEl) listEl.innerHTML = `<div class="empty">${escapeHtml(errText(e))}</div>`;
+    if (msgEl) msgEl.textContent = '';
+  } finally {
+    st.loading = false;
+    if (moreBtn) {
+      moreBtn.disabled = false;
+      moreBtn.hidden = !st.cursor;
+    }
+  }
+}
+
+function renderMedia() {
+  const list = $('#mediaList');
+  if (!list) return;
+  const st = mediaState();
+  const quota = $('#mediaQuota');
+  if (quota) quota.textContent = `已用 ${st.total} / ${st.quota} 张`;
+  if (!st.images.length) {
+    list.innerHTML = '<div class="empty">还没有素材，先在上面传一张</div>';
+    return;
+  }
+  list.innerHTML = st.images.map((it) => {
+    const id = escapeHtml(it.imageId);
+    const name = escapeHtml(it.fileName || '未命名');
+    const url = escapeHtml(it.url);
+    const md = escapeHtml(`![${it.fileName || '图片'}](${it.url || ''})`);
+    const thumb = it.previewUrl
+      ? `<img class="media-thumb" src="${escapeHtml(it.previewUrl)}" alt="" loading="lazy">`
+      : '<div class="media-thumb"></div>';
+    return `<div class="media-item">
+      ${thumb}
+      <div class="media-meta">
+        <div class="media-name">${name}</div>
+        <span class="hint">${mediaTime(it.createdAt)} · ${escapeHtml(mediaLeft(it.expiresAt))}</span>
+        <div class="media-actions">
+          <button type="button" class="btn small" data-media-copy="url" data-id="${id}">复制引用</button>
+          <button type="button" class="btn small" data-media-copy="md" data-value="${md}">复制 Markdown</button>
+          <button type="button" class="btn small danger" data-media-del="${id}">删除</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+  // 预览链接是短时效的，过期就留空方块，不要一页碎图标
+  list.querySelectorAll('.media-thumb').forEach((img) => {
+    img.addEventListener('error', () => { img.style.visibility = 'hidden'; });
+  });
+}
+
+async function copyMediaText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('已复制', 'ok');
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'absolute';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    toast(ok ? '已复制' : '复制失败，请手动选择', ok ? 'ok' : 'error');
+  }
+}
+
+function pickMediaFile(file) {
+  const st = mediaState();
+  const pick = $('#mediaPick');
+  const btn = $('#mediaUploadBtn');
+  const msg = $('#mediaMsg');
+  st.file = null;
+  if (btn) btn.disabled = true;
+  if (!file) {
+    if (pick) pick.textContent = '还没选文件';
+    return;
+  }
+  if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) {
+    if (pick) pick.textContent = '只支持 png / jpeg / gif / webp';
+    if (msg) msg.textContent = '';
+    return;
+  }
+  if (file.size > 10 * 1024 * 1024) {
+    if (pick) pick.textContent = `图片有 ${(file.size / 1024 / 1024).toFixed(1)}MB，超过 10MB 上限`;
+    if (msg) msg.textContent = '';
+    return;
+  }
+  st.file = file;
+  if (pick) pick.textContent = `${file.name} · ${(file.size / 1024).toFixed(0)} KB`;
+  if (msg) msg.textContent = '';
+  if (btn) btn.disabled = false;
+}
+
+async function uploadMediaFile() {
+  const st = mediaState();
+  const file = st.file;
+  if (!file) return;
+  const btn = $('#mediaUploadBtn');
+  const msg = $('#mediaMsg');
+  if (btn) btn.disabled = true;
+  try {
+    if (msg) msg.textContent = '正在读取图片…';
+    const dataUrl = await new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(String(fr.result || ''));
+      fr.onerror = () => reject(new Error('读取图片失败'));
+      fr.readAsDataURL(file);
+    });
+    const data = dataUrl.slice(dataUrl.indexOf(',') + 1);
+    if (msg) msg.textContent = '正在上传：申请 → 直传 → 完成…';
+    const r = await api('/api/media-images/upload', {
+      method: 'POST',
+      body: JSON.stringify({ name: file.name, data }),
+    });
+    if (msg) msg.textContent = '';
+    toast(`已上传 ${r?.image?.fileName || file.name}`, 'ok');
+    st.file = null;
+    const input = $('#mediaFile');
+    if (input) input.value = '';
+    pickMediaFile(null);
+    if ($('#mediaPick')) $('#mediaPick').textContent = '上传完成，可以继续选图';
+    await loadMedia();
+  } catch (e) {
+    if (msg) msg.textContent = errText(e);
+    toast(errText(e), 'error');
+  } finally {
+    if (btn) btn.disabled = !st.file;
+  }
+}
+
+document.addEventListener('click', async (e) => {
+  const copyBtn = e.target?.closest?.('[data-media-copy]');
+  if (copyBtn) {
+    const kind = copyBtn.dataset.mediaCopy;
+    if (kind === 'md') return copyMediaText(copyBtn.dataset.value || '');
+    const it = mediaState().images.find((x) => x.imageId === copyBtn.dataset.id);
+    if (it?.url) await copyMediaText(it.url);
+    return;
+  }
+  const delBtn = e.target?.closest?.('[data-media-del]');
+  if (delBtn) {
+    const id = delBtn.dataset.mediaDel;
+    const ok = await confirmDialog({
+      title: '删除素材',
+      message: '删除后 <b>qqbot-media://</b> 引用立即失效；已经发出去的消息不受影响。',
+      okText: '删除',
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api('/api/media-images/delete', {
+        method: 'POST',
+        body: JSON.stringify({ imageId: id, confirm: true }),
+      });
+      toast('已删除', 'ok');
+      await loadMedia();
+    } catch (err) {
+      toast(errText(err), 'error');
+    }
+    return;
+  }
+  if (e.target?.closest?.('#mediaUploadBtn')) return uploadMediaFile();
+  if (e.target?.closest?.('#mediaRefresh')) return loadMedia();
+  if (e.target?.closest?.('#mediaMore')) return loadMedia({ more: true });
+});
+
+const mediaDrop = $('#mediaDrop');
+if (mediaDrop) {
+  mediaDrop.addEventListener('click', (e) => {
+    // label 自己会触发 file input，别再点一次，否则弹两个选择框
+    if (e.target?.closest?.('label') || e.target?.closest?.('input')) return;
+    $('#mediaFile')?.click();
+  });
+  mediaDrop.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    mediaDrop.classList.add('drag');
+  });
+  mediaDrop.addEventListener('dragleave', () => mediaDrop.classList.remove('drag'));
+  mediaDrop.addEventListener('drop', (e) => {
+    e.preventDefault();
+    mediaDrop.classList.remove('drag');
+    pickMediaFile(e.dataTransfer?.files?.[0]);
+  });
+}
+$('#mediaFile')?.addEventListener('change', (e) => pickMediaFile(e.target.files?.[0]));
+
+// hash 直达 #media 时，activateTab 可能在本块执行前就跑过了，补一次
+if (location.hash.slice(1) === 'media') activateTab('media');

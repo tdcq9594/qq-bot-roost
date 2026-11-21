@@ -3153,3 +3153,27 @@ input.ap-range {
   width: 220px; max-width: 46vw; padding: 0; border: 0; background: transparent;
   accent-color: var(--primary-fill);
 }
+
+/* 素材页：拖拽上传区 + 图片卡片。只用已有变量，不新增 CSS 变量 */
+.media-drop {
+  margin-top: 14px; padding: 22px; text-align: center;
+  border: 1px dashed var(--border-strong); border-radius: var(--radius);
+  background: var(--panel-2); cursor: pointer;
+}
+.media-drop.drag { border-color: var(--primary); background: var(--primary-soft); }
+.media-pick { color: var(--primary); cursor: pointer; text-decoration: underline; }
+.media-list {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px; margin-top: 14px;
+}
+.media-item {
+  display: flex; gap: 12px; padding: 10px; min-width: 0;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel-2);
+}
+.media-thumb {
+  width: 64px; height: 64px; flex: 0 0 64px; object-fit: cover;
+  border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--panel-3);
+}
+.media-meta { flex: 1; min-width: 0; }
+.media-name { font-size: 13px; font-weight: 500; margin-bottom: 4px; word-break: break-all; }
+.media-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
