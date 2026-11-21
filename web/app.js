@@ -9358,6 +9358,22 @@ async function loadMedia({ more = false } = {}) {
   }
 }
 
+/**
+ * 删除成功后立即把卡片从本地摘掉，不等 list 接口重拉：
+ *   · loadMedia() 有 loading 闸门，删除时若有别的加载在跑会被直接跳过；
+ *   · 官方 list 有同步延迟，马上重拉可能把刚删的又带回来。
+ * 只移除 deleted / missing，failed 的留在列表上让用户看到并重试。
+ */
+function dropMediaCards(ids) {
+  const st = mediaState();
+  const gone = new Set(ids);
+  if (!gone.size) return;
+  st.images = st.images.filter((x) => !gone.has(x.imageId));
+  st.total = Math.max(0, st.total - gone.size);
+  for (const id of gone) st.selected.delete(id);
+  renderMedia();
+}
+
 function updateMediaSelection() {
   const st = mediaState();
   const n = st.selected.size;
@@ -9550,14 +9566,18 @@ async function deleteSelectedMedia() {
       method: 'POST',
       body: JSON.stringify({ imageIds: ids, confirm: true }),
     });
+    const gone = [
+      ...(r?.deleted || []).map((x) => x.imageId),
+      ...(r?.missing || []),
+    ];
     st.selected.clear();
+    dropMediaCards(gone); // 先本地摘卡片，立即见效，不等 list 重拉
     const d = r?.deleted?.length || 0;
     const m = r?.missing?.length || 0;
     const f = r?.failed?.length || 0;
     const tip = [d && `成功 ${d} 张`, m && `${m} 张已不存在`, f && `${f} 张失败`].filter(Boolean).join('，');
     if (msg) msg.textContent = r?.error || tip;
     toast(tip || '已删除', (f || m) ? 'error' : 'ok');
-    await loadMedia();
   } catch (e) {
     if (msg) msg.textContent = errText(e);
     toast(errText(e), 'error');
@@ -9617,9 +9637,8 @@ document.addEventListener('click', async (e) => {
         method: 'POST',
         body: JSON.stringify({ imageId: id, confirm: true }),
       });
-      mediaState().selected.delete(id);
+      dropMediaCards([id]);
       toast('已删除', 'ok');
-      await loadMedia();
     } catch (err) {
       toast(errText(err), 'error');
     }
