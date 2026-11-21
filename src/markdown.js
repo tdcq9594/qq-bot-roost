@@ -144,27 +144,51 @@ export function mdToPlain(src) {
  *        `cmd: null` 表示这不是命令（比如被动触发的玩法），只显示文字、不做成可点击
  * @param {object} [opts]
  * @param {'group'|'c2c'|'guild'} [opts.kind] 会话类型，决定用哪种交互标签
+ * @param {number} [opts.perLine=3] 无说明项每行合并几个（有说明的仍独占一行）
  * @returns {string}
  */
-export function renderMenuMd(title, groups, { kind = 'group' } = {}) {
+export function renderMenuMd(title, groups, { kind = 'group', perLine = 3 } = {}) {
   const lines = [`# ${escMd(title)}`];
+  const width = Math.max(1, Math.floor(Number(perLine) || 1));
 
   for (const g of groups ?? []) {
     if (!g?.items?.length) continue;
     lines.push('');
     lines.push(`## ${escMd(g.title)}`);
+
+    /**
+     * 无说明的项攒成一行再输出：像斗罗那样 80 多项的菜单，一项一行会刷屏。
+     * 有说明的项（用法示例等）保留独占行，避免被挤成一条宽行；
+     * 攒批时保持原始顺序，组尾不足一行也照样 flush。
+     */
+    let row = [];
+    const flush = () => {
+      if (!row.length) return;
+      lines.push(row.join(' | '));
+      row = [];
+    };
+
     for (const it of g.items) {
-      if (it.cmd === null) {
-        // 非命令项（被动触发的关键词等），不做成可点击
-        lines.push(`- ${escMd(it.text)}${it.desc ? ` · ${it.desc}` : ''}`);
-        continue;
-      }
+      const isCmd = it.cmd !== null;
       const cmd = it.cmd ?? `/${it.text}`;
       // 群聊只有 cmd-input 可用；单聊/频道才有 cmd-enter（点了直接发）
-      const tag = kind === 'group' ? md.cmdInput(cmd, it.text) : md.cmdEnter(cmd);
-      // desc 不转义：插件会往里塞反引号包起来的用法示例，转义了反而坏掉
-      lines.push(`- ${tag}${it.desc ? ` ${it.desc}` : ''}`);
+      const cell = () =>
+        isCmd
+          ? kind === 'group'
+            ? md.cmdInput(cmd, it.text)
+            : md.cmdEnter(cmd)
+          : escMd(it.text); // 非命令项（被动触发的关键词等）不做成可点击
+
+      if (it.desc) {
+        flush();
+        // desc 不转义：插件会往里塞反引号包起来的用法示例，转义了反而坏掉
+        lines.push(`- ${cell()}${isCmd ? ' ' : ' · '}${it.desc}`);
+        continue;
+      }
+      row.push(cell());
+      if (row.length >= width) flush();
     }
+    flush();
   }
   return lines.join('\n');
 }
