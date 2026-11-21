@@ -131,6 +131,8 @@
           <button class="tab-item" data-tab="identity">身份</button>
           <button class="tab-item" data-tab="groups">群组</button>
           <button class="tab-item" data-tab="roles">权限</button>
+          <!-- 素材：机器人级 Markdown 图床，上传后得到 qqbot-media:// 引用 -->
+          <button class="tab-item" data-tab="media">素材</button>
           <!-- 通知：SMTP 邮箱配置 + 普通成员自助绑定 -->
           <button class="tab-item" data-tab="notify">通知</button>
           <!-- 外接：上=自有宿主协议，下=OneBot v11，共用按需依赖 -->
@@ -468,6 +470,49 @@
     </div>
   </section>
 
+  <!-- 素材：机器人级 Markdown 图床。上传后拿到 qqbot-media:// 引用，跨群跨单聊复用 -->
+  <section id="tab-media" class="panel">
+    <div class="box">
+      <div class="box-hd">
+        <h3>上传图片</h3>
+        <span class="hint" id="mediaQuota">素材库读取中…</span>
+      </div>
+      <div class="hint">
+        单张 ≤10MB，支持 png / jpeg / gif / webp。上传后得到
+        <span class="mono">qqbot-media://</span> 引用，可在 Markdown 消息里反复使用；
+        单机器人上限 100 张，连续 90 天没被引用会失效。
+      </div>
+      <div class="media-drop" id="mediaDrop">
+        <div>把图片拖到这里，或 <label class="media-pick" for="mediaFile">选择文件</label>（可多选）</div>
+        <input type="file" id="mediaFile" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
+        <div class="hint" id="mediaPick">还没选文件</div>
+      </div>
+      <div class="btn-row">
+        <button type="button" class="btn primary" id="mediaUploadBtn" disabled>上传素材</button>
+        <span class="hint" id="mediaMsg"></span>
+      </div>
+    </div>
+
+    <div class="box">
+      <div class="box-hd">
+        <h3>素材库</h3>
+        <div class="box-hd-right">
+          <button type="button" class="btn small" id="mediaBatchBtn">批量管理</button>
+          <button type="button" class="btn small" id="mediaSelectAll" hidden>全选</button>
+          <button type="button" class="btn small danger" id="mediaDeleteSelected" hidden disabled>删除所选</button>
+          <button type="button" class="btn small" id="mediaRefresh">刷新</button>
+        </div>
+      </div>
+      <div class="hint" id="mediaListHint">缩略图是平台给的短时效预览链接，只在这里看一眼，不会存到本机。</div>
+      <div id="mediaList" class="media-list"><div class="empty">加载中…</div></div>
+      <div class="btn-row">
+        <button type="button" class="btn small" id="mediaMore" hidden>加载更多</button>
+        <span class="hint" id="mediaSelCount" hidden>已选 0 张</span>
+        <span class="hint" id="mediaListMsg"></span>
+      </div>
+    </div>
+  </section>
+
   <!-- 外观：明暗 / 底色 / 配色 / 背景图 / 导入导出。只存在这个浏览器 -->
   <section id="tab-appearance" class="panel">
     <div class="box">
@@ -597,6 +642,22 @@
           <a href="https://gitee.com/tdcq9594/qq-bot-roost" target="_blank" rel="noopener">Gitee</a>
         </dd>
       </dl>
+    </div>
+
+    <div class="box">
+      <div class="box-hd">
+        <h3>交流群</h3>
+        <span class="hint">安装踩坑、用法讨论、想法都欢迎来聊</span>
+      </div>
+      <div class="about-community">
+        <img class="about-community-qr" src="/qq-group.jpg" alt="roost 交流群二维码" width="200" />
+        <div class="about-community-info">
+          <div class="about-community-label">群号</div>
+          <a class="about-community-no" href="https://qm.qq.com/q/bV7MgMPhWE" target="_blank" rel="noopener">1130901545</a>
+          <div class="hint">点击群号一键加群，或扫码加入</div>
+          <div class="hint">提问尽量带上版本号和面板日志</div>
+        </div>
+      </div>
     </div>
 
     <div class="box">
@@ -1057,17 +1118,59 @@ curl 'https://bot.q.qq.com/cgi-bin/v2/info/list_bots' \
 
   <!-- 插件 -->
   <section id="tab-plugins" class="panel">
-    <div class="box">
+    <!--
+      子页签：已安装 / 市场。位置固定在插件页顶部，切换只改这两块的 hidden。
+      注意用 data-plugin-subtab 而不是 data-tab —— 后者会被全局 activateTab()
+      当成主导航，切走其他面板（2026-11-21 改造时确认过）。
+    -->
+    <div class="plugin-subtabs" role="tablist" aria-label="插件管理分区">
+      <button type="button" class="plugin-subtab active" data-plugin-subtab="installed" role="tab" aria-selected="true">已安装</button>
+      <button type="button" class="plugin-subtab" data-plugin-subtab="market" role="tab" aria-selected="false">插件市场</button>
+    </div>
+
+    <div class="box" id="installedBox">
       <div class="box-hd">
         <h3>已安装插件</h3>
         <div class="plugin-tools">
           <span class="hint">往 plugins/ 里放了新插件，点「刷新」即可加载，不用重启</span>
           <button class="btn small" id="btnRescanPlugins">刷新</button>
-          <button class="btn small" id="btnLoadMarket">插件市场</button>
         </div>
       </div>
       <div class="upd-tip" id="pluginUpdateTip"></div>
-      <div id="pluginList" class="plugin-list"></div>
+
+      <!-- 插件一多就得能找：搜索 / 状态 / 排序 + 三种视图自选 -->
+      <div class="plugin-filter">
+        <div class="filter-fields">
+          <input id="pluginSearch" class="mini-input" placeholder="搜索名称 / ID / 描述" aria-label="搜索已安装插件" />
+          <select id="pluginStatus" class="mini-select" aria-label="状态筛选">
+            <option value="">全部状态</option>
+            <option value="running">运行中</option>
+            <option value="idle">未加载</option>
+            <option value="disabled">已禁用</option>
+            <option value="error">出错</option>
+            <option value="update">有更新</option>
+          </select>
+          <select id="pluginSort" class="mini-select" aria-label="排序方式">
+            <option value="">默认顺序</option>
+            <option value="name">按名称</option>
+            <option value="status">按状态</option>
+            <option value="version">按版本</option>
+          </select>
+          <span class="hint filter-count" id="pluginCount"></span>
+        </div>
+        <div class="view-switch" role="group" aria-label="插件列表视图">
+          <button type="button" class="view-btn" data-view="list" title="紧凑列表" aria-label="紧凑列表">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 4h12M2 8h12M2 12h12" /></svg>
+          </button>
+          <button type="button" class="view-btn" data-view="grid" title="卡片网格" aria-label="卡片网格">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="2" width="5" height="5" rx="1" /><rect x="9" y="2" width="5" height="5" rx="1" /><rect x="2" y="9" width="5" height="5" rx="1" /><rect x="9" y="9" width="5" height="5" rx="1" /></svg>
+          </button>
+          <button type="button" class="view-btn" data-view="large" title="大卡片" aria-label="大卡片">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="2" width="12" height="5" rx="1" /><rect x="2" y="9" width="12" height="5" rx="1" /></svg>
+          </button>
+        </div>
+      </div>
+      <div id="pluginList" class="plugin-list view-grid"></div>
     </div>
 
     <div class="box" id="marketBox" hidden>
@@ -1143,9 +1246,27 @@ curl 'https://bot.q.qq.com/cgi-bin/v2/info/list_bots' \
       <div class="market-filter">
         <input id="marketSearch" class="mini-input" placeholder="搜索插件名 / 描述 / 标签" />
         <select id="marketCat" class="mini-select" aria-label="分类"></select>
+        <select id="marketSort" class="mini-select" aria-label="排序方式">
+          <option value="">默认顺序</option>
+          <option value="name">按名称</option>
+          <option value="version">按版本</option>
+          <option value="added">最近收录</option>
+        </select>
+        <span class="hint filter-count" id="marketCount"></span>
+        <div class="view-switch" role="group" aria-label="插件列表视图">
+          <button type="button" class="view-btn" data-view="list" title="紧凑列表" aria-label="紧凑列表">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 4h12M2 8h12M2 12h12" /></svg>
+          </button>
+          <button type="button" class="view-btn" data-view="grid" title="卡片网格" aria-label="卡片网格">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="2" width="5" height="5" rx="1" /><rect x="9" y="2" width="5" height="5" rx="1" /><rect x="2" y="9" width="5" height="5" rx="1" /><rect x="9" y="9" width="5" height="5" rx="1" /></svg>
+          </button>
+          <button type="button" class="view-btn" data-view="large" title="大卡片" aria-label="大卡片">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="2" width="12" height="5" rx="1" /><rect x="2" y="9" width="12" height="5" rx="1" /></svg>
+          </button>
+        </div>
       </div>
 
-      <div id="marketList" class="plugin-list"></div>
+      <div id="marketList" class="plugin-list view-grid"></div>
     </div>
   </section>
 

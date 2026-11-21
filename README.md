@@ -8,9 +8,9 @@
 
 <img src="https://img.shields.io/badge/Node.js-22.13%2B-339933?logo=node.js&logoColor=white" alt="Node.js 22.13+">
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
-<img src="https://img.shields.io/badge/tests-1338%20passed-brightgreen" alt="测试 1338 项">
+<img src="https://img.shields.io/badge/tests-1343%20passed-brightgreen" alt="测试 1343 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
-<img src="https://img.shields.io/badge/version-1.1.8-blueviolet" alt="版本 1.1.8">
+<img src="https://img.shields.io/badge/version-1.1.9-blueviolet" alt="版本 1.1.9">
 <img src="https://img.shields.io/badge/license-AGPL--3.0--only-blue" alt="AGPL-3.0-only">
 <a href="https://github.com/roost-qq/qq-bot-roost/actions"><img src="https://img.shields.io/github/actions/workflow/status/roost-qq/qq-bot-roost/ci.yml?branch=master" alt="CI"></a>
 
@@ -492,7 +492,7 @@ bot/
 │   ├── web/server.js           面板服务端（REST + SSE）
 │   └── plugin/                 插件加载、配置、依赖、子进程宿主、面板页面注册
 ├── test/
-│   ├── selftest.mjs            框架自检（689 项）
+│   ├── selftest.mjs            框架自检（694 项）
 │   ├── e2e.mjs                 端到端测试（253 项，起真实服务打接口）
 │   ├── qrlogin.mjs             扫码建机器人（8 项）
 │   └── deps.mjs                插件依赖安装（11 项）
@@ -536,9 +536,9 @@ openid 完全不同。共享 `roles.json` 等于所有权限记录全部对不�
 ## 开发
 
 ```bash
-npm test              # 自检 689 + qrlogin 8 + deps 11 + npm-registry 12 + deps-external 4，另跑 57 个 node:test 文件（共 614 项）
-npm run test:e2e      # 端到端 253 项（起 mock 服务打全部接口，跑在临时目录）
-npm run test:all      # 全量约 1591 项：自检 + 扫码 + 依赖 + e2e（真机驱动要真机，没配就跳过）
+npm test              # 框架自检
+npm run test:e2e      # 端到端测试（起 mock 服务打全部接口，跑在临时目录）
+npm run test:all      # 全量测试：自检 + 扫码 + 依赖 + e2e（真机驱动要真机，没配就跳过）
 npm run check:secrets # 扫硬编码凭据（CI 也跑这个，提交前建议过一遍）
 node src/main.js --mock          # 不连 QQ，命令行发假消息调插件
 node src/main.js --mock --serve  # 只开面板，调界面
@@ -625,10 +625,9 @@ mock 模式下：直接输入文本 = 模拟一条群 @ 消息；`!as <openid>` 
 
 **贡献者**
 
-<!-- 仓库公开后把下面这行的 owner/repo 填上，就会自动显示头像墙 -->
-<!-- <a href="https://github.com/OWNER/REPO/graphs/contributors"><img src="https://contrib.rocks/image?repo=OWNER/REPO" alt="contributors"></a> -->
+<a href="https://github.com/roost-qq/qq-bot-roost/graphs/contributors"><img src="https://contrib.rocks/image?repo=roost-qq/qq-bot-roost" alt="contributors"></a>
 
-*（等仓库公开后，这里会自动显示所有贡献者）*
+感谢所有贡献者。
 
 ---
 
@@ -641,6 +640,18 @@ mock 模式下：直接输入文本 = 模拟一条群 @ 消息；`!as <openid>` 
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 开发环境、代码风格、提交信息、PR 要求 |
 | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | 行为准则 |
 | [SECURITY.md](SECURITY.md) | 漏洞上报方式、部署时必须自己守住的三件事 |
+
+---
+
+## 💬 交流群
+
+安装踩坑、用法讨论、插件开发与想法都欢迎来聊。提问时尽量带上版本号和相关日志。
+
+群号：**1130901545**
+
+<div align="center">
+<img src="docs/images/qq-group.jpg" alt="roost 交流群二维码" width="240" />
+</div>
 
 ---
 

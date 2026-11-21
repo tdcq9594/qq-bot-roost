@@ -88,6 +88,20 @@ function mustReplace(text, re, replacer, label) {
   return text.replace(re, replacer);
 }
 
+/**
+ * 可选替换：README 改版后有些统计段落可能被删掉（如命令速查的测试分解、
+ * 「全量约 N 项」），存在才改、不存在就跳过，不再因此中断发版。
+ * 硬门禁（版本徽章、测试数徽章）仍走 mustReplace，缺了照样 die。
+ */
+function maybeReplace(text, re, replacer, label) {
+  if (!re.test(text)) {
+    console.log(`  · ${label}：README 里没有这一段，跳过`);
+    return text;
+  }
+  re.lastIndex = 0;
+  return text.replace(re, replacer);
+}
+
 /* ---------------- 1. 参数与前��� ---------------- */
 
 if (!target) {
@@ -248,8 +262,8 @@ if (stats) {
   r = mustReplace(r, /框架自检（\d+ 项）/, (m) => m.replace(/\d+/, stats.selftest), 'selftest 项数');
   r = mustReplace(r, /端到端测试（\d+ 项/, (m) => m.replace(/\d+/, stats.e2e), 'e2e 项数');
 
-  /** 命令速查里那一整行：五段分解 + node:test 文件数 + 用例总数 */
-  r = mustReplace(
+  /** 命令速查里那一整行：五段分解 + node:test 文件数 + 用例总数（README 可能已精简掉这段） */
+  r = maybeReplace(
     r,
     /自检 \d+ \+ qrlogin \d+ \+ deps \d+ \+ npm-registry \d+ \+ deps-external \d+，另跑 \d+ 个 node:test 文件（共 \d+ 项）/,
     `自检 ${stats.selftest} + qrlogin ${stats.qrlogin} + deps ${stats.deps} + npm-registry ${stats.npmRegistry} + deps-external ${stats.depsExternal}，另跑 ${stats.testFiles} 个 node:test 文件（共 ${stats.nodeTests} 项）`,
@@ -257,7 +271,7 @@ if (stats) {
   );
 
   /** 「全量约 N 项」= npm test 总数 + e2e（live-driver 要真机，历史口径没算它） */
-  r = mustReplace(r, /全量约 \d+ 项/, `全量约 ${stats.total + stats.e2e} 项`, '全量项数');
+  r = maybeReplace(r, /全量约 \d+ 项/, `全量约 ${stats.total + stats.e2e} 项`, '全量项数');
 }
 
 writeText(README, r, rd.crlf);

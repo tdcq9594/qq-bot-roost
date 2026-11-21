@@ -805,6 +805,9 @@ function registerCoreCommands(rt) {
 
 function createMockApi(botName, metrics = null) {
   let mockGroupInvited = false;
+  // 素材页的本地桩：纯内存，重启即清空，不会碰官方 100 张配额
+  const mockImages = new Map();
+  let mockImageSeq = 0;
   const echo = (scene) => async (target, body) => {
     metrics?.bump('sent');
     // markdown 消息单独打印正文，否则一堆 JSON 没法看
@@ -819,6 +822,31 @@ function createMockApi(botName, metrics = null) {
     sendC2C: echo('私聊'),
     uploadMedia: async () => ({ file_info: 'mock', ttl: 0 }),
     uploadLocalFile: async () => ({ file_info: 'mock', ttl: 0 }),
+    // 机器人级 Markdown 素材（面板「素材」页）
+    listMediaImages: async () => ({
+      images: [...mockImages.values()],
+      nextCursor: '',
+      total: mockImages.size,
+      quota: 100,
+    }),
+    uploadMarkdownImageBytes: async (buf, { fileName = 'image.png' } = {}) => {
+      const imageId = `mock_${++mockImageSeq}`;
+      const now = Math.floor(Date.now() / 1000);
+      const item = {
+        imageId,
+        url: `qqbot-media://image/v1/${imageId}`,
+        fileName,
+        previewUrl: '',
+        createdAt: now,
+        expiresAt: now + 7776000,
+      };
+      mockImages.set(imageId, item);
+      return { ...item, ttl: 7776000, retained: true };
+    },
+    deleteMediaImage: async (id) => {
+      mockImages.delete(String(id));
+      return {};
+    },
     getGateway: async () => ({ url: 'wss://mock' }),
     getMe: async () => ({ username: 'mock-bot', id: '0' }),
     retractGroupMessage: async () => ({}),

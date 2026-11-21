@@ -1123,6 +1123,24 @@ const RUN = Date.now().toString(36);
   });
   check('非命令项不生成点击标签', !passive.includes('cmd-input') && passive.includes('我的鲲'));
 
+  // 无说明项合并成一行，避免几十项菜单刷屏；有说明的仍独占
+  const compact = renderMenuMd('t', [{ title: 'g', items: [
+    { text: '/a', cmd: '/a' },
+    { text: '/b', cmd: '/b' },
+    { text: '/c', cmd: '/c' },
+    { text: '/d', cmd: '/d', desc: '有说明' },
+  ] }], { kind: 'group' });
+  const compactLines = compact.split('\n');
+  check('紧凑排版: 三个无说明项合并成一行',
+    compactLines.some((l) => (l.match(/qqbot-cmd-input/g) || []).length === 3), compact);
+  check('紧凑排版: 有说明项独占一行',
+    compactLines.some((l) => l.includes('有说明') && (l.match(/qqbot-cmd-input/g) || []).length === 1), compact);
+  const compact2 = renderMenuMd('t', [{ title: 'g', items: [
+    { text: '/a', cmd: '/a' }, { text: '/b', cmd: '/b' }, { text: '/c', cmd: '/c' },
+  ] }], { kind: 'group', perLine: 2 });
+  check('紧凑排版: perLine 可配置',
+    compact2.split('\n').some((l) => (l.match(/qqbot-cmd-input/g) || []).length === 2), compact2);
+
   // 转义只处理会破坏行内排版的字符，不碰 < > [ ]
   check('escMd 转义星号', escMd('a*b') === 'a\\*b');
   check('escMd 不动尖括号', escMd('/admin set <openid>') === '/admin set <openid>');
@@ -3277,6 +3295,16 @@ async function testHashDir() {
     const f1 = await mk('f1', { 'a.js': 'same\n' });
     const f2 = await mk('f2', { 'b.js': 'same\n' });
     check('目录指纹: 文件名参与计算', (await hashDir(f1)) !== (await hashDir(f2)));
+
+    // 纯文档不进指纹：改 README 不该逼着升插件版本。
+    // 和插件仓 scripts/hashdir.mjs 的豁免规则必须一致（跨仓一致性测试守）。
+    const g1 = await mk('g1', { 'index.js': 'z\n' });
+    const g2 = await mk('g2', { 'index.js': 'z\n', 'README.md': 'doc v1\n', 'docs/guide.md': 'more\n' });
+    check('目录指纹: 忽略 .md 文档', (await hashDir(g1)) === (await hashDir(g2)));
+
+    // LICENSE 是插件作者自带的协议声明，改协议不该逼着升版本，同样不进指纹
+    const h2 = await mk('h2', { 'index.js': 'z\n', 'LICENSE': 'MIT\n', 'COPYING.txt': 'x\n' });
+    check('目录指纹: 忽略 LICENSE 协议文件', (await hashDir(g1)) === (await hashDir(h2)));
   } finally {
     await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
   }
