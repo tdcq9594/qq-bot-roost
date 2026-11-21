@@ -600,6 +600,22 @@
     </div>
 
     <div class="box">
+      <div class="box-hd">
+        <h3>交流群</h3>
+        <span class="hint">安装踩坑、用法讨论、想法都欢迎来聊</span>
+      </div>
+      <div class="about-community">
+        <img class="about-community-qr" src="/qq-group.jpg" alt="roost 交流群二维码" width="200" />
+        <div class="about-community-info">
+          <div class="about-community-label">群号</div>
+          <a class="about-community-no" href="https://qm.qq.com/q/bV7MgMPhWE" target="_blank" rel="noopener">1130901545</a>
+          <div class="hint">点击群号一键加群，或扫码加入</div>
+          <div class="hint">提问尽量带上版本号和面板日志</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="box">
       <div class="box-hd"><h3>许可</h3></div>
       <div class="hint">采用 GNU AGPL-3.0-only（OSI 开源许可）：可自由使用、修改、分发，包括商业用途与收费；但分发或通过网络提供服务时须同样以 AGPL-3.0-only 开源并提供对应源码。详见根目录 LICENSE。</div>
     </div>
@@ -1057,13 +1073,22 @@ curl 'https://bot.q.qq.com/cgi-bin/v2/info/list_bots' \
 
   <!-- 插件 -->
   <section id="tab-plugins" class="panel">
-    <div class="box">
+    <!--
+      子页签：已安装 / 市场。位置固定在插件页顶部，切换只改这两块的 hidden。
+      注意用 data-plugin-subtab 而不是 data-tab —— 后者会被全局 activateTab()
+      当成主导航，切走其他面板（2026-11-21 改造时确认过）。
+    -->
+    <div class="plugin-subtabs" role="tablist" aria-label="插件管理分区">
+      <button type="button" class="plugin-subtab active" data-plugin-subtab="installed" role="tab" aria-selected="true">已安装</button>
+      <button type="button" class="plugin-subtab" data-plugin-subtab="market" role="tab" aria-selected="false">插件市场</button>
+    </div>
+
+    <div class="box" id="installedBox">
       <div class="box-hd">
         <h3>已安装插件</h3>
         <div class="plugin-tools">
           <span class="hint">往 plugins/ 里放了新插件，点「刷新」即可加载，不用重启</span>
           <button class="btn small" id="btnRescanPlugins">刷新</button>
-          <button class="btn small" id="btnLoadMarket">插件市场</button>
         </div>
       </div>
       <div class="upd-tip" id="pluginUpdateTip"></div>

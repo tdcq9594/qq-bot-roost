@@ -1357,6 +1357,29 @@ function showPageError(name, err) {
 }
 
 /** 包一层：同步抛错和未处理的 Promise 都收敛到 showPageError */
+/**
+ * 插件页的子页签（已安装 / 市场）。
+ *
+ * 放在 activateTab 定义之前，让「进插件页先回到已安装」的调用点在同一个函数里。
+ * 这里只切显隐和按钮状态，不碰 MARKET——市场数据由 activateTab 之后单独安排
+ * 后台预拉，两者职责分开。
+ *
+ * 属性用 data-plugin-subtab，不用 data-tab：后者会被全局 activateTab() 抢走。
+ */
+let activeSubtab = 'installed';
+function setPluginSubtab(which) {
+  activeSubtab = which === 'market' ? 'market' : 'installed';
+  const installed = $('#installedBox');
+  const market = $('#marketBox');
+  if (installed) installed.hidden = activeSubtab !== 'installed';
+  if (market) market.hidden = activeSubtab !== 'market';
+  $$('[data-plugin-subtab]').forEach((b) => {
+    const on = b.dataset.pluginSubtab === activeSubtab;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+}
+
 function safeLoad(name, fn) {
   try {
     const r = fn();
@@ -1391,8 +1414,11 @@ function activateTab(name) {
   $$('.panel').forEach((p) => p.classList.toggle('active', p.id === `tab-${name}`));
   // 插件指标只在插件页轮询，切走就停——别在后台白耗请求
   if (name === 'plugins') {
+    // 每次进插件页先回到「已安装」；市场数据在后台预拉，不阻塞列表渲染
+    setPluginSubtab('installed');
     safeLoad('plugins', loadPlugins);
     startPluginDashPolling();
+    safeLoad('market', () => loadMarket({ reveal: false }));
   } else {
     stopPluginDashPolling();
   }
@@ -3289,7 +3315,12 @@ function renderPluginRows() {
               <span class="hint plugin-ver">v${escapeHtml(p.version || '0.0.0')}</span>
               ${u ? `<span class="upd-tag">可更新 ${escapeHtml(u.latest)}</span>` : ''}
             </div>
-            <span class="badge ${badgeCls} plugin-status">${PLUGIN_STATE_TEXT[state]}</span>
+            <button type="button" class="plugin-toggle${p.enabled ? ' on' : ''}" role="switch"
+              aria-checked="${p.enabled ? 'true' : 'false'}" data-act="${p.enabled ? 'disable' : 'enable'}"
+              title="${p.enabled ? '点击禁用' : '点击启用'} ${escapeHtml(p.name || p.id)}"
+              aria-label="${p.enabled ? '禁用' : '启用'}插件 ${escapeHtml(p.name || p.id)}">
+              <span class="plugin-toggle-knob"></span>
+            </button>
           </div>
           ${
             (p.shortDesc || p.description)
@@ -3297,6 +3328,7 @@ function renderPluginRows() {
               : ''
           }
           <div class="plugin-meta">
+            <span class="badge ${badgeCls} plugin-status" title="运行状态">${PLUGIN_STATE_TEXT[state]}</span>
             <span class="plugin-id">${escapeHtml(p.id)}</span>
             <span class="kind-tag ${p.kind === 'external' ? 'ext' : 'int'}">
               ${p.kind === 'external' ? '外部 · ' + escapeHtml(p.runtime) : '内建 · node'}
@@ -3339,9 +3371,6 @@ function renderPluginRows() {
               ? `<button class="btn small primary" data-update-one="${escapeHtml(p.id)}" data-from="${escapeHtml(u.current)}" data-to="${escapeHtml(u.latest)}" data-name="${escapeHtml(u.name || p.id)}">更新</button>`
               : ''
           }
-          <button class="btn small" data-act="${p.enabled ? 'disable' : 'enable'}">
-            ${p.enabled ? '禁用' : '启用'}
-          </button>
           <button class="btn small" data-act="reload">重载</button>
           <button class="btn small" data-act="panel">设置</button>
           <button class="btn small danger" data-act="remove" title="删除插件代码，数据保留">卸载</button>
@@ -4163,48 +4192,64 @@ async function testMirrors() {
   }
 }
 
-async function loadMarket() {
+/**
+ * 拉市场数据并渲染。reveal=false 用于进插件页时的后台预拉：只填数据，不切页签。
+ * 在途请求复用（loading），成功过的用缓存（loaded），只有 force 才真重拉。
+ */
+async function loadMarket({ reveal = true, force = false } = {}) {
   const box = $('#marketBox');
   const list = $('#marketList');
   const meta = $('#marketMeta');
-  box.hidden = false;
+  if (reveal) box.hidden = false;
+  if (MARKET.loading && !force) return MARKET.loading;
+  if (MARKET.loaded && !force) return;
+
   meta.textContent = '获取中…';
   list.innerHTML = '<div class="empty">正在从 GitHub 获取插件列表…</div>';
-  // 下载源选择器：第一次打开市场时拉一次
+  // 下载源选择器：第一次拉数据时就准备好，切到市场页签不用再等
   if (!MIRRORS) loadMirrorBar();
 
-  let d;
+  const task = (async () => {
+    let d;
+    try {
+      d = await api('/api/market');
+    } catch (e) {
+      meta.textContent = '获取失败';
+      list.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`;
+      return; // 不置 loaded：切到市场页签时会再试一次
+    }
+
+    meta.textContent = `${d.repo} · 更新于 ${d.updated || '未知'}`;
+    // 网络不通时后端会退回本地缓存，得让用户知道这是旧数据
+    if (d.stale) {
+      meta.innerHTML =
+        `${escapeHtml(d.repo)} · <span class="stale-tip">离线缓存（${escapeHtml(d.staleAge || '未知')}）</span>`;
+    }
+    if (!d.plugins.length) {
+      MARKET.all = [];
+      list.innerHTML = '<div class="empty">市场里还没有插件</div>';
+      MARKET.loaded = true;
+      return;
+    }
+
+    const upd = {};
+    for (const u of d.updates || []) upd[u.id] = u;
+    MARKET.all = d.plugins;
+    MARKET.upd = upd;
+    MARKET.loaded = true;
+    buildMarketCats();
+    renderMarketRows();
+  })();
+  MARKET.loading = task;
   try {
-    d = await api('/api/market');
-  } catch (e) {
-    meta.textContent = '获取失败';
-    list.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`;
-    return;
+    await task;
+  } finally {
+    MARKET.loading = null;
   }
-
-  meta.textContent = `${d.repo} · 更新于 ${d.updated || '未知'}`;
-  // 网络不通时后端会退回本地缓存，得让用户知道这是旧数据
-  if (d.stale) {
-    meta.innerHTML =
-      `${escapeHtml(d.repo)} · <span class="stale-tip">离线缓存（${escapeHtml(d.staleAge || '未知')}）</span>`;
-  }
-  if (!d.plugins.length) {
-    MARKET.all = [];
-    list.innerHTML = '<div class="empty">市场里还没有插件</div>';
-    return;
-  }
-
-  const upd = {};
-  for (const u of d.updates || []) upd[u.id] = u;
-
-  MARKET.all = d.plugins;
-  MARKET.upd = upd;
-  buildMarketCats();
-  renderMarketRows();
 }
 
 /** 市场数据与筛选状态 */
-const MARKET = { all: [], upd: {}, q: '', tag: '', sort: '' };
+const MARKET = { all: [], upd: {}, q: '', tag: '', sort: '', loaded: false, loading: null };
 
 /** 搜索框和标签筛选都在前端做——索引就几十条，没必要每次都请求 */
 function matchMarket(p) {
@@ -4333,10 +4378,14 @@ function renderMarketRows() {
               ${p.runtime === 'node' ? '内建 · node' : '外部 · ' + escapeHtml(p.runtime || '')}
             </span>
             ${verifyTag(p)}
-            ${p.author ? `<span class="hint">by ${escapeHtml(p.author)}</span>` : ''}
-            ${p.credits ? `<span class="hint">${escapeHtml(p.credits)}</span>` : ''}
+            ${p.author ? `<span class="hint plugin-author" title="${escapeHtml('作者 ' + p.author)}">by ${escapeHtml(p.author)}</span>` : ''}
             ${u ? `<span class="hint">本地 v${escapeHtml(u.current)}</span>` : ''}
           </div>
+          ${
+            p.credits
+              ? `<div class="plugin-credits" title="${escapeHtml(p.credits)}">${escapeHtml(p.credits)}</div>`
+              : ''
+          }
           ${(p.tags || []).length ? `<div class="plugin-tags">${p.tags.map((t) => `<span class="tag">${escapeHtml(t)}</span>`).join('')}</div>` : ''}
         </div>
         <div class="plugin-actions">
@@ -4404,7 +4453,7 @@ async function updateAllFromMarket() {
     alert(lines.join('\n'));
     await loadPlugins();
     // 市场页开着才刷，关着就别白等一次索引
-    if ($('#marketBox') && !$('#marketBox').hidden) await loadMarket();
+    if (activeSubtab === 'market') await loadMarket({ force: true });
   } catch (e) {
     alert('更新失败: ' + e.message);
   }
@@ -4448,7 +4497,7 @@ async function updateFromMarket(id, btn) {
     if (btn) btn.textContent = '已更新';
     await loadPlugins();
     // 市场页开着才刷：它=又一次索引拉取，关着就是白等
-    if ($('#marketBox') && !$('#marketBox').hidden) await loadMarket();
+    if (activeSubtab === 'market') await loadMarket({ force: true });
     if (r.error) alert(r.error);
   } catch (e) {
     alert('更新失败: ' + e.message);
@@ -4474,7 +4523,8 @@ async function installFromMarket(id, btn) {
   try {
     const r = await api('/api/market/install', { method: 'POST', body: JSON.stringify({ id }) });
     await loadPlugins();
-    await loadMarket();
+    // 装完要刷新市场数据（「已安装」标记会变），但别强行把用户切到市场页签
+    await loadMarket({ reveal: false, force: true });
     await confirmDialog({
       title: '安装完成',
       message: r.added?.length
@@ -4505,7 +4555,7 @@ $('#btnExportStats')?.addEventListener('click', () => {
   window.location.href = `/api/stats/export?${q}`;
 });
 $('#statsDays')?.addEventListener('change', loadStats);
-$('#btnRefreshMarket')?.addEventListener('click', loadMarket);
+$('#btnRefreshMarket')?.addEventListener('click', () => loadMarket({ force: true }));
 
 // 市场筛选：纯前端过滤，输入防抖，避免每次按键都重画整个网格
 const onMarketSearch = debounce((v) => { MARKET.q = v; renderMarketRows(); });
@@ -4583,10 +4633,13 @@ $('#proxySelect')?.addEventListener('change', (e) => {
   saveMirror();
 });
 $('#proxyCustom')?.addEventListener('change', saveMirror);
-$('#btnLoadMarket')?.addEventListener('click', () => {
-  const box = $('#marketBox');
-  if (box.hidden) loadMarket();
-  else box.hidden = true;
+/* 子页签：切到市场时确保数据拉过；切回已安装只切显隐，不产生请求 */
+$$('[data-plugin-subtab]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const to = btn.dataset.pluginSubtab;
+    setPluginSubtab(to);
+    if (to === 'market') safeLoad('market', () => loadMarket({ reveal: true }));
+  });
 });
 
 /* ---------------- 插件设置面板 ---------------- */
