@@ -65,6 +65,7 @@
 
   --radius: 9px;
   --radius-sm: 6px;
+  --radius-lg: 12px;
 
   /* 阴影：暖调、极淡，只用来分层 */
   --shadow-sm: 0 1px 2px rgba(60, 40, 20, .05);
@@ -121,7 +122,33 @@
    */
   --primary-fill: var(--primary);
   --primary-fill-hover: var(--primary-hover);
+
+  /**
+   * 滚动条：默认暖灰（比 --border 深一档，栅格才看得见），悬停点主色。
+   * 由现有变量派生，明暗主题切换时自动跟随，不用在两套主题里各写一遍。
+   */
+  --scrollbar-thumb: var(--border-strong);
+  --scrollbar-thumb-hover: var(--primary);
 }
+
+/*
+ * 全局细圆角滚动条：与暖纸 / 琥珀配色一致，替掉浏览器默认的粗灰条。
+ * 特异性刻意压到最低——卡片简介（6px 专属）和侧栏导航（整条隐藏）的特例继续生效。
+ * WebKit / Blink 用伪元素；Firefox 走 scrollbar-width / scrollbar-color。
+ */
+* { scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) transparent; }
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); background-clip: padding-box; }
+/* 隐藏默认三角箭头（现代扁平滚动条都无箭头，用滚轮/拖拽），只留圆角滑块 */
+::-webkit-scrollbar-button { display: none; }
+::-webkit-scrollbar-corner { background: transparent; }
 
 [data-theme="dark"] {
   color-scheme: dark;
@@ -411,6 +438,16 @@ body {
 .about-hero .hint { margin-top: 2px; }
 #tab-about a { color: var(--primary-text); text-decoration: none; }
 #tab-about a:hover { text-decoration: underline; }
+/* 交流群：二维码 + 群号（群号本身是加群链接），窄屏自动堆叠 */
+.about-community { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+.about-community-qr {
+  flex: none; width: 200px; max-width: 100%; height: auto;
+  border: 1px solid var(--border); border-radius: var(--radius-lg);
+}
+.about-community-info { min-width: 0; }
+.about-community-label { font-size: 12px; color: var(--muted); }
+.about-community-no { font-family: var(--mono); font-size: 18px; font-weight: 600; }
+.about-community-info .hint { margin-top: 4px; }
 
 .tabs { display: flex; gap: 2px; flex: 1; align-self: stretch; }
 .tab {
@@ -624,6 +661,39 @@ input:focus, select:focus, textarea:focus {
   border-color: var(--primary); background: var(--panel); box-shadow: 0 0 0 3px var(--primary-ring);
 }
 textarea { resize: vertical; font-family: var(--mono); font-size: 12.5px; }
+
+/*
+ * 原生下拉弹层主题化（Chrome/Edge 135+、Safari 27+）。
+ * 旧引擎不认 appearance:base-select，整块被 @supports 跳过，保持原样可用；
+ * 支持的引擎里弹层用页面变量，圆角 / 悬停 / 选中标记都跟随明暗与自定义配色。
+ */
+@supports (appearance: base-select) {
+  select, select::picker(select) { appearance: base-select; }
+  select::picker(select) {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    /* 用实色：背景图模式下 --panel 是半透明毛玻璃，弹层跟着透会发虚 */
+    background: var(--panel-solid);
+    color: var(--text);
+    box-shadow: var(--shadow-lg);
+    padding: 4px;
+    margin-top: 4px;
+  }
+  select option {
+    padding: 7px 10px;
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    background: transparent;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  select option:hover, select option:focus-visible { background: var(--primary-soft); color: var(--primary-text); }
+  select option:checked { background: var(--primary-soft); color: var(--primary-text); font-weight: 600; }
+  select option::checkmark { color: var(--primary-text); }
+  select::picker-icon { color: var(--muted); }
+  select:open::picker-icon { rotate: 180deg; }
+}
+
 label.switch { flex-direction: row; align-items: center; gap: 8px; }
 label.switch input { width: auto; }
 label.switch.small { font-size: 12.5px; color: var(--muted); }
@@ -701,17 +771,205 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 .box-hd-right { display: flex; align-items: center; gap: 12px; margin-left: auto; }
 
 /* ---------- 插件 ---------- */
-.plugin-list { display: grid; gap: 10px; }
+
+/*
+ * 筛选栏：搜索/状态/排序在左，视图切换在右。
+ * 用面板底色 + 1px 边框做成一条独立的工具带，和下面的卡片拉开层次。
+ */
+.plugin-filter {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; flex-wrap: wrap;
+  padding: 9px 12px; margin-bottom: 12px;
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.filter-fields { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: 1; min-width: 0; }
+.filter-fields .mini-input { width: 210px; }
+.filter-count { font-variant-numeric: tabular-nums; white-space: nowrap; margin-right: 2px; }
+
+/* 视图切换：胶囊分段控件，当前项用主色淡底，键盘焦点有描边 */
+.view-switch {
+  display: inline-flex; gap: 2px; flex: none;
+  padding: 3px; border: 1px solid var(--border);
+  border-radius: 999px; background: var(--panel);
+}
+.view-btn {
+  display: grid; place-items: center;
+  width: 28px; height: 26px; padding: 0;
+  border: 0; border-radius: 999px; background: transparent;
+  color: var(--muted); cursor: pointer;
+  transition: background .15s var(--ease), color .15s var(--ease);
+}
+.view-btn svg { width: 15px; height: 15px; }
+.view-btn:hover { background: var(--panel-3); color: var(--text); }
+.view-btn.on { background: var(--primary-soft); color: var(--primary); }
+.view-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+
+/* ---------- 插件页子页签：已安装 / 市场 ---------- */
+/*
+ * 钉在插件页顶部，滚动时也能切。topbar 自己 sticky 且高 60px，这里让出 60px；
+ * z-index 低于 topbar 的 20，免得盖住顶栏。
+ */
+.plugin-subtabs {
+  position: sticky; top: 60px; z-index: 10;
+  display: flex; gap: 4px; width: fit-content;
+  padding: 4px; margin-bottom: 14px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+.plugin-subtab {
+  font: inherit; font-size: 13px; cursor: pointer;
+  padding: 7px 16px; border: 0; border-radius: var(--radius);
+  background: transparent; color: var(--muted);
+  transition: background .18s var(--ease), color .18s var(--ease);
+}
+.plugin-subtab:hover { background: var(--panel-3); color: var(--text); }
+.plugin-subtab.active { background: var(--primary-soft); color: var(--primary); }
+.plugin-subtab:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+
+/*
+ * 三种视图只切容器 class，不重建卡片、不重新请求后端。
+ * 卡片视图要求尺寸一致：grid stretch + 固定高度，简介区吃掉剩余高度并可滚动；
+ * 紧凑列表仍按内容高度排列，保持「密」的观感。
+ */
+.plugin-list { display: grid; gap: 14px; align-items: stretch; }
+.plugin-list.view-list { grid-template-columns: 1fr; gap: 8px; align-items: start; }
+.plugin-list.view-grid { grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); }
+.plugin-list.view-large { grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 18px; }
+
 .plugin {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-  padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 12px 14px; min-width: 0;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--panel);
+  transition: border-color .18s var(--ease), box-shadow .18s var(--ease), transform .18s var(--ease);
 }
-/* 右侧一排操作按钮：不压缩，窄屏时整体换行而不是被挤扁 */
-.plugin > .btn, .plugin > .badge { flex: none; }
-.plugin .info { flex: 1; min-width: 0; }
-.plugin .name { font-weight: 600; font-size: 13.5px; }
-.plugin .meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
-.plugin .err { font-size: 12px; color: var(--err); margin-top: 4px; }
+/* 卡片视图：纵向排布 + 12px 圆角 + 统一高度；长简介在卡片内滚动，不再把整行顶高 */
+.view-grid .plugin, .view-large .plugin {
+  flex-direction: column; align-items: stretch; flex-wrap: nowrap;
+  padding: 16px; border-radius: var(--radius-lg);
+  height: 260px;
+}
+.view-grid .plugin:hover, .view-large .plugin:hover {
+  border-color: var(--border-strong); box-shadow: var(--shadow); transform: translateY(-2px);
+}
+.view-large .plugin { padding: 18px; height: 340px; }
+
+/* 操作区：列表视图横排贴在右侧；卡片视图独占卡片底部一行 */
+.plugin-actions { display: flex; align-items: center; gap: 6px; flex: none; flex-wrap: wrap; }
+/*
+ * 卡片视图按钮不横向滚动：允许换行，按钮区 flex:none 钉在卡片底部，
+ * body（flex:1 + min-height:0 + overflow-y:auto）自动让出高度——按钮永远完整可见，
+ * 放不下就排两行，既不裁切也不出现难看的横向滚动条。
+ */
+.view-grid .plugin-actions, .view-large .plugin-actions {
+  justify-content: flex-end; flex-wrap: wrap; margin-top: auto;
+  padding-top: 10px; border-top: 1px solid var(--border);
+  gap: 5px;
+}
+.view-grid .plugin-actions .btn, .view-large .plugin-actions .btn {
+  flex: 0 0 auto; padding: 5px 8px;
+}
+/* ---------- 卡片内部排布 ---------- */
+/*
+ * 统一的分层结构：head（标题 + 状态徽章）/ desc（描述）/ meta（标签行）
+ * / metrics（运行指标）/ err（报错）/ actions（底部操作）。
+ * 三种视图用同一套子元素，只改内层对齐与显隐——卡片的按钮不再平铺挤在文字右边。
+ */
+.plugin-body { flex: 1; min-width: 0; }
+/* 卡片视图：body 纵向 flex，让简介吃到剩余高度；其余信息行固定不被压缩
+ * 注意：不要加 overscroll-behavior: contain——鼠标停在卡片上时它会吃掉滚轮，
+ * 让整页滚不动（键盘 PageDown 却正常）。允许滚动链传播到页面。 */
+.view-grid .plugin-body, .view-large .plugin-body {
+  display: flex; flex-direction: column; min-height: 0;
+  overflow-y: auto; scrollbar-width: thin;
+}
+.view-grid .plugin .plugin-head, .view-large .plugin .plugin-head,
+.view-grid .plugin .plugin-meta, .view-large .plugin .plugin-meta,
+.view-grid .plugin .plugin-credits, .view-large .plugin .plugin-credits,
+.view-grid .plugin .plugin-metrics, .view-large .plugin .plugin-metrics,
+.view-grid .plugin .plugin-tags, .view-large .plugin .plugin-tags,
+.view-grid .plugin .err, .view-large .plugin .err { flex: none; }
+.plugin-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; min-width: 0; }
+/* 标题行不折行：中文名一旦被挤窄就会逐字竖排，改为截断省略号 */
+.plugin-title { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; min-width: 0; }
+.plugin .name {
+  font-weight: 600; font-size: 13.5px; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 更新标记可收缩截断：窄卡片里不能撑破卡片或盖住徽章 */
+.plugin-title .upd-tag {
+  flex: 0 1 auto; min-width: 0; max-width: 45%;
+  overflow: hidden; text-overflow: ellipsis;
+}
+/* 启停滑块：和外观页 .switch-slider 同一套视觉语言，放在原运行状态徽章的位置 */
+.plugin-toggle {
+  position: relative; flex: none; width: 44px; height: 24px; padding: 0;
+  border: 1px solid var(--border-strong); border-radius: 999px;
+  background: var(--panel-3); cursor: pointer; transition: background .16s ease, border-color .16s ease;
+}
+.plugin-toggle:hover { border-color: var(--primary); }
+.plugin-toggle-knob {
+  position: absolute; top: 2px; left: 2px; width: 18px; height: 18px;
+  border-radius: 50%; background: var(--panel); box-shadow: 0 1px 3px rgba(0, 0, 0, .22);
+  transition: transform .16s ease;
+}
+.plugin-toggle.on { background: var(--ok); border-color: var(--ok); }
+.plugin-toggle.on .plugin-toggle-knob { transform: translateX(20px); }
+.plugin-toggle:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.plugin-toggle:disabled { opacity: .5; cursor: not-allowed; }
+.plugin .plugin-id { font-size: 11.5px; color: var(--muted); word-break: break-all; }
+.plugin .plugin-ver { white-space: nowrap; }
+.plugin .plugin-status { flex: none; align-self: flex-start; }
+.plugin .plugin-desc {
+  font-size: 12px; color: var(--text-2); line-height: 1.6; margin-top: 7px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.plugin .plugin-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 7px; }
+/* 作者 / credits 是次级信息：单行截断、悬停看全文，长署名不撑高卡片、不挤掉标签行 */
+.plugin-meta .plugin-author { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plugin-credits {
+  font-size: 11.5px; color: var(--faint); margin-top: 6px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.plugin-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.plugin-tags .tag {
+  font-size: 10.5px; padding: 2px 7px; border-radius: 999px;
+  background: var(--panel-3); color: var(--muted); white-space: nowrap;
+}
+.plugin .err { font-size: 12px; color: var(--err); margin-top: 7px; }
+/* 报错详情在卡片视图里保持可展开，但不要顶开其他卡片 */
+.view-grid .plugin .err-stack, .view-large .plugin .err-stack { max-height: 110px; overflow: auto; }
+
+/*
+ * 紧凑列表：标题行独占一行（徽章在最右），描述压 1 行，标签/按钮各占一行。
+ * 不改回「标题和 5 个按钮挤同一行」——那样中文名会被挤成省略号甚至逐字竖排。
+ * 靠更小的内边距和间距来体现「紧凑」，而不是靠牺牲可读性。
+ */
+.view-list .plugin { flex-direction: column; align-items: stretch; padding: 10px 12px; }
+.view-list .plugin .plugin-desc { margin-top: 4px; -webkit-line-clamp: 1; }
+.view-list .plugin .plugin-meta { margin-top: 5px; }
+.view-list .plugin .plugin-tags { margin-top: 5px; }
+.view-list .plugin-actions { margin-top: 0; padding-top: 8px; border-top: 1px solid var(--border); justify-content: flex-end; }
+
+/* 卡片 / 大卡片：徽章右上角，按钮独占底行右对齐；简介改滚动，不再硬截断 */
+.view-grid .plugin .plugin-desc,
+.view-large .plugin .plugin-desc {
+  display: block; flex: 1 1 auto; min-height: 2.6em;
+  -webkit-line-clamp: unset;
+  overflow-y: auto; padding-right: 4px; scrollbar-width: thin;
+}
+.view-large .plugin .plugin-desc { font-size: 12.5px; }
+/* 细滚动条，别抢视觉 */
+.view-grid .plugin .plugin-desc::-webkit-scrollbar,
+.view-large .plugin .plugin-desc::-webkit-scrollbar { width: 6px; }
+.view-grid .plugin .plugin-desc::-webkit-scrollbar-thumb,
+.view-large .plugin .plugin-desc::-webkit-scrollbar-thumb {
+  background: var(--border-strong); border-radius: 999px;
+}
+.view-large .plugin .name { font-size: 15px; }
+.view-large .plugin .plugin-icon { width: 22px; height: 22px; border-radius: 6px; }
+.view-large .plugin .plugin-meta { margin-top: 10px; }
 .badge {
   font-size: 11.5px; padding: 2px 8px; border-radius: 999px;
   background: var(--panel-3); color: var(--muted); white-space: nowrap;
@@ -1289,7 +1547,7 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 .upd-tip:not(:empty) { display: block; }
 .upd-tip a { color: var(--primary-text); font-weight: 600; margin-left: 8px; cursor: pointer; }
 .upd-tag {
-  display: inline-block; margin-left: 8px; padding: 1px 7px;
+  display: inline-block; padding: 1px 7px; white-space: nowrap;
   border-radius: 999px; font-size: 11px; font-weight: 600;
   background: var(--primary-soft, var(--panel-3)); color: var(--primary-text);
 }
@@ -1524,13 +1782,19 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
   display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
   margin-bottom: 10px;
 }
-.market-filter .mini-input { flex: 1 1 220px; width: auto; }
+.market-filter .mini-input { flex: 1 1 200px; width: auto; min-width: 130px; }
+.market-filter .view-switch { margin-left: auto; }
 
-/* 分类计数 chip：横向滚动而不是换行，几十个标签换行会把列表顶下去一大截 */
+/* 窄屏：网格退回单列，筛选控件占满一行，避免挤成两三个字 */
+@media (max-width: 720px) {
+  .plugin-list.view-grid, .plugin-list.view-large { grid-template-columns: 1fr; }
+  .filter-fields .mini-input { width: 100%; }
+  .market-filter .view-switch { margin-left: 0; }
+}
+
+/* 分类计数 chip：自动换行，全部标签一眼可见，不用横向拖动 */
 .cat-chips {
-  display: flex; gap: 6px; flex-wrap: nowrap;
-  overflow-x: auto; padding-bottom: 8px; margin-bottom: 10px;
-  scrollbar-width: thin;
+  display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px;
 }
 .cat-chip {
   flex: 0 0 auto;
@@ -2012,6 +2276,14 @@ main > .panel { max-width: 1400px; margin-inline: auto; }
 
   /* ---------- 12 张表全部卡片化 ---------- */
   .table-wrap { max-height: none; overflow: visible; }
+  /*
+   * 账本表的 max-height:460px 用了 #tab-ledger 的 ID 特异性（见上方账本专属规则），
+   * 会压过上面这条通用重置。若只重置 overflow:visible 而留下 460px 高度，
+   * 卡片化的行（每条约 173px）会溢出容器显示，但紧跟其后的 .table-foot
+   * 仍按 460px 的容器高度排布——结果「共 N 行 / 导出所选 CSV」正好叠在
+   * 第 3 行的时间范围上（窄屏实测）。这里用同等特异性把高度一并清掉。
+   */
+  #tab-ledger .table-wrap { max-height: none; }
   table, #tab-ledger table { min-width: 0; width: 100%; table-layout: auto; }
   thead { display: none; }
   tbody, tbody tr { display: block; }
@@ -2782,8 +3054,18 @@ html[data-bg="image"][data-theme="dark"] {
 html[data-bg="image"] .box,
 html[data-bg="image"] .card,
 html[data-bg="image"] .modal,
+html[data-bg="image"] .cmd-palette,
+html[data-bg="image"] .col-pop,
 html[data-bg="image"] .tab-menu:not(.app-nav .tab-menu) {
   border-radius: var(--glass-radius);
+  border-color: var(--glass-border);
+  box-shadow: inset 0 1px 0 var(--glass-sheen), var(--glass-shadow);
+  backdrop-filter: blur(16px) saturate(1.06);
+}
+/* 机器人数目浮层也用 --panel，但没进上面的清单——有背景图时补上模糊，
+   否则文字直接叠在底图上发虚。它是绝对定位浮层，没有 fixed/sticky 后代，
+   加 backdrop-filter 不会像顶栏那样让侧栏包含块塌掉。 */
+html[data-bg="image"] .bot-menu {
   border-color: var(--glass-border);
   box-shadow: inset 0 1px 0 var(--glass-sheen), var(--glass-shadow);
   backdrop-filter: blur(16px) saturate(1.06);
@@ -2812,9 +3094,26 @@ html[data-bg="image"] .app-nav .tab-menu {
   box-shadow: none;
 }
 
-/* 表头是 sticky 的，必须挡住下面滚过来的行，所以比卡片实一点 */
-html[data-bg="image"] th {
+/* 表头 / 配置页 sticky 目录都要挡住下面滚过来的内容，所以比卡片实一点 */
+html[data-bg="image"] th,
+html[data-bg="image"] .cfg-toc {
   background: color-mix(in srgb, var(--panel-solid) calc(var(--glass-alpha) + 14%), transparent);
+}
+/* 滚动到底圆按钮：保留 50% 圆角，只补模糊和描边 */
+html[data-bg="image"] .scroll-bottom {
+  border-color: var(--glass-border);
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: blur(12px) saturate(1.06);
+}
+/**
+ * 下拉弹层也是浮层，同样要比卡片实一点才能挡住下面的选项，但不能全实色——
+ * 有背景图时应该透出底图并模糊，跟页面其它玻璃面板一致。
+ * 不支持 base-select 的旧引擎会忽略这条伪元素规则，保持系统原样。
+ */
+html[data-bg="image"] select::picker(select) {
+  background: color-mix(in srgb, var(--panel-solid) calc(var(--glass-alpha) + 14%), transparent);
+  border-color: var(--glass-border);
+  backdrop-filter: blur(16px) saturate(1.06);
 }
 /**
  * 语义色的软底（警告条 / 危险区 / 提示 chip）也要跟玻璃走，

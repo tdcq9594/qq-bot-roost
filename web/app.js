@@ -1357,6 +1357,29 @@ function showPageError(name, err) {
 }
 
 /** 包一层：同步抛错和未处理的 Promise 都收敛到 showPageError */
+/**
+ * 插件页的子页签（已安装 / 市场）。
+ *
+ * 放在 activateTab 定义之前，让「进插件页先回到已安装」的调用点在同一个函数里。
+ * 这里只切显隐和按钮状态，不碰 MARKET——市场数据由 activateTab 之后单独安排
+ * 后台预拉，两者职责分开。
+ *
+ * 属性用 data-plugin-subtab，不用 data-tab：后者会被全局 activateTab() 抢走。
+ */
+let activeSubtab = 'installed';
+function setPluginSubtab(which) {
+  activeSubtab = which === 'market' ? 'market' : 'installed';
+  const installed = $('#installedBox');
+  const market = $('#marketBox');
+  if (installed) installed.hidden = activeSubtab !== 'installed';
+  if (market) market.hidden = activeSubtab !== 'market';
+  $$('[data-plugin-subtab]').forEach((b) => {
+    const on = b.dataset.pluginSubtab === activeSubtab;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+}
+
 function safeLoad(name, fn) {
   try {
     const r = fn();
@@ -1391,8 +1414,11 @@ function activateTab(name) {
   $$('.panel').forEach((p) => p.classList.toggle('active', p.id === `tab-${name}`));
   // 插件指标只在插件页轮询，切走就停——别在后台白耗请求
   if (name === 'plugins') {
+    // 每次进插件页先回到「已安装」；市场数据在后台预拉，不阻塞列表渲染
+    setPluginSubtab('installed');
     safeLoad('plugins', loadPlugins);
     startPluginDashPolling();
+    safeLoad('market', () => loadMarket({ reveal: false }));
   } else {
     stopPluginDashPolling();
   }
@@ -3097,6 +3123,74 @@ function renderUpdateTip(upd) {
   if (lnk) lnk.addEventListener('click', () => updateAllFromMarket());
 }
 
+/* ---------------- 插件列表：视图偏好 / 筛选工具 ---------------- */
+
+/** 视图偏好键：和侧栏紧凑模式同一套 localStorage 范式，隐私模式下静默失败 */
+const PLUGIN_VIEW_KEY = 'roost_plugin_view';
+const PLUGIN_VIEWS = ['list', 'grid', 'large'];
+
+/** 已安装列表的视图状态；all/dash/updates 是缓存，筛选排序只重渲染不请求 */
+const PLUGINS = { all: [], dash: {}, updates: {}, q: '', status: '', sort: '' };
+
+/** 输入防抖：搜索框用，避免每次按键都重画整个列表 */
+function debounce(fn, ms = 180) {
+  let timer;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), ms);
+  };
+}
+
+/** 版本比较：a>b 为 1，a<b 为 -1，相等 0。按 . 和 - 分段，纯数字段按数值比 */
+function compareVersion(a, b) {
+  const pa = String(a || '0').split(/[.-]/);
+  const pb = String(b || '0').split(/[.-]/);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] ?? '0';
+    const y = pb[i] ?? '0';
+    const nx = Number(x);
+    const ny = Number(y);
+    if (Number.isFinite(nx) && Number.isFinite(ny)) {
+      if (nx !== ny) return nx > ny ? 1 : -1;
+    } else if (x !== y) {
+      return x > y ? 1 : -1;
+    }
+  }
+  return 0;
+}
+
+/** 状态归一：筛选、排序、徽章共用一份口径 */
+function pluginState(p) {
+  if (p.error || (p.runtimeErrors && p.runtimeErrors.length)) return 'error';
+  if (!p.enabled) return 'disabled';
+  if (p.loaded) return 'running';
+  return 'idle';
+}
+const PLUGIN_STATE_ORDER = ['running', 'idle', 'disabled', 'error'];
+const PLUGIN_STATE_TEXT = {
+  running: '运行中', idle: '未加载', disabled: '已禁用', error: '出错',
+};
+
+/** 切换视图：只改容器 class，不重建卡片、不重新请求，滚动位置原样保留 */
+function applyPluginView() {
+  let view = 'grid';
+  try {
+    const saved = localStorage.getItem(PLUGIN_VIEW_KEY);
+    if (PLUGIN_VIEWS.includes(saved)) view = saved;
+  } catch {}
+  ['pluginList', 'marketList'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.classList.remove('view-list', 'view-grid', 'view-large');
+    el.classList.add(`view-${view}`);
+  });
+  document.querySelectorAll('.view-btn').forEach((btn) => {
+    const on = btn.dataset.view === view;
+    btn.classList.toggle('on', on);
+    btn.setAttribute('aria-pressed', String(on));
+  });
+}
+
 /**
  * 把「可更新」标记补到**已经画好的**卡片上——不重建卡片。
  *
@@ -3107,6 +3201,8 @@ function renderUpdateTip(upd) {
  * 否则更新完还一直挂着「可更新 4.4.6」，看着像没成功。
  */
 function applyUpdateMarks(upd) {
+  // 结果存进缓存：筛选/排序重渲染时，「可更新」标记和按钮不能丢
+  PLUGINS.updates = Object.fromEntries((upd.updates || []).map((u) => [u.id, u]));
   // 先刷顶部提示：列表可能是空的（插件全卸载了），提示也得跟着清掉
   renderUpdateTip(upd);
 
@@ -3134,17 +3230,16 @@ function applyUpdateMarks(upd) {
       continue;
     }
 
-    const name = card.querySelector('.name');
-    if (name && !name.querySelector('.upd-tag')) {
+    const title = card.querySelector('.plugin-title');
+    if (title && !title.querySelector('.upd-tag')) {
       const tag = document.createElement('span');
       tag.className = 'upd-tag';
       tag.textContent = `可更新 ${u.latest}`;
-      name.appendChild(tag);
+      title.appendChild(tag);
     }
 
-    // 按钮插在状态徽章后面，和整块重绘时的位置一致
-    const badge = card.querySelector('.badge');
-    if (!badge) continue;
+    const actions = card.querySelector('.plugin-actions');
+    if (!actions) continue;
     const btn = document.createElement('button');
     btn.className = 'btn small primary';
     btn.dataset.updateOne = id;
@@ -3152,53 +3247,89 @@ function applyUpdateMarks(upd) {
     btn.dataset.to = u.latest;
     btn.dataset.name = u.name || id;
     btn.textContent = '更新';
-    btn.addEventListener('click', () => updateFromMarket(id, btn));
-    badge.insertAdjacentElement('afterend', btn);
+    // 点击统一走 #pluginList 上的事件委托（见 bindPluginListActions），列表重建也不会重复绑
+    actions.prepend(btn);
   }
 }
 
-async function loadPlugins() {
+/**
+ * 按当前筛选/排序重渲染已安装插件。
+ * 只从 PLUGINS 缓存取数，不请求后端——搜索/切状态/排序都是纯前端操作。
+ */
+function renderPluginRows() {
   const wrap = $('#pluginList');
-  // 插件装了/卸了，它注册的面板页面也会变，顺带刷一下标签栏
-  loadPluginPages();
-  try {
-    /**
-     * 只等「列表 + 运行数据」——都是毫秒级。
-     *
-     * 「有没有新版」以前也塞在同一个 `Promise.all` 里，于是整页要陪它等一次市场索引
-     * （国内直连 GitHub 常要 8~11 秒才失败切镜像），表现就是进插件页后整块空白。
-     * 现在拆成两趟：这里先把卡片画出来，更新标记由 `applyUpdateMarks` 异步补。
-     */
-    const [list, dash] = await Promise.all([
-      api('/api/plugins'),
-      api('/api/plugins/dashboard').catch(() => ({})),
-    ]);
-    /**
-     * 首屏一律按「没有新版」画：卡片上不会出现「可更新」和「更新」按钮，
-     * 都由第二趟的 applyUpdateMarks 补。这样不会先画错再改，闪一下。
-     */
-    if (!list.length) {
-      wrap.innerHTML = '<div class="empty">还没有插件，把文件夹放进 plugins/ 即可</div>';
-      // 没有插件就不可能有更新，顺手把上次留下的「N 个有新版本」清掉
-      renderUpdateTip({ updates: [] });
-      return;
-    }
-    wrap.innerHTML = list.map((p) => {
-      // 插件自己上报的指标，卡片上最多露 3 个，详情在「设置 → 运行数据」
-      const d = dash[p.id];
-      const chips = renderDashChips(d?.metrics);
+  if (!wrap) return;
 
-      return `
-      <div class="plugin" data-id="${escapeHtml(p.id)}" data-name="${escapeHtml(p.name || p.id)}">
-        <div class="info">
-          <div class="name">${
-            p.icon
-              ? `<img class="plugin-icon" src="${escapeHtml(p.icon)}" alt="" loading="lazy">`
-              : ''
-          }${escapeHtml(p.name || p.id)} <span class="hint">v${escapeHtml(p.version || '0.0.0')}</span>
+  const q = PLUGINS.q.trim().toLowerCase();
+  let rows = PLUGINS.all.filter((p) => {
+    if (q) {
+      const hay = [p.id, p.name, p.shortDesc, p.description, ...(p.tags || [])]
+        .filter(Boolean).join(' ').toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    if (PLUGINS.status === 'update') return !!PLUGINS.updates[p.id];
+    if (PLUGINS.status) return pluginState(p) === PLUGINS.status;
+    return true;
+  });
+
+  if (PLUGINS.sort === 'name') {
+    rows.sort((a, b) => String(a.name || a.id).localeCompare(String(b.name || b.id), 'zh-CN'));
+  } else if (PLUGINS.sort === 'status') {
+    rows.sort((a, b) =>
+      PLUGIN_STATE_ORDER.indexOf(pluginState(a)) - PLUGIN_STATE_ORDER.indexOf(pluginState(b)) ||
+      String(a.name || a.id).localeCompare(String(b.name || b.id), 'zh-CN'));
+  } else if (PLUGINS.sort === 'version') {
+    rows.sort((a, b) => compareVersion(b.version, a.version));
+  }
+
+  const count = $('#pluginCount');
+  if (count) count.textContent = `显示 ${rows.length} / ${PLUGINS.all.length}`;
+
+  if (!PLUGINS.all.length) {
+    wrap.innerHTML = '<div class="empty">还没有插件，把文件夹放进 plugins/ 即可</div>';
+    return;
+  }
+  if (!rows.length) {
+    wrap.innerHTML = `<div class="empty">没有匹配的插件，换个关键词或状态试试 ${emptyAction('清除筛选', 'clear-plugins')}</div>`;
+    return;
+  }
+
+  wrap.innerHTML = rows.map((p) => {
+    // 插件自己上报的指标，卡片上最多露 3 个，详情在「设置 → 运行数据」
+    const d = PLUGINS.dash[p.id];
+    const chips = renderDashChips(d?.metrics);
+    const u = PLUGINS.updates[p.id];
+    const state = pluginState(p);
+    const badgeCls = state === 'running' ? 'on' : state === 'disabled' ? 'off' : '';
+
+    return `
+      <div class="plugin" data-id="${escapeHtml(p.id)}" data-name="${escapeHtml(p.name || p.id)}" data-state="${state}">
+        <div class="plugin-body">
+          <div class="plugin-head">
+            <div class="plugin-title">
+              ${
+                p.icon
+                  ? `<img class="plugin-icon" src="${escapeHtml(p.icon)}" alt="" loading="lazy">`
+                  : ''
+              }<span class="name">${escapeHtml(p.name || p.id)}</span>
+              <span class="hint plugin-ver">v${escapeHtml(p.version || '0.0.0')}</span>
+              ${u ? `<span class="upd-tag">可更新 ${escapeHtml(u.latest)}</span>` : ''}
+            </div>
+            <button type="button" class="plugin-toggle${p.enabled ? ' on' : ''}" role="switch"
+              aria-checked="${p.enabled ? 'true' : 'false'}" data-act="${p.enabled ? 'disable' : 'enable'}"
+              title="${p.enabled ? '点击禁用' : '点击启用'} ${escapeHtml(p.name || p.id)}"
+              aria-label="${p.enabled ? '禁用' : '启用'}插件 ${escapeHtml(p.name || p.id)}">
+              <span class="plugin-toggle-knob"></span>
+            </button>
           </div>
-          <div class="meta">
-            ${escapeHtml(p.id)}
+          ${
+            (p.shortDesc || p.description)
+              ? `<div class="plugin-desc">${escapeHtml(p.shortDesc || p.description)}</div>`
+              : ''
+          }
+          <div class="plugin-meta">
+            <span class="badge ${badgeCls} plugin-status" title="运行状态">${PLUGIN_STATE_TEXT[state]}</span>
+            <span class="plugin-id">${escapeHtml(p.id)}</span>
             <span class="kind-tag ${p.kind === 'external' ? 'ext' : 'int'}">
               ${p.kind === 'external' ? '外部 · ' + escapeHtml(p.runtime) : '内建 · node'}
             </span>
@@ -3209,7 +3340,6 @@ async function loadPlugins() {
                 : ''
             }
             ${renderDecl(p)}
-            ${(p.shortDesc || p.description) ? '<br>' + escapeHtml(p.shortDesc || p.description) : ''}
           </div>
           ${chips ? `<div class="plugin-metrics">${chips}</div>` : ''}
           ${
@@ -3235,62 +3365,99 @@ async function loadPlugins() {
           }
           ${p.menuMissing ? '<div class="err">未提供指令菜单，用户看不到它能做什么</div>' : ''}
         </div>
-        <span class="badge ${p.loaded ? 'on' : p.enabled ? '' : 'off'}">
-          ${p.loaded ? '运行中' : p.enabled ? '未加载' : '已禁用'}
-        </span>
-        <button class="btn small" data-act="${p.enabled ? 'disable' : 'enable'}">
-          ${p.enabled ? '禁用' : '启用'}
-        </button>
-        <button class="btn small" data-act="reload">重载</button>
-        <button class="btn small" data-act="panel">设置</button>
-        <button class="btn small danger" data-act="remove" title="删除插件代码，数据保留">卸载</button>
+        <div class="plugin-actions">
+          ${
+            u
+              ? `<button class="btn small primary" data-update-one="${escapeHtml(p.id)}" data-from="${escapeHtml(u.current)}" data-to="${escapeHtml(u.latest)}" data-name="${escapeHtml(u.name || p.id)}">更新</button>`
+              : ''
+          }
+          <button class="btn small" data-act="reload">重载</button>
+          <button class="btn small" data-act="panel">设置</button>
+          <button class="btn small danger" data-act="remove" title="删除插件代码，数据保留">卸载</button>
+        </div>
       </div>`;
-    }).join('');
+  }).join('');
 
-    // 顶部「N 个有新版本」提示和卡片上的「更新」按钮由 applyUpdateMarks 补，见下
+  bindPluginListActions(wrap);
+  // 缓存里已有更新数据时，同步标记到新画的卡片（第二趟尚未回来也可能发生）
+  if (Object.keys(PLUGINS.updates).length) applyUpdateMarks({ updates: Object.values(PLUGINS.updates) });
+}
 
-    wrap.querySelectorAll('button[data-act]').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        const card = btn.closest('.plugin');
-        const id = card.dataset.id;
-        // 「设置」不是启停操作，走独立弹窗
-        if (btn.dataset.act === 'panel') {
-          openPluginPanel(id);
-          return;
-        }
+/** 事件委托：只在容器上绑一次，列表重建后按钮照样能用 */
+let pluginListBound = false;
+function bindPluginListActions(wrap) {
+  if (pluginListBound) return;
+  pluginListBound = true;
+  wrap.addEventListener('click', async (e) => {
+    const upd = e.target.closest('[data-update-one]');
+    if (upd) {
+      updateFromMarket(upd.dataset.updateOne, upd);
+      return;
+    }
+    const btn = e.target.closest('button[data-act]');
+    if (!btn) return;
+    const card = btn.closest('.plugin');
+    if (!card) return;
+    const id = card.dataset.id;
+    // 「设置」不是启停操作，走独立弹窗
+    if (btn.dataset.act === 'panel') {
+      openPluginPanel(id);
+      return;
+    }
 
-        /**
-         * 卸载是不可逆的（代码目录直接删），必须先问清楚。
-         * 数据目录不删——用户重装后还想接着用存档。
-         */
-        if (btn.dataset.act === 'remove') {
-          const name = card.dataset.name || id;
-          const ok = await confirmDialog({
-            title: `卸载插件「${name}」`,
-            message:
-              `会删除 <code>plugins/${escapeHtml(id)}</code> 整个目录，插件代码就没了。\n\n` +
-              '它的<b>数据会保留</b>（群档案、插件存档都在 data/ 里），重装之后还能接着用。\n\n' +
-              '确定卸载？',
-            okText: '卸载',
-            danger: true,
-          });
-          if (!ok) return;
-        }
-
-        btn.disabled = true;
-        try {
-          await api(`/api/plugins/${encodeURIComponent(id)}/${btn.dataset.act}`, { method: 'POST' });
-          await loadPlugins();
-        } catch (e) {
-          alert('操作失败: ' + e.message);
-          btn.disabled = false;
-        }
+    /**
+     * 卸载是不可逆的（代码目录直接删），必须先问清楚。
+     * 数据目录不删——用户重装后还想接着用存档。
+     */
+    if (btn.dataset.act === 'remove') {
+      const name = card.dataset.name || id;
+      const ok = await confirmDialog({
+        title: `卸载插件「${name}」`,
+        message:
+          `会删除 <code>plugins/${escapeHtml(id)}</code> 整个目录，插件代码就没了。\n\n` +
+          '它的<b>数据会保留</b>（群档案、插件存档都在 data/ 里），重装之后还能接着用。\n\n' +
+          '确定卸载？',
+        okText: '卸载',
+        danger: true,
       });
-    });
+      if (!ok) return;
+    }
 
-    // 卡片上的「更新」按钮不再在这里批量绑：它由 applyUpdateMarks 创建并自带监听
+    btn.disabled = true;
+    try {
+      await api(`/api/plugins/${encodeURIComponent(id)}/${btn.dataset.act}`, { method: 'POST' });
+      await loadPlugins();
+    } catch (e) {
+      alert('操作失败: ' + e.message);
+      btn.disabled = false;
+    }
+  });
+}
+
+async function loadPlugins() {
+  // 插件装了/卸了，它注册的面板页面也会变，顺带刷一下标签栏
+  loadPluginPages();
+  try {
+    /**
+     * 只等「列表 + 运行数据」——都是毫秒级。
+     *
+     * 「有没有新版」以前也塞在同一个 `Promise.all` 里，于是整页要陪它等一次市场索引
+     * （国内直连 GitHub 常要 8~11 秒才失败切镜像），表现就是进插件页后整块空白。
+     * 现在拆成两趟：这里先把卡片画出来，更新标记由 `applyUpdateMarks` 异步补。
+     */
+    const [list, dash] = await Promise.all([
+      api('/api/plugins'),
+      api('/api/plugins/dashboard').catch(() => ({})),
+    ]);
+    PLUGINS.all = list || [];
+    PLUGINS.dash = dash || {};
+    renderPluginRows();
+    // 没有插件就不可能有更新，顺手把上次留下的「N 个有新版本」清掉
+    if (!PLUGINS.all.length) renderUpdateTip({ updates: [] });
   } catch (e) {
-    wrap.innerHTML = `<div class="empty">加载失败: ${escapeHtml(e.message)}</div>`;
+    const wrap = $('#pluginList');
+    if (wrap) wrap.innerHTML = `<div class="empty">加载失败: ${escapeHtml(e.message)}</div>`;
+    return;
   }
 
   /**
@@ -4025,48 +4192,64 @@ async function testMirrors() {
   }
 }
 
-async function loadMarket() {
+/**
+ * 拉市场数据并渲染。reveal=false 用于进插件页时的后台预拉：只填数据，不切页签。
+ * 在途请求复用（loading），成功过的用缓存（loaded），只有 force 才真重拉。
+ */
+async function loadMarket({ reveal = true, force = false } = {}) {
   const box = $('#marketBox');
   const list = $('#marketList');
   const meta = $('#marketMeta');
-  box.hidden = false;
+  if (reveal) box.hidden = false;
+  if (MARKET.loading && !force) return MARKET.loading;
+  if (MARKET.loaded && !force) return;
+
   meta.textContent = '获取中…';
   list.innerHTML = '<div class="empty">正在从 GitHub 获取插件列表…</div>';
-  // 下载源选择器：第一次打开市场时拉一次
+  // 下载源选择器：第一次拉数据时就准备好，切到市场页签不用再等
   if (!MIRRORS) loadMirrorBar();
 
-  let d;
+  const task = (async () => {
+    let d;
+    try {
+      d = await api('/api/market');
+    } catch (e) {
+      meta.textContent = '获取失败';
+      list.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`;
+      return; // 不置 loaded：切到市场页签时会再试一次
+    }
+
+    meta.textContent = `${d.repo} · 更新于 ${d.updated || '未知'}`;
+    // 网络不通时后端会退回本地缓存，得让用户知道这是旧数据
+    if (d.stale) {
+      meta.innerHTML =
+        `${escapeHtml(d.repo)} · <span class="stale-tip">离线缓存（${escapeHtml(d.staleAge || '未知')}）</span>`;
+    }
+    if (!d.plugins.length) {
+      MARKET.all = [];
+      list.innerHTML = '<div class="empty">市场里还没有插件</div>';
+      MARKET.loaded = true;
+      return;
+    }
+
+    const upd = {};
+    for (const u of d.updates || []) upd[u.id] = u;
+    MARKET.all = d.plugins;
+    MARKET.upd = upd;
+    MARKET.loaded = true;
+    buildMarketCats();
+    renderMarketRows();
+  })();
+  MARKET.loading = task;
   try {
-    d = await api('/api/market');
-  } catch (e) {
-    meta.textContent = '获取失败';
-    list.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`;
-    return;
+    await task;
+  } finally {
+    MARKET.loading = null;
   }
-
-  meta.textContent = `${d.repo} · 更新于 ${d.updated || '未知'}`;
-  // 网络不通时后端会退回本地缓存，得让用户知道这是旧数据
-  if (d.stale) {
-    meta.innerHTML =
-      `${escapeHtml(d.repo)} · <span class="stale-tip">离线缓存（${escapeHtml(d.staleAge || '未知')}）</span>`;
-  }
-  if (!d.plugins.length) {
-    MARKET.all = [];
-    list.innerHTML = '<div class="empty">市场里还没有插件</div>';
-    return;
-  }
-
-  const upd = {};
-  for (const u of d.updates || []) upd[u.id] = u;
-
-  MARKET.all = d.plugins;
-  MARKET.upd = upd;
-  buildMarketCats();
-  renderMarketRows();
 }
 
 /** 市场数据与筛选状态 */
-const MARKET = { all: [], upd: {}, q: '', tag: '' };
+const MARKET = { all: [], upd: {}, q: '', tag: '', sort: '', loaded: false, loading: null };
 
 /** 搜索框和标签筛选都在前端做——索引就几十条，没必要每次都请求 */
 function matchMarket(p) {
@@ -4150,6 +4333,18 @@ function renderMarketRows() {
   const shown = MARKET.all.filter(matchMarket);
   syncCatChips();
 
+  // 排序只动Shown数组，不改 MARKET.all（分类 chip 的计数依赖原始顺序）
+  if (MARKET.sort === 'name') {
+    shown.sort((a, b) => String(a.name || a.id).localeCompare(String(b.name || b.id), 'zh-CN'));
+  } else if (MARKET.sort === 'version') {
+    shown.sort((a, b) => compareVersion(b.version, a.version));
+  } else if (MARKET.sort === 'added') {
+    shown.sort((a, b) => String(b.addedAt || '').localeCompare(String(a.addedAt || '')));
+  }
+
+  const count = $('#marketCount');
+  if (count) count.textContent = `显示 ${shown.length} / ${MARKET.all.length}`;
+
   if (!shown.length) {
     list.innerHTML = `<div class="empty">没有匹配的插件${
       MARKET.q || MARKET.tag ? '，换个关键词或分类试试' : ''
@@ -4163,31 +4358,45 @@ function renderMarketRows() {
         const u = upd[p.id];
         return `
       <div class="plugin">
-        <div class="info">
-          <div class="name">${escapeHtml(p.name || p.id)}
-            <span class="hint">v${escapeHtml(p.version || '0.0.0')}</span>
-            ${u ? `<span class="upd-tag">可更新 ${escapeHtml(u.current)} → ${escapeHtml(u.latest)}</span>` : ''}
+        <div class="plugin-body">
+          <div class="plugin-head">
+            <div class="plugin-title">
+              <span class="name">${escapeHtml(p.name || p.id)}</span>
+              <span class="hint plugin-ver">v${escapeHtml(p.version || '0.0.0')}</span>
+              ${u ? `<span class="upd-tag">可更新 ${escapeHtml(u.current)} → ${escapeHtml(u.latest)}</span>` : ''}
+            </div>
+            ${
+              p.installed
+                ? '<span class="badge on plugin-status">已安装</span>'
+                : ''
+            }
           </div>
-          <div class="meta">
-            ${escapeHtml(p.id)}
+          ${p.description ? `<div class="plugin-desc">${escapeHtml(p.description)}</div>` : ''}
+          <div class="plugin-meta">
+            <span class="plugin-id">${escapeHtml(p.id)}</span>
             <span class="kind-tag ${p.runtime === 'node' ? 'int' : 'ext'}">
               ${p.runtime === 'node' ? '内建 · node' : '外部 · ' + escapeHtml(p.runtime || '')}
             </span>
             ${verifyTag(p)}
-            ${p.author ? `<span class="hint">by ${escapeHtml(p.author)}</span>` : ''}
-            ${p.credits ? `<span class="hint">${escapeHtml(p.credits)}</span>` : ''}
-            ${p.description ? '<br>' + escapeHtml(p.description) : ''}
-            ${(p.tags || []).length ? '<br><span class="hint">' + p.tags.map(escapeHtml).join(' / ') + '</span>' : ''}
-            ${u ? `<br><span class="hint">本地版本 v${escapeHtml(u.current)}</span>` : ''}
+            ${p.author ? `<span class="hint plugin-author" title="${escapeHtml('作者 ' + p.author)}">by ${escapeHtml(p.author)}</span>` : ''}
+            ${u ? `<span class="hint">本地 v${escapeHtml(u.current)}</span>` : ''}
           </div>
+          ${
+            p.credits
+              ? `<div class="plugin-credits" title="${escapeHtml(p.credits)}">${escapeHtml(p.credits)}</div>`
+              : ''
+          }
+          ${(p.tags || []).length ? `<div class="plugin-tags">${p.tags.map((t) => `<span class="tag">${escapeHtml(t)}</span>`).join('')}</div>` : ''}
         </div>
-        ${
-          u
-            ? `<button class="btn small primary" data-update="${escapeHtml(p.id)}" data-name="${escapeHtml(p.name || p.id)}" data-from="${escapeHtml(u.current)}" data-to="${escapeHtml(u.latest)}">更新到 ${escapeHtml(u.latest)}</button>`
-            : p.installed
-              ? '<span class="badge on">已安装</span>'
-              : `<button class="btn small primary" data-install="${escapeHtml(p.id)}">安装</button>`
-        }
+        <div class="plugin-actions">
+          ${
+            u
+              ? `<button class="btn small primary" data-update="${escapeHtml(p.id)}" data-name="${escapeHtml(p.name || p.id)}" data-from="${escapeHtml(u.current)}" data-to="${escapeHtml(u.latest)}">更新到 ${escapeHtml(u.latest)}</button>`
+              : p.installed
+                ? ''
+                : `<button class="btn small primary" data-install="${escapeHtml(p.id)}">安装</button>`
+          }
+        </div>
       </div>`;
       },
     )
@@ -4244,7 +4453,7 @@ async function updateAllFromMarket() {
     alert(lines.join('\n'));
     await loadPlugins();
     // 市场页开着才刷，关着就别白等一次索引
-    if ($('#marketBox') && !$('#marketBox').hidden) await loadMarket();
+    if (activeSubtab === 'market') await loadMarket({ force: true });
   } catch (e) {
     alert('更新失败: ' + e.message);
   }
@@ -4288,7 +4497,7 @@ async function updateFromMarket(id, btn) {
     if (btn) btn.textContent = '已更新';
     await loadPlugins();
     // 市场页开着才刷：它=又一次索引拉取，关着就是白等
-    if ($('#marketBox') && !$('#marketBox').hidden) await loadMarket();
+    if (activeSubtab === 'market') await loadMarket({ force: true });
     if (r.error) alert(r.error);
   } catch (e) {
     alert('更新失败: ' + e.message);
@@ -4314,7 +4523,8 @@ async function installFromMarket(id, btn) {
   try {
     const r = await api('/api/market/install', { method: 'POST', body: JSON.stringify({ id }) });
     await loadPlugins();
-    await loadMarket();
+    // 装完要刷新市场数据（「已安装」标记会变），但别强行把用户切到市场页签
+    await loadMarket({ reveal: false, force: true });
     await confirmDialog({
       title: '安装完成',
       message: r.added?.length
@@ -4345,16 +4555,38 @@ $('#btnExportStats')?.addEventListener('click', () => {
   window.location.href = `/api/stats/export?${q}`;
 });
 $('#statsDays')?.addEventListener('change', loadStats);
-$('#btnRefreshMarket')?.addEventListener('click', loadMarket);
+$('#btnRefreshMarket')?.addEventListener('click', () => loadMarket({ force: true }));
 
-// 市场筛选：纯前端过滤，输入即生效
-$('#marketSearch')?.addEventListener('input', (e) => {
-  MARKET.q = e.target.value;
-  renderMarketRows();
-});
+// 市场筛选：纯前端过滤，输入防抖，避免每次按键都重画整个网格
+const onMarketSearch = debounce((v) => { MARKET.q = v; renderMarketRows(); });
+$('#marketSearch')?.addEventListener('input', (e) => onMarketSearch(e.target.value));
 $('#marketCat')?.addEventListener('change', (e) => {
   MARKET.tag = e.target.value;
   renderMarketRows();
+});
+$('#marketSort')?.addEventListener('change', (e) => {
+  MARKET.sort = e.target.value;
+  renderMarketRows();
+});
+
+// 已安装列表筛选：都是从缓存重渲染，不碰后端
+const onPluginSearch = debounce((v) => { PLUGINS.q = v; renderPluginRows(); });
+$('#pluginSearch')?.addEventListener('input', (e) => onPluginSearch(e.target.value));
+$('#pluginStatus')?.addEventListener('change', (e) => {
+  PLUGINS.status = e.target.value;
+  renderPluginRows();
+});
+$('#pluginSort')?.addEventListener('change', (e) => {
+  PLUGINS.sort = e.target.value;
+  renderPluginRows();
+});
+
+// 视图切换：两份控件共用一份偏好（已安装 / 市场同步切换）
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest?.('.view-btn');
+  if (!btn || !PLUGIN_VIEWS.includes(btn.dataset.view)) return;
+  try { localStorage.setItem(PLUGIN_VIEW_KEY, btn.dataset.view); } catch {}
+  applyPluginView();
 });
 // 分类 chip 与下拉是同一份状态：点 chip 也把下拉同步过去，键盘用户不受影响
 document.addEventListener('click', (e) => {
@@ -4401,10 +4633,13 @@ $('#proxySelect')?.addEventListener('change', (e) => {
   saveMirror();
 });
 $('#proxyCustom')?.addEventListener('change', saveMirror);
-$('#btnLoadMarket')?.addEventListener('click', () => {
-  const box = $('#marketBox');
-  if (box.hidden) loadMarket();
-  else box.hidden = true;
+/* 子页签：切到市场时确保数据拉过；切回已安装只切显隐，不产生请求 */
+$$('[data-plugin-subtab]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const to = btn.dataset.pluginSubtab;
+    setPluginSubtab(to);
+    if (to === 'market') safeLoad('market', () => loadMarket({ reveal: true }));
+  });
 });
 
 /* ---------------- 插件设置面板 ---------------- */
@@ -7148,6 +7383,7 @@ function initThemeColor() {
 
   // 初始化：先恢复偏好，再补一次外观同步（无 hash 时 activateTab 不会被调用）
   applyNavPrefs();
+  applyPluginView();
   if (toggle) {
     toggle.title = document.body.classList.contains('nav-compact') ? '展开侧栏' : '收起侧栏';
   }
@@ -7179,9 +7415,20 @@ const EMPTY_ACTIONS = {
   'clear-market': () => {
     const q = $('#marketSearch');
     const cat = $('#marketCat');
+    const sort = $('#marketSort');
     if (q) { q.value = ''; MARKET.q = ''; }
     if (cat) { cat.value = ''; MARKET.tag = ''; }
+    if (sort) { sort.value = ''; MARKET.sort = ''; }
     renderMarketRows();
+  },
+  'clear-plugins': () => {
+    const q = $('#pluginSearch');
+    const status = $('#pluginStatus');
+    const sort = $('#pluginSort');
+    if (q) { q.value = ''; PLUGINS.q = ''; }
+    if (status) { status.value = ''; PLUGINS.status = ''; }
+    if (sort) { sort.value = ''; PLUGINS.sort = ''; }
+    renderPluginRows();
   },
   'go-config': () => {
     activateTab('config');
