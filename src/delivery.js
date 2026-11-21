@@ -85,13 +85,14 @@ export function createDeliveryLedger({ db, botId, log = () => {} }) {
    * @param {string} [p.replyTo]  被动回复时的 msg_id
    * @param {number} [p.msgSeq]
    * @param {string} p.digest
+   * @param {string} [p.source] 来源（plugin / host / onebot / api），见 `events-schema.js`
    * @returns {{action:'send'|'reuse'|'unknown'|'wait', row?:object}}
    *   - `send`    没发过 / 上次 failed，可以发
    *   - `reuse`   已经 sent/audited，直接返回上次结果
    *   - `unknown` 上次结果未知，**不能重发**
    *   - `wait`    正在发送中（并发调用）
    */
-  function claim({ requestId, kind, chatId, replyTo, msgSeq, digest }) {
+  function claim({ requestId, kind, chatId, replyTo, msgSeq, digest, source = '' }) {
     if (!ready()) return { action: 'send' };
     const id = String(requestId ?? '').trim();
     if (!id) return { action: 'send' };
@@ -101,8 +102,8 @@ export function createDeliveryLedger({ db, botId, log = () => {} }) {
       if (!row) {
         db.prepare(
           `INSERT INTO deliveries
-             (request_id, bot_id, kind, chat_id, reply_to, msg_seq, digest, state, attempts, created_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?)`,
+             (request_id, bot_id, kind, chat_id, reply_to, msg_seq, digest, state, attempts, created_at, source)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
         ).run(
           id,
           botId,
@@ -114,6 +115,7 @@ export function createDeliveryLedger({ db, botId, log = () => {} }) {
           DELIVERY_STATE.PENDING,
           0,
           Date.now(),
+          String(source ?? ''),
         );
         return { action: 'send' };
       }

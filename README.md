@@ -252,6 +252,37 @@ docker compose up -d
 
 ---
 
+## 网络与代理
+
+框架只在**下载类**出站上走代理：插件市场索引与包、框架更新、镜像测速、Gitee 拉取。
+QQ 官方接口、扫码登录、文件预签名上传**一律直连**——这些是国内地址，
+套一层本地代理只会更慢，甚至被对端拒掉。
+
+配置在 `config/bot.json` 的 `network.proxy`，三个取值：
+
+| 值 | 行为 |
+|---|---|
+| `auto`（默认） | 先读 Windows 系统代理，再读环境变量 |
+| `off` | 全部直连，不读任何代理设置 |
+| `http://127.0.0.1:7890` | 只用这一个，不再猜（也接受不带 `http://` 的写法） |
+
+`auto` 的顺序是**系统代理优先**（Clash / v2rayN 那个「系统代理」开关改的就是它），
+其次 `HTTPS_PROXY` / `HTTP_PROXY`，例外列表取 `NO_PROXY`。反过来（环境变量优先）
+在桌面场景更容易踩坑：机器上留着一个早就失效的 `HTTPS_PROXY`，框架会一直用那个坏的。
+只支持 http / https 代理，SOCKS 请用 Clash 之类的混合端口。
+
+Windows 上读系统代理靠 `reg query`。企业策略、安全软件或沙箱可能直接拦掉 `reg.exe`，
+表现是「浏览器能打开、框架连不上」。设 `ROOST_NO_SYSTEM_PROXY=1` 绕开：
+
+```bash
+ROOST_NO_SYSTEM_PROXY=1 node src/main.js
+```
+
+设了它就完全不碰注册表，只认 `network.proxy` / 环境变量 / 直连。当前实际生效的代理
+及其来源（系统设置 / 环境变量 / 手动）在面板**「插件管理」页 →「插件市场」卡片**里能直接看到。
+
+---
+
 ## 收事件：WebSocket 还是 Webhook
 
 官方两种都支持，框架都实现了：
@@ -511,7 +542,7 @@ npm run test:all      # 全量约 1542 项：自检 + 扫码 + 依赖 + e2e（�
 npm run check:secrets # 扫硬编码凭据（CI 也跑这个，提交前建议过一遍）
 node src/main.js --mock          # 不连 QQ，命令行发假消息调插件
 node src/main.js --mock --serve  # 只开面板，调界面
-node src/main.js --check         # 只验证凭证和网关
+node src/main.js --check         # 只体检：凭证 + 网关 + intents / 面板暴露面 / 插件目录，不启动机器人
 ```
 
 > **真凭据不要写进代码**，放 `config/bot.json`（已在 .gitignore 里）。

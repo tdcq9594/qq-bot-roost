@@ -63,6 +63,14 @@ export class Gateway {
     this.heartbeatInterval = 45000;
     this.lastAckAt = 0;
     this.connecting = false;
+    /**
+     * 建连代数。`stop()` 每调一次就 +1，`#connect()` 在 await 前后各对一次。
+     *
+     * 只靠 `stopped` 标志不够：`restart()` 会在 stop 之后把 stopped 改回 false，
+     * 这时**上一轮还在 await 的 #connect 会以为没事了**，继续建第二条连接。
+     * 加个代数就分得清「谁是我这一轮的」。
+     */
+    this.epoch = 0;
     /** 已经为哪条 ws 安排过重连，防止 error + close 双触发建出两条连接 */
     this.retryScheduledFor = null;
 
@@ -131,6 +139,9 @@ export class Gateway {
 
   stop() {
     this.stopped = true;
+    /** 作废所有在飞的 `#connect()`，并把 connecting 复位，别让 restart() 被卡住 */
+    this.epoch += 1;
+    this.connecting = false;
     this.#clearTimers();
     try {
       this.ws?.close(1000, 'client shutdown');
@@ -159,6 +170,8 @@ export class Gateway {
       return;
     }
     this.connecting = true;
+    /** 这一轮建连的代号；stop()/restart() 会让它过期（见构造函数里的说明） */
+    const epoch = this.epoch;
     let url;
     try {
       const gw = await this.api.getGateway();
@@ -170,6 +183,19 @@ export class Gateway {
       this.connecting = false;
       log.error('获取网关地址失败:', e.message);
       return this.#scheduleReconnect();
+    }
+
+    /**
+     * 取地址是异步的（最长 15 秒），这期间可能已经被 stop()：
+     * 下线、删除机器人、面板重启都会走到。这里必须复查一次，否则会在停机后
+     * 建出一条**僵尸连接**——它能连上就会发 Identify，把线上那条会话踢成
+     * 4902（本文件开头那段「两条连接互相踢」说的就是它），而且 `connecting`
+     * 会永久停在 true。
+     */
+    if (this.stopped || epoch !== this.epoch) {
+      this.connecting = false;
+      log.debug('停机中，放弃建立连接');
+      return;
     }
 
     const ws = new WebSocket(url);

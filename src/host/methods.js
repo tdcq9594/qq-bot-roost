@@ -23,7 +23,7 @@ import { registerMedia } from './media.js';
 import { splitQuery } from '../search-query.js';
 import { registerOps } from './ops.js';
 import { registerDev } from './dev.js';
-import { sendOut, receivedAtOf, isChatKind, CHAT_KINDS } from './dispatch.js';
+import { sendOut, receivedAtOf, isChatKind, CHAT_KINDS, HOST_PLUGIN } from './dispatch.js';
 
 export const HOST_PROTOCOL = 1;
 
@@ -663,6 +663,31 @@ export function createMethods({ runtime: R, getState, log = () => {}, extBridge 
     /** 首片返回的 stream_msg_id 也映射到同一个 seq，续片只带它也能对上 */
     const sid = str(data?.stream_msg_id ?? data?.id);
     if (sid && !streamSeqs.has(sid)) streamSeqs.set(sid, { seq, at: Date.now() });
+    /**
+     * 流式**不入 outbound**，也就没有 outbound 自带的那两个记账出口。
+     * 以前宿主流式发出去的消息在账本里一条都没有——「自有协议说的话」
+     * 整类不可见，出了问题只能翻日志。
+     *
+     * 这里按插件侧同一口径补记：**只在结束片（state=10）记一笔**，
+     * 否则一条长回复会在账本里冒出十几行。正文记的是结束片的内容
+     * （协议只给增量，宿主要完整全文得自己拼），和 `api-record.js`
+     * 对 `sendStreamMessage` 的处理一致。
+     */
+    if (state === 10) {
+      try {
+        R.outbound?.recordDirect?.({
+          kind: 'c2c',
+          target: openid,
+          content,
+          payload: { content },
+          plugin: HOST_PLUGIN,
+          source: 'host',
+          id: sid || key,
+        });
+      } catch {
+        /* 记账是增强，失败不影响发送 */
+      }
+    }
     return { ...(data ?? {}), msgSeq: opts.msgSeq };
   });
 

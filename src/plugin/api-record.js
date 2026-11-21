@@ -85,6 +85,8 @@ export function wrapApiForLedger(api, { outbound = null, plugin = '', log = null
         target: String(args[spec.target] ?? ''),
         payload: spec.digestOf ? spec.digestOf(args) : p,
         plugin,
+        /** 插件直连 api 的发送也走账本：来源标 `plugin`（谁发的看 `plugin` 列） */
+        source: 'plugin',
         /**
          * 用 `||` 不用 `??`：服务端可能给 `id: ''`，而空 id 会让账本的
          * 去重退化成「同毫秒 + 同摘要」——连发几张图时会被 `INSERT OR IGNORE`

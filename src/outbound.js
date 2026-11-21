@@ -137,21 +137,61 @@ export class SendError extends Error {
 /**
  * 这次失败是「确定没发出去」还是「不知道发没发出去」。
  *
- * 只有 `api` 这一类可能不确定：超时、5xx、连接重置——请求发出去了但响应没回来。
- * 其余四种（`offline` / `expired` / `quota` / `rate`）都是**本地判定**，
- * 消息一定没发出去，记 `failed` 可以放心重试。
- *
  * 判错的代价不对称：把「确定失败」误判成 unknown，用户要人工核对（麻烦但安全）；
  * 把 unknown 误判成「确定失败」，就会重发一条可能已经发出去的消息（重复打扰）。
- * 所以这里宁可保守——拿不准就当 unknown。
+ * 所以拿不准一律当 unknown。
+ *
+ * ⚠️ 这里**必须能读 api.js 的原始异常**。
+ * `#post()` 抛出来的不是 `SendError`，而是 api.js 的 `Error`——它只有
+ * `status` / `qqCode`，没有 `code`（`api.js` 全文没给任何 Error 设过 `code`）。
+ * 以前这里以 `e.code !== 'api'` 开头直接返回 false，于是**网络超时和
+ * ECONNRESET 全被记成 `failed`（可重试）**，下一次 `claim()` 返回 `send`,
+ * 重试就是群里两条一样的消息——账本「未知绝不重发」的承诺等于没有。
+ *
+ * @param {any} e
  */
 function uncertainOf(e) {
-  if (e?.code !== 'api') return false;
-  const s = String(e?.detail ?? e?.message ?? '');
-  return /timeout|timed out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|socket hang up|aborted|\b5\d\d\b/i.test(s);
+  if (!e) return false;
+  /** SendError 里除 `api` 之外都是本地判定（offline / expired / quota / rate），一定没发出去 */
+  if (e.code && e.code !== 'api') return false;
+
+  const status = Number(e.status ?? 0);
+  /** 平台明确拒绝：请求到达了，但没被受理，重试安全 */
+  if (status >= 400 && status < 500) return false;
+  /** 5xx：服务端可能已经处理了一部分，宁可按未知处理 */
+  if (status >= 500) return true;
+
+  /**
+   * 没有 HTTP 状态说明失败发生在连接层或本地。看机器码：
+   *   · 连接**根本没建起来** → 请求没到服务端 → failed（可重试）
+   *   · 连上了但读响应时断了 → 可能已送达 → unknown（不可重发）
+   */
+  const text = `${e.name ?? ''} ${e.cause?.code ?? ''} ${e.detail ?? ''} ${e.message ?? ''}`;
+  if (/ECONNREFUSED|ENOTFOUND|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|UND_ERR_CONNECT_TIMEOUT/.test(text)) return false;
+  if (/TimeoutError|timeout|timed out|超时|ETIMEDOUT|ECONNRESET|EPIPE|socket hang up|aborted|UND_ERR_SOCKET|other side closed/i.test(text)) return true;
+
+  /** 走到这里还带着 `api`：本地校验类（如「不支持的会话类型」），压根没发 */
+  if (e.code === 'api') return false;
+  /** 彻底认不出的异常：保守当未知，让人核对一次 */
+  return true;
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * 这条消息从哪个口子出去的（账本 v4）。
+ *
+ * 显式给了就用显式的；没给就按「有 plugin 必是插件路径」推断——
+ * `message.js` 里十几个 `outbound.send({plugin})` 因此不用逐个改，
+ * 也不会漏掉新加的调用点。两者都空写空串（老路径 / 未知），
+ * **空串不代表入站**。
+ *
+ * @param {object} opts
+ * @returns {string}
+ */
+function sourceOf(opts) {
+  return String(opts?.source ?? '') || (opts?.plugin ? 'plugin' : '');
+}
 
 /** 本地日期键，按用户所在时区算，不用 UTC 免得跨天错位 */
 export function dateKey(d = new Date()) {
@@ -432,6 +472,8 @@ export class Outbound {
       replyTo: opts.payload?.msgId,
       msgSeq: opts.payload?.msgSeq,
       digest: digestOf(digestTextOf(opts.payload)),
+      /** 投递账本也带来源：面板「投递」页能一眼分出 onebot / host / 插件 */
+      source: sourceOf(opts),
     });
 
     if (c.action === 'reuse') {
@@ -482,7 +524,8 @@ export class Outbound {
        * `offline` / `expired` / `quota` / `rate` 是**确定没发出去**，记 `failed` 允许重试。
        */
       this.delivery.settle(requestId, uncertainOf(e) ? DELIVERY_STATE.UNKNOWN : DELIVERY_STATE.FAILED, {
-        code: e?.code || 'error',
+        /** 原始异常没有 `code`，把真实原因（业务码 / HTTP 状态）落到面板「原因码」列 */
+        code: e?.code || (e?.qqCode ? `qq-${e.qqCode}` : e?.status ? `http-${e.status}` : 'error'),
       });
       throw e;
     }
@@ -512,7 +555,7 @@ export class Outbound {
    * —— 单聊长回复会整条不进账本、「谁」列依旧空（复核抓到的 P1）。
    * 由调用方在**发送成功之后**调一次，幂等由调用方保证。
    */
-  recordDirect({ kind, target, content, payload = null, plugin = '', id = '' } = {}) {
+  recordDirect({ kind, target, content, payload = null, plugin = '', id = '', source = '' } = {}) {
     this.#recordOutbound(
       {
         kind,
@@ -523,6 +566,7 @@ export class Outbound {
          */
         payload: payload ?? { content: String(content ?? '') },
         plugin,
+        source,
       },
       { id: String(id ?? '') },
     );
@@ -548,6 +592,10 @@ export class Outbound {
            * 由 `message.js` 的 `flushReplies` 拼好传下来。
            */
           plugin: String(opts.plugin ?? ''),
+          /**
+           * 从哪个口子出去的（v4 账本列）。推断规则见上面的 `sourceOf()`。
+           */
+          source: sourceOf(opts),
         },
         { timeBasis: 'observation' },
       );
@@ -744,16 +792,28 @@ export class Outbound {
     return { id: r?.id ?? '', raw: r };
   }
 
-  /** 从异常里判断是不是「被动窗口过期」这类可降级的错误 */
+  /**
+   * 从异常里判断是不是「被动回复窗口/次数过期」——**只有这一种情况才值得改发主动消息**。
+   *
+   * 以前用一堆关键词模糊匹配，其中包含 `超时` 和 `40034`。后果是把
+   * **请求超时**（`请求超时（15s）`，网络层）也判成「被动窗口过期」，
+   * 于是立刻降级再发一条主动消息：原消息可能已经送达，用户收到两条。
+   * 这和 `uncertainOf()` 那条是同一类错误——把「不知道」当成「确定没发」。
+   *
+   * 现在的口径：
+   *   · `40034128`（被动回复时间或次数超限）→ 换主动能救，降级；
+   *   · 任何网络层错误（超时 / 重置 / 拒绝）→ **不降级**，交给账本记 unknown；
+   *   · 其它业务码 → 不降级（换主动消息只会换个理由再失败一次）。
+   *
+   * @param {any} e
+   */
   #looksExpired(e) {
+    const qq = Number(e?.qqCode ?? 0);
+    if (qq === 40034128) return true;
+    if (qq) return false;
     const text = `${e?.message ?? ''} ${JSON.stringify(e?.body ?? {})}`.toLowerCase();
-    return (
-      text.includes('msg_id') ||
-      text.includes('expire') ||
-      text.includes('过期') ||
-      text.includes('超时') ||
-      text.includes('40034')
-    );
+    if (/超时|timeout|timed out|econnreset|econnrefused|socket hang up|aborted|epipe/.test(text)) return false;
+    return text.includes('msg_id') || text.includes('expire') || text.includes('过期');
   }
 
   /**

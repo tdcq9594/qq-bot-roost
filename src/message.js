@@ -291,7 +291,7 @@ export function parseElements(list, depth = 0) {
  * @param {object} [p.identity] 身份对照表（`IdentityStore`）。没传就是没启用绑定，
  *   所有 `uin` / `*Aliases` 字段一律空，老行为不变。
  */
-export function buildMessage(eventName, d, { api, cfg, outbound, session, traceId, identity }) {
+export function buildMessage(eventName, d, { api, cfg, outbound, session, traceId, identity, source = '' }) {
   const kind = messageKindOf(eventName) ?? 'unknown';
 
   let groupId = '';
@@ -382,6 +382,14 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
      * 让插件生成会出现「同一条消息被两个插件各生成一个 id」。
      */
     traceId: String(traceId || newTraceId()),
+    /**
+     * 这条消息从哪个口子进来的（v4 账本列）。
+     *
+     * 由 `bot.dispatch(eventName, d, source)` 传：`gateway` / `webhook` /
+     * `mock`。**不在这里猜**——同一个 `GROUP_AT_MESSAGE_CREATE` 既可能来自
+     * WebSocket 网关，也可能来自 Webhook 回调，光看事件名分不出来。
+     */
+    source: String(source ?? ''),
     /**
      * 内核拿到这条事件的时间。四段耗时的第一段靠它算：
      * 官方事件到达 → 插件真正拿到，中间是内核的分发排队。
@@ -1467,6 +1475,8 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
               target,
               content: String(contentRaw ?? ''),
               plugin: String(opts.plugin ?? msg.pluginId ?? ''),
+              /** 流式绕过了 outbound.send，来源要显式给，否则账本里是空串 */
+              source: 'plugin',
               id: String(r?.id ?? streamId ?? ''),
             });
           } catch (e) {

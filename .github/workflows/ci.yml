@@ -140,6 +140,39 @@ jobs:
           fi
           echo "OK：徽章与版本都是 $ver"
 
+      # notes 顶部段版本对不上时，`release.yml` 会在**合并之后**才红——那时 PR 已经
+      # 进了 master，发不出去，只能再提一个只修 notes 的 PR。所以把这条校验提前到
+      # PR 阶段：本 PR 只要 bump 了版本，notes 顶部段就必须是这个版本。
+      #
+      # 判据和 sums job 的第二段一致（比较 base 与 head 的 package.json），不用
+      # `release` 标签——`pull_request` 事件默认不含 `labeled`，打标签那次根本不会
+      # 触发新 run，靠标签判会漏。
+      #
+      # 放在这个 job 里（而不是新建 job）是因为必需检查是按 check run 的 name 匹配的：
+      # 新建 job 不在列表里只跑不拦，改名又会直接让必需检查失配。
+      - name: bump 了版本 → notes 顶部段必须同步
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          cur=$(node -p "require('./package.json').version")
+          git fetch --depth=1 origin "${{ github.base_ref }}" >/dev/null 2>&1
+          base=$(git show FETCH_HEAD:package.json | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version")
+          if [ "$cur" = "$base" ]; then
+            echo "版本未变（$cur），不要求 notes 新段"
+            exit 0
+          fi
+          head_line=$(grep -m1 '^## v' RELEASE_NOTES.md || true)
+          if [ -z "$head_line" ]; then
+            echo "::error::RELEASE_NOTES.md 里没有 '## vX.Y.Z：' 开头的段落" >&2
+            exit 1
+          fi
+          notes_ver=$(printf '%s' "$head_line" | sed -nE 's/^## v([0-9.]+).*/\1/p')
+          if [ "$notes_ver" != "$cur" ]; then
+            echo "::error::RELEASE_NOTES 顶部段是 v$notes_ver，package.json 是 v$cur——把新版 notes 写到最上面（npm run release:prepare 会生成骨架）" >&2
+            exit 1
+          fi
+          echo "OK：notes 顶部段 v$notes_ver == package.json"
+
   # 换行符单独一个 job：Windows 开发者本地检出是 CRLF，
   # 一不小心就提交进去，而这种问题在 Windows 上跑测试是看不出来的。
   eol:

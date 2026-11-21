@@ -3466,12 +3466,17 @@ async function loadLedgerRows(reset) {
       items
         .map((x) => {
           /**
-           * 出站行没有 user_name，直接在「谁」列显示发出它的插件：
-           * 插件 → 插件名；框架内建（`__core`，菜单等）→ 机器人实例名（默认 main）。
-           * 原来那个独立的 `[plugin]` 标记撤掉，否则同一行会重复两遍。
-           * 入站的 `userName || userId` 兜底保持不变。
+           * 「谁」列的兜底顺序：插件名 → 来源（OneBot / 宿主 / …）→ 机器人实例名。
+           *
+           * 加来源这一档是因为 OneBot 客户端发的消息 `plugin` 是空串，
+           * 以前一律显示成 `main`——和「机器人自己内建的菜单」长得一样，
+           * 排查时分不出这句话是谁让发的。入站（gateway/webhook）不进这一档：
+           * 那些行有 userName，本来就不会走到兜底。
            */
-          const actor = x.plugin && x.plugin !== '__core' ? x.plugin : (x.botId || 'main');
+          const srcTag = x.source && x.source !== 'gateway' && x.source !== 'webhook'
+            ? (SOURCE_LABEL[x.source] ?? String(x.source))
+            : '';
+          const actor = x.plugin && x.plugin !== '__core' ? x.plugin : (srcTag || x.botId || 'main');
           const who = x.userName || x.userId || actor;
           /**
            * 发言人：群名片优先（`userName` 现在就是群内昵称），QQ 昵称放第二行。
@@ -5325,6 +5330,22 @@ const DELIVERY_LABEL = {
   unknown: { text: '结果未知', tip: '超时或崩溃，不知道服务端收没收到。不会自动重发，需要人工核对' },
 };
 
+/**
+ * 来源标签（账本 v4）：**只列「谁发起的」那几种**。
+ *
+ * `gateway` / `webhook` 是入站传输，不会出现在投递账本里；
+ * 空串是早于本版的老记录，显示成 `-` 而不是猜一个。
+ */
+const SOURCE_LABEL = {
+  plugin: '插件',
+  host: '宿主',
+  onebot: 'OneBot',
+  api: '直连',
+  mock: '模拟',
+  dev: '调试',
+  import: '导入',
+};
+
 async function loadDelivery() {
   const body = $('#deliveryBody');
   if (!body) return;
@@ -5354,7 +5375,7 @@ function renderDelivery(d) {
   const body = $('#deliveryBody');
   const items = d?.items ?? [];
   if (!items.length) {
-    body.innerHTML = '<tr><td colspan="6" class="empty">还没有记录（只有带幂等键的发送才记账）</td></tr>';
+    body.innerHTML = '<tr><td colspan="7" class="empty">还没有记录（只有带幂等键的发送才记账）</td></tr>';
     return;
   }
   body.innerHTML = items
@@ -5370,6 +5391,7 @@ function renderDelivery(d) {
       const digestText = /^…\(0\)#/.test(digest) ? '（无正文）' : digest.slice(0, 60);
       return `<tr>
         <td>${escapeHtml(when)}</td>
+        <td>${escapeHtml(SOURCE_LABEL[x.source] ?? (x.source ? String(x.source) : '-'))}</td>
         <td class="mono">${escapeHtml(String(x.chat_id ?? '').slice(0, 12))}</td>
         <td${warn ? ' style="color:var(--warn-text)"' : ''} title="${escapeHtml(st.tip)}">${escapeHtml(st.text)}</td>
         <td title="${escapeHtml(digest)}">${escapeHtml(digestText)}</td>

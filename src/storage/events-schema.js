@@ -12,7 +12,7 @@
  * 合表等于把统计库那句「不存消息正文」变成假话。
  */
 
-export const EVENTS_SCHEMA_VERSION = 3;
+export const EVENTS_SCHEMA_VERSION = 4;
 
 const V1 = `
 CREATE TABLE IF NOT EXISTS events (
@@ -91,6 +91,32 @@ ALTER TABLE events ADD COLUMN plugin TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS events_plugin ON events(plugin) WHERE plugin != '';
 `;
 
+/**
+ * v4：从哪个口子进来的 / 从哪个口子出去的。
+ *
+ * `plugin` 只回答「哪个插件说的」，回答不了「这条走的是官方网关、Webhook、
+ * OneBot 兼容层，还是自有宿主协议」。三件事以前是混着推的：
+ *
+ *   · OneBot 客户端发的消息 `plugin` 是空串 → 与入站消息**完全无法区分**
+ *     （入站的 `plugin` 也是空串），面板上只能靠猜；
+ *   · 宿主协议发的消息 `plugin='host'`，但「host 是插件还是协议」没有定义；
+ *   · 入站是网关推的还是 Webhook 推的，账本里根本没有这个信息。
+ *
+ * 取值口径（**入口/出口，不是内容**）：
+ *   gateway / webhook  入站传输
+ *   plugin             框架内插件发起（具体是谁看 `plugin` 列）
+ *   host               自有宿主协议（DSH 外接）
+ *   onebot             OneBot v11 兼容层
+ *   api                框架内部直连官方接口（兜底路径，正常很少）
+ *   mock / dev         模拟消息、面板/命令行注入
+ *   import             导入 / 补录
+ *   ''                 早于本版的老行（**不代表入站**，别拿空串当判据）
+ */
+const V4 = `
+ALTER TABLE events ADD COLUMN source TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS events_source ON events(bot_id, source) WHERE source != '';
+`;
+
 /** 表里有没有这一列（迁移要幂等，重复 ALTER 会抛） */
 function hasColumn(db, table, col) {
   try {
@@ -119,6 +145,11 @@ export function migrateEvents(db) {
    * 吞成一条 warn —— 表现是「账本静默不可用」，最难查。
    */
   if (!hasColumn(db, 'events', 'plugin')) db.exec(V3);
+  /**
+   * v4 同样按「列在不在」判。这条比 v3 更要紧：`source` 是新增的判据，
+   * 老库若是被手工加过列、版本号却没动，只看版本会撞 duplicate column。
+   */
+  if (!hasColumn(db, 'events', 'source')) db.exec(V4);
   db.exec(`PRAGMA user_version = ${EVENTS_SCHEMA_VERSION}`);
   return { from: cur, to: EVENTS_SCHEMA_VERSION };
 }

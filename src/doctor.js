@@ -132,17 +132,35 @@ export async function runDoctor({ cfg, globalCfg, rt, mock = false }) {
   }
 
   /* ---------- 4. 插件目录可写 ---------- */
+  /**
+   * 三种情况必须分开说，不能一刀切成「不可写」：
+   *   · 存在且可写   → ok
+   *   · 不存在       → warn。全新安装 / 全新检出时本来就没有（`plugins/` 在
+   *                    `.gitignore` 里），首次启动 `ensureDirs` 会建出来。
+   *                    报 error 会让刚 clone 完就跑 `--check` 的人看到
+   *                    「装插件会失败」这种根本不存在的故障，还会让退出码变成 1。
+   *   · 存在但不可写 → error。这才是真问题（权限、被杀毒软件锁住）。
+   */
   try {
     await fs.access(DIRS.plugins, FS.W_OK);
     add('plugins-dir', 'ok', '插件目录可写', DIRS.plugins);
-  } catch {
-    add(
-      'plugins-dir',
-      'error',
-      '插件目录不可写',
-      `${DIRS.plugins} 打不开或没有写权限，装插件会失败。`,
-      '检查目录是否存在、是否被杀毒软件锁住、当前用户有没有权限。',
-    );
+  } catch (e) {
+    if (e?.code === 'ENOENT') {
+      add(
+        'plugins-dir',
+        'warn',
+        '插件目录还没建',
+        `${DIRS.plugins} 不存在——全新安装时这是正常的，首次启动会自动创建。`,
+      );
+    } else {
+      add(
+        'plugins-dir',
+        'error',
+        '插件目录不可写',
+        `${DIRS.plugins} 打不开或没有写权限，装插件会失败。`,
+        '检查目录是否被杀毒软件锁住、当前用户有没有权限。',
+      );
+    }
   }
 
   /* ---------- 5. 面板暴露面 ---------- */

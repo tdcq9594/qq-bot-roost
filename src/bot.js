@@ -453,7 +453,7 @@ export class BotRuntime {
       try {
         wh.register(cfg.appId, {
           secret: cfg.appSecret,
-          onEvent: (event, d, payload) => this.dispatch(event, d, payload),
+          onEvent: (event, d, payload) => this.dispatch(event, d, 'webhook'),
           onError: (e) => this.log.error(`Webhook 事件处理失败: ${e.message}`),
         });
         this.state = 'online';
@@ -494,7 +494,7 @@ export class BotRuntime {
       tokens: this.tokens,
       intents: cfg.intents,
       metrics: this.metrics,
-      onDispatch: (event, d, p) => this.dispatch(event, d, p),
+      onDispatch: (event, d, p) => this.dispatch(event, d, 'gateway'),
     });
 
     try {
@@ -977,7 +977,7 @@ export class BotRuntime {
    * id 用事件名 + 场景 + 操作人 + 时间戳拼出**稳定**值，官方重推同一条时
    * `ledger.append` 的 dedupe 唯一约束会把它挡掉，不会记重。
    */
-  #recordNotice(eventName, d) {
+  #recordNotice(eventName, d, source = '') {
     if (!this.ledger?.append) return;
     const CHANNEL_NOTICE = /^(GUILD|CHANNEL|FORUM|AUDIO|MESSAGE_REACTION|MESSAGE_AUDIT|PUBLIC_MESSAGE_DELETE|DIRECT_MESSAGE_DELETE)/;
     if (!CHANNEL_NOTICE.test(eventName)) return;
@@ -1008,6 +1008,8 @@ export class BotRuntime {
         userName: '',
         content: `[事件] ${eventName}${sub}${d?.name ? ` ${String(d.name).slice(0, 80)}` : ''}`,
         raw: d,
+        /** 和消息事件同一口径：这条事件是网关推的还是 Webhook 推的 */
+        source,
       });
     } catch (e) {
       this.log.warn(`频道事件入账失败（不影响分发）：${e?.message ?? e}`);
@@ -1018,7 +1020,7 @@ export class BotRuntime {
    * 这个方法和单机器人时的逻辑一致，只是绑到了某个实例上。
    * 所有事件都会转交给插件，未知事件也不例外。
    */
-  async dispatch(eventName, d) {
+  async dispatch(eventName, d, source = '') {
     const { cfg, registry, roles, groups, session, pipeline, outbound } = this;
 
     this.metrics.lastEventAt = Date.now();
@@ -1034,7 +1036,7 @@ export class BotRuntime {
     /* ---- 非消息事件 ---- */
     if (!isMessageEvent(eventName)) {
       /** 和消息事件一样「入账第一」，放在任何处理/过滤之前 */
-      this.#recordNotice(eventName, d);
+      this.#recordNotice(eventName, d, source);
       if (!isKnownEvent(eventName)) {
         this.log.warn(`收到未登记的事件 ${eventName}，已转交插件。建议在 src/events.js 补登记`);
       }
@@ -1098,7 +1100,7 @@ export class BotRuntime {
     }
 
     /* ---- 消息事件 ---- */
-    const msg = buildMessage(eventName, d, { api: this.api, cfg, outbound, session, identity: this.identity });
+    const msg = buildMessage(eventName, d, { api: this.api, cfg, outbound, session, identity: this.identity, source });
 
     /**
      * 群名不在官方事件里（只有 `group_openid`），但框架有缓存。

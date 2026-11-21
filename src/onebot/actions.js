@@ -198,6 +198,14 @@ export function createActions({
       target: targetOpenid,
       chatKey: `${kind}:${chatId}`,
       ...(passive ? { receivedAt: passive.at } : {}),
+      /**
+       * 来源标记（账本 v4）：这条是 **OneBot 客户端**发的，不是框架插件发的。
+       *
+       * 以前 OneBot 的发送不带任何来源：账本里 `plugin` 是空串，而入站消息的
+       * `plugin` 也是空串 —— 「客户端发出去的」和「用户说进来的」长得一模一样，
+       * 面板和记忆层都分不出来。`...base` 会带给所有拆条（文本 / 图 / 语音）。
+       */
+      source: 'onebot',
     };
     /**
      * 每次 `outbound.send` 都带一个**独立**的幂等键。

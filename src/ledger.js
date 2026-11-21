@@ -48,7 +48,7 @@ import { SENSITIVE_KEY } from './runtime.js';
  * 单独用 `AUTHOR_COLS` 把它用 `json_extract` 拆成三列——一页 50 条每条
  * 几十 KB 的报文全都读上来太浪费。
  */
-const EVENT_COLS = 'seq, id, kind, chat_id, user_id, user_name, content, at, time_basis, msg_idx, quoted, trace, plugin, bot_id';
+const EVENT_COLS = 'seq, id, kind, chat_id, user_id, user_name, content, at, time_basis, msg_idx, quoted, trace, plugin, source, bot_id';
 
 /** 从 `payload.author` 里取的三个展示字段（昵称 / 群名片 / 头像） */
 const AUTHOR_COLS = `,
@@ -230,6 +230,12 @@ export class EventLedger {
       : `${this.botId}:${msg.chatId ?? ''}:${at}:${digestOf(msg)}`;
 
     const id = crypto.randomUUID();
+    /**
+     * 来源（v4）的兜底：显式给了就用，没给但署名了插件 → 一定是插件路径。
+     * 和 `outbound.js` 的 `sourceOf()` 同一口径（那边是给投递账本用的，
+     * 两层各存一份库、都得算）。两者都空就是空串 = 不知道，**不等于入站**。
+     */
+    const source = String(msg.source ?? '') || (msg.plugin ? 'plugin' : '');
     const payload = (() => {
       try {
         let s = JSON.stringify(cleanPayload(msg.raw));
@@ -251,8 +257,8 @@ export class EventLedger {
           `INSERT OR IGNORE INTO events
             (id, bot_id, kind, chat_id, msg_id, user_id, user_name, content,
              at, observed_at, time_basis, dedupe,
-             msg_idx, ref_msg_idx, union_openid, quoted, payload, trace, plugin)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+             msg_idx, ref_msg_idx, union_openid, quoted, payload, trace, plugin, source)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         )
         .run(
           id,
@@ -279,6 +285,13 @@ export class EventLedger {
            * 多插件合并时是逗号分隔（`echo,ai-chat`）。
            */
           String(msg.plugin ?? ''),
+          /**
+           * 从哪个口子进来 / 出去（v4）。见 `events-schema.js` 的取值口径。
+           * 入站由 `bot.dispatch()` 传（gateway / webhook / mock），
+           * 出站由 `outbound.send({source})` 传（plugin / host / onebot / api）。
+           * 老调用方不给就写空串——**空串表示「不知道」，不是「入站」**。
+           */
+          source,
         );
       // changes === 0 说明撞了 dedupe 唯一约束 = 官方重推的同一条消息
       if (!r?.changes) {
@@ -422,7 +435,7 @@ export class EventLedger {
       .get(this.botId, String(chatId), Number(anchorSeq) || 0);
     if (!anchor) return [];
 
-    const cols = `seq, id, kind, chat_id, msg_id, user_id, user_name, content, at, time_basis, msg_idx, ref_msg_idx, quoted`;
+    const cols = `seq, id, kind, chat_id, msg_id, user_id, user_name, content, at, time_basis, msg_idx, ref_msg_idx, quoted, source`;
     const prev = this.db
       .prepare(
         /**
@@ -461,6 +474,8 @@ export class EventLedger {
       msgIdx: r.msg_idx,
       refMsgIdx: r.ref_msg_idx,
       quoted: r.quoted,
+      /** 邻文也带来源：AI 拿到上下文时能知道哪条是 OneBot/宿主发的 */
+      source: r.source ?? '',
       content: contentOf(r),
       role: r.hit ? 'hit' : 'neighbor',
     }));
@@ -680,14 +695,14 @@ export class EventLedger {
     const rows = beforeSeq
       ? this.db
           .prepare(
-            `SELECT seq, id, kind, chat_id, user_id, user_name, content, at, msg_idx, quoted, payload
+            `SELECT ${EVENT_COLS}, payload
                FROM events WHERE bot_id = ? AND chat_id = ? AND seq < ? AND kind != 'notice'
               ORDER BY seq DESC LIMIT ?`,
           )
           .all(this.botId, String(chatId), Number(beforeSeq), lim)
       : this.db
           .prepare(
-            `SELECT seq, id, kind, chat_id, user_id, user_name, content, at, msg_idx, quoted, payload
+            `SELECT ${EVENT_COLS}, payload
                FROM events WHERE bot_id = ? AND chat_id = ? AND kind != 'notice'
               ORDER BY seq DESC LIMIT ?`,
           )
@@ -723,7 +738,7 @@ export class EventLedger {
     const lim = Math.min(Math.max(Number(limit) || 20, 1), 200);
     const rows = this.db
       .prepare(
-        `SELECT seq, id, kind, chat_id, user_id, user_name, content, at, time_basis, msg_idx, quoted, trace, plugin, bot_id
+        `SELECT ${EVENT_COLS}
            FROM events WHERE bot_id = ? AND user_id = ? AND kind != 'notice'
           ORDER BY at DESC, seq DESC LIMIT ?`,
       )
@@ -949,7 +964,9 @@ export class EventLedger {
    *   · 有 `msgId` → dedupe = `botId:msgId`，和原来那条一模一样；
    *   · 没有 `msgId` → dedupe 里带 `at`，同一份文件导两次也只会进一次。
    *
-   * @param {Array<object>} rows 每行 `{at, kind, chatId, msgId, userId, userName, content, plugin}`
+   * @param {Array<object>} rows 每行 `{at, kind, chatId, msgId, userId, userName, content, plugin, source}`
+   *   `source` 缺省落 `import`（这条是外部搬进来的），给了就按给的记——导出文件里带的
+   *   `gateway` / `onebot` / `plugin` 原样还原，别把来源洗成清一色的 `import`。
    * @returns {{added:number, skipped:number, bad:number, error?:string}}
    */
   importRows(rows, { max = 5000 } = {}) {
@@ -979,6 +996,12 @@ export class EventLedger {
           userName: String(r?.userName ?? ''),
           content: String(r?.content ?? ''),
           plugin: String(r?.plugin ?? ''),
+          /**
+           * 导入的行默认标 `import`：这些是从外部搬进来的历史，
+           * 不是「现在从网关收到的」。允许行里显式覆盖（比如从 OneBot
+           * 历史接口搬进来的，标 `onebot` 更准确）。
+           */
+          source: String(r?.source ?? 'import'),
           /**
            * `append()` 只从 `raw.timestamp` 推 `at`（传 `at` 无效）。
            * 给 ISO 字符串，`resolveTime` 会解析成 `basis: 'message'`——
@@ -1051,7 +1074,7 @@ export class EventLedger {
       const args = [];
       if (chat) { where.push('chat_id = ?'); args.push(chat); }
       if (ts) { where.push('at < ?'); args.push(ts); }
-      const sql = `SELECT seq, id, kind, chat_id, msg_id, user_id, user_name, content, at, time_basis, plugin, bot_id
+      const sql = `SELECT seq, id, kind, chat_id, msg_id, user_id, user_name, content, at, time_basis, plugin, source, bot_id
                      FROM events ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
                     ORDER BY seq ASC LIMIT ?`;
       return this.db.prepare(sql).all(...args, lim);
@@ -1114,6 +1137,15 @@ function mapRow(r) {
      * 别默认成 `''` 就当成"入站"——老库里的出站行也是空串。
      */
     plugin: r.plugin ?? '',
+    /**
+     * 从哪个口子进来 / 出去（v4）：gateway / webhook / plugin / host /
+     * onebot / api / mock / dev / import。
+     *
+     * 和 `plugin` 是**两个维度**：`plugin='' + source='onebot'` 是「OneBot
+     * 客户端发的」，`plugin='ai-chat' + source='plugin'` 是「ai-chat 插件发的」。
+     * 老行一律空串，表示「不知道」，不要拿来判断入站还是出站。
+     */
+    source: r.source ?? '',
     content: contentOf(r),
   };
 }
@@ -1132,6 +1164,34 @@ function authorFieldsOf(r) {
     card: String(r?.author_card ?? ''),
     /** QQ 昵称 */
     nickname: String(r?.author_nickname ?? ''),
+  };
+}
+
+/**
+ * 把一行事件（库里的 snake_case）转成**导入用的 camelCase**。
+ *
+ * 导出 JSONL 与 `importRows()` 必须共用这一份映射。以前导出那边自己手写字段列表，
+ * 加 `source` 时漏了——而 JSONL 恰恰是「给导回用」的格式，导一轮回来来源全变成
+ * `import`，等于备份自己丢了信息。放在模块级是为了能直接单测（给一行库记录，
+ * 断言导出的对象），不用起面板。
+ *
+ * @param {object} r `exportRows()` 返回的行
+ */
+export function toImportRow(r) {
+  return {
+    at: Number(r?.at),
+    kind: String(r?.kind ?? ''),
+    chatId: String(r?.chat_id ?? ''),
+    msgId: String(r?.msg_id ?? ''),
+    userId: String(r?.user_id ?? ''),
+    userName: String(r?.user_name ?? ''),
+    content: String(r?.content ?? ''),
+    plugin: String(r?.plugin ?? ''),
+    /**
+     * 来源必须原样带出去。`importRows()` 只在**缺这个字段**时才落 `import`，
+     * 所以「网关收的」导回去还是 `gateway`，「OneBot 客户端发的」还是 `onebot`。
+     */
+    source: String(r?.source ?? ''),
   };
 }
 

@@ -266,7 +266,17 @@ function readSystemProxy() {
       ],
       { encoding: 'utf8', windowsHide: true, timeout: 3000 },
     );
-  } catch {
+  } catch (e) {
+    /**
+     * 读不到不是错误（下面还有环境变量和直连兜底），但**必须说出来**：
+     * 企业策略、安全软件、容器沙箱都可能直接拦掉 `reg.exe`，现象是
+     * 「浏览器能打开、框架连不上」，而日志里一句提示都没有，只能靠猜。
+     *
+     * 用 warn 而不是 debug——debug 默认不输出，等于没留线索。一个进程只读一次
+     * （`resolve()` 有缓存），而且设了 `ROOST_NO_SYSTEM_PROXY=1` 的人根本走不到
+     * 这里（上面已经 return），所以不会刷屏。
+     */
+    log.warn(`读系统代理失败（${e.message}），按「没有系统代理」处理；如果网络不通，可设 ROOST_NO_SYSTEM_PROXY=1`);
     return null;
   }
   return parseWindowsProxyReg(out);

@@ -110,6 +110,11 @@ export async function sendOut({
       ...(rid ? { requestId: rid } : {}),
       ...(fileType != null ? { fileType: Number(fileType) } : {}),
       plugin: HOST_PLUGIN,
+      /**
+       * 来源标记（账本 v4）：自有宿主协议发起的，和 OneBot / 框架插件区分开。
+       * `plugin='host'` 只说明「署名是宿主」，`source` 才是「从哪个口子出去的」。
+       */
+      source: 'host',
     });
     return {
       id: String(r?.id ?? ''),

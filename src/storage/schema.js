@@ -14,7 +14,7 @@
  *     那个存群，这个存人。
  */
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 const V1 = `
 CREATE TABLE IF NOT EXISTS messages (
@@ -90,6 +90,28 @@ CREATE INDEX IF NOT EXISTS deliveries_open ON deliveries(state) WHERE state IN (
 `;
 
 /**
+ * v3：这条是从哪个口子发出去的。
+ *
+ * 和事件账本的 `events.source` 同一套取值（plugin / host / onebot / api）。
+ * 为什么投递账本也要：面板「投递」页以前只能看到「发给了谁、成没成」，
+ * 分不出「这是 OneBot 客户端要发的」还是「ai-chat 回的话」——出问题时
+ * 不知道该去查哪一层。空串表示早于本版，不代表任何具体来源。
+ */
+const V3 = `
+ALTER TABLE deliveries ADD COLUMN source TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS deliveries_source ON deliveries(bot_id, source) WHERE source != '';
+`;
+
+/** 表里有没有这一列（迁移要幂等，重复 ALTER 会抛） */
+function hasColumn(db, table, col) {
+  try {
+    return db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 把库升到最新结构。
  * @param {object} db DatabaseSync
  */
@@ -100,6 +122,12 @@ export function migrate(db) {
   // 以后加表就往这里追加：if (cur < 3) { ... }
   if (cur < 1) db.exec(V1);
   if (cur < 2) db.exec(V2);
+  /**
+   * `hasColumn` 这里也要判一次：v2 的库被人手工补过列、版本号却还是 2 时，
+   * 只看版本会撞 `duplicate column name: source`，而异常会被上层吞成一条
+   * warn —— 表现是「投递账本静默不可用」。
+   */
+  if (cur < 3 && !hasColumn(db, 'deliveries', 'source')) db.exec(V3);
 
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   return { from: cur, to: SCHEMA_VERSION };

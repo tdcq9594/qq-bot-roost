@@ -368,7 +368,15 @@ export class QQApi {
        */
       if (!retried && isSafeToRetryNetworkError(code)) {
         log.warn(`连接没建起来，重试一次：${method} ${path}（${code}）`);
-        return this.#request(method, path, body, { retried: true, headers });
+        /**
+         * `multipart` 必须一起透传。
+         *
+         * 漏掉它的后果不是「多发一条」，而是**把带附件的请求变成 JSON**：
+         * 报文里 `file_image` 是 Buffer，`JSON.stringify` 后成了
+         * `{"type":"Buffer","data":[…]}`，平台必然 400 —— 重试等于白打一次，
+         * 还把真正的错误（连接没建起来）盖成一条看不懂的 400。
+         */
+        return this.#request(method, path, body, { retried: true, headers, multipart });
       }
       throw new Error(`网络错误 ${method} ${path}: ${reason}`);
     }
@@ -381,7 +389,7 @@ export class QQApi {
       const stale = this.tokens.token;
       log.warn('接口返回 401，刷新访问凭证');
       await this.tokens.refresh(stale);
-      if (method === 'GET') return this.#request(method, path, body, { retried: true, headers });
+      if (method === 'GET') return this.#request(method, path, body, { retried: true, headers, multipart });
       throw new Error(`HTTP 401 ${method} ${path}: 凭证已刷新，但写请求不自动重试（避免重复发送）`);
     }
 
@@ -636,7 +644,14 @@ export class QQApi {
     }
     if (!res.ok) {
       const detail = await res.text().catch(() => '');
-      throw new Error(`分片 PUT 失败 HTTP ${res.status}${detail ? `：${detail.slice(0, 200)}` : ''}`);
+      const err = new Error(`分片 PUT 失败 HTTP ${res.status}${detail ? `：${detail.slice(0, 200)}` : ''}`);
+      /**
+       * 把状态码挂出来。调用方（`uploadLocalFileSharded`）要靠它区分
+       * 「签名过期 / 413 超限」（重试无意义）和「5xx / 网络抖动」（值得重试）。
+       * 只给一句 message 的话，只能靠正则猜，迟早猜错。
+       */
+      err.status = res.status;
+      throw err;
     }
     return res.headers?.get('etag') ?? '';
   }
@@ -761,7 +776,22 @@ export class QQApi {
           return;
         } catch (e) {
           lastErr = e;
-          if (Number(e?.qqCode) === 40093002) throw e; // 日配额，重试无用
+          /**
+           * 只有**明确可重试**的才继续等：
+           *   · `40093001`：官方点名「BDH 通道异常」，给了 `retry_timeout`；
+           *   · 网络层抖动 / 5xx：可能下一次就好。
+           *
+           * 以前除 `40093002` 外一律重试，于是 presigned URL 过期（403）、
+           * 413 超限、404 这类**重试一万次也不会变**的错，会按默认
+           * `retry_timeout=300s` 一片一片耗完——用户看到的是「发文件卡死五分钟」。
+           */
+          const qqCode = Number(e?.qqCode ?? 0);
+          const status = Number(e?.status ?? 0);
+          if (qqCode === 40093002) throw e; // 日配额，重试无用
+          const retriable = qqCode === 40093001
+            || status >= 500
+            || (!status && /timeout|timed out|超时|ECONNRESET|EPIPE|socket hang up|fetch failed|网络错误/i.test(String(e?.message ?? '')));
+          if (!retriable) throw e;
           await new Promise((r) => setTimeout(r, retryDelayMs));
         }
       }

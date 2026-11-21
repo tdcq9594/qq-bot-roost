@@ -31,8 +31,9 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { Outbound, digestTextOf } from '../src/outbound.js';
-import { createLedger } from '../src/ledger.js';
+import { createLedger, toImportRow } from '../src/ledger.js';
 import { buildMessage } from '../src/message.js';
+import { DELIVERY_STATE } from '../src/delivery.js';
 
 /** 每次都给一份干净的临时库；`t.after` 保证失败时也清理 */
 function rig(t, { delivery = null } = {}) {
@@ -343,4 +344,271 @@ test('非消息频道事件：kind=notice 可查，官方重推不会记重', (t
   assert.equal(around[0].content, '大家好');
   assert.equal(ledger.history({ chatId: 'G1', limit: 10 }).length, 1, 'OneBot 历史也不该混入系统事件');
   assert.equal(ledger.byUser({ userId: 'U1', limit: 10 }).length, 1, '按人历史同样过滤');
+});
+
+/* ---------- 来源标记（账本 v4） ---------- */
+
+/**
+ * 为什么要有 `source`：`plugin` 只回答「哪个插件说的」。
+ * OneBot 客户端发的、宿主协议发的、网关收进来的，三者在账本里以前
+ * **全是 `plugin=''`** —— 分不出「用户说的话」和「OneBot 客户端发出去的话」。
+ * 这里锁住口径：入口/出口写进 `source`，`plugin` 的含义不变。
+ */
+test('来源：入站按 dispatch 传的 transport 落库', (t) => {
+  const { ledger } = rig(t);
+  const raw = { id: 'in-src-1', timestamp: '1700000000000' };
+  ledger.append({ id: 'in-src-1', kind: 'group', chatId: 'g1', userId: 'u1', content: '网关', raw, source: 'gateway' });
+  ledger.append({ id: 'in-src-2', kind: 'group', chatId: 'g1', userId: 'u1', content: '回调', raw: { ...raw, id: 'in-src-2' }, source: 'webhook' });
+  /** 老调用不带 source：写空串表示「不知道」，不能拿它当入站判据 */
+  ledger.append({ id: 'in-src-3', kind: 'group', chatId: 'g1', userId: 'u1', content: '老调用', raw: { ...raw, id: 'in-src-3' } });
+
+  const byContent = Object.fromEntries(ledger.recent({ chatId: 'g1', limit: 10 }).map((r) => [r.content, r.source]));
+  assert.equal(byContent['网关'], 'gateway');
+  assert.equal(byContent['回调'], 'webhook');
+  assert.equal(byContent['老调用'], '');
+});
+
+test('来源：buildMessage 原样挂到消息上，供 ledger.append 读', () => {
+  const msg = buildMessage(
+    'GROUP_AT_MESSAGE_CREATE',
+    { id: 'in-src-9', content: 'x', group_openid: 'g1', author: { member_openid: 'u1' }, timestamp: '1700000000000' },
+    { api: {}, cfg: { commandPrefix: '/' }, source: 'webhook' },
+  );
+  assert.equal(msg.source, 'webhook');
+});
+
+test('来源：出站按显式 source；没给但有 plugin 推断成 plugin', async (t) => {
+  const { ledger, out } = rig(t);
+  /** rig 的假 api 恒返回同一个 id，账本会按 dedupe 判成「重推」——这里给唯一 id */
+  let n = 0;
+  out.api.sendGroup = async () => ({ id: `m-src-${++n}` });
+  await out.send(base({ plugin: 'ai-chat' }));                       // → plugin（推断）
+  await out.send(base({ payload: { msgId: 'in-2', content: 'ob' }, source: 'onebot' })); // → onebot
+  await out.send(base({ payload: { msgId: 'in-3', content: 'host' }, plugin: 'host', source: 'host' }));
+
+  const byContent = Object.fromEntries(ledger.recent({ chatId: 'g1', limit: 10 }).map((r) => [r.content, r]));
+  assert.equal(byContent['你好'].source, 'plugin', '有 plugin 没 source 时按插件路径推断');
+  assert.equal(byContent['你好'].plugin, 'ai-chat');
+  assert.equal(byContent['ob'].source, 'onebot', 'OneBot 客户端的发送要能认出来');
+  assert.equal(byContent['ob'].plugin, '', 'OneBot 的 plugin 仍为空，两个维度互不影响');
+  assert.equal(byContent['host'].source, 'host');
+});
+
+test('来源：recordDirect（流式 / 插件直连 api）也带 source', (t) => {
+  const { ledger, out } = rig(t);
+  out.recordDirect({ kind: 'c2c', target: 'u1', content: '宿主流式', plugin: 'host', source: 'host', id: 's-1' });
+  out.recordDirect({ kind: 'c2c', target: 'u1', content: '插件直连', plugin: 'dice', source: 'plugin', id: 's-2' });
+  const byContent = Object.fromEntries(ledger.recent({ chatId: 'u1', limit: 10 }).map((r) => [r.content, r.source]));
+  assert.equal(byContent['宿主流式'], 'host');
+  assert.equal(byContent['插件直连'], 'plugin');
+});
+
+test('来源：投递账本 claim 也带上 source', async (t) => {
+  let claimed = null;
+  const delivery = {
+    claim: (p) => { claimed = p; return { action: 'new' }; },
+    settle: () => {},
+  };
+  const { out } = rig(t, { delivery });
+  await out.send(base({ requestId: 'ob-1', source: 'onebot' }));
+  assert.equal(claimed?.source, 'onebot', 'OneBot 发的消息在投递账本里要能认出来');
+});
+
+/* ---------- 失败定性：unknown（不可重发）vs failed（可重试） ---------- */
+
+/**
+ * 这一组锁的是**核心承诺**：「结果未知的绝不自动重发」。
+ *
+ * 以前 `uncertainOf()` 只认 `e.code === 'api'`，而 `#post()` 抛的是 api.js
+ * 的原始 Error（只有 status / qqCode，没有 code）→ 网络超时一律落成
+ * `failed`（可重试），下一次 `claim()` 返回 `send`，重试就是群里两条一样的消息。
+ */
+function captureDelivery() {
+  const seen = [];
+  return {
+    seen,
+    delivery: {
+      claim: () => ({ action: 'new' }),
+      settle: (id, state, extra) => { seen.push({ id, state, extra }); },
+    },
+  };
+}
+
+test('失败定性：ECONNRESET（可能已送达）记 unknown，不是 failed', async (t) => {
+  const { seen, delivery } = captureDelivery();
+  const { out } = rig(t, { delivery });
+  out.api.sendGroup = async () => {
+    throw new Error('网络错误 POST /v2/groups/g1/messages: fetch failed（ECONNRESET）');
+  };
+  await assert.rejects(() => out.send(base({ requestId: 'in-1:main', plugin: 'ai-chat' })));
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].state, DELIVERY_STATE.UNKNOWN, '连接重置后不知道发没发出去，必须记 unknown');
+});
+
+test('失败定性：请求超时也记 unknown', async (t) => {
+  const { seen, delivery } = captureDelivery();
+  const { out } = rig(t, { delivery });
+  out.api.sendGroup = async () => {
+    throw new Error('网络错误 POST /v2/groups/g1/messages: 请求超时（15s）');
+  };
+  await assert.rejects(() => out.send(base({ requestId: 'in-1:main', plugin: 'ai-chat' })));
+  assert.equal(seen[0].state, DELIVERY_STATE.UNKNOWN);
+});
+
+test('失败定性：连接没建起来 / 4xx 明确拒绝 → failed（可重试）', async (t) => {
+  const { seen, delivery } = captureDelivery();
+  const { out } = rig(t, { delivery });
+
+  out.api.sendGroup = async () => { throw new Error('网络错误 POST /v2/groups/g1/messages: fetch failed（ECONNREFUSED）'); };
+  await assert.rejects(() => out.send(base({ requestId: 'r-1', plugin: 'ai-chat' })));
+  assert.equal(seen[0].state, DELIVERY_STATE.FAILED, '连都没连上，一定没发出去');
+
+  out.api.sendGroup = async () => {
+    throw Object.assign(new Error('HTTP 400 POST /v2/groups/g1/messages: 内容违规'), { status: 400, qqCode: 40034006 });
+  };
+  await assert.rejects(() => out.send(base({ requestId: 'r-2', plugin: 'ai-chat' })));
+  assert.equal(seen[1].state, DELIVERY_STATE.FAILED);
+  assert.equal(seen[1].extra.code, 'qq-40034006', '原因码要落业务码，别只写 error');
+
+  out.api.sendGroup = async () => { throw Object.assign(new Error('HTTP 500 内部错误'), { status: 500 }); };
+  await assert.rejects(() => out.send(base({ requestId: 'r-3', plugin: 'ai-chat' })));
+  assert.equal(seen[2].state, DELIVERY_STATE.UNKNOWN, '5xx 可能已处理，按未知处理');
+});
+
+/**
+ * 降级重发的边界：只有「被动窗口/次数过期」才能改发主动消息。
+ *
+ * 以前 `#looksExpired` 里有 `超时` 这个关键词，于是**请求超时**（网络层）
+ * 被当成窗口过期 → 立刻再发一条主动消息。原消息可能已经送达，
+ * 用户就收到两条。这条锁住「网络错误一律不降级」。
+ */
+test('降级：被动回复请求超时不得改发主动消息（否则双发）', async (t) => {
+  const { out } = rig(t);
+  let sends = 0;
+  out.api.sendGroup = async () => {
+    sends += 1;
+    throw new Error('网络错误 POST /v2/groups/g1/messages: 请求超时（15s）');
+  };
+  await assert.rejects(() => out.send(base({ plugin: 'ai-chat' })));
+  assert.equal(sends, 1, '超时就停在这里，不能再打一次接口');
+});
+
+test('降级：40034128（被动超限）仍然改发主动消息', async (t) => {
+  const { out } = rig(t);
+  let sends = 0;
+  out.api.sendGroup = async () => {
+    sends += 1;
+    if (sends === 1) {
+      throw Object.assign(new Error('HTTP 400 POST /v2/groups/g1/messages: passive reply expired'), { status: 400, qqCode: 40034128 });
+    }
+    return { id: 'active-1' };
+  };
+  const r = await out.send(base({ plugin: 'ai-chat' }));
+  assert.equal(sends, 2, '这是唯一值得降级的错误');
+  assert.equal(r.degraded, true);
+  assert.equal(r.id, 'active-1');
+});
+
+/**
+ * 导出 / 导入必须共用 `toImportRow()`。
+ *
+ * 原来的导出在 `server.js` 里逐字段手写，加 `source` 时漏了 —— 而 JSONL 正是
+ * 「给导回用」的格式，导一轮回来所有 OneBot / 插件消息都变成 `import`。
+ * 这两条锁住：字段映射本身，以及「写进去 → 导出 → 导入」整条路。
+ */
+test('toImportRow：库里 snake_case → 导入用 camelCase，多余字段丢掉', () => {
+  const row = toImportRow({
+    at: 1700000000000,
+    kind: 'group',
+    chat_id: 'G1',
+    msg_id: 'm1',
+    user_id: 'U1',
+    user_name: '甲',
+    content: 'hi',
+    plugin: 'ai-chat',
+    source: 'onebot',
+    /** 下面这些不在导入形状里，不能让它们漏进去（导回时会被当成未知字段） */
+    seq: 9,
+    bot_id: 'main',
+    dedupe: 'main:m1',
+  });
+  assert.deepEqual(row, {
+    at: 1700000000000,
+    kind: 'group',
+    chatId: 'G1',
+    msgId: 'm1',
+    userId: 'U1',
+    userName: '甲',
+    content: 'hi',
+    plugin: 'ai-chat',
+    source: 'onebot',
+  });
+});
+
+test('导出再导入：source 原样还原，不会被洗成 import', async (t) => {
+  const src = rig(t);
+  const now = Date.now();
+  const add = (id, extra) =>
+    src.ledger.append({
+      id,
+      kind: 'group',
+      chatId: 'G1',
+      content: id,
+      raw: { timestamp: now },
+      ...extra,
+    });
+  add('网关来的', { userId: 'U1', userName: '甲', source: 'gateway' });
+  add('OneBot 发的', { source: 'onebot' });
+  add('插件发的', { plugin: 'ai-chat', source: 'plugin' });
+
+  /** 和 /api/ledger/export?format=jsonl 完全同一条路 */
+  const rows = src.ledger.exportRows({ chatId: 'G1' }).map(toImportRow);
+  assert.equal(rows.length, 3);
+  assert.equal(rows.find((r) => r.content === 'OneBot 发的')?.source, 'onebot', '导出的行必须带来源');
+
+  const dst = rig(t);
+  const r = dst.ledger.importRows(rows);
+  assert.equal(r.added, 3, '三条都是一次导入');
+  assert.equal(r.bad, 0);
+
+  const back = Object.fromEntries(
+    dst.ledger
+      .recent({ chatId: 'G1', limit: 10 })
+      .map((x) => [x.content, { source: x.source, plugin: x.plugin }]),
+  );
+  assert.deepEqual(back['网关来的'], { source: 'gateway', plugin: '' });
+  assert.deepEqual(back['OneBot 发的'], { source: 'onebot', plugin: '' }, '不能被洗成 import');
+  assert.deepEqual(back['插件发的'], { source: 'plugin', plugin: 'ai-chat' }, 'plugin 列也要跟着回来');
+});
+
+/**
+ * `history()` 与 `byUser()` 以前各自手写了一份列列表，加 `source` 时没跟着改——
+ * `mapRow()` 里 `r.source ?? ''` 会把它们统一读成空串，看起来「正常」，其实恒为空。
+ * 这两条查询一个给 OneBot 回放历史、一个给面板「身份」页，都必须带真实来源。
+ */
+test('history / byUser 也要带 source（不能因为手写列列表漏掉）', async (t) => {
+  const { ledger } = rig(t);
+  const now = Date.now();
+  ledger.append({
+    id: 'h1', kind: 'group', chatId: 'G1', userId: 'U1', userName: '甲',
+    content: '网关来的', raw: { timestamp: now }, source: 'gateway',
+  });
+  ledger.append({
+    id: 'h2', kind: 'group', chatId: 'G1', userId: 'U1',
+    content: '插件发的', raw: { timestamp: now }, plugin: 'ai-chat', source: 'plugin',
+  });
+
+  const h = ledger.history({ chatId: 'G1', limit: 10 });
+  assert.deepEqual(
+    h.map((x) => [x.content, x.source]),
+    [['网关来的', 'gateway'], ['插件发的', 'plugin']],
+    'history 要给 OneBot 回放带上来源',
+  );
+
+  const u = ledger.byUser({ userId: 'U1', limit: 10 });
+  assert.deepEqual(
+    u.map((x) => [x.content, x.source]),
+    [['网关来的', 'gateway'], ['插件发的', 'plugin']],
+    'byUser 不能恒为空串',
+  );
 });
