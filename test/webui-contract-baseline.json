@@ -10,6 +10,7 @@
     "identity",
     "ledger",
     "logs",
+    "media",
     "notify",
     "onebot",
     "overview",
@@ -274,8 +275,23 @@
     "marketMeta",
     "marketSearch",
     "marketSort",
+    "mediaBatchBtn",
+    "mediaDeleteSelected",
+    "mediaDrop",
+    "mediaFile",
+    "mediaList",
+    "mediaListHint",
+    "mediaListMsg",
+    "mediaMore",
+    "mediaMsg",
+    "mediaPick",
     "mediaPlaceholderSpace",
+    "mediaQuota",
+    "mediaRefresh",
+    "mediaSelCount",
+    "mediaSelectAll",
     "mediaSpaceMsg",
+    "mediaUploadBtn",
     "mirrorCustom",
     "mirrorGiteeToken",
     "mirrorSelect",
@@ -393,6 +409,7 @@
     "tab-identity",
     "tab-ledger",
     "tab-logs",
+    "tab-media",
     "tab-notify",
     "tab-onebot",
     "tab-overview",
@@ -814,11 +831,11 @@
     "--warn-text"
   ],
   "counts": {
-    "panels": 18,
+    "panels": 19,
     "tables": 17,
     "modals": 4,
-    "controls": 261,
-    "apiCalls": 115
+    "controls": 269,
+    "apiCalls": 119
   },
   "requiredIds": [
     {
@@ -922,6 +939,6 @@
     "tabItemClass": true,
     "cspScriptSelf": true,
     "pageThemeMirror": true,
-    "serverHash": "3ff42c3972eaacb3112cdfca910bf75b121d0c26465a17429d9dfeee44c94dc8"
+    "serverHash": "93e5c7c36d1fd97b164f4f90bb4526b321abd3410458842848ec672029d63dd0"
   }
 }

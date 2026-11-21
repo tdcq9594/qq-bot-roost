@@ -40,6 +40,7 @@ import { suspendPluginWatch } from '../services/plugin-watch.js';
 import { syncNickname } from '../services/nickname.js';
 import { onMessage as onBusMessage } from '../message-bus.js';
 import { handleQqCall, capabilityPayload } from './qq-call.js';
+import { handleMediaList, handleMediaUpload, handleMediaDelete } from './media.js';
 import { getDevPlatform } from '../host/dev.js';
 import { requireBoundAppid } from '../dev/platform.js';
 import { devErrorPayload, devErrorTable } from '../dev/errors.js';
@@ -1459,6 +1460,46 @@ async function startWebServerInstance({
             return json(res, 400, { ok: false, error: e.message });
           }
           const out = await handleQqCall({ runtimes, body, fallbackRuntime: rt, log });
+          return json(res, out.code, out.body);
+        }
+
+        /* ---------------- Markdown 素材管理（机器人级图床） ----------------
+         * 跟 /api/qq/call 的区别：prepare/complete/delete 是 internal 接口，
+         * 不进通用白名单。这里直接调 QQApi 的封装，保留它的本地预检、
+         * 归属记录和 100 张配额管理；删图前还要先查列表确认属于本机器人。
+         * 三条路由都在 authorized() + CSRF + 同源校验之后，和面板其他写接口同待遇。
+         */
+        if (pathname === '/api/media-images' && req.method === 'GET') {
+          const out = await handleMediaList({
+            runtimes,
+            query: Object.fromEntries(url.searchParams.entries()),
+            fallbackRuntime: rt,
+            log,
+          });
+          return json(res, out.code, out.body);
+        }
+
+        if (pathname === '/api/media-images/upload' && req.method === 'POST') {
+          let body;
+          try {
+            // 图片最大 10MB，base64 后约 13.3MB；只对这一条路由放宽，
+            // 仍由 media.js 按解码后的真实字节数卡 10MB。
+            body = await readBody(req, 15 * 1024 * 1024);
+          } catch (e) {
+            return json(res, e.status || 400, { ok: false, error: e.message });
+          }
+          const out = await handleMediaUpload({ runtimes, body, fallbackRuntime: rt, log });
+          return json(res, out.code, out.body);
+        }
+
+        if (pathname === '/api/media-images/delete' && req.method === 'POST') {
+          let body;
+          try {
+            body = await readBody(req);
+          } catch (e) {
+            return json(res, e.status || 400, { ok: false, error: e.message });
+          }
+          const out = await handleMediaDelete({ runtimes, body, fallbackRuntime: rt, log });
           return json(res, out.code, out.body);
         }
 

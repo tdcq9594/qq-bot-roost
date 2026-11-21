@@ -294,6 +294,7 @@ async function selectBot(id) {
   if (tab === 'delivery') loadDelivery();
   if (tab === 'groups') loadGroups();
   if (tab === 'roles') { loadRoles(); loadPeople(); }
+  if (tab === 'media') loadMedia();
   if (tab === 'stats') loadStats();
   // 体检是按机器人做的，切了要重查
   loadDoctor();
@@ -1462,6 +1463,7 @@ function activateTab(name) {
     safeLoad('roles', loadPeople);
   }
   if (name === 'identity') safeLoad('identity', loadIdentity);
+  if (name === 'media') safeLoad('media', loadMedia);
   if (name === 'notify') safeLoad('notify', loadNotify);
   if (name === 'onebot') safeLoad('onebot', loadOnebot);
   // 纯展示同步：侧栏 / 底栏高亮、面包屑、抽屉收起。不碰任何数据加载。
@@ -9300,3 +9302,372 @@ async function devSave(patch, what) {
     lastLoggedIn = logged;
   }, 4000)?.unref?.();
 })();
+
+/* ---------------- 素材页（机器人级 Markdown 图床） ----------------
+ * 三条接口都在后端做了鉴权 / CSRF / 归属校验，前端只负责选文件、base64 编码
+ * 和展示。用 var 是刻意的：activateTab 可能在脚本执行到这里之前就被 hash 触发，
+ * let/const 会撞 TDZ，safeLoad 把异常吞成「页面加载失败」很难查。
+ */
+var MEDIA_STATE = null;
+function mediaState() {
+  if (!MEDIA_STATE) {
+    MEDIA_STATE = { images: [], cursor: '', total: 0, quota: 100, loading: false, files: [], selected: new Set(), batchMode: false };
+  }
+  return MEDIA_STATE;
+}
+
+function mediaTime(sec) {
+  const n = Number(sec) || 0;
+  return n ? new Date(n * 1000).toLocaleString('zh-CN', { hour12: false }) : '—';
+}
+
+function mediaLeft(sec) {
+  const n = Number(sec) || 0;
+  if (!n) return '—';
+  const days = Math.ceil((n * 1000 - Date.now()) / 86400000);
+  return days <= 0 ? '已过期' : `剩 ${days} 天`;
+}
+
+async function loadMedia({ more = false } = {}) {
+  const st = mediaState();
+  if (st.loading) return;
+  st.loading = true;
+  const listEl = $('#mediaList');
+  const moreBtn = $('#mediaMore');
+  const msgEl = $('#mediaListMsg');
+  if (msgEl) msgEl.textContent = '加载中…';
+  if (moreBtn) moreBtn.disabled = true;
+  try {
+    const q = !more || !st.cursor ? '' : `?cursor=${encodeURIComponent(st.cursor)}`;
+    const r = await api(`/api/media-images${q}`);
+    st.images = more ? [...st.images, ...(r?.images || [])] : (r?.images || []);
+    st.cursor = String(r?.nextCursor || '');
+    st.total = Number(r?.total) || 0;
+    st.quota = Number(r?.quota) || 100;
+    renderMedia();
+    if (msgEl) msgEl.textContent = '';
+  } catch (e) {
+    if (listEl) listEl.innerHTML = `<div class="empty">${escapeHtml(errText(e))}</div>`;
+    if (msgEl) msgEl.textContent = '';
+  } finally {
+    st.loading = false;
+    if (moreBtn) {
+      moreBtn.disabled = false;
+      moreBtn.hidden = !st.cursor;
+    }
+  }
+}
+
+/**
+ * 删除成功后立即把卡片从本地摘掉，不等 list 接口重拉：
+ *   · loadMedia() 有 loading 闸门，删除时若有别的加载在跑会被直接跳过；
+ *   · 官方 list 有同步延迟，马上重拉可能把刚删的又带回来。
+ * 只移除 deleted / missing，failed 的留在列表上让用户看到并重试。
+ */
+function dropMediaCards(ids) {
+  const st = mediaState();
+  const gone = new Set(ids);
+  if (!gone.size) return;
+  st.images = st.images.filter((x) => !gone.has(x.imageId));
+  st.total = Math.max(0, st.total - gone.size);
+  for (const id of gone) st.selected.delete(id);
+  renderMedia();
+}
+
+function updateMediaSelection() {
+  const st = mediaState();
+  const n = st.selected.size;
+  const batch = st.batchMode;
+  const batchBtn = $('#mediaBatchBtn');
+  const all = $('#mediaSelectAll');
+  const del = $('#mediaDeleteSelected');
+  const cnt = $('#mediaSelCount');
+  const hint = $('#mediaListHint');
+  if (batchBtn) batchBtn.textContent = batch ? '退出批量' : '批量管理';
+  if (all) {
+    all.hidden = !batch;
+    all.textContent = (n && n === st.images.length) ? '取消全选' : '全选';
+  }
+  if (del) {
+    del.hidden = !batch;
+    del.disabled = !n;
+    del.textContent = n ? `删除所选 (${n})` : '删除所选';
+  }
+  if (cnt) { cnt.hidden = !batch; cnt.textContent = `已选 ${n} 张`; }
+  if (hint) {
+    hint.textContent = batch
+      ? '批量模式：直接点卡片选中或取消，再点「删除所选」；点「退出批量」返回普通模式。'
+      : '缩略图是平台给的短时效预览链接，只在这里看一眼，不会存到本机。';
+  }
+}
+
+function renderMedia() {
+  const list = $('#mediaList');
+  if (!list) return;
+  const st = mediaState();
+  const quota = $('#mediaQuota');
+  if (quota) quota.textContent = `已用 ${st.total} / ${st.quota} 张`;
+  // 切机器人 / 刷新后清掉已不在列表里的选中项
+  const ids = new Set(st.images.map((x) => x.imageId));
+  for (const id of st.selected) if (!ids.has(id)) st.selected.delete(id);
+  list.classList.toggle('batch', st.batchMode);
+  updateMediaSelection();
+  if (!st.images.length) {
+    list.innerHTML = '<div class="empty">还没有素材，先在上面传一张</div>';
+    return;
+  }
+  list.innerHTML = st.images.map((it) => {
+    const id = escapeHtml(it.imageId);
+    const name = escapeHtml(it.fileName || '未命名');
+    const url = escapeHtml(it.url);
+    const md = escapeHtml(`![${it.fileName || '图片'}](${it.url || ''})`);
+    const picked = st.selected.has(it.imageId) ? ' selected' : '';
+    const thumb = it.previewUrl
+      ? `<img class="media-thumb" src="${escapeHtml(it.previewUrl)}" alt="" loading="lazy">`
+      : '<div class="media-thumb"></div>';
+    // 批量模式下不生成卡片按钮：点卡片任意位置都是选中，不会误触到复制 / 单张删除
+    const actions = st.batchMode ? '' : `<div class="media-actions">
+      <button type="button" class="btn small" data-media-copy="url" data-id="${id}">复制引用</button>
+      <button type="button" class="btn small" data-media-copy="md" data-value="${md}">复制 Markdown</button>
+      <button type="button" class="btn small danger" data-media-del="${id}">删除</button>
+    </div>`;
+    return `<div class="media-item${picked}" data-media-id="${id}">
+      ${thumb}
+      <div class="media-meta">
+        <div class="media-name">${name}</div>
+        <span class="hint">${mediaTime(it.createdAt)} · ${escapeHtml(mediaLeft(it.expiresAt))}</span>
+        ${actions}
+      </div>
+    </div>`;
+  }).join('');
+  // 预览链接是短时效的，过期就留空方块，不要一页碎图标
+  list.querySelectorAll('.media-thumb').forEach((img) => {
+    img.addEventListener('error', () => { img.style.visibility = 'hidden'; });
+  });
+}
+
+async function copyMediaText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('已复制', 'ok');
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'absolute';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    toast(ok ? '已复制' : '复制失败，请手动选择', ok ? 'ok' : 'error');
+  }
+}
+
+function pickMediaFiles(files) {
+  const st = mediaState();
+  const pick = $('#mediaPick');
+  const btn = $('#mediaUploadBtn');
+  const msg = $('#mediaMsg');
+  st.files = [];
+  if (btn) btn.disabled = true;
+  if (msg) msg.textContent = '';
+  if (!files || !files.length) {
+    if (pick) pick.textContent = '还没选文件';
+    return;
+  }
+  const skipped = [];
+  for (const file of Array.from(files)) {
+    if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) {
+      skipped.push(`${file.name}（格式不支持）`);
+    } else if (file.size > 10 * 1024 * 1024) {
+      skipped.push(`${file.name}（${(file.size / 1024 / 1024).toFixed(1)}MB 超限）`);
+    } else {
+      st.files.push(file);
+    }
+  }
+  if (btn) btn.disabled = !st.files.length;
+  if (!st.files.length) {
+    if (pick) pick.textContent = skipped.join('、') || '没有可用图片';
+    return;
+  }
+  const names = st.files.slice(0, 3).map((f) => f.name).join('、');
+  const more = st.files.length > 3 ? ` 等 ${st.files.length} 张` : '';
+  const skipTip = skipped.length ? `；跳过 ${skipped.length} 张：${skipped.slice(0, 2).join('、')}` : '';
+  if (pick) pick.textContent = `已选 ${st.files.length} 张：${names}${more}${skipTip}`;
+}
+
+async function uploadMediaFiles() {
+  const st = mediaState();
+  const files = st.files.slice();
+  if (!files.length) return;
+  const btn = $('#mediaUploadBtn');
+  const msg = $('#mediaMsg');
+  if (btn) btn.disabled = true;
+  const done = [];
+  const failed = [];
+  try {
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      if (msg) msg.textContent = `正在上传 ${i + 1}/${files.length}：${file.name}（申请 → 直传 → 完成）…`;
+      try {
+        const dataUrl = await new Promise((resolve, reject) => {
+          const fr = new FileReader();
+          fr.onload = () => resolve(String(fr.result || ''));
+          fr.onerror = () => reject(new Error('读取图片失败'));
+          fr.readAsDataURL(file);
+        });
+        const data = dataUrl.slice(dataUrl.indexOf(',') + 1);
+        await api('/api/media-images/upload', {
+          method: 'POST',
+          body: JSON.stringify({ name: file.name, data }),
+        });
+        done.push(file.name);
+      } catch (e) {
+        failed.push(`${file.name}：${errText(e)}`);
+      }
+    }
+    st.files = [];
+    const input = $('#mediaFile');
+    if (input) input.value = '';
+    if (msg) msg.textContent = failed.length ? failed.join('；') : '';
+    if ($('#mediaPick')) {
+      $('#mediaPick').textContent = failed.length
+        ? `本次 ${done.length} 张成功、${failed.length} 张失败，可重新选择`
+        : `已上传 ${done.length} 张，可以继续选图`;
+    }
+    if (failed.length) {
+      toast(`成功 ${done.length} 张，失败 ${failed.length} 张`, 'error');
+    } else {
+      toast(`已上传 ${done.length} 张`, 'ok');
+    }
+    await loadMedia();
+  } finally {
+    if (btn) btn.disabled = !st.files.length;
+  }
+}
+
+async function deleteSelectedMedia() {
+  const st = mediaState();
+  const ids = [...st.selected];
+  if (!ids.length) return;
+  const ok = await confirmDialog({
+    title: '批量删除素材',
+    message: `确定删除选中的 <b>${ids.length}</b> 张吗？删除后 <b>qqbot-media://</b> 引用立即失效；已经发出去的消息不受影响。`,
+    okText: `删除 ${ids.length} 张`,
+    danger: true,
+  });
+  if (!ok) return;
+  const btn = $('#mediaDeleteSelected');
+  const msg = $('#mediaListMsg');
+  if (btn) btn.disabled = true;
+  try {
+    if (msg) msg.textContent = `正在删除 ${ids.length} 张…`;
+    const r = await api('/api/media-images/delete', {
+      method: 'POST',
+      body: JSON.stringify({ imageIds: ids, confirm: true }),
+    });
+    const gone = [
+      ...(r?.deleted || []).map((x) => x.imageId),
+      ...(r?.missing || []),
+    ];
+    st.selected.clear();
+    dropMediaCards(gone); // 先本地摘卡片，立即见效，不等 list 重拉
+    const d = r?.deleted?.length || 0;
+    const m = r?.missing?.length || 0;
+    const f = r?.failed?.length || 0;
+    const tip = [d && `成功 ${d} 张`, m && `${m} 张已不存在`, f && `${f} 张失败`].filter(Boolean).join('，');
+    if (msg) msg.textContent = r?.error || tip;
+    toast(tip || '已删除', (f || m) ? 'error' : 'ok');
+  } catch (e) {
+    if (msg) msg.textContent = errText(e);
+    toast(errText(e), 'error');
+  } finally {
+    updateMediaSelection();
+  }
+}
+
+document.addEventListener('click', async (e) => {
+  if (e.target?.closest?.('#mediaBatchBtn')) {
+    const st = mediaState();
+    st.batchMode = !st.batchMode;
+    if (!st.batchMode) st.selected.clear();
+    renderMedia();
+    return;
+  }
+  if (e.target?.closest?.('#mediaSelectAll')) {
+    const st = mediaState();
+    if (st.selected.size === st.images.length) st.selected.clear();
+    else st.images.forEach((x) => st.selected.add(x.imageId));
+    renderMedia();
+    return;
+  }
+  if (e.target?.closest?.('#mediaDeleteSelected')) return deleteSelectedMedia();
+  if (mediaState().batchMode) {
+    const item = e.target?.closest?.('.media-item');
+    if (item) {
+      const st = mediaState();
+      const id = item.dataset.mediaId;
+      if (st.selected.has(id)) st.selected.delete(id);
+      else st.selected.add(id);
+      item.classList.toggle('selected', st.selected.has(id));
+      updateMediaSelection();
+      return;
+    }
+  }
+  const copyBtn = e.target?.closest?.('[data-media-copy]');
+  if (copyBtn) {
+    const kind = copyBtn.dataset.mediaCopy;
+    if (kind === 'md') return copyMediaText(copyBtn.dataset.value || '');
+    const it = mediaState().images.find((x) => x.imageId === copyBtn.dataset.id);
+    if (it?.url) await copyMediaText(it.url);
+    return;
+  }
+  const delBtn = e.target?.closest?.('[data-media-del]');
+  if (delBtn) {
+    const id = delBtn.dataset.mediaDel;
+    const ok = await confirmDialog({
+      title: '删除素材',
+      message: '删除后 <b>qqbot-media://</b> 引用立即失效；已经发出去的消息不受影响。',
+      okText: '删除',
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api('/api/media-images/delete', {
+        method: 'POST',
+        body: JSON.stringify({ imageId: id, confirm: true }),
+      });
+      dropMediaCards([id]);
+      toast('已删除', 'ok');
+    } catch (err) {
+      toast(errText(err), 'error');
+    }
+    return;
+  }
+  if (e.target?.closest?.('#mediaUploadBtn')) return uploadMediaFiles();
+  if (e.target?.closest?.('#mediaRefresh')) return loadMedia();
+  if (e.target?.closest?.('#mediaMore')) return loadMedia({ more: true });
+});
+
+const mediaDrop = $('#mediaDrop');
+if (mediaDrop) {
+  mediaDrop.addEventListener('click', (e) => {
+    // label 自己会触发 file input，别再点一次，否则弹两个选择框
+    if (e.target?.closest?.('label') || e.target?.closest?.('input')) return;
+    $('#mediaFile')?.click();
+  });
+  mediaDrop.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    mediaDrop.classList.add('drag');
+  });
+  mediaDrop.addEventListener('dragleave', () => mediaDrop.classList.remove('drag'));
+  mediaDrop.addEventListener('drop', (e) => {
+    e.preventDefault();
+    mediaDrop.classList.remove('drag');
+    pickMediaFiles(e.dataTransfer?.files);
+  });
+}
+$('#mediaFile')?.addEventListener('change', (e) => pickMediaFiles(e.target.files));
+
+// hash 直达 #media 时，activateTab 可能在本块执行前就跑过了，补一次
+if (location.hash.slice(1) === 'media') activateTab('media');

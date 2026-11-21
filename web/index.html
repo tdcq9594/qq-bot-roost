@@ -131,6 +131,8 @@
           <button class="tab-item" data-tab="identity">身份</button>
           <button class="tab-item" data-tab="groups">群组</button>
           <button class="tab-item" data-tab="roles">权限</button>
+          <!-- 素材：机器人级 Markdown 图床，上传后得到 qqbot-media:// 引用 -->
+          <button class="tab-item" data-tab="media">素材</button>
           <!-- 通知：SMTP 邮箱配置 + 普通成员自助绑定 -->
           <button class="tab-item" data-tab="notify">通知</button>
           <!-- 外接：上=自有宿主协议，下=OneBot v11，共用按需依赖 -->
@@ -464,6 +466,49 @@
         成员发 <b>绑定QQ 自己的QQ号</b> → 验证码发到 <b>QQ号@qq.com</b> → 再发
         <b>QQ验证码 6位数字</b> 即完成绑定。收件邮箱由 QQ 号自动拼接，不需要在这里配置。
         QQ 号已被别人绑定时会直接拒绝；未开通数字邮箱的 QQ 号请找主人用「绑定成员」代绑。
+      </div>
+    </div>
+  </section>
+
+  <!-- 素材：机器人级 Markdown 图床。上传后拿到 qqbot-media:// 引用，跨群跨单聊复用 -->
+  <section id="tab-media" class="panel">
+    <div class="box">
+      <div class="box-hd">
+        <h3>上传图片</h3>
+        <span class="hint" id="mediaQuota">素材库读取中…</span>
+      </div>
+      <div class="hint">
+        单张 ≤10MB，支持 png / jpeg / gif / webp。上传后得到
+        <span class="mono">qqbot-media://</span> 引用，可在 Markdown 消息里反复使用；
+        单机器人上限 100 张，连续 90 天没被引用会失效。
+      </div>
+      <div class="media-drop" id="mediaDrop">
+        <div>把图片拖到这里，或 <label class="media-pick" for="mediaFile">选择文件</label>（可多选）</div>
+        <input type="file" id="mediaFile" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
+        <div class="hint" id="mediaPick">还没选文件</div>
+      </div>
+      <div class="btn-row">
+        <button type="button" class="btn primary" id="mediaUploadBtn" disabled>上传素材</button>
+        <span class="hint" id="mediaMsg"></span>
+      </div>
+    </div>
+
+    <div class="box">
+      <div class="box-hd">
+        <h3>素材库</h3>
+        <div class="box-hd-right">
+          <button type="button" class="btn small" id="mediaBatchBtn">批量管理</button>
+          <button type="button" class="btn small" id="mediaSelectAll" hidden>全选</button>
+          <button type="button" class="btn small danger" id="mediaDeleteSelected" hidden disabled>删除所选</button>
+          <button type="button" class="btn small" id="mediaRefresh">刷新</button>
+        </div>
+      </div>
+      <div class="hint" id="mediaListHint">缩略图是平台给的短时效预览链接，只在这里看一眼，不会存到本机。</div>
+      <div id="mediaList" class="media-list"><div class="empty">加载中…</div></div>
+      <div class="btn-row">
+        <button type="button" class="btn small" id="mediaMore" hidden>加载更多</button>
+        <span class="hint" id="mediaSelCount" hidden>已选 0 张</span>
+        <span class="hint" id="mediaListMsg"></span>
       </div>
     </div>
   </section>
