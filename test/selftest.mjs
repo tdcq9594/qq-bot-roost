@@ -3277,6 +3277,16 @@ async function testHashDir() {
     const f1 = await mk('f1', { 'a.js': 'same\n' });
     const f2 = await mk('f2', { 'b.js': 'same\n' });
     check('目录指纹: 文件名参与计算', (await hashDir(f1)) !== (await hashDir(f2)));
+
+    // 纯文档不进指纹：改 README 不该逼着升插件版本。
+    // 和插件仓 scripts/hashdir.mjs 的豁免规则必须一致（跨仓一致性测试守）。
+    const g1 = await mk('g1', { 'index.js': 'z\n' });
+    const g2 = await mk('g2', { 'index.js': 'z\n', 'README.md': 'doc v1\n', 'docs/guide.md': 'more\n' });
+    check('目录指纹: 忽略 .md 文档', (await hashDir(g1)) === (await hashDir(g2)));
+
+    // LICENSE 是插件作者自带的协议声明，改协议不该逼着升版本，同样不进指纹
+    const h2 = await mk('h2', { 'index.js': 'z\n', 'LICENSE': 'MIT\n', 'COPYING.txt': 'x\n' });
+    check('目录指纹: 忽略 LICENSE 协议文件', (await hashDir(g1)) === (await hashDir(h2)));
   } finally {
     await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
   }
