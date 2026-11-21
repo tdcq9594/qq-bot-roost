@@ -66,6 +66,16 @@ async function collect(root) {
         await walk(path.join(dir, it.name), prefix ? `${prefix}/${it.name}` : it.name);
       } else if (it.isFile()) {
         if (SKIP_FILES.has(it.name)) continue;
+        /**
+         * 纯文档不参与插件内容指纹：改 README / LICENSE 不改变用户装到的
+         * 代码，不该逼维护者 bump 版本（改文档就升版纯属版本噪音）。
+         * LICENSE 由插件作者自带、可自定义协议，属于「文档声明」不是代码。
+         * 这里排除后，必须同步重建插件仓 index.json 并让插件仓的
+         * scripts/hashdir.mjs 一致排除，否则跨仓校验会全红。
+         */
+        const lower = it.name.toLowerCase();
+        if (lower.endsWith('.md')) continue;
+        if (/^(license|licence|copying)(\.[a-z0-9]+)?$/.test(lower)) continue;
         out.push(prefix ? `${prefix}/${it.name}` : it.name);
       }
       // 符号链接一律跳过：它可能指向仓库外，内容不稳定

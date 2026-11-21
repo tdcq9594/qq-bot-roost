@@ -10,7 +10,7 @@
 
 ```bash
 node -v          # 需要 >= 22
-npm test         # 框架自检，当前 31 项，必须全绿
+npm test         # 框架自检，必须全绿（项数以 README 徽章为准）
 npm run mock     # 不连 QQ，命令行发假消息调插件
 ```
 
