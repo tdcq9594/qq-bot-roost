@@ -7042,10 +7042,51 @@ function msgClass(text) {
   return '';
 }
 
-function logLine(e) {
+/**
+ * 视图层折叠：只把**连续相同**的 `[ext-bridge]` INFO 合成一行 ×N。
+ * 思路照 pino-quiet（缓冲上一条，相同计数，不同才落新行），
+ * 但只作用在展示层——logBuf 仍存每一条原始日志，搜索/过滤不受影响。
+ */
+function foldKeyOf(e) {
+  if (e?.level !== 'info' || !String(e.msg ?? '').startsWith('[ext-bridge] ')) return null;
+  return `info|${e.tag ?? ''}|${e.msg}`;
+}
+
+function bumpFold(el, e) {
+  const n = Number(el.dataset.foldCount || 1) + 1;
+  el.dataset.foldCount = String(n);
+  const time = el.querySelector('.t');
+  if (time) time.textContent = e.time;
+  let badge = el.querySelector('.log-fold');
+  if (!badge) {
+    badge = document.createElement('span');
+    badge.className = 'log-fold';
+    el.appendChild(badge);
+  }
+  badge.textContent = `×${n}`;
+  el.title = `连续 ${n} 条相同日志 · 首次 ${el.dataset.firstTime ?? e.time} · 最近 ${e.time}`;
+}
+
+/** 追加一行；跟上一行是同类折叠日志就只更新计数 */
+function pushFolded(e) {
+  const key = foldKeyOf(e);
+  const last = logView.lastElementChild;
+  if (key && last?.dataset.foldKey === key) {
+    bumpFold(last, e);
+    return;
+  }
+  logView.appendChild(logLine(e, key));
+}
+
+function logLine(e, foldKey = null) {
   const el = document.createElement('div');
   el.className = `log-line ${e.level}`;
   el.dataset.level = e.level;
+  if (foldKey) {
+    el.dataset.foldKey = foldKey;
+    el.dataset.foldCount = '1';
+    el.dataset.firstTime = e.time;
+  }
 
   const lv = `<span class="lv">${LEVEL_LABEL[e.level] ?? e.level}</span>`;
   const tag = e.tag ? `<span class="tag ${tagClass(e.tag)}">${escapeHtml(e.tag)}</span>` : '';
@@ -7109,7 +7150,7 @@ function renderLogs() {
   const atBottom = logView.scrollTop + logView.clientHeight >= logView.scrollHeight - 40;
   logView.innerHTML = '';
   for (const e of logBuf) {
-    if (logMatches(e)) logView.appendChild(logLine(e));
+    if (logMatches(e)) pushFolded(e);
   }
   if ($('#autoScroll').checked && atBottom) logView.scrollTop = logView.scrollHeight;
 }
@@ -7122,9 +7163,8 @@ function appendLog(e) {
     if (logView.firstElementChild && logView.children.length > 600) logView.firstElementChild.remove();
   }
   if (!logMatches(e)) return;
-  const el = logLine(e);
   const atBottom = logView.scrollTop + logView.clientHeight >= logView.scrollHeight - 40;
-  logView.appendChild(el);
+  pushFolded(e);
   if ($('#autoScroll').checked && atBottom) logView.scrollTop = logView.scrollHeight;
 }
 
