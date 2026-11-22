@@ -84,6 +84,36 @@ test('normalize：已经写了两个尺寸位的原样放过（作者优先）',
   assert.equal(normalizeMarkdownImages(raw, (u) => dims.get(u)), raw);
 });
 
+test('normalize：正文里的 #3月 #5日 不是尺寸位，照常补（旧版 px 可选会误认）', () => {
+  const dims = new Map([['qqbot-media://a', { w: 800, h: 400 }]]);
+  const raw = '![今天聊了 #3月 #5日](qqbot-media://a)';
+  assert.equal(
+    normalizeMarkdownImages(raw, (u) => dims.get(u)),
+    '![今天聊了 #3月 #5日 #480px #240px](qqbot-media://a)',
+  );
+});
+
+test('normalize：只写一个尺寸位时按真实比例补齐，作者写的宽度不改', () => {
+  const dims = new Map([['qqbot-media://a', { w: 800, h: 400 }]]);
+  // 作者指定宽 200 → 真实比例高 100；#480px 超过上限也不动作者的值
+  assert.equal(
+    normalizeMarkdownImages('![图 #200px](qqbot-media://a)', (u) => dims.get(u)),
+    '![图 #200px #100px](qqbot-media://a)',
+  );
+  assert.equal(
+    normalizeMarkdownImages('![图 #480px](qqbot-media://a)', (u) => dims.get(u)),
+    '![图 #480px #240px](qqbot-media://a)',
+  );
+});
+
+test('normalize：单个尺寸位后仍有说明文字时，补的高紧跟尺寸位', () => {
+  const dims = new Map([['qqbot-media://a', { w: 800, h: 400 }]]);
+  assert.equal(
+    normalizeMarkdownImages('![图 #200px 说明](qqbot-media://a)', (u) => dims.get(u)),
+    '![图 #200px #100px 说明](qqbot-media://a)',
+  );
+});
+
 test('normalize：查不到宽高的不动（宁可不显示也不压变形）', () => {
   const raw = '![](qqbot-media://unknown)';
   assert.equal(normalizeMarkdownImages(raw, () => undefined), raw);

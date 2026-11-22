@@ -98,8 +98,14 @@ export function sizeSuffix(d) {
   return ` #${w}px #${h}px`;
 }
 
-/** 图片语法的 alt 位里，已经写了几个 `#数字px` */
-const SIZE_TOKEN = /#\s*\d{1,5}\s*(?:px)?/g;
+/**
+ * 图片语法的 alt 位里，已经写了几个合法的 `#数字px`。
+ *
+ * px 必须带：QQ 官方语法就是 `#宽px #高px`。旧版本把 px 写成可选，
+ * `#3月 #5日` 里的 `#3`、`#5` 会被当成两个尺寸位，正文带日期的图反而
+ * 丢掉尺寸、手机上不显示（2026-11-22 发版审查发现）。
+ */
+const SIZE_TOKEN = /#\s*\d{1,5}\s*px/g;
 /** 只认单行的图片语法；URL 里不会有空格，`[^\s)]` 足够 */
 const MD_IMAGE = /!\[([^\]\n]*)\]\(([^)\s]+)\)/g;
 /** 代码块原样保留：里面的 `![]()` 是要给人看的语法，补尺寸反而改坏了 */
@@ -150,10 +156,13 @@ function splitInlineCode(seg) {
 /**
  * 给正文里缺尺寸的 markdown 图片补上 `#宽px #高px`。
  *
- * 三条规则：
- *   1. 已经带两个尺寸位的**不动**（作者显式写的优先，我们只兜底）；
- *   2. 拿不到宽高的**不动**（不猜比例）；
- *   3. alt 为空时补一个占位说明——`![ #480px #240px]` 这种写法官方示例里没有，
+ * 四条规则：
+ *   1. 已经带两个及以上尺寸位的**不动**（作者显式写的优先，我们只兜底，
+ *      不校验写的值对不对——那是作者故意指定的显示大小）；
+ *   2. 只写了一个尺寸位的：按真实比例补上另一个。QQ 语法是
+ *      `#宽px #高px`，所以补的那个放在后面当高；作者写的宽度不改写；
+ *   3. 拿不到宽高的**不动**（不猜比例）；
+ *   4. alt 为空时补一个占位说明——`![ #480px #240px]` 这种写法官方示例里没有，
  *      填个字更稳，也不会在图上多显示什么东西。
  *
  * 围栏块（```）和行内反引号里的内容都原样保留，见 `splitInlineCode`。
@@ -167,7 +176,23 @@ export function normalizeMarkdownImages(text, lookup) {
   const fill = (seg) => seg.replace(MD_IMAGE, (m, alt, url) => {
     const had = String(alt).match(SIZE_TOKEN) ?? [];
     if (had.length >= 2) return m;
-    const suffix = sizeSuffix(lookup(url));
+    const real = lookup(url);
+    const w = Math.floor(Number(real?.w) || 0);
+    const h = Math.floor(Number(real?.h) || 0);
+    if (w <= 0 || h <= 0) return m;
+    /**
+     * 只写了一个尺寸位：作者写的不改写，按真实比例补上另一个。
+     * QQ 语法是 `#宽px #高px`，补的当高紧跟在后面，说明文字仍留在原处。
+     * 作者写 0 这种无效值不猜，原样放过。
+     */
+    if (had.length === 1) {
+      const given = Math.floor(Number(had[0].replace(/[^\d]/g, '')) || 0);
+      if (given <= 0) return m;
+      const other = Math.max(1, Math.round((h * given) / w));
+      const filled = String(alt).replace(SIZE_TOKEN, (tok) => `${tok} #${other}px`);
+      return `![${filled}](${url})`;
+    }
+    const suffix = sizeSuffix({ w, h });
     if (!suffix) return m;
     const name = String(alt).trim() || '图片';
     return `![${name}${suffix}](${url})`;
