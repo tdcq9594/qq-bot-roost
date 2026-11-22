@@ -140,15 +140,6 @@ export function etagToMd5(etag, fallback = '') {
 export const MD5_10M_SIZE = 10_002_432;
 
 /**
- * 被动回复序号的**最后一道**兜底上限。
- *
- * 官方口径按会话类型不同：群聊 5 次（`msg_seq` 1–5），单聊 4 次（1–4）。
- * 这里只按 `msgId` 记，拿不到会话类型，所以取两者较大的 5 当「绝不可能超过」的硬顶。
- * 精确拦截在 `outbound.js`（`PASSIVE_MAX_REPLIES[kind]`），正常流程走不到这里。
- */
-const PASSIVE_MAX_SEQ = 5;
-
-/**
  * 构造发送报文。抽成纯函数是为了能单测——`#payload` 是私有方法，测试摸不到。
  *
  * @param {object} opts 驼峰字段：content / msgType / msgId / msgSeq / eventId /
@@ -2426,16 +2417,14 @@ export class QQApi {
   }
 
   /**
-   * 被动回复序号。硬顶见 `PASSIVE_MAX_SEQ`（群聊 5 / 单聊 4，这里取 5 兜底），
-   * 超了服务端返回 40034128。正常流程由 outbound.js 按会话类型先拦。
+   * 被动回复序号，只递增、不设本地上限。
+   *
+   * 官方 2026-11-17 起群消息在开发者为群主 / 管理员时每条可达 50 次，
+   * 框架拿不到这个条件；超过上限时由服务端返回 40034128，
+   * `outbound.js` 会据此自动改发主动消息。这里硬拦会让本来能发的第 6～50 条丢掉。
    */
   #nextSeq(msgId) {
     const cur = this.seqMap.get(msgId) ?? 0;
-    if (cur >= PASSIVE_MAX_SEQ) {
-      throw new Error(
-        `同一条消息最多回复 5 次（群聊）/ 4 次（单聊），这条已经回了 ${cur} 次`,
-      );
-    }
     const next = cur + 1;
     this.seqMap.set(msgId, next);
     if (this.seqMap.size > 2000) {

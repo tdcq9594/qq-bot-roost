@@ -161,3 +161,33 @@ test('群档案：重启后从档案预载，不用等第一条消息', async ()
   assert.equal(second.groupName('G2'), '预载群');
   assert.equal(second.groupInfo('G2').memberNum, 42);
 });
+
+test('群消息：userOpenid 取发送者 OpenID，不与 member_openid 混用', () => {
+  const msg = buildMessage('GROUP_AT_MESSAGE_CREATE', groupEvent({
+    member_openid: 'MEMBER1',
+    id: 'USER1',
+    user_openid: 'USER1',
+  }), { api, cfg });
+
+  assert.equal(msg.userId, 'MEMBER1');
+  assert.equal(msg.userOpenid, 'USER1');
+});
+
+test('群消息 msg_id 私聊回复：走 c2c + 发送者 user_openid，共用同一个 msgId', async () => {
+  const calls = [];
+  const outbound = { send: async (o) => { calls.push(o); return { id: 'sent' }; } };
+  const msg = buildMessage('GROUP_AT_MESSAGE_CREATE', groupEvent({
+    member_openid: 'MEMBER1',
+    id: 'USER1',
+  }), { api, cfg, outbound });
+
+  const r = await msg.replyPrivate('私聊回你');
+
+  assert.equal(r.id, 'sent');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].kind, 'c2c');
+  assert.equal(calls[0].target, 'USER1');
+  assert.equal(calls[0].payload.msgId, 'm1');
+  assert.equal(calls[0].payload.content, '私聊回你');
+  assert.equal(msg.replied, true);
+});

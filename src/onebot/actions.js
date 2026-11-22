@@ -189,7 +189,7 @@ export function createActions({
       parsed.images.length +
       parsed.records.length;
     if (parts > MAX_PARTS) {
-      throw obError(1501, `一条消息最多拆 ${MAX_PARTS} 条（官方限制每条入站消息最多回 5 次），这条要拆 ${parts} 条`);
+      throw obError(1501, `一条消息最多拆 ${MAX_PARTS} 条（框架防刷屏上限，不是官方回复次数上限），这条要拆 ${parts} 条`);
     }
 
     const passive = getPassive(chatId);

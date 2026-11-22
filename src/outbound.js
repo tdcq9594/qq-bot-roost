@@ -14,8 +14,9 @@ const QUEUE_IDLE_MS = 60 * 1000;
  *
  * QQ 官方接口的硬限制都在这里统一处理，插件和内核都不用关心：
  *
- *   1. 被动回复只有 5 分钟有效期，超时必失败 → 快过期时降级为主动消息
- *   2. 同一条消息最多被动回复 5 次（msg_seq 1–5）→ 用满后同样降级
+ *   1. 被动回复有有效期（群 / 单聊 60 分钟，频道 5 分钟）→ 快过期时降级为主动消息
+ *   2. 被动回复次数不在这里设上限：官方 2026-11-17 起群消息在开发者为群主 / 管理员时
+ *      可达 50 次，框架查不到这个条件；真被服务端拒（40034128）再改发主动消息
  *   3. 发送接口 100 QPS（「每秒 5 条」只属于文字子频道，群聊 / 单聊没有这条）→ 本地令牌队列，超出的排队等
  *   4. 主动消息有两个维度：单关系 20/分钟 + 每群 1000/天 → 本地记账，用完直接拒绝
  *   5. 必须 WebSocket 在线才能发 → 离线时直接拒绝，不浪费一次网络请求
@@ -25,20 +26,17 @@ const QUEUE_IDLE_MS = 60 * 1000;
  */
 
 /**
- * 被动回复窗口。**两个接口不一样，别再用一个值。**
+ * 被动回复窗口。**官方 2026-11-17 变更记录：群从 5 分钟延长到 60 分钟。**
  *
- *   群聊 `/v2/groups/{group_openid}/messages`：5 分钟、最多 5 次
- *   单聊 `/v2/users/{user_openid}/messages`：**60 分钟、最多 4 次**
+ *   群聊 `/v2/groups/{group_openid}/messages`：60 分钟
+ *   单聊 `/v2/users/{user_openid}/messages`：60 分钟
+ *   频道 / 频道私信：仍按 5 分钟（官方 send.html 口径未变）
  *
- * 以前两者共用「5 分钟 / 5 次」（群聊的口径），单聊的后果是：
- *   · 5 分钟后就降级成主动消息，白吃「每个好友 1000 条/天」的额度，
- *     而被动回复本来不占主动额度；
- *   · 第 5 次回复会被服务端拒（40034128）。
- *
+ * 以前群聊按 5 分钟更早降级，白吃主动额度；单聊此前已经是 60 分钟。
  * 各留 15 秒给网络和服务端时钟差。
  */
 const PASSIVE_WINDOW_MS = {
-  group: 5 * 60 * 1000,
+  group: 60 * 60 * 1000,
   c2c: 60 * 60 * 1000,
   /** 文字子频道 / 频道私信：官方 `send.html` 写被动回复有效期 5 分钟 */
   guild: 5 * 60 * 1000,
@@ -49,18 +47,6 @@ const PASSIVE_SAFE_MS = {
   c2c: PASSIVE_WINDOW_MS.c2c - 15_000,
   guild: PASSIVE_WINDOW_MS.guild - 15_000,
   dm: PASSIVE_WINDOW_MS.dm - 15_000,
-};
-
-/**
- * 同一条消息最多回复次数：群聊 5、单聊 4。
- * 超过会返回 40034128「被动回复时间或次数超限」。
- * 频道侧官方只给了 5 分钟窗口，没给次数上限，所以不在这里拦。
- */
-const PASSIVE_MAX_REPLIES = {
-  group: 5,
-  c2c: 4,
-  guild: Number.MAX_SAFE_INTEGER,
-  dm: Number.MAX_SAFE_INTEGER,
 };
 
 /**
@@ -375,8 +361,6 @@ export class Outbound {
     /** 最近 50 条「本来会发出去」的消息，面板只读展示 */
     this.dryLog = [];
 
-    /** msgId -> 已用被动回复次数。官方：同一条消息最多 5 次 */
-    this.passiveCount = new Map();
     /** chatKey -> 最近 60 秒的主动发送时间戳 */
     this.activeLog = new Map();
 
@@ -656,36 +640,11 @@ export class Outbound {
     // 2) 排队 + 限速 + 额度扣减 + 实际发送
     //    额度的「查」和「扣」都放在队列里，避免两个并发推送同时通过检查后超额
     return this.#enqueue(chatKey, async () => {
-      // 2a) 被动回复次数上限：群聊 5 次、单聊 4 次
-      //     同一条消息被多个插件连着回、或用户一句话触发多轮时很容易撞上，
-      //     本地先拦，省得服务端返回 40034128 再兜底
-      let passiveNow = wantPassive && !active;
-      if (passiveNow) {
-        const maxReplies = PASSIVE_MAX_REPLIES[kind];
-        const used = this.passiveCount.get(body.msgId) ?? 0;
-        if (used >= maxReplies) {
-          if (!this.downgrade) {
-            this.stats.expired += 1;
-            throw new SendError(
-              `同一条消息最多回复 ${maxReplies} 次（QQ 官方限制），这条已经回满了。\n` +
-                `等用户再说一句，就能继续用被动回复。`,
-              'expired',
-            );
-          }
-          delete body.msgId;
-          delete body.msgSeq;
-          passiveNow = false;
-          active = true;
-          degraded = true;
-          this.stats.degraded += 1;
-          log.warn(
-            `同一条消息已回复 ${used} 次，达到官方上限，降级为主动消息 · ${chatKey}`,
-          );
-        } else {
-          this.passiveCount.set(body.msgId, used + 1);
-          this.#prunePassiveCount();
-        }
-      }
+      // 被动回复次数不在本地设上限：官方 2026-11-17 起群消息在开发者为群主 /
+      // 管理员时每条可达 50 次，而框架查不到这个条件（canManageGroup 查的是
+      // 机器人自己在群里的角色，不是开发者账号）。真超了服务端会回 40034128，
+      // 下面 catch 里的 #looksExpired 会把它当过期，自动改发主动消息。
+      const passiveNow = wantPassive && !active;
 
       // 2b) 主动消息额度：日额度 + 分钟额度，两个都要过
       //     互动召回（is_wakeup）走官方独立额度：用户主动对话后 30 天内
@@ -731,11 +690,6 @@ export class Outbound {
         if (r?.pending) this.stats.audit += 1;
         return { ...r, degraded };
       } catch (e) {
-        // 被动回复没发出去，把这次占用的次数退回去，不然 5 次额度会白白烧掉
-        if (passiveNow) {
-          const n = this.passiveCount.get(body.msgId) ?? 0;
-          if (n > 0) this.passiveCount.set(body.msgId, n - 1);
-        }
         // 主动消息是「先扣后发」，发失败要把额度退回去（互动召回没扣，不退）
         if (active && !isWakeup) await this.quota.refund(chatKey).catch(() => {});
         // 被动回复被服务端判定过期（本地时钟差或排队等太久），再降级试一次
@@ -850,12 +804,6 @@ export class Outbound {
   }
 
   /** 被动次数表不能无限长，超了丢最旧的（和 api.js 的 seqMap 一个套路） */
-  #prunePassiveCount() {
-    if (this.passiveCount.size <= 2000) return;
-    const oldest = this.passiveCount.keys().next().value;
-    if (oldest !== undefined) this.passiveCount.delete(oldest);
-  }
-
   /**
    * 同一会话串行执行，并保证 1 秒内不超过 perSec 条。
    * 不同会话之间互不影响，可以并行。
