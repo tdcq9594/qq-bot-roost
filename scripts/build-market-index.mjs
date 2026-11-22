@@ -17,6 +17,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
+import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { hashDir } from '../src/hashdir.js';
 
@@ -87,6 +88,44 @@ async function readExternal(file) {
     console.warn(`  跳过 ${path.basename(path.dirname(file))}：plugin.json 解析失败（${e.message}）`);
     return null;
   }
+}
+
+/**
+ * 读 `<仓库>/deps/manifest.json`，算出每个依赖包的 sha256 与体积。
+ *
+ * 没有 `deps/` 目录＝这个市场没配镜像，返回空数组（不是错误）。
+ * 声明了文件却找不到**必须抛错**：静默跳过会让 `index.json` 少一条，
+ * 用户那边表现为「镜像里没有这个包」，而我们会以为已经发布了。
+ *
+ * @param {string} root 市场仓库根目录
+ * @returns {Promise<Array<{name:string,version:string,path:string,sha256:string,size:number,license?:string}>>}
+ */
+async function readDeps(root) {
+  const dir = path.join(root, 'deps');
+  let manifest;
+  try {
+    manifest = JSON.parse(await fs.readFile(path.join(dir, 'manifest.json'), 'utf8'));
+  } catch (e) {
+    if (e.code === 'ENOENT') return [];
+    throw new Error(`deps/manifest.json 读不出：${e.message}`);
+  }
+  const list = [];
+  for (const p of manifest.packages ?? []) {
+    if (!p?.name || !p?.version || !p?.file) {
+      throw new Error(`deps/manifest.json 里有条目缺 name/version/file：${JSON.stringify(p)}`);
+    }
+    const buf = await fs.readFile(path.join(dir, p.file)).catch(() => null);
+    if (!buf) throw new Error(`deps/${p.file} 不存在（manifest 里声明了 ${p.name}@${p.version}）`);
+    list.push({
+      name: p.name,
+      version: p.version,
+      path: `deps/${p.file}`,
+      sha256: createHash('sha256').update(buf).digest('hex'),
+      size: buf.length,
+      ...(p.license ? { license: p.license } : {}),
+    });
+  }
+  return list.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 async function main() {
@@ -231,12 +270,25 @@ async function main() {
     plugins: merged,
   };
 
+  /**
+   * 依赖镜像：`<仓库>/deps/manifest.json` + 同目录的 tgz。
+   *
+   * 规则与插件仓 `scripts/build-index.mjs` 的 `readDeps()` **必须一致**，
+   * 否则谁跑一次都会把对方写的内容改一遍。哈希一律现算——清单里只写
+   * 名字/版本/文件名，哈希手抄一次就多一个出错点。
+   */
+  const depsList = await readDeps(dir);
+  if (depsList.length) out.deps = depsList;
+
   await fs.writeFile(target, `${JSON.stringify(out, null, 2)}\n`.replace(/\n/g, prevEol), 'utf8');
 
   console.log(`\n已生成 ${target}`);
   console.log(`  ${merged.length} 个插件${out.repo ? `，repo=${out.repo}` : '（没有 repo，安装会失败）'}`);
   for (const p of merged) {
     console.log(`  - ${p.id}${p.version ? ` v${p.version}` : ''}（${p.runtime}）${p.sha256 ? '' : '  ⚠ 无 sha256'}`);
+  }
+  for (const d of out.deps ?? []) {
+    console.log(`  · 依赖镜像 ${d.name}@${d.version}（${Math.round(d.size / 1024)}KB）`);
   }
 }
 

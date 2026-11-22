@@ -6358,7 +6358,12 @@ function renderOnebot(d) {
     hint.innerHTML =
       `还缺：<b>${escapeHtml(missing)}</b>。装不上时可以手动执行：` +
       `<code>${escapeHtml(d?.manual ?? '')}</code>` +
-      `<br>${regLine}　装不上先换个源再试`;
+      `<br>${regLine}　装不上先换个源再试` +
+      /**
+       * 内置包这条路要说出来：用户遇到「npm 装不上」时，最想知道的是
+       * 「还有没有别的办法」，而不是再换一次源。
+       */
+      '<br>npm 走不通时会自动改用<b>市场内置包</b>（ws / silk-wasm，直接解包，不需要 npm）';
   }
 
   /* ---------- 能力矩阵 ---------- */
@@ -6400,10 +6405,32 @@ async function onebotDepsAction(kind, name, btn) {
   const check = $('#onebotDepsCheck');
   if (check) check.hidden = true;
   try {
-    await api(`/api/ext/deps/${kind}`, {
+    const r = await api(`/api/ext/deps/${kind}`, {
       method: 'POST',
       body: JSON.stringify({ packages: [name] }),
     });
+    /**
+     * 后端把「安装没成功」包在 HTTP 200 + {ok:false, error} 里返回（为了不破坏
+     * 老客户端的状态码契约），api() 只在非 2xx 才抛。所以这里必须主动看 ok，
+     * 否则装不上时面板一声不吭——正是那次「ws 装不上且无报错」的根因之一。
+     */
+    if (r && r.ok === false) {
+      const hint = $('#onebotDepsHint');
+      if (hint) hint.innerHTML = `失败：${escapeHtml(r.error || '未知原因')}`;
+    } else if (Array.isArray(r?.fromMirror) && r.fromMirror.length) {
+      /**
+       * 走的是市场内置包：必须说出来。
+       *
+       * npm 那条路已经失败过一次（否则不会回退），用户下次再点「安装」还会
+       * 遇到同样的问题；不写明来源，他只会以为「刚才那一下碰巧成了」。
+       */
+      const hint = $('#onebotDepsHint');
+      const list = r.fromMirror.map((x) => `${x.name}@${x.version}`).join('、');
+      if (hint) {
+        hint.innerHTML = `npm 没装上，已改用<b>市场内置包</b>：<code>${escapeHtml(list)}</code>`
+          + '（装入后功能一致，只是不走 npm）';
+      }
+    }
   } catch (e) {
     const hint = $('#onebotDepsHint');
     if (hint) hint.innerHTML = `失败：${escapeHtml(e.message)}`;
