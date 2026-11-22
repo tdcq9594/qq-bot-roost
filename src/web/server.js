@@ -3275,7 +3275,11 @@ async function startWebServerInstance({
             ? body.packages
             : ['ws'];
           try {
-            const r = await extDeps.install(packages);
+            /**
+             * 把市场地址带进去：npm 装不上时从这里取内置包。
+             * 用户把 `plugins.marketUrl` 指向自己的仓库时，依赖也跟着他那个仓走。
+             */
+            const r = await extDeps.install(packages, { marketUrl: globalCfg.plugins?.marketUrl });
             // 装完立刻重配：开关早就打开的用户不用再点一次「保存」
             await rt?.onebot?.reconfigure(rt.cfg.onebot).catch(() => {});
             /** 宿主协议共用这份 ws，每只鸟都要重配，别只顾当前选中的那只 */
@@ -3286,6 +3290,8 @@ async function startWebServerInstance({
               ok: r.ok,
               installed: r.installed,
               error: r.error,
+              /** 哪几个包是从市场内置包装的（空＝全走 npm），面板要说清来源 */
+              fromMirror: r.fromMirror ?? [],
               deps: { dir: r.status.dir, packages: r.status.packages, missing: r.status.missing },
               state: rt?.onebot?.snapshot?.() ?? null,
             });
