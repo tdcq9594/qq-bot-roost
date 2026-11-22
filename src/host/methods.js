@@ -1113,6 +1113,7 @@ export function createMethods({ runtime: R, getState, log = () => {}, extBridge 
     /** 和面板一样，这两个开关要立刻同步给 api 实例，不然得等重启才生效 */
     R.api?.setGroupInvited?.(cfg.groupManage?.invited === true);
     R.api?.setMediaPlaceholderSpace?.(cfg.media?.placeholderSpace === true);
+    R.api?.setFaces?.(cfg.faces);
     return {
       ok: true,
       keys,
