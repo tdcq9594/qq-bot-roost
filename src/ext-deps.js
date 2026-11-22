@@ -36,7 +36,7 @@ import fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { createRequire } from 'node:module';
+import Module, { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { DIRS } from './paths.js';
 import { createLogger } from './logger.js';
@@ -102,6 +102,9 @@ const pkgFile = () => path.join(depsDir(), 'package.json');
 
 /** 已加载的模块缓存（`{ws, silk}`），`remove()` / `install()` 后要清 */
 const loaded = new Map();
+
+/** 加载失败的原因（首次失败时记，供诊断接口读；null 缓存后不再刷日志但原因还在） */
+const loadedError = new Map();
 
 /** 共用一个 createRequire，`resetCache` 要拿它去删 Node 自己的模块缓存 */
 let requireFrom = null;
@@ -182,6 +185,18 @@ async function installedVersion(name) {
   } catch {
     return '';
   }
+}
+
+/**
+ * 包是否真的在磁盘上（以 package.json 为准）。
+ *
+ * 为什么不能只信 `require.resolve`：Node 的 `Module._pathCache` 会缓存旧路径，
+ * 用户删掉 silk-wasm 后 `resolve()` 仍返回那个已不存在的文件路径，于是
+ * `install()` 以为「已装」直接跳过——删了重装怎么点都装不回来。
+ * 磁盘上的 package.json 是骗不了人的：删了就没了。
+ */
+async function presentOnDisk(name) {
+  return Boolean(await installedVersion(name));
 }
 
 /**
@@ -603,12 +618,21 @@ export async function load(name) {
         mod = null;
       }
     } else {
-      log.debug(`加载 ${name} 失败：${e.message}`);
+      // 升为 warn：缺依赖是用户要在面板处理的事，debug 会被控制台阈值(info)过滤，
+      // 导致「ws 没加载、日志却一片正常」。缓存 mod=null 避免反复 require，
+      // 但原因存进 loadedError，诊断接口能读到。
+      log.warn(`加载 ${name} 失败：${e.message}`);
+      loadedError.set(name, String(e.message));
       mod = null;
     }
   }
   loaded.set(name, mod);
   return mod;
+}
+
+/** 最近一次加载失败原因；没失败过返回空串（供宿主/面板显示为什么 WS 没起来） */
+export function loadError(name) {
+  return loadedError.get(name) || '';
 }
 
 /**
@@ -620,6 +644,7 @@ export async function load(name) {
  */
 export function resetCache() {
   loaded.clear();
+  loadedError.clear();
   /** 二进制路径也跟着重探：装/卸/重装之后不能还指着旧路径 */
   ffmpegCache = undefined;
   /** 系统 PATH 可能刚变（用户新装了一份），一并重扫 */
@@ -630,6 +655,25 @@ export function resetCache() {
       delete r.cache[r.resolve(name)];
     } catch {
       // 没装/解析不到：本来就没有缓存可删
+    }
+    /**
+     * 第二层：`require.resolve` 自己走的是 `Module._pathCache`，和 `require.cache`
+     * 是两套。只删 require.cache 的话，包被删掉后 resolve() 仍命中旧路径，
+     * install() 会误判「已装」。这里按包名匹配清掉相关路径缓存条目。
+     * Node 内部 API，用可选链保护；即使将来改了实现也不影响主判据（磁盘存在性）。
+     */
+    try {
+      const pathCache = Module?._pathCache;
+      if (pathCache && typeof pathCache === 'object') {
+        // Node 的 key 形如 `ws\0C:\...\node_modules\0...`：包名开头 + NUL 分隔的
+        // 搜索路径串。不是普通路径子串，所以用 `name\0` 前缀匹配才删得掉。
+        const prefix = `${name}\0`;
+        for (const key of Object.keys(pathCache)) {
+          if (key.startsWith(prefix)) delete pathCache[key];
+        }
+      }
+    } catch {
+      // 清不到也无妨：install() 已改用磁盘存在性判定
     }
   }
 }
@@ -667,12 +711,18 @@ export function install(names, opts = {}) {
      */
     const already = [];
     for (const name of picked) {
-      let ok = false;
-      try {
-        req().resolve(name);
-        ok = true;
-      } catch {
-        ok = false;
+      /**
+       * 磁盘事实优先：包被删后 `_pathCache` 仍让 resolve() 成功，
+       * 只信 resolve 会把「删了」误判成「已装」而跳过 npm（B3）。
+       * package.json 还在才谈得上解析。
+       */
+      let ok = await presentOnDisk(name);
+      if (ok) {
+        try {
+          req().resolve(name);
+        } catch {
+          ok = false;
+        }
       }
       /**
        * ffmpeg 主包能 resolve ≠ 能用：平台子包/二进制可能不在
@@ -804,6 +854,8 @@ export function install(names, opts = {}) {
       ...warn,
       ...(errors.length ? mirrorNotes : []),
     ].filter(Boolean).join('；').slice(0, 800);
+    /** 安装没成功必须留一条日志：以前只把原因塞进返回值，HTTP 200 回给前端后谁都不显示 = 完全静默 */
+    if (error) log.error(`外接依赖安装未成功：${error}`);
     return {
       ok: errors.length === 0,
       installed: picked,
@@ -820,10 +872,10 @@ export function install(names, opts = {}) {
   };
 
   const p = installChain.then(run, run);
-  // 失败不把链条卡死：下一次调用照样能跑
+  // 失败不把链条卡死：下一次调用照样能跑；但异常要留痕，不能纯吞
   installChain = p.then(
     () => undefined,
-    () => undefined,
+    (e) => { log.error(`外接依赖安装异常：${String(e?.message || e)}`); },
   );
   return p;
 }

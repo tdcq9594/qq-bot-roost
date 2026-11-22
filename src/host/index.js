@@ -185,15 +185,17 @@ export class HostBridge {
       return this;
     }
 
-    let wsMod = null;
-    try {
-      const m = await deps.load('ws');
-      if (m?.WebSocketServer) wsMod = m;
-    } catch (e) {
-      log.warn(`ws 加载失败，只开 HTTP + SSE：${e.message}`);
-    }
+    /**
+     * `deps.load('ws')` 内部吞错返回 null（不抛），所以以前的 try/catch 是死代码，
+     * 缺 ws 时一行日志都没有。现在 load() 自己会 warn，这里读它的失败原因，
+     * 让面板能显示「为什么 WS 没起来」。
+     */
+    const m = await deps.load('ws');
+    const wsMod = m?.WebSocketServer ? m : null;
     /** 没 ws 也要记住原因，面板据此显示「只有 SSE」而不是「坏了」 */
     this.wsMissing = !wsMod;
+    /** 顺序要对：先定 wsMissing，再据此取加载失败原因（否则恒为空） */
+    this.wsLoadError = this.wsMissing ? deps.loadError('ws') : '';
 
     await this.#version();
     /** 端口写在构造参数里，被占只能重建实例；每次只建一个，别让失败的实例堆着计时器 */
@@ -237,6 +239,13 @@ export class HostBridge {
 
     this.state = 'running';
     this.startedAt = Date.now();
+    /**
+     * 缺 ws 时服务确实在跑（HTTP + SSE），不能报 error 状态；但也不能
+     * error='' 装作一切正常——把「WS 未启用」的原因摆出来，面板/接口可见。
+     */
+    if (this.wsMissing) {
+      this.error = `WS 通道未启用（仅 HTTP + SSE）：${this.wsLoadError || '缺 ws 依赖，请到面板「外接 → 依赖」一键安装'}`;
+    }
     this.heartbeat = setInterval(() => {
       /** 不进缓冲、不增 seq：它只是保活，重连补拉不该把它算成事件 */
       this.server?.broadcast({ type: 'heartbeat', at: Date.now(), seq: this.seq });
