@@ -1,8 +1,12 @@
 import crypto from 'node:crypto';
+import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createLogger } from './logger.js';
 import { DIRS } from './paths.js';
+import { encodeFaces, stripFaceMarks } from './faces/index.js';
+import { dimsOf, normalizeMarkdownImages } from './md-image.js';
+import { mdToPlain } from './markdown.js';
 /** 路径里的 id 一律编码：openid / 群号是外部数据，含 / 会拼出别的路径 */
 const enc = (v) => encodeURIComponent(String(v ?? ''));
 
@@ -14,6 +18,14 @@ const OWN_MEDIA_FILE = path.join(DIRS.data, 'media-images-own.json');
  * 老用户升级后也不需要做格式迁移。
  */
 const KEPT_MEDIA_FILE = path.join(DIRS.data, 'media-images-kept.json');
+/**
+ * Markdown 素材的宽高（`qqbot-media://` 引用 → `{ w, h }`）。
+ *
+ * 为什么要落盘：插件会缓存引用反复发（「线上那份留着复用」是默认行为），
+ * 框架重启后内存表是空的，而官方接口事后**不返回宽高**。不落盘的话，
+ * 重启后所有复用图都会退化成「没有尺寸」→ 手机上不显示，且没有任何报错。
+ */
+const MD_DIMS_FILE = path.join(DIRS.data, 'media-images-dims.json');
 
 /** 官方给的单机器人素材配额，查询接口的 total 与它同一口径 */
 export const MEDIA_IMAGE_QUOTA = 100;
@@ -220,6 +232,116 @@ export function buildSendPayload(opts = {}, nextSeq = () => 1) {
 }
 
 /**
+ * 把正文里的 `【表情: 微笑】` 编成 QQ 协议表情（`0x14 + faceId`）。
+ *
+ * 抽成纯函数（而不是写在 `#payload()` 里）有两个原因：
+ *
+ *   1. `#payload` 是私有方法，测试摸不到；这里是发送链路上唯一会被单测钉住的环节；
+ *   2. **content 和 markdown.content 是两个字段**，只改一个就会出现
+ *      「纯文本回复有表情、markdown 回复没有」这种一半好一半坏的情况。
+ *
+ * ## markdown 通道必须降级（2026-11-22 实测）
+ *
+ * 同样的正文、同样的编码，分两条发到手机：
+ *
+ *   · `msg_type=0`（纯文本）→ 表情正常显示 ✅
+ *   · `msg_type=2`（markdown）→ 表情消失，只剩文字 ❌
+ *
+ * 结论：markdown 渲染器把 `0x14` 当非法控制字符吃掉了。
+ * 所以带表情的 markdown 消息在 `auto` 模式下**转成纯文本发**：
+ * 正文先用 `mdToPlain()` 去掉 `**` `#` 这类记号，表情字符原样保留。
+ *
+ * 三种情况不降级（降级代价比丢表情更大）：
+ *   · 正文里有图（`![](...)` / `qqbot-media://`）—— 纯文本会把图弄没；
+ *   · 这条消息本身是富媒体 / 卡片 / ark —— 一条消息只能有一种富文本；
+ *   · `mode: 'keep'` —— 用户明确要排版优先。
+ *
+ * @param {object} payload `buildSendPayload()` 的产物（原地修改）
+ * @param {object} [opts]
+ * @param {boolean} [opts.enabled=true] 总开关
+ * @param {'drop'|'keep'} [opts.unknown='drop'] 名字不认识时删掉 / 保留原样
+ * @param {'auto'|'keep'|'force'} [opts.mode='auto'] 通道策略，见上
+ * @param {(name:string)=>void} [opts.onMiss] 诊断回调
+ * @returns {object} 同一个 payload
+ */
+export function applyFaceEncoding(payload, opts = {}) {
+  if (!payload || opts.enabled === false) return payload;
+  const unknown = opts.unknown === 'keep' ? 'keep' : 'drop';
+  const mode = ['auto', 'keep', 'force'].includes(opts.mode) ? opts.mode : 'auto';
+  const onMiss = opts.onMiss;
+
+  /**
+   * 富媒体 / 卡片 / ark：一条消息只能有一种富文本，**表情一律让位**。
+   *
+   * 这个判断必须放在编码之前：`msg_type=7` 的 `content` 官方口径是
+   * 「只在 0 时才是全文」，控制字符塞进去同样没人渲染，还会在正文里
+   * 留下看不见的字符。所以这里只删标记、不编码。
+   * 卡片那两个字段（title / description）是卡片自己的内容，不碰。
+   */
+  if (payload.media || payload.card || payload.ark) {
+    if (typeof payload.content === 'string' && payload.content.includes('【表情')) {
+      payload.content = stripFaceMarks(payload.content);
+    }
+    if (payload.markdown && typeof payload.markdown.content === 'string') {
+      payload.markdown.content = stripFaceMarks(payload.markdown.content);
+    }
+    return payload;
+  }
+
+  /* 1) 纯文本：编完就发。`msg_type=0` 是客户端原生认 `0x14` 的那条通道 */
+  if (typeof payload.content === 'string' && payload.content.includes('【表情')) {
+    payload.content = encodeFaces(payload.content, { unknown, onMiss });
+  }
+
+  /* 2) markdown：编完之后要决定走哪条通道 */
+  const mdObj = payload.markdown;
+  if (!mdObj || typeof mdObj.content !== 'string' || !mdObj.content.includes('【表情')) {
+    return payload;
+  }
+
+  const raw = mdObj.content;
+  const encoded = encodeFaces(raw, { unknown, onMiss });
+
+  /** `force`：明知 markdown 通道会吞，也照编（实测 / 高级用法） */
+  if (mode === 'force') {
+    mdObj.content = encoded;
+    return payload;
+  }
+
+  const hasFace = encoded.includes('\u0014');
+  const hasImage = /!\[|qqbot-media:\/\//.test(raw);
+
+  /**
+   * 不能降级：把表情标记删掉，保住图 / 排版。
+   *
+   * 这里必须用 `stripFaceMarks()` 而不是 `encodeFaces(…, {unknown:'drop'})`：
+   * 后者对**认识**的名字会编成控制字符，而 markdown 通道恰恰吞控制字符 ——
+   * 那就成了"既没表情、又留了两个看不见的字符"。
+   */
+  if (mode === 'keep' || hasImage) {
+    mdObj.content = stripFaceMarks(raw);
+    return payload;
+  }
+
+  /** 名字全都不认识（编完没有表情字符）→ 只是删了几个标记，markdown 照旧 */
+  if (!hasFace) {
+    mdObj.content = encoded;
+    return payload;
+  }
+
+  /**
+   * `auto` 降级：markdown → 纯文本。
+   *
+   * `mdToPlain()` 只剥记号（`**` `#` `>` 链接），不碰 `0x14`——
+   * 它最后一步只 trim 空白，控制字符不在 `\s` 里。
+   */
+  payload.content = mdToPlain(encoded);
+  delete payload.markdown;
+  payload.msg_type = 0;
+  return payload;
+}
+
+/**
  * 素材 file_info 的缓存时长。
  * 官方说有效期 3 天，这里按 2 天算——过期前就换新的，
  * 免得刚好卡在边界上收到「file_info 已失效」。
@@ -297,6 +419,27 @@ export class QQApi {
     this.groupInvited = false;
     // 「发图带空格」兼容开关，由 BotRuntime 按 cfg.media.placeholderSpace 同步；默认关
     this.mediaPlaceholderSpace = false;
+    /**
+     * 小黄脸出站开关，由 BotRuntime 按 cfg.faces 同步；默认开。
+     *
+     * 默认开是有意的：`【表情: 微笑】` 这种写法只有我们自己的模型会写，
+     * 真人用户不会在正文里打这一串。所以"默认开"不会误伤正常消息，
+     * 而关掉它只会让模型写的表情变成五个中文字。
+     */
+    this.faces = { outbound: true, unknown: 'drop' };
+    /**
+     * Markdown 素材的宽高：`qqbot-media://` 引用 → `{ w, h }`。
+     *
+     * 只在上传那一刻有字节可读，官方接口事后**不返回宽高**（只有
+     * image_id / url / file_name / preview_url）。而 QQ 的 markdown 图片
+     * 语法 `![说明 #宽px #高px](url)` 缺了尺寸就**不渲染**——手机上只剩文字，
+     * 平台还照收 200、不报错。所以宽高必须当场记下来，发送时补进正文。
+     *
+     * 上限 500：一个机器人最多 100 张素材，留点余量给反复上传。
+     */
+    this._mdImageDims = new Map();
+    /** 落盘的那份只读一次；`#payload()` 是同步的，不能每次都 await */
+    this._mdDimsLoaded = false;
     // 群角色查询缓存：groupOpenid -> { at, value }。bot_state 只有 30 QPM
     this.roleCache = new Map();
     /**
@@ -1042,13 +1185,30 @@ export class QQApi {
       e.reason = 'internal';
       throw e;
     }
+    const url = String(done.url);
+    /**
+     * 宽高就在手上（`buf` 是刚上传的那份字节），现在不记，以后就再也拿不到了：
+     * 官方素材接口不回宽高。`#payload()` 发消息时按这个表补 `#宽px #高px`。
+     *
+     * 读不出来（老图/怪格式）存 `{0,0}`，调用方按"没有尺寸"处理——
+     * 宁可这一次不显示，也不要瞎猜比例把图压变形。
+     */
+    const dims = dimsOf(buf);
+    this._mdImageDims.set(url, dims);
+    if (this._mdImageDims.size > 500) {
+      this._mdImageDims.delete(this._mdImageDims.keys().next().value);
+    }
+    this.#saveMdImageDims();
     return {
       imageId: String(done.image_id),
-      url: String(done.url),
+      url,
       ttl: done.ttl,
       previewUrl: String(done.preview_url ?? ''),
       fileName: name,
       retained: Boolean(retain),
+      /** 插件拼 `![说明 #宽px #高px](url)` 直接用，省得自己再解文件头 */
+      width: dims.w,
+      height: dims.h,
     };
   }
 
@@ -1173,6 +1333,25 @@ export class QQApi {
   setMediaPlaceholderSpace(v) {
     this.mediaPlaceholderSpace = v === true;
     return this.mediaPlaceholderSpace;
+  }
+
+  /**
+   * 小黄脸出站开关。由 BotRuntime 按 `cfg.faces` 初始化，面板改动时同步进来。
+   *
+   * 只认 `false` 是关（和 `setMediaPlaceholderSpace` 相反，这里的默认值是「开」）：
+   * 老配置文件里没有 faces 这一段，读出来是 undefined，语义应该是「保持默认开」，
+   * 而不是「显式关闭」——后者会让升级后的老用户突然丢掉表情。
+   *
+   * @param {{outbound?:boolean, unknown?:'drop'|'keep'}} [v]
+   */
+  setFaces(v) {
+    const src = (v && typeof v === 'object') ? v : {};
+    this.faces = {
+      outbound: src.outbound !== false,
+      unknown: src.unknown === 'keep' ? 'keep' : 'drop',
+      mode: ['auto', 'keep', 'force'].includes(src.mode) ? src.mode : 'auto',
+    };
+    return this.faces;
   }
 
   /** 内邀接口的统一闸门。没开门就抛错，别把请求发出去刷一屏 11253 */
@@ -2146,6 +2325,39 @@ export class QQApi {
   #payload(opts) {
     const payload = buildSendPayload(opts, (id) => this.#nextSeq(id));
     /**
+     * markdown 图片补尺寸：`![说明](qqbot-media://…)` → `![说明 #480px #270px](…)`。
+     *
+     * **缺了尺寸平台不渲染图**：照收 200，手机上只剩文字，日志里什么都没有
+     * （2026-11-22 实测，见 `md-image.js` 顶部的对照表）。宽高只有上传那一刻
+     * 能读到，事后官方接口不返回，所以在上传处记表、在这里补。
+     *
+     * 放在 `#payload` 的理由和下面的表情编码一样：`msg.reply` / `replyAuto` /
+     * 插件直调 `ctx.api` / 宿主协议 `msg.send` 最后都过这里，一处覆盖全部出口。
+     * 插件自己写对尺寸也不受影响——已经带两个尺寸位的原样放过。
+     */
+    if (payload.markdown && typeof payload.markdown.content === 'string') {
+      this.#loadMdImageDims();
+      payload.markdown.content = normalizeMarkdownImages(
+        payload.markdown.content,
+        (u) => this._mdImageDims.get(u),
+      );
+    }
+    /**
+     * 小黄脸：`【表情: 微笑】` → `0x14 + faceId`。
+     *
+     * 放在这一层是**唯一能一处覆盖全部出口**的位置：`msg.reply` /
+     * `replyAuto` / `replyMarkdown` / 插件拿到的 `ctx.api.sendGroup` /
+     * 宿主协议的 `msg.send`，最后都过 `#payload`。
+     * 放到 outbound 或 message 层都会漏掉「插件直调 ctx.api」那条路。
+     *
+     * 顺序在下面的「发图带空格」之前：那个只碰 msg_type=7 的空 content，
+     * 和表情没有交集，但先编码能让"正文最终长什么样"更早定型。
+     */
+    applyFaceEncoding(payload, {
+      ...this.faces,
+      onMiss: (name) => log.warn(`表情名不认识，已从正文删掉：${name}`),
+    });
+    /**
      * 「发图带空格」兼容开关（默认关，面板「配置 → 发图兼容」）。
      *
      * 放在最终报文这一层，是为了**一处覆盖所有发图路径**：
@@ -2162,6 +2374,36 @@ export class QQApi {
       payload.content = ' ';
     }
     return payload;
+  }
+
+  /**
+   * 把宽高表落盘。失败只记一条警告：补不上尺寸顶多是图不显示，
+   * 不能让一次磁盘错误把整条消息拖死。
+   */
+  #saveMdImageDims() {
+    const plain = Object.fromEntries(this._mdImageDims);
+    fs.mkdir(path.dirname(MD_DIMS_FILE), { recursive: true })
+      .then(() => fs.writeFile(MD_DIMS_FILE, JSON.stringify(plain), 'utf8'))
+      .catch((e) => log.warn(`Markdown 素材宽高表写失败（不影响本次发送）: ${e.message}`));
+  }
+
+  /**
+   * 首次发消息时把宽高表读回来（同步，一次就够）。
+   *
+   * 用同步读是为了能放进 `#payload()`：那是同步函数，整条发送链路都在等它，
+   * 没必要为了几十 KB 的 JSON 把它改成 async。文件不存在 / 损坏都当空表。
+   */
+  #loadMdImageDims() {
+    if (this._mdDimsLoaded) return;
+    this._mdDimsLoaded = true;
+    try {
+      const obj = JSON.parse(fsSync.readFileSync(MD_DIMS_FILE, 'utf8'));
+      for (const [u, d] of Object.entries(obj ?? {})) {
+        if (!this._mdImageDims.has(u)) this._mdImageDims.set(u, d);
+      }
+    } catch {
+      /* 没有文件 / 内容坏了：当空表，走"没有尺寸"的分支 */
+    }
   }
 
   /**

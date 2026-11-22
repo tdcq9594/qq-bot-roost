@@ -463,6 +463,32 @@ const BOT_DEFAULTS = {
   media: {
     placeholderSpace: false,
   },
+
+  /**
+   * QQ 小黄脸（名字标记 ↔ 协议表情）。
+   *
+   * `outbound` 默认开：模型写 `【表情: 微笑】`，发出前换成 `0x14 + faceId`。
+   * 真人不会在正文里打这一串，所以默认开不会误伤正常消息。
+   *
+   * `inbound` 默认开：群友发表情时 QQ 推的是
+   * `<faceType=1,faceId="187",ext="…">`，翻成 `【表情: 幽灵】` 模型才看得懂。
+   *
+   * `unknown` 决定名字不认识时怎么办：
+   *   · `drop`（默认）—— 删掉标记。`【表情: 不存在的脸】` 原样发进群，
+   *     用户看到括号加中文，比不发更怪；
+   *   · `keep` —— 原样保留，方便调试码表。
+   *
+   * `mode` 决定 markdown 消息怎么办（2026-11-22 实测：markdown 通道会吞表情）：
+   *   · `auto`（默认）—— 带表情的 markdown 转成纯文本发，表情保得住；
+   *   · `keep` —— 保留 markdown 排版，表情标记删掉（排版优先）；
+   *   · `force` —— 明知会吞也照编，只用于实测。
+   */
+  faces: {
+    outbound: true,
+    inbound: true,
+    unknown: 'drop',
+    mode: 'auto',
+  },
 };
 
 /** 深拷贝：默认值里的对象/数组必须复制，见 `deepMerge` 的注释 */
@@ -758,6 +784,17 @@ export async function saveBotConfig(id, cfg) {
     host: normalizeHostConfig(cfg.host),
     // 脏值（字符串 / 数组 / 旧配置里混进来的东西）一律规范成默认关，别污染配置文件
     media: { placeholderSpace: cfg.media?.placeholderSpace === true },
+    /**
+     * 小黄脸。和 media 相反，这两项**默认开**：
+     * 老配置文件里没有这一段时 `undefined !== false`，读出来仍是开。
+     * `unknown` 只认 'keep'，其余（含拼错的）一律当 'drop'。
+     */
+    faces: {
+      outbound: cfg.faces?.outbound !== false,
+      inbound: cfg.faces?.inbound !== false,
+      unknown: cfg.faces?.unknown === 'keep' ? 'keep' : 'drop',
+      mode: ['auto', 'keep', 'force'].includes(cfg.faces?.mode) ? cfg.faces.mode : 'auto',
+    },
   });
 }
 

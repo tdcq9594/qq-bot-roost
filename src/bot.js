@@ -290,6 +290,8 @@ export class BotRuntime {
     // 发图带空格：只影响真实 QQApi 的最终报文；mock api 不拼官方报文、
     // 没实现这个 setter，?. 会直接跳过（演示模式下开关不适用）
     this.api.setMediaPlaceholderSpace?.(cfg.media?.placeholderSpace);
+    // 小黄脸：`【表情: 微笑】` → 协议表情字符。默认开，只有显式 false 才关
+    this.api.setFaces?.(cfg.faces);
 
     this.session = new SessionManager({
       stickyMs: Math.max(0, (cfg.session?.stickySec ?? 180) * 1000),

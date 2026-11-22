@@ -4,6 +4,7 @@ import { createLogger } from './logger.js';
 import { FILE_TYPE, MEDIA_SOFT_LIMIT, MEDIA_HARD_LIMIT, DIRECT_UPLOAD_LIMIT } from './api.js';
 import { messageKindOf, EVENTS } from './events.js';
 import { renderMenuMd, mdToPlain } from './markdown.js';
+import { normalizeInbound } from './faces/index.js';
 import {
   parseReplyNodes,
   decideReplyMode,
@@ -332,7 +333,20 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
     userId = d.author?.id ?? '';
   }
 
-  const content = stripMention(d.content);
+  /**
+   * 表情先翻成人话，再处理 @。
+   *
+   * QQ 推过来的是 `<faceType=1,faceId="187",ext="eyJ0ZXh0Ijoi5bm954G1In0=">`：
+   * 模型既看不懂（那是协议细节），又白占十几个 token。翻成 `【表情: 幽灵】`
+   * 之后它才知道"对方发了个幽灵"，也才能用同一个语法回一个。
+   *
+   * `normalizeInbound()` 内部吞掉所有异常、翻不出来原样返回 ——
+   * 这条路上抛一次就是吞掉一整条消息，绝不冒这个险。
+   *
+   * `faces.inbound: false` 时跳过（老用户想要原始标签做自己的解析）。
+   */
+  const inboundFaces = cfg?.faces?.inbound !== false;
+  const content = stripMention(inboundFaces ? normalizeInbound(d.content) : d.content);
   const prefix = cfg.commandPrefix || '/';
   const isCommand = content.startsWith(prefix);
   const mentioned = detectMention(d);

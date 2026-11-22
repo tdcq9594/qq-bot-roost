@@ -2106,6 +2106,23 @@ async function startWebServerInstance({
             cfg.media = { placeholderSpace: body.media.placeholderSpace };
             rt.api?.setMediaPlaceholderSpace?.(cfg.media.placeholderSpace);
           }
+          /**
+           * 小黄脸开关。三项各自独立可选，**没传的那项保持原值**——
+           * 老面板只认识 `outbound`，不该因为没传 `mode` 就把用户选的策略重置掉。
+           * 脏值（字符串 "false"、数字、数组）一律当没传。
+           */
+          if (body.faces && typeof body.faces === 'object' && !Array.isArray(body.faces)) {
+            const cur = cfg.faces ?? {};
+            const pickBool = (k) => (typeof body.faces[k] === 'boolean' ? body.faces[k] : cur[k] !== false);
+            const mode = body.faces.mode ?? cur.mode;
+            cfg.faces = {
+              outbound: pickBool('outbound'),
+              inbound: pickBool('inbound'),
+              unknown: body.faces.unknown === 'keep' ? 'keep' : (body.faces.unknown === 'drop' ? 'drop' : (cur.unknown === 'keep' ? 'keep' : 'drop')),
+              mode: ['auto', 'keep', 'force'].includes(mode) ? mode : 'auto',
+            };
+            rt.api?.setFaces?.(cfg.faces);
+          }
 
           await saveBotConfig(rt.id, cfg);
           log.info('配置已通过面板更新');
