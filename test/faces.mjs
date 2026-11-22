@@ -65,6 +65,11 @@ test('码表：账本反解出来的真实 faceId 必须一条不错', () => {
     我方了: 343,
     大怨种: 344,
     偷感: 427,
+    /** 下面 4 条是 2026-11-22 从运行账本里补抓的，NapCat 表里没有 */
+    学习: 481,
+    知识增加: 489,
+    阴晴圆缺: 496,
+    '中!': 498,
   };
   for (const [name, id] of Object.entries(truth)) {
     assert.equal(lookupFace(name), id, `${name} 应该是 ${id}`);
@@ -78,6 +83,8 @@ test('码表：老名字走别名，映射到同一个脸', () => {
   assert.equal(lookupFace('强'), lookupFace('赞'));
   assert.equal(lookupFace('弱'), lookupFace('踩'));
   assert.equal(lookupFace('大兵'), lookupFace('悠闲'));
+  // 498 的真名是半角叹号，模型基本都写全角
+  assert.equal(lookupFace('中！'), lookupFace('中!'));
 });
 
 test('码表：规模与唯一性', () => {

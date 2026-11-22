@@ -106,6 +106,48 @@ const MD_IMAGE = /!\[([^\]\n]*)\]\(([^)\s]+)\)/g;
 const FENCE = /(```[\s\S]*?```)/g;
 
 /**
+ * 把一段正文按行内代码切开：`{code:true}` 的片段原样放过。
+ *
+ * 为什么不能只靠 `FENCE`：围栏块之外的**行内反引号**同样是在"讲语法"
+ * （`对话里说「用 \`![](url)\` 就能发图」`），2026-11-22 自检实测旧实现会把
+ * 里面的示例改写成 `![图片 #480px #270px](url)`，等于改坏了别人要看的文字。
+ *
+ * 反引号串必须**等长配对**（`` `a` `` / ``` ``a`b`` ```），这是 CommonMark 的
+ * 规则；找不到收尾就按普通字符处理。跨行不当代码：真跨行的行内代码极少，
+ * 而漏配一次就会把后面的图一起吞掉——**图补不上尺寸就发不出来**，代价更大。
+ *
+ * @param {string} seg 已排除围栏块的一段正文
+ * @returns {Array<{code:boolean, text:string}>}
+ */
+function splitInlineCode(seg) {
+  const parts = [];
+  let i = 0;
+  let from = 0;
+  while (i < seg.length) {
+    if (seg[i] !== '`') { i += 1; continue; }
+    let n = 0;
+    while (seg[i + n] === '`') n += 1;
+    let j = i + n;
+    let close = -1;
+    while (j < seg.length) {
+      if (seg[j] === '\n') break;
+      if (seg[j] !== '`') { j += 1; continue; }
+      let m = 0;
+      while (seg[j + m] === '`') m += 1;
+      if (m === n) { close = j; break; }
+      j += m;
+    }
+    if (close < 0) { i += n; continue; }
+    if (from < i) parts.push({ code: false, text: seg.slice(from, i) });
+    parts.push({ code: true, text: seg.slice(i, close + n) });
+    i = close + n;
+    from = i;
+  }
+  if (from < seg.length) parts.push({ code: false, text: seg.slice(from) });
+  return parts;
+}
+
+/**
  * 给正文里缺尺寸的 markdown 图片补上 `#宽px #高px`。
  *
  * 三条规则：
@@ -114,25 +156,28 @@ const FENCE = /(```[\s\S]*?```)/g;
  *   3. alt 为空时补一个占位说明——`![ #480px #240px]` 这种写法官方示例里没有，
  *      填个字更稳，也不会在图上多显示什么东西。
  *
+ * 围栏块（```）和行内反引号里的内容都原样保留，见 `splitInlineCode`。
+ *
  * @param {string} text markdown 正文
  * @param {(url:string)=>{w:number,h:number}|undefined} lookup 按引用串查宽高
  * @returns {string}
  */
 export function normalizeMarkdownImages(text, lookup) {
   if (typeof text !== 'string' || !text.includes('![') || typeof lookup !== 'function') return text;
+  const fill = (seg) => seg.replace(MD_IMAGE, (m, alt, url) => {
+    const had = String(alt).match(SIZE_TOKEN) ?? [];
+    if (had.length >= 2) return m;
+    const suffix = sizeSuffix(lookup(url));
+    if (!suffix) return m;
+    const name = String(alt).trim() || '图片';
+    return `![${name}${suffix}](${url})`;
+  });
   return String(text)
     .split(FENCE)
     .map((seg, i) => {
       /** split 带捕获组：奇数下标是代码块 */
       if (i % 2) return seg;
-      return seg.replace(MD_IMAGE, (m, alt, url) => {
-        const had = String(alt).match(SIZE_TOKEN) ?? [];
-        if (had.length >= 2) return m;
-        const suffix = sizeSuffix(lookup(url));
-        if (!suffix) return m;
-        const name = String(alt).trim() || '图片';
-        return `![${name}${suffix}](${url})`;
-      });
+      return splitInlineCode(seg).map((p) => (p.code ? p.text : fill(p.text))).join('');
     })
     .join('');
 }

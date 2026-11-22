@@ -95,6 +95,36 @@ test('normalize：代码块里的语法不动（那是要给人看的示例）',
   assert.equal(normalizeMarkdownImages(raw, (u) => dims.get(u)), raw);
 });
 
+test('normalize：行内反引号里的语法也不动（讲语法时别改坏原文）', () => {
+  const dims = new Map([['qqbot-media://a', { w: 480, h: 240 }]]);
+  const raw = '发图写法是 `![](qqbot-media://a)` ，注意尺寸位不能省';
+  assert.equal(normalizeMarkdownImages(raw, (u) => dims.get(u)), raw);
+});
+
+test('normalize：行内代码之外的图照样补，两边互不影响', () => {
+  const dims = new Map([['qqbot-media://a', { w: 480, h: 240 }]]);
+  const raw = '示例 `![](qqbot-media://a)` 真正要发的是\n![](qqbot-media://a)';
+  assert.equal(
+    normalizeMarkdownImages(raw, (u) => dims.get(u)),
+    '示例 `![](qqbot-media://a)` 真正要发的是\n![图片 #480px #240px](qqbot-media://a)',
+  );
+});
+
+test('normalize：多反引号行内代码（``a`b``）也保护', () => {
+  const dims = new Map([['qqbot-media://a', { w: 480, h: 240 }]]);
+  const raw = '``发 `![](qqbot-media://a)` 这样``';
+  assert.equal(normalizeMarkdownImages(raw, (u) => dims.get(u)), raw);
+});
+
+test('normalize：反引号没配平不能把后面的图吞掉（宁可只当普通字符）', () => {
+  const dims = new Map([['qqbot-media://a', { w: 480, h: 240 }]]);
+  const raw = '价格 5` 到 10 之间\n![](qqbot-media://a)';
+  assert.equal(
+    normalizeMarkdownImages(raw, (u) => dims.get(u)),
+    '价格 5` 到 10 之间\n![图片 #480px #240px](qqbot-media://a)',
+  );
+});
+
 test('normalize：一条消息里多张图各自补，顺序不变', () => {
   const dims = new Map([
     ['qqbot-media://a', { w: 480, h: 240 }],
