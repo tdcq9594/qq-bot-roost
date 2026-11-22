@@ -10,6 +10,24 @@ import { mdToPlain } from './markdown.js';
 /** 路径里的 id 一律编码：openid / 群号是外部数据，含 / 会拼出别的路径 */
 const enc = (v) => encodeURIComponent(String(v ?? ''));
 
+/**
+ * 官方的 `created_at` / `expires_at` 是 Unix **秒**，而框架内其它 `expiresAt`
+ * （如 `token.js`）是毫秒、下游面板一律按毫秒渲染。同一个名字两种量级，
+ * 曾经把 `1.83e9` 秒当毫秒显示成 **1970-01-22**。
+ *
+ * 所以在这里一次性归一：小于 1e12 的按秒乘 1000（1e12 ms 是 2001 年，
+ * 现实里不会有 1970~2001 之间的素材时间戳），已经是毫秒的原样返回——
+ * 万一官方哪天改成毫秒，也不会反着错一次。
+ *
+ * 导出是为了能被单测钉住：这个函数错了，面板上只会显示一个错的时间，
+ * 不会报错，属于「静默错」，必须有测试。
+ */
+export const toMillis = (v) => {
+  const n = Number(v) || 0;
+  if (!n) return 0;
+  return n < 1e12 ? n * 1000 : n;
+};
+
 /** 本进程创建、尚未删除的 Markdown 素材 id（崩溃后靠它认领孤儿） */
 const OWN_MEDIA_FILE = path.join(DIRS.data, 'media-images-own.json');
 /**
@@ -1053,6 +1071,7 @@ export class QQApi {
    * 官方的机器人级素材清单，按上传时间倒序。用它看剩余配额（上限 100 张）、
    * 找可复用的 qqbot-media:// 引用、定位要删除的 image_id。
    * 返回字段统一转 camelCase；`previewUrl` 是短时效预签名链接，别持久化。
+   * `createdAt` / `expiresAt` 统一成**毫秒**（官方给的是秒，见 `toMillis`）。
    */
   async listMediaImages({ cursor = '' } = {}) {
     const q = new URLSearchParams();
@@ -1065,8 +1084,8 @@ export class QQApi {
       url: String(it?.url ?? ''),
       fileName: String(it?.file_name ?? ''),
       previewUrl: String(it?.preview_url ?? ''),
-      createdAt: Number(it?.created_at) || 0,
-      expiresAt: Number(it?.expires_at) || 0,
+      createdAt: toMillis(it?.created_at),
+      expiresAt: toMillis(it?.expires_at),
     }));
     return {
       images,

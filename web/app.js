@@ -9343,15 +9343,28 @@ function mediaState() {
   return MEDIA_STATE;
 }
 
-function mediaTime(sec) {
-  const n = Number(sec) || 0;
-  return n ? new Date(n * 1000).toLocaleString('zh-CN', { hour12: false }) : '—';
+/**
+ * 素材时间戳一律按**毫秒**进来（`api.js` 的 `toMillis` 已经把官方的秒归一了）。
+ *
+ * 这里仍按量级再兜一次：面板可能连着**没升级的框架**（旧版给秒），
+ * 或者有插件直接把自己拼的列表塞进 `MEDIA_STATE`。乘错方向的后果是
+ * 「50000 年」或「1970」，两种都看不出是单位错了。
+ */
+function mediaMs(v) {
+  const n = Number(v) || 0;
+  if (!n) return 0;
+  return n < 1e12 ? n * 1000 : n;
 }
 
-function mediaLeft(sec) {
-  const n = Number(sec) || 0;
+function mediaTime(ms) {
+  const n = mediaMs(ms);
+  return n ? new Date(n).toLocaleString('zh-CN', { hour12: false }) : '—';
+}
+
+function mediaLeft(ms) {
+  const n = mediaMs(ms);
   if (!n) return '—';
-  const days = Math.ceil((n * 1000 - Date.now()) / 86400000);
+  const days = Math.ceil((n - Date.now()) / 86400000);
   return days <= 0 ? '已过期' : `剩 ${days} 天`;
 }
 
