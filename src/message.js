@@ -297,6 +297,8 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
 
   let groupId = '';
   let userId = '';
+  /** 官方单聊接口要的 user_openid。群消息里 userId 取的是 member_openid，不能混用 */
+  let userOpenid = '';
   /**
    * 频道维度单独留两个字段：以前只有 `groupId`，guild 场景塞的是
    * `channel_id`、dm 场景塞的是 `guild_id`，同一个字段两种含义，
@@ -320,8 +322,11 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
   if (kind === 'group') {
     groupId = d.group_openid ?? '';
     userId = d.author?.member_openid ?? d.author?.id ?? '';
+    /** 2026-11-17 起群 msg_id 可用于私聊回复发送者，这里就得留住发送者的 user_openid */
+    userOpenid = d.author?.user_openid ?? d.author?.id ?? d.author?.member_openid ?? '';
   } else if (kind === 'c2c') {
     userId = d.author?.user_openid ?? d.author?.id ?? '';
+    userOpenid = userId;
   } else if (kind === 'guild') {
     groupId = d.channel_id ?? '';
     guildId = d.guild_id ?? '';
@@ -415,6 +420,8 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
     eventMeta: EVENTS[eventName] ?? null,
     groupId,
     userId,
+    /** 单聊接口用的 user_openid；群消息是发送者的 OpenID，不是 member_openid */
+    userOpenid,
     /** 显示名：群聊取群内昵称，单聊取 QQ 昵称（2026-11-16 官方开始下发） */
     userName,
     /** QQ 昵称（群聊里可能和 `userCard` 不同） */
@@ -639,7 +646,7 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
   const MAX_CHUNK = 1500; // 单条上限，超了按行切成多条
 
   /**
-   * 被动回复（带 msg_id，群聊 5 分钟内、单聊 60 分钟内有效）。
+   * 被动回复（带 msg_id，群聊 / 单聊 60 分钟内有效；官方 2026-11-17 起群窗口为 60 分钟）。
    * **不会立刻发出**，而是攒到本次处理结束，由 flushReplies() 合并成一条。
    * 想立刻发用 msg.replyNow()。
    */
@@ -684,10 +691,39 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
   };
 
   /**
+   * 用群消息的 msg_id 私聊回复发送者（官方 2026-11-17 新增能力）。
+   *
+   * 官方约束：user_openid 必须是**这条群消息的发送者**，且该用户与机器人为好友；
+   * 有效期与回复次数按群消息算，并与群内回复共用同一个 msg_id 的次数上限。
+   * 好友关系没有查询接口，拿不到 user_openid 时退回普通群回复，不硬发。
+   */
+  msg.replyPrivate = (text, opts = {}) => {
+    if (text === undefined || text === null || text === '') return Promise.resolve(null);
+    if (kind !== 'group' || !msg.id || !userOpenid) return msg.replyNow(text, opts);
+
+    const { requestId, plugin, fileType, ...rest } = opts ?? {};
+    const sender = String(plugin ?? msg.pluginId ?? '');
+    const body = { msgId: msg.id, content: String(text), ...rest };
+    msg.replied = true;
+
+    if (!outbound) return api.sendC2C(userOpenid, body);
+    return outbound.send({
+      kind: 'c2c',
+      target: userOpenid,
+      chatKey: `c2c:${userOpenid}`,
+      payload: body,
+      receivedAt,
+      ...(requestId ? { requestId: String(requestId) } : {}),
+      ...(sender ? { plugin: sender } : {}),
+      ...(fileType ? { fileType: Number(fileType) } : {}),
+    });
+  };
+
+  /**
    * 引用回复：以「引用某条消息」的样式发出去（官方 `message_reference`）。
    *
    * 跟 `reply()` 不是一回事：
-   *   - `reply()` 是**被动回复**，靠 msg_id，群聊 5 分钟 / 5 次，单聊 60 分钟 / 4 次
+   *   - `reply()` 是**被动回复**，靠 msg_id，群 / 单聊 60 分钟；次数不设本地上限，服务端拒了会自动改发主动
    *   - 这个是**引用**，靠 `REFIDX`，视觉上带"回复某某"的引用块
    *
    * 默认引用当前这条消息（用它的 `msg_idx`）。想引用别的传 `refIdx`。

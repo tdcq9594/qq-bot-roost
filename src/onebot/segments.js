@@ -134,7 +134,7 @@ export function parseOutgoing(message, { ids, selfUin }) {
   return out;
 }
 
-/** 拆条上限：官方一条入站消息最多回 5 次（群聊） */
+/** 拆条上限：框架自己的防刷屏保守值，不是官方回复次数上限（后者 2026-11-17 起可达 50） */
 export const MAX_PARTS = 5;
 
 /**
