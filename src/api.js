@@ -10,6 +10,24 @@ import { mdToPlain } from './markdown.js';
 /** 路径里的 id 一律编码：openid / 群号是外部数据，含 / 会拼出别的路径 */
 const enc = (v) => encodeURIComponent(String(v ?? ''));
 
+/**
+ * 官方的 `created_at` / `expires_at` 是 Unix **秒**，而框架内其它 `expiresAt`
+ * （如 `token.js`）是毫秒、下游面板一律按毫秒渲染。同一个名字两种量级，
+ * 曾经把 `1.83e9` 秒当毫秒显示成 **1970-01-22**。
+ *
+ * 所以在这里一次性归一：小于 1e12 的按秒乘 1000（1e12 ms 是 2001 年，
+ * 现实里不会有 1970~2001 之间的素材时间戳），已经是毫秒的原样返回——
+ * 万一官方哪天改成毫秒，也不会反着错一次。
+ *
+ * 导出是为了能被单测钉住：这个函数错了，面板上只会显示一个错的时间，
+ * 不会报错，属于「静默错」，必须有测试。
+ */
+export const toMillis = (v) => {
+  const n = Number(v) || 0;
+  if (!n) return 0;
+  return n < 1e12 ? n * 1000 : n;
+};
+
 /** 本进程创建、尚未删除的 Markdown 素材 id（崩溃后靠它认领孤儿） */
 const OWN_MEDIA_FILE = path.join(DIRS.data, 'media-images-own.json');
 /**
@@ -120,15 +138,6 @@ export function etagToMd5(etag, fallback = '') {
  * 这个值用于「秒传判断」，传错了服务端不会报错、只是秒传不生效。
  */
 export const MD5_10M_SIZE = 10_002_432;
-
-/**
- * 被动回复序号的**最后一道**兜底上限。
- *
- * 官方口径按会话类型不同：群聊 5 次（`msg_seq` 1–5），单聊 4 次（1–4）。
- * 这里只按 `msgId` 记，拿不到会话类型，所以取两者较大的 5 当「绝不可能超过」的硬顶。
- * 精确拦截在 `outbound.js`（`PASSIVE_MAX_REPLIES[kind]`），正常流程走不到这里。
- */
-const PASSIVE_MAX_SEQ = 5;
 
 /**
  * 构造发送报文。抽成纯函数是为了能单测——`#payload` 是私有方法，测试摸不到。
@@ -1053,6 +1062,7 @@ export class QQApi {
    * 官方的机器人级素材清单，按上传时间倒序。用它看剩余配额（上限 100 张）、
    * 找可复用的 qqbot-media:// 引用、定位要删除的 image_id。
    * 返回字段统一转 camelCase；`previewUrl` 是短时效预签名链接，别持久化。
+   * `createdAt` / `expiresAt` 统一成**毫秒**（官方给的是秒，见 `toMillis`）。
    */
   async listMediaImages({ cursor = '' } = {}) {
     const q = new URLSearchParams();
@@ -1065,8 +1075,8 @@ export class QQApi {
       url: String(it?.url ?? ''),
       fileName: String(it?.file_name ?? ''),
       previewUrl: String(it?.preview_url ?? ''),
-      createdAt: Number(it?.created_at) || 0,
-      expiresAt: Number(it?.expires_at) || 0,
+      createdAt: toMillis(it?.created_at),
+      expiresAt: toMillis(it?.expires_at),
     }));
     return {
       images,
@@ -2407,16 +2417,14 @@ export class QQApi {
   }
 
   /**
-   * 被动回复序号。硬顶见 `PASSIVE_MAX_SEQ`（群聊 5 / 单聊 4，这里取 5 兜底），
-   * 超了服务端返回 40034128。正常流程由 outbound.js 按会话类型先拦。
+   * 被动回复序号，只递增、不设本地上限。
+   *
+   * 官方 2026-11-17 起群消息在开发者为群主 / 管理员时每条可达 50 次，
+   * 框架拿不到这个条件；超过上限时由服务端返回 40034128，
+   * `outbound.js` 会据此自动改发主动消息。这里硬拦会让本来能发的第 6～50 条丢掉。
    */
   #nextSeq(msgId) {
     const cur = this.seqMap.get(msgId) ?? 0;
-    if (cur >= PASSIVE_MAX_SEQ) {
-      throw new Error(
-        `同一条消息最多回复 5 次（群聊）/ 4 次（单聊），这条已经回了 ${cur} 次`,
-      );
-    }
     const next = cur + 1;
     this.seqMap.set(msgId, next);
     if (this.seqMap.size > 2000) {

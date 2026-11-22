@@ -93,6 +93,24 @@ test('load：没装返回 null，不抛', async () => {
   assert.equal(await deps.load('lodash'), null);
 });
 
+/**
+ * B4：load 失败要留下可诊断原因——日志升为 warn，且 loadError() 能读到。
+ * 宿主据此在 snapshot().error 里说明「WS 未启用」的真正原因，而不是报 running 装正常。
+ */
+test('B4：load 失败后 loadError() 有原因，resetCache 后清空', async () => {
+  deps.resetCache();
+  assert.equal(deps.loadError('ws'), '', '干净状态没错误');
+  await fakeWs('8.18.0');
+  await fs.rm(path.join(WS_DIR(), 'index.js'), { force: true }); // 造一个入口坏掉的包
+  deps.resetCache();
+  assert.equal(await deps.load('ws'), null, '坏包加载失败返回 null');
+  const reason = deps.loadError('ws');
+  assert.ok(reason.length > 0, 'loadError 要记下失败原因，供面板显示');
+  // 重装后清缓存，错误原因也必须跟着清掉
+  deps.resetCache();
+  assert.equal(deps.loadError('ws'), '', 'resetCache 要清掉旧的错误原因');
+});
+
 test('装好之后：status 认得出、load 拿得到、verify 通过', async () => {
   await fakeWs();
   const s = await deps.status();
@@ -109,17 +127,19 @@ test('装好之后：status 认得出、load 拿得到、verify 通过', async (
 
 test('版本号在、文件坏了：resolvable=false，verify 报原因', async () => {
   await fakeWs('8.18.1');
-  // 把入口删掉：package.json 还在，resolve 还能过，但 require 会失败
+  // 把入口删掉：package.json 还在，但入口没了
   await fs.rm(path.join(WS_DIR(), 'index.js'));
   deps.resetCache();
 
   const s = await deps.status();
   assert.equal(s.packages.ws.version, '8.18.1');
-  assert.equal(s.packages.ws.resolvable, true, 'resolve 只证明入口文件路径存在');
+  // resetCache 现在连 Module._pathCache 一起清，删了入口后 resolve 如实失败；
+  // 旧断言期待 true（靠旧路径缓存）正是 B3 要修的 bug，已更正。
+  assert.equal(s.packages.ws.resolvable, false, '入口被删后不该再算可解析');
 
   const errs = await deps.verify(['ws']);
-  assert.equal(errs.length, 1);
-  assert.match(errs[0], /加载失败/);
+  assert.ok(errs.length >= 1);
+  assert.match(errs.join('\n'), /加载失败|找不到|Cannot find/i);
 });
 
 test('remove：删掉包之后回到「没装」', async () => {
@@ -170,4 +190,25 @@ test('remove：ffmpeg 连平台子包一起删，不留 62MB 垃圾', async () =
     false,
     '主包和平台子包在同一个 scope 下，卸载要整个删掉',
   );
+});
+
+/**
+ * B3 回归：删掉整个包目录后，`Module._pathCache` 仍让 resolve() 命中旧路径，
+ * 导致 install() 误判「已装」跳过 npm。修复后 resetCache() 必须清掉这层缓存。
+ */
+test('B3：删整包 + resetCache 后 resolve 不再命中旧路径，status 认成未装', async () => {
+  const { createRequire } = await import('node:module');
+  const r = createRequire(path.join(deps.depsDir(), 'package.json'));
+  await fakeWs('8.19.0');
+  // 先解析一次，把路径塞进 Module._pathCache
+  const resolved = r.resolve('ws');
+  assert.match(resolved, /node_modules[\\/]ws[\\/]index\.js$/, '首次要能解析到假包');
+  // 模拟用户直接删掉整个包目录（不是走 remove()）
+  await fs.rm(WS_DIR(), { recursive: true, force: true });
+  deps.resetCache();
+  // 修复点：_pathCache 被清后，resolve 不能再用旧路径骗人
+  assert.throws(() => r.resolve('ws'), /Cannot find module/, '删包后 resolve 必须失败');
+  const s = await deps.status();
+  assert.equal(s.packages.ws.version, '', '磁盘上没 package.json 就是没装');
+  assert.equal(s.packages.ws.resolvable, false);
 });

@@ -23,17 +23,26 @@
  * 安装本身复用 `src/plugin/deps.js` 的 `ensurePluginDeps`：npm / pnpm 探测、
  * DSH 自带运行时、`--ignore-scripts`、超时、失败原因都已经在里面了，
  * 这里只补「白名单 + 状态 + 加载 + 冒烟 + 共用目录迁移」。
+ *
+ * ## npm 不是唯一的路（2026-11-22）
+ *
+ * npm 会坏：没装 npm、公司网拦 registry、源超时、装完还是 `require` 不了。
+ * 所以 `install()` 在 npm 失败后**自动回退到市场仓的 `deps/` 目录**，
+ * 直接解包、不经过 npm（见 `src/deps-mirror.js`）。只覆盖两个零依赖的包
+ * （`ws` / `silk-wasm`）；ffmpeg 上百 MB 且分平台，仍走 npm 或系统已装的。
  */
 
 import fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { createRequire } from 'node:module';
+import Module, { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { DIRS } from './paths.js';
 import { createLogger } from './logger.js';
 import { ensurePluginDeps } from './plugin/deps.js';
+import { normalizeMarketUrl } from './plugin/market.js';
+import { installFromMirror } from './deps-mirror.js';
 
 const log = createLogger('onebot-deps');
 
@@ -93,6 +102,9 @@ const pkgFile = () => path.join(depsDir(), 'package.json');
 
 /** 已加载的模块缓存（`{ws, silk}`），`remove()` / `install()` 后要清 */
 const loaded = new Map();
+
+/** 加载失败的原因（首次失败时记，供诊断接口读；null 缓存后不再刷日志但原因还在） */
+const loadedError = new Map();
 
 /** 共用一个 createRequire，`resetCache` 要拿它去删 Node 自己的模块缓存 */
 let requireFrom = null;
@@ -173,6 +185,18 @@ async function installedVersion(name) {
   } catch {
     return '';
   }
+}
+
+/**
+ * 包是否真的在磁盘上（以 package.json 为准）。
+ *
+ * 为什么不能只信 `require.resolve`：Node 的 `Module._pathCache` 会缓存旧路径，
+ * 用户删掉 silk-wasm 后 `resolve()` 仍返回那个已不存在的文件路径，于是
+ * `install()` 以为「已装」直接跳过——删了重装怎么点都装不回来。
+ * 磁盘上的 package.json 是骗不了人的：删了就没了。
+ */
+async function presentOnDisk(name) {
+  return Boolean(await installedVersion(name));
 }
 
 /**
@@ -440,6 +464,18 @@ async function verifyWithRetry(names, tries = 4, everyMs = 250) {
   return errors;
 }
 
+/**
+ * 逐包冒烟，返回**仍然不能用**的那些（名字）。
+ *
+ * 镜像回退要知道「装哪个」：npm 可能装好了 ws、只卡住 silk-wasm，
+ * 这时候整批丢给镜像会把已经好的那个也重装一遍。
+ */
+async function stillBroken(names) {
+  const out = [];
+  for (const name of names) if (await smoke(name)) out.push(name);
+  return out;
+}
+
 /** 已加载过就直接给（不触发安装）：面板的「能不能发语音」要看这个 */
 export function cached(name) {
   return loaded.get(name) ?? null;
@@ -582,12 +618,21 @@ export async function load(name) {
         mod = null;
       }
     } else {
-      log.debug(`加载 ${name} 失败：${e.message}`);
+      // 升为 warn：缺依赖是用户要在面板处理的事，debug 会被控制台阈值(info)过滤，
+      // 导致「ws 没加载、日志却一片正常」。缓存 mod=null 避免反复 require，
+      // 但原因存进 loadedError，诊断接口能读到。
+      log.warn(`加载 ${name} 失败：${e.message}`);
+      loadedError.set(name, String(e.message));
       mod = null;
     }
   }
   loaded.set(name, mod);
   return mod;
+}
+
+/** 最近一次加载失败原因；没失败过返回空串（供宿主/面板显示为什么 WS 没起来） */
+export function loadError(name) {
+  return loadedError.get(name) || '';
 }
 
 /**
@@ -599,6 +644,7 @@ export async function load(name) {
  */
 export function resetCache() {
   loaded.clear();
+  loadedError.clear();
   /** 二进制路径也跟着重探：装/卸/重装之后不能还指着旧路径 */
   ffmpegCache = undefined;
   /** 系统 PATH 可能刚变（用户新装了一份），一并重扫 */
@@ -610,6 +656,25 @@ export function resetCache() {
     } catch {
       // 没装/解析不到：本来就没有缓存可删
     }
+    /**
+     * 第二层：`require.resolve` 自己走的是 `Module._pathCache`，和 `require.cache`
+     * 是两套。只删 require.cache 的话，包被删掉后 resolve() 仍命中旧路径，
+     * install() 会误判「已装」。这里按包名匹配清掉相关路径缓存条目。
+     * Node 内部 API，用可选链保护；即使将来改了实现也不影响主判据（磁盘存在性）。
+     */
+    try {
+      const pathCache = Module?._pathCache;
+      if (pathCache && typeof pathCache === 'object') {
+        // Node 的 key 形如 `ws\0C:\...\node_modules\0...`：包名开头 + NUL 分隔的
+        // 搜索路径串。不是普通路径子串，所以用 `name\0` 前缀匹配才删得掉。
+        const prefix = `${name}\0`;
+        for (const key of Object.keys(pathCache)) {
+          if (key.startsWith(prefix)) delete pathCache[key];
+        }
+      }
+    } catch {
+      // 清不到也无妨：install() 已改用磁盘存在性判定
+    }
   }
 }
 
@@ -619,9 +684,15 @@ export function resetCache() {
  * 串行化：后一次调用排队等前一次，避免两个请求同时跑 npm 把目录写坏。
  *
  * @param {string[]} names
- * @returns {Promise<{ok:boolean, installed:string[], error:string, status:object}>}
+ * @param {object} [opts]
+ * @param {string} [opts.marketUrl] 市场索引地址（`config.plugins.marketUrl`）。
+ *   npm 失败时从这里找内置依赖包；不传就只能报错。
+ * @returns {Promise<{ok:boolean, installed:string[], error:string,
+ *   fromMirror:Array<{name:string,version:string}>, status:object}>}
  */
-export function install(names) {
+export function install(names, opts = {}) {
+  /** 拼一次就够：`normalizeMarketUrl` 会把各种写法的市场地址归一成索引 URL */
+  const indexUrl = normalizeMarketUrl(opts.marketUrl);
   const run = async () => {
     const picked = pickPackages(names);
     if (!picked.length) throw new Error('没有要安装的依赖');
@@ -640,12 +711,18 @@ export function install(names) {
      */
     const already = [];
     for (const name of picked) {
-      let ok = false;
-      try {
-        req().resolve(name);
-        ok = true;
-      } catch {
-        ok = false;
+      /**
+       * 磁盘事实优先：包被删后 `_pathCache` 仍让 resolve() 成功，
+       * 只信 resolve 会把「删了」误判成「已装」而跳过 npm（B3）。
+       * package.json 还在才谈得上解析。
+       */
+      let ok = await presentOnDisk(name);
+      if (ok) {
+        try {
+          req().resolve(name);
+        } catch {
+          ok = false;
+        }
       }
       /**
        * ffmpeg 主包能 resolve ≠ 能用：平台子包/二进制可能不在
@@ -662,7 +739,9 @@ export function install(names) {
     }
     if (already.length === picked.length) {
       log.debug(`依赖已就绪，跳过安装：${picked.join('、')}`);
-      return { ok: true, installed: [], skipped: true, error: '', status: await status() };
+      return {
+        ok: true, installed: [], skipped: true, error: '', fromMirror: [], status: await status(),
+      };
     }
 
     /**
@@ -701,8 +780,18 @@ export function install(names) {
      *   · `warnings` 里才是 npm 失败的真实原因（超时、镜像 502、没有 npm）。
      * 以前这里直接丢掉返回值，用户只能看到一句「加载失败」，根本不知道
      * 是网络问题还是目录坏了。
+     *
+     * 它**会抛**：没装 npm / 没有可用运行时 / 必需依赖装失败。以前异常直接
+     * 冒到面板上，一条链断在这里——现在接住，交给后面的镜像回退。
      */
-    let res = await ensurePluginDeps({ dir, manifest: {}, enabled: true, log });
+    let res = { installed: [], warnings: [] };
+    let npmError = '';
+    try {
+      res = await ensurePluginDeps({ dir, manifest: {}, enabled: true, log });
+    } catch (e) {
+      npmError = String(e?.message ?? e);
+      log.warn(`npm 装外接依赖失败（${npmError}），准备改用市场内置包`);
+    }
 
     resetCache();
     let errors = await verifyWithRetry(picked);
@@ -715,16 +804,58 @@ export function install(names) {
      * 包不在」的状态。这时它连 npm 都不跑，怎么点都装不上。
      * 删掉标记强制重装一次，仍失败才如实报错。
      */
-    if (errors.length && res.installed.length === 0) {
+    if (errors.length && (res.installed?.length ?? 0) === 0 && !npmError) {
       await fs.rm(path.join(dir, '.deps.json'), { force: true });
       log.info(`依赖记录与磁盘不一致，强制重装：${picked.join('、')}`);
-      res = await ensurePluginDeps({ dir, manifest: {}, enabled: true, log });
+      try {
+        res = await ensurePluginDeps({ dir, manifest: {}, enabled: true, log });
+      } catch (e) {
+        npmError = String(e?.message ?? e);
+        log.warn(`重装仍然失败（${npmError}），准备改用市场内置包`);
+      }
       resetCache();
       errors = await verifyWithRetry(picked);
     }
 
+    /**
+     * 最后一条路：市场仓的 `deps/` 目录。
+     *
+     * **这一步完全不碰 npm**，所以「机器上没装 npm」「registry 被墙」
+     * 「npm 装完还是 require 不了」这三种都能救。只覆盖两个零依赖的包。
+     */
+    const fromMirror = [];
+    let mirrorNotes = [];
+    if (errors.length) {
+      const missing = await stillBroken(picked);
+      if (missing.length) {
+        log.info(`改用市场内置包：${missing.join('、')}`);
+        const m = await installFromMirror({
+          names: missing, whitelist: WHITELIST, dir, indexUrl,
+        });
+        fromMirror.push(...m.installed);
+        mirrorNotes = [...m.errors, ...m.absent.map((n) => `${n}：市场镜像里没有这个包`)];
+        if (m.installed.length) {
+          log.info(`市场内置包装好了：${m.installed.map((x) => `${x.name}@${x.version}`).join('、')}`);
+          resetCache();
+          errors = await verifyWithRetry(picked);
+        }
+      }
+    }
+
     const st = await status();
     const warn = (res.warnings ?? []).map((w) => String(w).replace(/\s+/g, ' ').trim()).filter(Boolean);
+    /**
+     * 顺序按「离用户最近」排：先冒烟结果（到底什么不能用），再 npm 的原始
+     * 原因，最后镜像那条路的说明。都成功时只有 warn 里的可选依赖提示。
+     */
+    const error = [
+      ...errors,
+      ...(errors.length ? [npmError] : []),
+      ...warn,
+      ...(errors.length ? mirrorNotes : []),
+    ].filter(Boolean).join('；').slice(0, 800);
+    /** 安装没成功必须留一条日志：以前只把原因塞进返回值，HTTP 200 回给前端后谁都不显示 = 完全静默 */
+    if (error) log.error(`外接依赖安装未成功：${error}`);
     return {
       ok: errors.length === 0,
       installed: picked,
@@ -733,16 +864,18 @@ export function install(names) {
        * 失败的文案要能直接回答「为什么」：
        * 先给冒烟结果，再带上安装器的原始原因（截断，避免把 600 字噪声塞进面板）。
        */
-      error: [...errors, ...warn].filter(Boolean).join('；').slice(0, 800),
+      error,
+      /** 这次是哪几个包从市场内置包装的（空数组＝全走 npm）。面板据此说清来源 */
+      fromMirror,
       status: st,
     };
   };
 
   const p = installChain.then(run, run);
-  // 失败不把链条卡死：下一次调用照样能跑
+  // 失败不把链条卡死：下一次调用照样能跑；但异常要留痕，不能纯吞
   installChain = p.then(
     () => undefined,
-    () => undefined,
+    (e) => { log.error(`外接依赖安装异常：${String(e?.message || e)}`); },
   );
   return p;
 }

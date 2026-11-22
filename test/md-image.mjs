@@ -84,6 +84,36 @@ test('normalize：已经写了两个尺寸位的原样放过（作者优先）',
   assert.equal(normalizeMarkdownImages(raw, (u) => dims.get(u)), raw);
 });
 
+test('normalize：正文里的 #3月 #5日 不是尺寸位，照常补（旧版 px 可选会误认）', () => {
+  const dims = new Map([['qqbot-media://a', { w: 800, h: 400 }]]);
+  const raw = '![今天聊了 #3月 #5日](qqbot-media://a)';
+  assert.equal(
+    normalizeMarkdownImages(raw, (u) => dims.get(u)),
+    '![今天聊了 #3月 #5日 #480px #240px](qqbot-media://a)',
+  );
+});
+
+test('normalize：只写一个尺寸位时按真实比例补齐，作者写的宽度不改', () => {
+  const dims = new Map([['qqbot-media://a', { w: 800, h: 400 }]]);
+  // 作者指定宽 200 → 真实比例高 100；#480px 超过上限也不动作者的值
+  assert.equal(
+    normalizeMarkdownImages('![图 #200px](qqbot-media://a)', (u) => dims.get(u)),
+    '![图 #200px #100px](qqbot-media://a)',
+  );
+  assert.equal(
+    normalizeMarkdownImages('![图 #480px](qqbot-media://a)', (u) => dims.get(u)),
+    '![图 #480px #240px](qqbot-media://a)',
+  );
+});
+
+test('normalize：单个尺寸位后仍有说明文字时，补的高紧跟尺寸位', () => {
+  const dims = new Map([['qqbot-media://a', { w: 800, h: 400 }]]);
+  assert.equal(
+    normalizeMarkdownImages('![图 #200px 说明](qqbot-media://a)', (u) => dims.get(u)),
+    '![图 #200px #100px 说明](qqbot-media://a)',
+  );
+});
+
 test('normalize：查不到宽高的不动（宁可不显示也不压变形）', () => {
   const raw = '![](qqbot-media://unknown)';
   assert.equal(normalizeMarkdownImages(raw, () => undefined), raw);
@@ -93,6 +123,36 @@ test('normalize：代码块里的语法不动（那是要给人看的示例）',
   const dims = new Map([['qqbot-media://a', { w: 480, h: 240 }]]);
   const raw = '```\n![](qqbot-media://a)\n```';
   assert.equal(normalizeMarkdownImages(raw, (u) => dims.get(u)), raw);
+});
+
+test('normalize：行内反引号里的语法也不动（讲语法时别改坏原文）', () => {
+  const dims = new Map([['qqbot-media://a', { w: 480, h: 240 }]]);
+  const raw = '发图写法是 `![](qqbot-media://a)` ，注意尺寸位不能省';
+  assert.equal(normalizeMarkdownImages(raw, (u) => dims.get(u)), raw);
+});
+
+test('normalize：行内代码之外的图照样补，两边互不影响', () => {
+  const dims = new Map([['qqbot-media://a', { w: 480, h: 240 }]]);
+  const raw = '示例 `![](qqbot-media://a)` 真正要发的是\n![](qqbot-media://a)';
+  assert.equal(
+    normalizeMarkdownImages(raw, (u) => dims.get(u)),
+    '示例 `![](qqbot-media://a)` 真正要发的是\n![图片 #480px #240px](qqbot-media://a)',
+  );
+});
+
+test('normalize：多反引号行内代码（``a`b``）也保护', () => {
+  const dims = new Map([['qqbot-media://a', { w: 480, h: 240 }]]);
+  const raw = '``发 `![](qqbot-media://a)` 这样``';
+  assert.equal(normalizeMarkdownImages(raw, (u) => dims.get(u)), raw);
+});
+
+test('normalize：反引号没配平不能把后面的图吞掉（宁可只当普通字符）', () => {
+  const dims = new Map([['qqbot-media://a', { w: 480, h: 240 }]]);
+  const raw = '价格 5` 到 10 之间\n![](qqbot-media://a)';
+  assert.equal(
+    normalizeMarkdownImages(raw, (u) => dims.get(u)),
+    '价格 5` 到 10 之间\n![图片 #480px #240px](qqbot-media://a)',
+  );
 });
 
 test('normalize：一条消息里多张图各自补，顺序不变', () => {

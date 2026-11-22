@@ -114,11 +114,11 @@ const RUN = Date.now().toString(36);
   await ob.flush();
 }
 
-/* ---------- 2. 超过 5 分钟窗口 → 降级为主动消息 ---------- */
+/* ---------- 2. 超过 60 分钟窗口 → 降级为主动消息 ---------- */
 {
   const api = makeApi();
   const ob = new Outbound({ api, cfg, isOnline: () => true });
-  const old = Date.now() - 6 * 60 * 1000;
+  const old = Date.now() - 61 * 60 * 1000;
   const r = await ob.send({
     kind: 'group',
     target: 'g1',
@@ -131,7 +131,7 @@ const RUN = Date.now().toString(36);
   await ob.flush();
 }
 
-/* ---------- 2b. 单聊窗口是 60 分钟，不能套用群聊的 5 分钟 ---------- */
+/* ---------- 2b. 群 / 单聊同为 60 分钟窗口，频道仍是 5 分钟 ---------- */
 {
   const api = makeApi();
   const ob = new Outbound({ api, cfg, isOnline: () => true });
@@ -140,7 +140,7 @@ const RUN = Date.now().toString(36);
     target: 'u1',
     chatKey: 'c2c:__t2b_window__',
     payload: { content: 'late-ish', msgId: 'msg-2b' },
-    // 10 分钟：群聊早就超窗了，单聊还有 50 分钟
+    // 10 分钟：频道早就超窗了，群 / 单聊还有 50 分钟
     receivedAt: Date.now() - 10 * 60 * 1000,
   });
   check('单聊 10 分钟仍走被动回复', r.degraded === false, JSON.stringify(r));
@@ -163,7 +163,7 @@ const RUN = Date.now().toString(36);
   await ob.flush();
 }
 
-/* ---------- 2d. 被动回复次数：单聊只允许 4 次（群聊 5 次） ---------- */
+/* ---------- 2d. 被动回复次数不设本地上限，单聊也不在框架里拦 ---------- */
 {
   const api = makeApi();
   const ob = new Outbound({ api, cfg, isOnline: () => true });
@@ -179,7 +179,7 @@ const RUN = Date.now().toString(36);
     });
     if (r.degraded && degradedAt < 0) degradedAt = i;
   }
-  check('单聊第 5 次被动回复降级', degradedAt === 4, degradedAt < 0 ? '一次都没降级' : `第 ${degradedAt + 1} 次`);
+  check('单聊次数也不在本地拦截', degradedAt === -1, degradedAt < 0 ? '一次都没降级' : `第 ${degradedAt + 1} 次`);
   await ob.flush();
 }
 
@@ -4013,7 +4013,7 @@ await testUpdaterRestartHint();
   check('Message: msgIdx 可直接用于引用回复', msg.msgIdx === 'REFIDX_1==');
 }
 
-/* ---------- 21. 同一条消息最多被动回复 5 次 ---------- */
+/* ---------- 21. 被动回复次数不设本地上限（官方 2026-11-17 变更） ---------- */
 {
   const api = makeApi();
   const cfgCap = { ...cfg, outbound: { ...cfg.outbound, dailyActive: 100, downgradeToActive: true } };
@@ -4032,8 +4032,24 @@ await testUpdaterRestartHint();
     if (r?.degraded) degraded += 1;
   }
   const passiveCalls = api.calls.filter((c) => c.body.msgId === 'same-msg').length;
-  check('同一消息最多 5 次被动回复', passiveCalls === 5, `实际 ${passiveCalls} 次`);
-  check('超过 5 次后降级为主动消息', degraded === 2, `降级 ${degraded} 次`);
+  check('连续回复不受本地 5 次上限拦截', passiveCalls === 7, `实际 ${passiveCalls} 次`);
+  check('服务端未拒绝时不降级', degraded === 0, `降级 ${degraded} 次`);
+
+  // 群窗口已从 5 分钟延长到 60 分钟：6 分钟前收到的消息仍走被动回复
+  const stale = new Outbound({ api, cfg: cfgCap, isOnline: () => true });
+  await stale.send({
+    kind: 'group',
+    target: 'g1',
+    chatKey: `group:__t21_stale_${RUN}__`,
+    payload: { content: 'still-passive', msgId: 'stale-msg' },
+    receivedAt: Date.now() - 6 * 60 * 1000,
+  });
+  check(
+    '群被动回复窗口为 60 分钟（6 分钟前仍被动）',
+    api.calls.some((c) => c.body.msgId === 'stale-msg'),
+    '被当成过期降级了',
+  );
+  await stale.flush();
   await ob.flush();
 }
 
@@ -4188,7 +4204,7 @@ await testUpdaterRestartHint();
     body: { method: 'sendGroup', args: { __target: 'g' } },
     fallbackRuntime: boom,
   });
-  check('调用: 官方错误码翻成人话', c6.code === 502 && /5 次/.test(c6.body.error) && c6.body.code === 40034128);
+  check('调用: 官方错误码翻成人话', c6.code === 502 && /超限/.test(c6.body.error) && c6.body.code === 40034128);
 
   const c7 = await handleQqCall({ runtimes: [], body: { method: 'getMe' }, fallbackRuntime: null });
   check('调用: 没有可用机器人时报 503', c7.code === 503);

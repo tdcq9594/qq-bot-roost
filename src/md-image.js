@@ -98,21 +98,74 @@ export function sizeSuffix(d) {
   return ` #${w}px #${h}px`;
 }
 
-/** 图片语法的 alt 位里，已经写了几个 `#数字px` */
-const SIZE_TOKEN = /#\s*\d{1,5}\s*(?:px)?/g;
+/**
+ * 图片语法的 alt 位里，已经写了几个合法的 `#数字px`。
+ *
+ * px 必须带：QQ 官方语法就是 `#宽px #高px`。旧版本把 px 写成可选，
+ * `#3月 #5日` 里的 `#3`、`#5` 会被当成两个尺寸位，正文带日期的图反而
+ * 丢掉尺寸、手机上不显示（2026-11-22 发版审查发现）。
+ */
+const SIZE_TOKEN = /#\s*\d{1,5}\s*px/g;
 /** 只认单行的图片语法；URL 里不会有空格，`[^\s)]` 足够 */
 const MD_IMAGE = /!\[([^\]\n]*)\]\(([^)\s]+)\)/g;
 /** 代码块原样保留：里面的 `![]()` 是要给人看的语法，补尺寸反而改坏了 */
 const FENCE = /(```[\s\S]*?```)/g;
 
 /**
+ * 把一段正文按行内代码切开：`{code:true}` 的片段原样放过。
+ *
+ * 为什么不能只靠 `FENCE`：围栏块之外的**行内反引号**同样是在"讲语法"
+ * （`对话里说「用 \`![](url)\` 就能发图」`），2026-11-22 自检实测旧实现会把
+ * 里面的示例改写成 `![图片 #480px #270px](url)`，等于改坏了别人要看的文字。
+ *
+ * 反引号串必须**等长配对**（`` `a` `` / ``` ``a`b`` ```），这是 CommonMark 的
+ * 规则；找不到收尾就按普通字符处理。跨行不当代码：真跨行的行内代码极少，
+ * 而漏配一次就会把后面的图一起吞掉——**图补不上尺寸就发不出来**，代价更大。
+ *
+ * @param {string} seg 已排除围栏块的一段正文
+ * @returns {Array<{code:boolean, text:string}>}
+ */
+function splitInlineCode(seg) {
+  const parts = [];
+  let i = 0;
+  let from = 0;
+  while (i < seg.length) {
+    if (seg[i] !== '`') { i += 1; continue; }
+    let n = 0;
+    while (seg[i + n] === '`') n += 1;
+    let j = i + n;
+    let close = -1;
+    while (j < seg.length) {
+      if (seg[j] === '\n') break;
+      if (seg[j] !== '`') { j += 1; continue; }
+      let m = 0;
+      while (seg[j + m] === '`') m += 1;
+      if (m === n) { close = j; break; }
+      j += m;
+    }
+    if (close < 0) { i += n; continue; }
+    if (from < i) parts.push({ code: false, text: seg.slice(from, i) });
+    parts.push({ code: true, text: seg.slice(i, close + n) });
+    i = close + n;
+    from = i;
+  }
+  if (from < seg.length) parts.push({ code: false, text: seg.slice(from) });
+  return parts;
+}
+
+/**
  * 给正文里缺尺寸的 markdown 图片补上 `#宽px #高px`。
  *
- * 三条规则：
- *   1. 已经带两个尺寸位的**不动**（作者显式写的优先，我们只兜底）；
- *   2. 拿不到宽高的**不动**（不猜比例）；
- *   3. alt 为空时补一个占位说明——`![ #480px #240px]` 这种写法官方示例里没有，
+ * 四条规则：
+ *   1. 已经带两个及以上尺寸位的**不动**（作者显式写的优先，我们只兜底，
+ *      不校验写的值对不对——那是作者故意指定的显示大小）；
+ *   2. 只写了一个尺寸位的：按真实比例补上另一个。QQ 语法是
+ *      `#宽px #高px`，所以补的那个放在后面当高；作者写的宽度不改写；
+ *   3. 拿不到宽高的**不动**（不猜比例）；
+ *   4. alt 为空时补一个占位说明——`![ #480px #240px]` 这种写法官方示例里没有，
  *      填个字更稳，也不会在图上多显示什么东西。
+ *
+ * 围栏块（```）和行内反引号里的内容都原样保留，见 `splitInlineCode`。
  *
  * @param {string} text markdown 正文
  * @param {(url:string)=>{w:number,h:number}|undefined} lookup 按引用串查宽高
@@ -120,19 +173,36 @@ const FENCE = /(```[\s\S]*?```)/g;
  */
 export function normalizeMarkdownImages(text, lookup) {
   if (typeof text !== 'string' || !text.includes('![') || typeof lookup !== 'function') return text;
+  const fill = (seg) => seg.replace(MD_IMAGE, (m, alt, url) => {
+    const had = String(alt).match(SIZE_TOKEN) ?? [];
+    if (had.length >= 2) return m;
+    const real = lookup(url);
+    const w = Math.floor(Number(real?.w) || 0);
+    const h = Math.floor(Number(real?.h) || 0);
+    if (w <= 0 || h <= 0) return m;
+    /**
+     * 只写了一个尺寸位：作者写的不改写，按真实比例补上另一个。
+     * QQ 语法是 `#宽px #高px`，补的当高紧跟在后面，说明文字仍留在原处。
+     * 作者写 0 这种无效值不猜，原样放过。
+     */
+    if (had.length === 1) {
+      const given = Math.floor(Number(had[0].replace(/[^\d]/g, '')) || 0);
+      if (given <= 0) return m;
+      const other = Math.max(1, Math.round((h * given) / w));
+      const filled = String(alt).replace(SIZE_TOKEN, (tok) => `${tok} #${other}px`);
+      return `![${filled}](${url})`;
+    }
+    const suffix = sizeSuffix({ w, h });
+    if (!suffix) return m;
+    const name = String(alt).trim() || '图片';
+    return `![${name}${suffix}](${url})`;
+  });
   return String(text)
     .split(FENCE)
     .map((seg, i) => {
       /** split 带捕获组：奇数下标是代码块 */
       if (i % 2) return seg;
-      return seg.replace(MD_IMAGE, (m, alt, url) => {
-        const had = String(alt).match(SIZE_TOKEN) ?? [];
-        if (had.length >= 2) return m;
-        const suffix = sizeSuffix(lookup(url));
-        if (!suffix) return m;
-        const name = String(alt).trim() || '图片';
-        return `![${name}${suffix}](${url})`;
-      });
+      return splitInlineCode(seg).map((p) => (p.code ? p.text : fill(p.text))).join('');
     })
     .join('');
 }

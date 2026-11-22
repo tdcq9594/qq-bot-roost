@@ -6268,14 +6268,17 @@ function renderOnebot(d) {
           : '') +
         (st.selfOpenidBound ? '' : '<div class="hint" style="margin-top:6px"><b>机器人自己的 openid 没绑</b>：已按「过滤所有机器人消息」处理，避免自激</div>') +
         /**
-         * `forwardAll` 只承诺「收到的都推」。上游没开全量群消息时，非 @ 的
-         * 群聊根本到不了框架——不写清楚的话，用户会以为是 OneBot 这边丢了。
+         * `forwardAll` 只承诺「收到的都推」。群主没给这个群开「接收所有消息」时，
+         * 非 @ 的群聊根本到不了框架——不写清楚的话，用户会以为是 OneBot 这边丢了。
+         *
+         * 判据只能用「见过非 @ 的群消息没有」（`upstream.groupAll`）：那个开关在
+         * 群主的手机 QQ 里，配置和接口都查不到，不能靠 intents 猜。
          */
-        (st.upstream && st.upstream.fullGroup === false && cfg.forwardAll !== false
+        (st.upstream && st.upstream.groupAll === false && cfg.forwardAll !== false
           ? '<div class="hint" style="margin-top:6px"><b>只收得到 @ 机器人的群消息</b>：'
-            + `上游 intents=${Number(st.upstream.intents ?? 0)} 不含全量群消息（1073741824 = 2^30）。`
-            + '要去 q.qq.com 给机器人开「接收所有消息」，再把 intents 加上 1073741824；'
-            + '否则普通群聊不会到达框架，客户端这边自然也看不到</div>'
+            + '群主还没给这个群开「接收全量消息」（最新版手机 QQ → 群成员列表点机器人）。'
+            + '这与 intents 无关——全量事件同样走「群聊与私聊」（1<<25），本机已订阅；'
+            + '群主开完之后普通群聊才会到达框架</div>'
           : '');
     } else if (st.state === 'missing-deps' || st.state === 'error') {
       connHint.innerHTML = `<b>${escapeHtml(st.error || '没起来')}</b>`;
@@ -6358,7 +6361,12 @@ function renderOnebot(d) {
     hint.innerHTML =
       `还缺：<b>${escapeHtml(missing)}</b>。装不上时可以手动执行：` +
       `<code>${escapeHtml(d?.manual ?? '')}</code>` +
-      `<br>${regLine}　装不上先换个源再试`;
+      `<br>${regLine}　装不上先换个源再试` +
+      /**
+       * 内置包这条路要说出来：用户遇到「npm 装不上」时，最想知道的是
+       * 「还有没有别的办法」，而不是再换一次源。
+       */
+      '<br>npm 走不通时会自动改用<b>市场内置包</b>（ws / silk-wasm，直接解包，不需要 npm）';
   }
 
   /* ---------- 能力矩阵 ---------- */
@@ -6400,10 +6408,32 @@ async function onebotDepsAction(kind, name, btn) {
   const check = $('#onebotDepsCheck');
   if (check) check.hidden = true;
   try {
-    await api(`/api/ext/deps/${kind}`, {
+    const r = await api(`/api/ext/deps/${kind}`, {
       method: 'POST',
       body: JSON.stringify({ packages: [name] }),
     });
+    /**
+     * 后端把「安装没成功」包在 HTTP 200 + {ok:false, error} 里返回（为了不破坏
+     * 老客户端的状态码契约），api() 只在非 2xx 才抛。所以这里必须主动看 ok，
+     * 否则装不上时面板一声不吭——正是那次「ws 装不上且无报错」的根因之一。
+     */
+    if (r && r.ok === false) {
+      const hint = $('#onebotDepsHint');
+      if (hint) hint.innerHTML = `失败：${escapeHtml(r.error || '未知原因')}`;
+    } else if (Array.isArray(r?.fromMirror) && r.fromMirror.length) {
+      /**
+       * 走的是市场内置包：必须说出来。
+       *
+       * npm 那条路已经失败过一次（否则不会回退），用户下次再点「安装」还会
+       * 遇到同样的问题；不写明来源，他只会以为「刚才那一下碰巧成了」。
+       */
+      const hint = $('#onebotDepsHint');
+      const list = r.fromMirror.map((x) => `${x.name}@${x.version}`).join('、');
+      if (hint) {
+        hint.innerHTML = `npm 没装上，已改用<b>市场内置包</b>：<code>${escapeHtml(list)}</code>`
+          + '（装入后功能一致，只是不走 npm）';
+      }
+    }
   } catch (e) {
     const hint = $('#onebotDepsHint');
     if (hint) hint.innerHTML = `失败：${escapeHtml(e.message)}`;
@@ -9316,15 +9346,28 @@ function mediaState() {
   return MEDIA_STATE;
 }
 
-function mediaTime(sec) {
-  const n = Number(sec) || 0;
-  return n ? new Date(n * 1000).toLocaleString('zh-CN', { hour12: false }) : '—';
+/**
+ * 素材时间戳一律按**毫秒**进来（`api.js` 的 `toMillis` 已经把官方的秒归一了）。
+ *
+ * 这里仍按量级再兜一次：面板可能连着**没升级的框架**（旧版给秒），
+ * 或者有插件直接把自己拼的列表塞进 `MEDIA_STATE`。乘错方向的后果是
+ * 「50000 年」或「1970」，两种都看不出是单位错了。
+ */
+function mediaMs(v) {
+  const n = Number(v) || 0;
+  if (!n) return 0;
+  return n < 1e12 ? n * 1000 : n;
 }
 
-function mediaLeft(sec) {
-  const n = Number(sec) || 0;
+function mediaTime(ms) {
+  const n = mediaMs(ms);
+  return n ? new Date(n).toLocaleString('zh-CN', { hour12: false }) : '—';
+}
+
+function mediaLeft(ms) {
+  const n = mediaMs(ms);
   if (!n) return '—';
-  const days = Math.ceil((n * 1000 - Date.now()) / 86400000);
+  const days = Math.ceil((n - Date.now()) / 86400000);
   return days <= 0 ? '已过期' : `剩 ${days} 天`;
 }
 

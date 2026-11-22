@@ -17,10 +17,19 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
+import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { hashDir } from '../src/hashdir.js';
 
 const args = process.argv.slice(2);
+/**
+ * `--check`：只比对、不写文件。
+ *
+ * 2026-11-22 的教训：拿这个脚本去「校验」市场仓时，它直接把人工作区里
+ * 未提交的 `index.json` 覆盖了——脚本没有只读模式，想看一眼现状的唯一
+ * 办法就是写一遍。现在比对与生成分开，CI / 人工校验都走 `--check`。
+ */
+const checkMode = args.includes('--check');
 const repoIdx = args.indexOf('--repo');
 const branchIdx = args.indexOf('--branch');
 
@@ -87,6 +96,164 @@ async function readExternal(file) {
     console.warn(`  跳过 ${path.basename(path.dirname(file))}：plugin.json 解析失败（${e.message}）`);
     return null;
   }
+}
+
+/**
+ * 读 `<仓库>/deps/manifest.json`，算出每个依赖包的 sha256 与体积。
+ *
+ * 没有 `deps/` 目录＝这个市场没配镜像，返回空数组（不是错误）。
+ * 声明了文件却找不到**必须抛错**：静默跳过会让 `index.json` 少一条，
+ * 用户那边表现为「镜像里没有这个包」，而我们会以为已经发布了。
+ *
+ * @param {string} root 市场仓库根目录
+ * @returns {Promise<Array<{name:string,version:string,path:string,sha256:string,size:number,license?:string}>>}
+ */
+async function readDeps(root) {
+  const dir = path.join(root, 'deps');
+  let manifest;
+  try {
+    manifest = JSON.parse(await fs.readFile(path.join(dir, 'manifest.json'), 'utf8'));
+  } catch (e) {
+    if (e.code === 'ENOENT') return [];
+    throw new Error(`deps/manifest.json 读不出：${e.message}`);
+  }
+
+  /** 读一个 tgz 的字节；缺文件立刻抛（静默跳过的后果是用户那边「镜像里没有」） */
+  const readOne = async (rel, owner) => {
+    const buf = await fs.readFile(path.join(dir, rel)).catch(() => null);
+    if (!buf) throw new Error(`deps/${rel} 不存在（manifest 里声明了 ${owner}）`);
+    return { buf, hash: createHash('sha256').update(buf).digest('hex') };
+  };
+
+  const list = [];
+  for (const p of manifest.packages ?? []) {
+    if (!p?.name || !p?.version || !p?.file) {
+      throw new Error(`deps/manifest.json 里有条目缺 name/version/file：${JSON.stringify(p)}`);
+    }
+    const { buf, hash } = await readOne(p.file, `${p.name}@${p.version}`);
+    list.push({
+      name: p.name,
+      version: p.version,
+      path: `deps/${p.file}`,
+      sha256: hash,
+      size: buf.length,
+      ...(p.license ? { license: p.license } : {}),
+    });
+  }
+
+  /**
+   * `bundles` = 带传递依赖的整棵树（`qrcode` 有 29 个包）。
+   *
+   * **这一段的规则必须与插件仓 `scripts/build-index.mjs` 的 `readDeps()`
+   * 完全一致**：两个脚本都可能被用来重建同一份 `index.json`，规则一分叉，
+   * 谁跑一次就会把对方写的内容改一遍（甚至把 bundle 整段删掉）。
+   */
+  for (const b of manifest.bundles ?? []) {
+    if (!b?.name || !b?.version || !b?.dir) {
+      throw new Error(`deps/manifest.json 的 bundles 条目缺 name/version/dir：${JSON.stringify(b)}`);
+    }
+    if (!Array.isArray(b.packages) || !b.packages.length) {
+      throw new Error(`bundle ${b.name} 没有 packages：空树发布出去等于告诉用户「有」却装不上`);
+    }
+    const packages = [];
+    for (const p of b.packages) {
+      if (!p?.name || !p?.version || !p?.file) {
+        throw new Error(`bundle ${b.name} 里有条目缺 name/version/file：${JSON.stringify(p)}`);
+      }
+      const rel = `${b.dir}/${p.file}`;
+      const { buf, hash } = await readOne(rel, `${b.name} → ${p.name}@${p.version}`);
+      packages.push({
+        name: p.name,
+        version: p.version,
+        path: `deps/${rel}`,
+        sha256: hash,
+        size: buf.length,
+        ...(p.license ? { license: p.license } : {}),
+      });
+    }
+    list.push({
+      name: b.name,
+      version: b.version,
+      kind: 'bundle',
+      ...(b.license ? { license: b.license } : {}),
+      ...(b.why ? { why: b.why } : {}),
+      packages,
+    });
+  }
+
+  return list.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * `--check` 的比对：只比「脚本能算出来、索引里会过期」的部分。
+ *
+ * 忽略 `updated`（天天在变）与字段顺序。规则与插件仓
+ * `scripts/build-index.mjs` 的 `diff()` 保持同一套：两个脚本都可能被用来
+ * 重建同一份 `index.json`，判定口径一分叉，「谁跑谁改一遍」的老问题就回来了。
+ *
+ * @param {object} prev 现有索引
+ * @param {object} next 刚算出来的索引
+ * @returns {{problems:string[], notes:string[]}} `problems` 让退出码变 1，`notes` 只提示
+ */
+function diffIndex(prev, next) {
+  const problems = [];
+  const notes = [];
+  const byId = new Map((prev.plugins ?? []).map((p) => [p.id, p]));
+  for (const p of next.plugins ?? []) {
+    const old = byId.get(p.id);
+    if (!old) { problems.push(`${p.id}: 索引里没有这个插件`); continue; }
+    byId.delete(p.id);
+    for (const k of ['version', 'sha256', 'runtime', 'path', 'verified', 'category']) {
+      const a = old[k] ?? '';
+      const b = p[k] ?? '';
+      /** scopes / overrides 是数组，String() 会把 ['a','b'] 和 ['a,b'] 混为一谈 */
+      const sa = typeof a === 'object' ? JSON.stringify(a) : String(a);
+      const sb = typeof b === 'object' ? JSON.stringify(b) : String(b);
+      if (sa === sb) continue;
+      /**
+       * `version` 一边空一边有值：两个脚本对 mcp 扩展的版本来源口径不同
+       * （插件仓从 `transport` 认扩展，这里只认 `kind:'dsh-extension'`）。
+       * 这是**既有差异**，与本次 bundle 无关；报成硬错会让 `--check` 在市场仓
+       * 上永久为红，反而没人看。归入 notes，不算失败。
+       */
+      if (k === 'version' && (!sa || !sb)) { notes.push(`${p.id}: version 索引里是 ${sa || '(空)'}，实际是 ${sb || '(空)'}（版本来源口径不同，可能是 mcp 扩展）`); continue; }
+      problems.push(`${p.id}: ${k} 索引里是 ${sa || '(空)'}，实际是 ${sb || '(空)'}`);
+    }
+  }
+  for (const id of byId.keys()) problems.push(`${id}: 索引里有，但仓库里已经没有这个插件`);
+
+  const oldDeps = new Map((prev.deps ?? []).map((d) => [d.name, d]));
+  for (const d of next.deps ?? []) {
+    const old = oldDeps.get(d.name);
+    if (!old) { problems.push(`依赖 ${d.name}: 索引里没有这一条`); continue; }
+    oldDeps.delete(d.name);
+    /** bundle 没有顶层 path/sha256：逐个子包比，只比 version 会漏掉「换了某个子包」 */
+    if (Array.isArray(d.packages)) {
+      const op = Array.isArray(old.packages) ? old.packages : [];
+      if (!op.length) { problems.push(`依赖 ${d.name}: 索引里还是单包形态，实际已是 bundle`); continue; }
+      const byName = new Map(op.map((x) => [x.name, x]));
+      for (const p of d.packages) {
+        const o = byName.get(p.name);
+        if (!o) { problems.push(`依赖 ${d.name}/${p.name}: 索引里没有这一条`); continue; }
+        byName.delete(p.name);
+        for (const k of ['version', 'sha256', 'path']) {
+          if (String(o[k] ?? '') !== String(p[k] ?? '')) {
+            problems.push(`依赖 ${d.name}/${p.name}: ${k} 索引里是 ${o[k] ?? '(空)'}，实际是 ${p[k] ?? '(空)'}`);
+          }
+        }
+      }
+      for (const n of byName.keys()) problems.push(`依赖 ${d.name}/${n}: 索引里有，deps/ 下已经没有`);
+      continue;
+    }
+    if (Array.isArray(old.packages)) { problems.push(`依赖 ${d.name}: 索引里是 bundle 形态，实际已是单包`); continue; }
+    for (const k of ['version', 'path', 'sha256', 'size']) {
+      if (String(old[k] ?? '') !== String(d[k] ?? '')) {
+        problems.push(`依赖 ${d.name}: ${k} 索引里是 ${old[k] ?? '(空)'}，实际是 ${d[k] ?? '(空)'}`);
+      }
+    }
+  }
+  for (const name of oldDeps.keys()) problems.push(`依赖 ${name}: 索引里有，但 deps/ 下已经没有这个包`);
+  return { problems, notes };
 }
 
 async function main() {
@@ -231,12 +398,45 @@ async function main() {
     plugins: merged,
   };
 
+  /**
+   * 依赖镜像：`<仓库>/deps/manifest.json` + 同目录的 tgz。
+   *
+   * 规则与插件仓 `scripts/build-index.mjs` 的 `readDeps()` **必须一致**，
+   * 否则谁跑一次都会把对方写的内容改一遍。哈希一律现算——清单里只写
+   * 名字/版本/文件名，哈希手抄一次就多一个出错点。
+   */
+  const depsList = await readDeps(dir);
+  if (depsList.length) out.deps = depsList;
+
+  if (checkMode) {
+    const { problems, notes } = diffIndex(prev, out);
+    for (const n of notes) console.warn(`  ! ${n}`);
+    if (problems.length) {
+      console.error(`✗ 索引不一致（${problems.length} 处）：`);
+      for (const p of problems.slice(0, 40)) console.error(`  - ${p}`);
+      if (problems.length > 40) console.error(`  …还有 ${problems.length - 40} 处`);
+      console.error('  跑 `node scripts/build-market-index.mjs` 重新生成。');
+      process.exitCode = 1;
+      return;
+    }
+    console.log(`✓ 索引一致（${out.plugins?.length ?? 0} 个插件、${(out.deps ?? []).length} 个依赖镜像${notes.length ? `，${notes.length} 条提示` : ''}）`);
+    return;
+  }
+
   await fs.writeFile(target, `${JSON.stringify(out, null, 2)}\n`.replace(/\n/g, prevEol), 'utf8');
 
   console.log(`\n已生成 ${target}`);
   console.log(`  ${merged.length} 个插件${out.repo ? `，repo=${out.repo}` : '（没有 repo，安装会失败）'}`);
   for (const p of merged) {
     console.log(`  - ${p.id}${p.version ? ` v${p.version}` : ''}（${p.runtime}）${p.sha256 ? '' : '  ⚠ 无 sha256'}`);
+  }
+  for (const d of out.deps ?? []) {
+    if (Array.isArray(d.packages)) {
+      const kb = Math.round(d.packages.reduce((s, p) => s + (Number(p.size) || 0), 0) / 1024);
+      console.log(`  · 依赖镜像 ${d.name}@${d.version}（${d.packages.length} 个包平铺，${kb}KB）`);
+      continue;
+    }
+    console.log(`  · 依赖镜像 ${d.name}@${d.version}（${Math.round(d.size / 1024)}KB）`);
   }
 }
 

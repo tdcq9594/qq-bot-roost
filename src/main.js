@@ -831,14 +831,19 @@ function createMockApi(botName, metrics = null) {
     }),
     uploadMarkdownImageBytes: async (buf, { fileName = 'image.png' } = {}) => {
       const imageId = `mock_${++mockImageSeq}`;
-      const now = Math.floor(Date.now() / 1000);
+      /**
+       * 真接口 `listMediaImages()` 已经把官方的秒归一成毫秒，mock 要跟它同契约，
+       * 否则「本地试跑」看到的时间和真机不一样（这正是当初 1970 那个 bug 的形态）。
+       * `ttl` 保持秒——官方那个字段本来就是秒。
+       */
+      const now = Date.now();
       const item = {
         imageId,
         url: `qqbot-media://image/v1/${imageId}`,
         fileName,
         previewUrl: '',
         createdAt: now,
-        expiresAt: now + 7776000,
+        expiresAt: now + 7776000_000,
       };
       mockImages.set(imageId, item);
       return { ...item, ttl: 7776000, retained: true };
