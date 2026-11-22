@@ -33,6 +33,21 @@ const CLOSE_HINTS = {
 const FATAL_CLOSE_CODES = new Set(Object.keys(CLOSE_HINTS).map(Number));
 
 /**
+ * 会话已失效的关闭码：清掉本地 session，下次走全新 IDENTIFY。
+ *
+ * 官方明确定义（bot.q.qq.com/wiki/develop/api-v2/openapi/wss）：
+ *   4006 SESSION_NO_LONGER_VALID — 会话不再有效
+ *   4007 INVALID_SEQ             — seq 无效
+ *   4902                         — 同一 AppID 被另一条连接顶掉
+ *
+ * 不清的话会带着旧 session_id 去 RESUME，被服务端再拒一次（又 close 4006/4007），
+ * 表现为「一直重连但始终不上线」。注意**不能**把它们加进 CLOSE_HINTS：
+ * FATAL_CLOSE_CODES 是从 CLOSE_HINTS 的 key 派生的，加进去就变成「停止重连」了。
+ * 与 botrs close.rs 的 cannot_resume_close_code 同口径。
+ */
+const SESSION_INVALID_CLOSE_CODES = new Set([4006, 4007, 4902]);
+
+/**
  * WebSocket 网关客户端。
  *
  * 流程（对应官方文档 api-v2 / 事件订阅）：
@@ -130,8 +145,8 @@ export class Gateway {
     }
 
     this.stopped = false;
-    this.sessionId = '';
-    this.lastSeq = null;
+    // 面板上残留的旧会话也要清，否则重启后到 READY 之间显示的是已废的 id
+    this.#clearSession();
     this.lastAckAt = 0;
     this.attempt = 0;
     await this.#connect();
@@ -158,6 +173,19 @@ export class Gateway {
     this.reconnectTimer = null;
   }
 
+  /**
+   * 会话失效时统一清理本地会话状态。
+   *
+   * metrics.sessionId 也要清：它会在 READY 时写入并上面板（runtime.js:160），
+   * 只清 this.sessionId 的话，面板会一直显示一个已经作废的会话 id，
+   * 排查「为什么一直 RESUME 失败」时会被误导。
+   */
+  #clearSession() {
+    this.sessionId = '';
+    this.lastSeq = null;
+    this.metrics.sessionId = '';
+  }
+
   async #connect() {
     if (this.stopped) return;
     // 防止重连定时器和手动重连撞在一起，建出两条连接
@@ -172,9 +200,11 @@ export class Gateway {
     this.connecting = true;
     /** 这一轮建连的代号；stop()/restart() 会让它过期（见构造函数里的说明） */
     const epoch = this.epoch;
+    /** 网关响应要留到下面的配额预检用，不能关在 try 块里 */
+    let gw;
     let url;
     try {
-      const gw = await this.api.getGateway();
+      gw = await this.api.getGateway();
       url = gw?.url;
       if (!url) throw new Error('网关接口未返回 url');
       this.metrics.gatewayUrl = url;
@@ -196,6 +226,28 @@ export class Gateway {
       this.connecting = false;
       log.debug('停机中，放弃建立连接');
       return;
+    }
+
+    /**
+     * 会话创建配额预检（官方 GET /gateway/bot 的 session_start_limit）。
+     *
+     * 只挡「需要全新 IDENTIFY」的场景：有 sessionId + seq 时走 RESUME，
+     * 不创建新 Session、不消耗配额，不能被误挡——否则断线重连永远回不来。
+     * remaining<=0 时盲发 IDENTIFY 只会被服务端拒（还白白消耗一次失败计数），
+     * 不如按官方 reset_after 等到配额重置再连。
+     *
+     * 多分片场景（shards>1）本框架单连接用不上；这里按「至少要有 1 个」判断。
+     * 字段缺失（旧接口/沙箱）一律放行，不让预检变成新的启动阻塞点。
+     */
+    const needIdentify = !(this.sessionId && this.lastSeq !== null);
+    const limit = gw?.session_start_limit;
+    if (needIdentify && limit && Number.isFinite(limit.remaining) && limit.remaining <= 0) {
+      this.connecting = false;
+      log.warn(
+        `会话创建配额已耗尽（remaining=${limit.remaining}/total=${limit.total ?? '?'}），` +
+          `跳过本次 IDENTIFY 等配额重置`,
+      );
+      return this.#scheduleReconnect(limit.reset_after);
     }
 
     const ws = new WebSocket(url);
@@ -259,10 +311,10 @@ export class Gateway {
       this.metrics.connected = false;
       if (this.stopped) return;
       this.metrics.reconnectCount += 1;
-      if (ev.code === 4902) {
-        // resume 被拒（会话已被别的连接用掉），清掉本地会话，下次走全新鉴权
-        this.sessionId = '';
-        this.lastSeq = null;
+      if (SESSION_INVALID_CLOSE_CODES.has(ev.code)) {
+        // 会话失效（被顶掉 / 不再有效 / seq 无效）：清掉本地会话，下次走全新鉴权。
+        // 不清就会带着旧 session_id 反复 RESUME 被拒，表现为一直重连却不上线。
+        this.#clearSession();
       }
       const hint = CLOSE_HINTS[ev.code];
       log.warn(`WebSocket 关闭 code=${ev.code} reason=${ev.reason || '-'}`);
@@ -334,8 +386,7 @@ export class Gateway {
       }
       case OP.INVALID_SESSION: {
         log.warn('会话失效，重新鉴权');
-        this.sessionId = '';
-        this.lastSeq = null;
+        this.#clearSession();
         await this.#identify();
         break;
       }
@@ -472,7 +523,11 @@ export class Gateway {
     }
   }
 
-  #scheduleReconnect() {
+  /**
+   * @param {number|null} quotaWaitMs 会话配额耗尽时按官方 reset_after 等待；
+   *   传了就用它（且不推高 attempt，避免后续每次断线退避越来越长），不传走普通指数退避。
+   */
+  #scheduleReconnect(quotaWaitMs = null) {
     if (this.stopped) return;
     // 撞过永久性错误就别再试了，重连只会刷日志
     if (this.fatal) return;
@@ -481,11 +536,25 @@ export class Gateway {
       log.debug('已有重连排队，跳过');
       return;
     }
-    // 指数退避，上限 30s
-    // 加 jitter：多机器人/多实例同时断线时避免锁步重连一起打满网关
-    const base = Math.min(1000 * 2 ** this.attempt++, 30000);
-    const delay = Math.round(base * (0.5 + Math.random() * 0.5));
-    log.info(`${(delay / 1000).toFixed(0)}s 后重连（第 ${this.attempt} 次）`);
+    let delay;
+    // 调用方只在「配额耗尽」时传参（哪怕 reset_after 非法也传 null），
+    // 所以用「是否走过配额路径」决定分支，不能拿参数有效性当判断——
+    // 否则 reset_after=0/undefined 会落进下面的指数退避，平白把 attempt 推高。
+    const quotaMode = arguments.length > 0;
+    if (quotaMode) {
+      // reset_after 单位是 ms，官方给的是「计数重置还需多久」。
+      // 非法/缺失时用 30s 兜底；setTimeout 上限约 24.8 天，
+      // 这里再收一道到 24h，避免异常值溢出成立即触发。
+      const safe = Number.isFinite(quotaWaitMs) && quotaWaitMs > 0 ? quotaWaitMs : 30_000;
+      delay = Math.min(safe, 24 * 3600_000 - 1);
+      log.info(`会话配额耗尽，${(delay / 1000).toFixed(0)}s 后配额重置再重连`);
+    } else {
+      // 指数退避，上限 30s
+      // 加 jitter：多机器人/多实例同时断线时避免锁步重连一起打满网关
+      const base = Math.min(1000 * 2 ** this.attempt++, 30000);
+      delay = Math.round(base * (0.5 + Math.random() * 0.5));
+      log.info(`${(delay / 1000).toFixed(0)}s 后重连（第 ${this.attempt} 次）`);
+    }
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.#connect().catch((e) => log.error('重连失败:', e.message));
