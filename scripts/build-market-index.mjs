@@ -363,10 +363,20 @@ async function main() {
    * 以前的写法是整份覆盖，结果一次「更新索引」就把 tags 清空、
    * 把描述里的补充说明抹掉，看起来像升级，实际是数据丢失。
    */
-  /** 与插件仓 `scripts/build-index.mjs` 的 `STRUCT_FIELDS` 保持一致（kind 决定下游怎么处理）。 */
+  /**
+   * 与插件仓 `scripts/build-index.mjs` 的 `STRUCT_FIELDS` 逐项一致。
+   *
+   * 2026-11-23 对齐：补上 issue #37 加的 `sha256_v2`（algo2 指纹）与 `ui`
+   * （扩展运行形态声明）。`test/market-kind.mjs` 会把两份数组抽出来 deepEqual，
+   * 漂移就红。注意这里的字段只用于「合并时以磁盘为准覆盖旧值」：
+   * 框架侧 `hashDir()` 只产 `sha256`（且口径与插件仓 algo1 不同），产不出
+   * `sha256_v2` / `ui`，所以 `p[k]` 为 undefined 时不会覆盖——旧索引里的
+   * 插件仓值原样保留，不会把双哈希抹掉。
+   */
   const STRUCT_FIELDS = [
-    'id', 'version', 'path', 'runtime', 'sha256', 'frameworkVersion', 'kind',
-    'scopes', 'overrides', 'form',
+    'id', 'version', 'path', 'runtime', 'sha256', 'sha256_v2', 'frameworkVersion', 'kind',
+    /** 权限声明：与插件仓一致，删掉后必须能降档 */
+    'scopes', 'overrides', 'form', 'ui',
   ];
 
   const merged = plugins.map((p) => {
@@ -383,7 +393,8 @@ async function main() {
      */
     if (p.kind === undefined) delete out.kind;
     if (!p.version) delete out.version;
-    for (const k of ['scopes', 'overrides', 'form']) {
+    /** 权限声明同样不能继承旧值：删掉一个敏感 scope / ui 必须能降档（与插件仓一致） */
+    for (const k of ['scopes', 'overrides', 'form', 'ui']) {
       if (p[k] === undefined) delete out[k];
     }
     return out;
