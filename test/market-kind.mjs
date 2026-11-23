@@ -78,6 +78,10 @@ test('build-market-index 与 build-index 的 kind 规则一致（防两份漂移
    * 2026-11-14：STRUCT_FIELDS 扩成多行、多了 scopes/overrides/form 三个
    * 权限声明字段。以前靠 `/'kind'\]/` 匹配数组结尾，格式一变就误报。
    * 直接把两份数组抽出来逐项比，才是这个测试真正想守的东西。
+   *
+   * 2026-11-23：deepEqual 只能保证「两份一致」，两份**同时**删掉一个字段
+   * 它照样绿。所以再对关键字段做显式存在断言：sha256_v2（issue #37 双哈希）
+   * 和 ui（运行形态声明）缺一不可。
    */
   const fieldsOf = (src) => (src.match(/const STRUCT_FIELDS = \[([\s\S]*?)\];/)?.[1] ?? '')
     .match(/'[^']+'/g) ?? [];
@@ -85,7 +89,7 @@ test('build-market-index 与 build-index 的 kind 规则一致（防两份漂移
   const b = fieldsOf(p);
   assert.ok(a.length > 0 && b.length > 0, '两份脚本都要能读出 STRUCT_FIELDS');
   assert.deepEqual(a, b, '两份索引脚本的 STRUCT_FIELDS 必须逐项一致，否则生成的索引会漂');
-  for (const key of ['kind', 'scopes', 'overrides', 'form']) {
+  for (const key of ['kind', 'sha256_v2', 'ui', 'scopes', 'overrides', 'form']) {
     assert.ok(a.includes(`'${key}'`), `STRUCT_FIELDS 少了 ${key}`);
   }
 });
