@@ -30,7 +30,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { hashFileList } from '../src/hashdir.js';
+import { hashFileList, isHashedFile } from '../src/hashdir.js';
 import { CODE_ENTRIES } from '../src/update-scope.js';
 import { compareVersion } from '../src/semver.js';
 
@@ -62,12 +62,16 @@ function trackedFiles() {
    * 原因：GitHub 的 tarball 是全量（还带 .github、scripts、sdk、types），
    * 而 Gitee 源只拉 CODE_ENTRIES 这几个条目。如果指纹按「包里全部文件」算，
    * 两条下载路径必然算出不同值 —— 一条永远校验失败，一条等于没校验。
+   * 注意：这里必须再过一遍 isHashedFile()——它和更新器 hashDir() 的 collect
+   * 共用同一套排除规则（文档、LICENSE、缓存目录）。2026-11 的教训是这里
+   * 漏掉该过滤，导致清单指纹含 17 个文档、更新器实算不含，全量自更新失败。
    */
   return out
     .split('\0')
     .filter(Boolean)
     .filter((f) => f !== SUMS_FILE)
-    .filter((f) => CODE_ENTRIES.some((p) => f === p || f.startsWith(`${p}/`)));
+    .filter((f) => CODE_ENTRIES.some((p) => f === p || f.startsWith(`${p}/`)))
+    .filter(isHashedFile);
 }
 
 /**
@@ -105,7 +109,8 @@ function dirtyTracked() {
   return [...new Set([...unstaged, ...untracked])]
     .filter(Boolean)
     .filter((f) => f !== SUMS_FILE)
-    .filter((f) => CODE_ENTRIES.some((p) => f === p || f.startsWith(`${p}/`)));
+    .filter((f) => CODE_ENTRIES.some((p) => f === p || f.startsWith(`${p}/`)))
+    .filter(isHashedFile);
 }
 
 /** 读现有 SHA256SUMS → Map<version, hash> */

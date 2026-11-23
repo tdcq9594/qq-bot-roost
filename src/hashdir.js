@@ -30,6 +30,30 @@ const SKIP_DIRS = HASH_SKIP;
 const SKIP_FILES = new Set(['.deps.json', '.DS_Store', 'Thumbs.db']);
 
 /**
+ * 一个相对路径（`/` 分隔，含文件名）是否参与内容指纹。
+ *
+ * **这是唯一的排除规则**，目录遍历（collect）和发版脚本（build-sums.mjs）
+ * 都必须调它，不能各自复制一份判断——2026-11 就因为发版脚本漏了这里的
+ * 文档排除规则，导致 SHA256SUMS 记录的指纹含 17 个 md/LICENSE、而更新器
+ * 解包后算出的不含，v1.1.11 及之后所有版本的自更新全部校验失败。
+ *
+ * @param {string} rel 相对路径，如 `src/main.js` / `docs/架构说明.md`
+ * @returns {boolean}
+ */
+export function isHashedFile(rel) {
+  const parts = String(rel).split('/');
+  const name = parts.pop();
+  if (!name) return false;
+  // 任一级目录在跳过表里就排除（与 collect 逐层剪枝等价）
+  if (parts.some((seg) => SKIP_DIRS.has(seg))) return false;
+  if (SKIP_FILES.has(name)) return false;
+  const lower = name.toLowerCase();
+  if (lower.endsWith('.md')) return false;
+  if (/^(license|licence|copying)(\.[a-z0-9]+)?$/.test(lower)) return false;
+  return true;
+}
+
+/**
  * 把文本文件的 CRLF 折成 LF；二进制原样返回。
  *
  * 判断依据是「有没有 NUL 字节」，和 git 自己判定二进制的思路一致。
@@ -65,18 +89,9 @@ async function collect(root) {
         if (SKIP_DIRS.has(it.name)) continue;
         await walk(path.join(dir, it.name), prefix ? `${prefix}/${it.name}` : it.name);
       } else if (it.isFile()) {
-        if (SKIP_FILES.has(it.name)) continue;
-        /**
-         * 纯文档不参与插件内容指纹：改 README / LICENSE 不改变用户装到的
-         * 代码，不该逼维护者 bump 版本（改文档就升版纯属版本噪音）。
-         * LICENSE 由插件作者自带、可自定义协议，属于「文档声明」不是代码。
-         * 这里排除后，必须同步重建插件仓 index.json 并让插件仓的
-         * scripts/hashdir.mjs 一致排除，否则跨仓校验会全红。
-         */
-        const lower = it.name.toLowerCase();
-        if (lower.endsWith('.md')) continue;
-        if (/^(license|licence|copying)(\.[a-z0-9]+)?$/.test(lower)) continue;
-        out.push(prefix ? `${prefix}/${it.name}` : it.name);
+        const rel = prefix ? `${prefix}/${it.name}` : it.name;
+        if (!isHashedFile(rel)) continue;
+        out.push(rel);
       }
       // 符号链接一律跳过：它可能指向仓库外，内容不稳定
     }
