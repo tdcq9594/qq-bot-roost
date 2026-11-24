@@ -56,6 +56,12 @@ test('纯内存校验：24kHz 单声道 16bit WAV 走和真发语音同一个 en
   assert.equal(r.rms, 0, '静音样本量出来的电平如实回传，方便面板提示「可能没声音」');
 });
 
+test('试听：32kHz WAV 也算可直接编码，不再误报需要 ffmpeg', async () => {
+  const r = await toSilkDry(makeWav({ rate: 32000 }), fakeSilk({ rate: 32000 }));
+  assert.equal(r.ok, true);
+  assert.equal(r.via, 'wav');
+});
+
 test('本来就是 SILK：直接通过，不再编码一次', async () => {
   const buf = Buffer.from('#!SILK_V3' + 'x'.repeat(32));
   const r = await toSilkDry(buf, fakeSilk());

@@ -6,13 +6,14 @@
  * 装了才转，没装就明确报错，框架本体不为这条功能破零依赖。
  *
  * 三条路径：
- *   · 已经是 SILK  → 直接发
- *   · WAV          → `silk-wasm.encode(buf, 0)`（它自己读 WAV 头，零转码）
- *   · mp3 / 其它   → 有 ffmpeg 就转 24k 单声道 WAV 再编码
+ *   · 已经是 SILK                    → 直接发
+ *   · WAV（silk-wasm 能直编的采样率）→ `silk-wasm.encode(buf, 0)`（它自己读 WAV 头，零转码）
+ *   · WAV（怪采样率）/ mp3 / 其它    → 有 ffmpeg 就转 24k 单声道 WAV 再编码
  *
  * 两个可选依赖都**不在**根 package.json 里，靠 `ext-deps` 按需补装：
  * `silk-wasm` 1.5MB，第一次发语音时装；`ffmpeg` 62MB，第一次遇到
- * **非 WAV 语音**才装（`@ffmpeg-installer` 的平台子包带静态二进制）。
+ * **不能直接编码的语音**（非 WAV、静音档位采样率、超 60 秒等）才装
+ *（`@ffmpeg-installer` 的平台子包带静态二进制）。
  * 面板「外接 → 依赖」也能手动装/卸。
  */
 
@@ -31,13 +32,24 @@ const log = createLogger('onebot-voice');
 export const MAX_VOICE_BYTES = 20 * 1024 * 1024;
 
 /**
- * QQ 只按 **24kHz** 解码语音 SILK。
+ * ffmpeg 转码目标 / 静音自检用的参考解码率，**不是 QQ 的限制**。
  *
- * SILK 容器里**不存采样率**，解码器按约定值读——所以编码前必须先把采样率
- * 对齐到 24k，否则客户端解出来就是错的：2026-11-13 实测，22050Hz 的 WAV
- * 直接编码会得到**全静音**的码流，语音条发得出去、点开没声音。
+ * 2026-11-24 实测纠正了一个持续很久的误解：QQ 官方接口只要求 SILK 容器，
+ * 不限采样率；SILK 码流自带采样率，32kHz 编的码流按 24k 或 32k 解码，
+ * 音高时长都对。真正的问题是 silk-wasm 对 11025 / 22050 这两个非标准档位
+ * 会吐出静音码流（见下面的 SILK_DIRECT_RATES），跟 QQ 无关。
  */
 export const QQ_VOICE_RATE = 24000;
+
+/**
+ * 可以跳过 ffmpeg、直接交给 silk-wasm 编码的 WAV 采样率档位。
+ *
+ * 2026-11-24 实测（1 秒 440Hz 正弦波 → encode → decode）：
+ *   8000 / 12000 / 16000 / 24000 / 32000 / 44100 / 48000 → 有声，音高时长正确
+ *   11025 / 22050                                        → 静音，体积膨胀约 17 倍
+ * 不在表里的采样率一律走 ffmpeg 归一到 24k——宁可多转一次，也不发静音条。
+ */
+export const SILK_DIRECT_RATES = new Set([8000, 12000, 16000, 24000, 32000, 44100, 48000]);
 
 /** 读 WAV 头；不是 WAV 或解析失败返回 null */
 function wavInfoOf(silk, buf) {
@@ -255,39 +267,35 @@ export async function toSilk(buf, silk) {
   if (silk.isSilk?.(buf)) return { silk: buf, via: 'silk' };
 
   /**
-   * **采样率必须归一到 24kHz / 单声道 / 16bit**，否则客户端放不出来。
+   * SILK 只吃单声道 16bit PCM；采样率只要在已知安全档位上就能直接编码。
    *
-   * 2026-11-13 实测（aurabot 用 Windows 本地语音 SAPI，输出 22050Hz / 单声道 /
-   * 16bit 的 WAV）：`silk.encode` 只认 8000 / 12000 / 16000 / 24000 四档，
-   * 22050 不在表内，它**不报错**，却把码流编成了静音——5 条真实语音解码后
-   * RMS 全是 1，SILK 体积还膨胀 18–29 倍。QQ 侧表现就是「语音条发得出去、
-   * 点开没声音」，日志里发送还是成功的。
-   *
-   * 这条路径以前只对「非 WAV」转码，WAV 直接编码，所以 TTS 出 WAV 的用户
-   * 一直是坏的；走 mp3 的因为经过 ffmpeg，所以从来没暴露过。
+   * 历史：2026-11-13 的 22050Hz 静音事故（SAPI 输出）让这里写死了"必须 24k"，
+   * 2026-11-24 实测推翻了这个前提——QQ 不限采样率，silk-wasm 对 32k 等档位
+   * 也编得正常，只有 11025 / 22050 会静音。所以改成白名单判断：GPT-SoVITS
+   * 这类 32k 输出不用再白跑一次 ffmpeg 重采样。
    */
   const info = wavInfoOf(silk, buf);
   const fmt = info?.fmt ?? null;
   const seconds = secondsOf(info);
   const tooLong = seconds > MAX_VOICE_SEC;
-  const alreadyQqVoice =
+  const directEncode =
     Boolean(fmt) &&
-    Number(fmt.sampleRate) === QQ_VOICE_RATE &&
+    SILK_DIRECT_RATES.has(Number(fmt.sampleRate)) &&
     Number(fmt.numberOfChannels) === 1 &&
     Number(fmt.bitsPerSample) === 16 &&
     !tooLong;
 
-  if (alreadyQqVoice) {
+  if (directEncode) {
     const out = await encodeChecked(silk, buf);
     log.info(`语音 SILK 就绪：via=wav，${Math.round(Number(silk.getDuration?.(out.data)) || 0)}ms，${out.data.length}B`);
     return { silk: out.data, via: 'wav' };
   }
 
   /**
-   * 走到这里说明**不能直接编码**：要么不是 WAV，要么采样率/声道/位深不对，
-   * 要么时长超限。`silk.encode` 只吃单声道 16bit——双声道、32bit float 的
-   * WAV 会被它按错误的方式解释、**不会报错**，产出的码流在客户端就是
-   * 「语音条在、点开放不出来」。参数写进日志，现场不用再猜。
+   * 走到这里说明**不能直接编码**：要么不是 WAV，要么采样率在静音档位 /
+   * 声道 / 位深不对，要么时长超限。统一走 ffmpeg 归一到 24kHz 单声道 16bit
+   * 再编码。双声道、32bit float 的 WAV 会被 `silk.encode` 按错误方式解释、
+   * **不会报错**，所以这些参数都要写进日志，现场不用猜。
    */
   log.info(
     fmt
@@ -309,8 +317,8 @@ export async function toSilk(buf, silk) {
   if (!ffmpeg) {
     const e = new Error(
       fmt
-        ? `这段 WAV 是 ${fmt.sampleRate}Hz / ${fmt.numberOfChannels} 声道，QQ 只认 24000Hz 单声道，` +
-            '需要 ffmpeg 重采样，自动安装也没成功（原因见日志）。到面板「外接 → 依赖」点『一键安装』。'
+        ? `这段 WAV 是 ${fmt.sampleRate}Hz / ${fmt.numberOfChannels} 声道，SILK 编码器不能直接处理，` +
+            '需要 ffmpeg 归一到 24kHz 单声道，自动安装也没成功（原因见日志）。到面板「外接 → 依赖」点『一键安装』。'
         : '这段语音不是 WAV/SILK，需要 ffmpeg 转码，自动安装也没成功（原因见日志）。' +
             '到面板「外接 → 依赖」点『一键安装』，或让 TTS 直接输出 WAV；装好后下一条语音就能发。',
     );
@@ -380,10 +388,11 @@ function pcmRms16(buf, maxBytes = 1 << 20) {
 /**
  * 编码 + **静音自检**。
  *
- * `silk.encode()` 遇到它不支持的采样率（比如 22050）不会报错，而是吐出一段
+ * `silk.encode()` 遇到 11025 / 22050 这类采样率不会报错，而是吐出一段
  * 能解码、但全静音的码流——消息照常发出，用户点开什么都没有，最难查。
  * 所以编完自己解码量一次电平：输入明明有声、输出却没声，就当场抛错，
  * 宁可这条语音报失败，也不发一条「看着在、其实空的」语音条。
+ * 解码用 QQ_VOICE_RATE 只是自检的参考采样率，不代表码流本身是 24k。
  *
  * 导出给测试用：`test/onebot-voice.mjs` 拿 22050 的 WAV 直接喂它，
  * 断言它必须拦下来——这是「能发不能播」那道 bug 的回归护栏。
@@ -395,9 +404,9 @@ function pcmRms16(buf, maxBytes = 1 << 20) {
  * 自动装依赖，`ffmpegToWav` 还会落临时文件——试听若照跑一遍，等于
  * 「点一下试听，后台开始下 62MB、写一堆盘」，直接违背 5.3 的验收。
  *
- * 所以这里只覆盖**不需要转码**的两种输入：本来就是 SILK，或已经是
- * QQ 要的 24kHz / 单声道 / 16bit / ≤60s 的 WAV。这两种走的编码函数
- * 与 `toSilk` 的 `alreadyQqVoice` 分支是同一个 `encodeChecked`，
+ * 所以这里只覆盖**不需要转码**的两种输入：本来就是 SILK，或采样率在
+ * SILK_DIRECT_RATES 白名单内、单声道 / 16bit / ≤60s 的 WAV。这两种走的
+ * 编码函数与 `toSilk` 的 `directEncode` 分支是同一个 `encodeChecked`，
  * 因此「试听校验通过」等价于「这份字节发出去能播」。
  * 其它格式明确回 `needs_transcode`，让面板说清「发送时框架会转码」，
  * 而不是假装验过了。
@@ -418,7 +427,7 @@ export async function toSilkDry(buf, silk) {
   const fmt = info?.fmt ?? null;
   const seconds = secondsOf(info);
   const direct = Boolean(fmt)
-    && Number(fmt.sampleRate) === QQ_VOICE_RATE
+    && SILK_DIRECT_RATES.has(Number(fmt.sampleRate))
     && Number(fmt.numberOfChannels) === 1
     && Number(fmt.bitsPerSample) === 16
     && seconds <= MAX_VOICE_SEC;
@@ -427,7 +436,7 @@ export async function toSilkDry(buf, silk) {
       ok: false,
       reason: 'needs_transcode',
       message: fmt
-        ? `这段 WAV 是 ${fmt.sampleRate}Hz / ${fmt.numberOfChannels} 声道 / ${fmt.bitsPerSample}bit，发送前要 ffmpeg 重采样；试听不跑转码以免写盘`
+        ? `这段 WAV 是 ${fmt.sampleRate}Hz / ${fmt.numberOfChannels} 声道 / ${fmt.bitsPerSample}bit，发送前要 ffmpeg 转成 24k 单声道；试听不跑转码以免写盘`
         : '这段音频不是 WAV/SILK，发送前要 ffmpeg 转码；试听不跑转码以免写盘',
     };
   }
