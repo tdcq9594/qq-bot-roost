@@ -10,6 +10,7 @@ import {
   saveBotConfig,
   createBotConfig,
   ensureBotCredentials,
+  promptCredentials,
   migrateToMultiBot,
 } from './config.js';
 import { DIRS, PATHS, botPaths, listBotIds, ensureDirs, rel } from './paths.js';
@@ -1563,6 +1564,37 @@ async function main() {
   for (const rt of runtimes) {
     if (!rt.online) log.error(`[${rt.id}] 未连上：${rt.lastError || '未知原因'}`);
   }
+
+  /**
+   * 命令行补凭证（可选，不阻塞面板）。
+   *
+   * 面板和浏览器都已经起来了，这里才在终端里问一句。有 TTY 且缺凭证时提示，
+   * 回车跳过则什么都不做（面板引导照常可用）。拿到凭证后要同步运行时：
+   *   · 把新值写进 rt.cfg（面板的 ?bot= 状态、syncBotName 都读它）；
+   *   · 清 token 管理器里的旧 appId/secret，否则还拿旧凭证换 token；
+   *   · goOnline() 重新认领实例并连网关（start() 那次因无凭证置了 error）。
+   * 用 void 启动、不 await——询问期间面板照常服务，用户输入完自行上线。
+   */
+  void (async () => {
+    for (const rt of runtimes) {
+      if (rt.cfg.appId && rt.cfg.appSecret) continue;
+      const fresh = await promptCredentials(rt.id);
+      if (!fresh) continue;
+      Object.assign(rt.cfg, { appId: fresh.appId, appSecret: fresh.appSecret });
+      if (rt.tokens) {
+        rt.tokens.appId = fresh.appId;
+        rt.tokens.appSecret = fresh.appSecret;
+        rt.tokens.token = '';
+        rt.tokens.expiresAt = 0;
+      }
+      try {
+        await rt.goOnline();
+        log.info(`[${rt.id}] 已用命令行填入的凭证上线`);
+      } catch (e) {
+        log.error(`[${rt.id}] 命令行凭证已保存，但上线失败：${e.message}`);
+      }
+    }
+  })().catch((e) => log.warn(`命令行凭证交互跳过：${e.message}`));
 
   // 后台服务放在最后启动，不干扰启动流程的日志
   await services.start();
