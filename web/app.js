@@ -342,11 +342,11 @@ async function deleteBot(id) {
  * 二维码内容是官方给的一个 URL，我们本地画成二维码（web/vendor/qrcode.js）。
  * 密钥（bindKey）留在服务端，前端只拿到 taskId。
  *
- * 两个入口共用这套逻辑，区别只在「扫完之后把值填哪」：
- *   · `new` —— 新建机器人弹窗：填进 #nbAppId / #nbSecret，等用户补个 ID 再创建；
- *   · `cfg` —— 配置页的连接凭证：填进 cfgForm，AppSecret 被重置、或者整只机器人
- *     换账号时用，点「保存设置」才生效（自动保存会在用户没反应过来时重连一次，
- *     扫码本来就可能是误点，不该顺带把在线连接掐掉）。
+ * 三个入口共用这套逻辑，区别只在「扫完之后把值填哪」：
+ *   · `new`   —— 新建机器人弹窗：填进 #nbAppId / #nbSecret，等用户补个 ID 再创建；
+ *   · `cfg`   —— 配置页的连接凭证：拿到新凭证即自动保存+上线（旧密钥已作废，
+ *     不落盘就用旧票据连不上），见 QR_SLOTS.cfg.onDone；
+ *   · `setup` —— 首次启动引导：拿到凭证即保存到当前机器人并上线，见 QR_SLOTS.setup.onDone。
  *
  * 同一时刻只允许一个扫码任务：换位置扫会先把上一个收掉，免得两个 interval
  * 抢同一个 taskId、或者把结果填到已经关掉的弹窗里。
@@ -368,20 +368,44 @@ const QR_SLOTS = {
   },
   cfg: {
     box: '#cfgQr', code: '#cfgQrCode', tip: '#cfgQrTip', btn: '#cfgQrStart',
-    hint: '用手机 QQ 扫码，确认后自动填到上面，再点「保存设置」生效',
-    onDone(r) {
+    hint: '用手机 QQ 扫码，确认后自动保存新凭证并尝试上线',
+    async onDone(r) {
       const f = $('#cfgForm');
+      if (!f) return;
       f.appId.value = r.appId || '';
       // 扫码给的是完整的一对，直接覆盖输入框；留空会被后端当成「不修改」
       f.appSecret.value = r.appSecret || '';
-      /**
-       * 二维码已经用完了，留着只是一块黑白方块：清掉图纸，让提示单独留着，
-       * 这样用户视线落在「点保存设置」上，而不是再扫一次。
-       */
       const code = $('#cfgQrCode');
       if (code) code.innerHTML = '';
-      $('#cfgQrTip').textContent = `✓ 已换成 AppID ${r.appId}，点「保存设置」生效`;
-      $('#cfgSaveTop')?.focus();
+      /**
+       * 只有走到这里（/qr/poll 返回 done、拿到新凭证）旧密钥才真正作废：
+       * 二维码还没扫、或还在 pending 时旧凭证依然有效，机器人照常在线，
+       * 所以 startQr 里不做任何破坏性动作。拿到新凭证后必须立刻保存并上线，
+       * 否则机器人会一直拿已失效的旧票据连不上。
+       */
+      $('#cfgQrTip').textContent = `✓ 已拿到 AppID ${r.appId}，正在保存并尝试上线…`;
+      const saved = await saveCfgForm({ fromQr: true });
+      if (saved) await tryOnlineAfterQr();
+      else {
+        const tip = $('#cfgQrTip');
+        if (tip) tip.textContent = '凭证没保存上，这张二维码已失效；请重新扫码或手动填写';
+      }
+    },
+  },
+  setup: {
+    box: '#setupQr', code: '#setupQrCode', tip: '#setupQrTip', btn: '#setupQrStart',
+    hint: '用手机 QQ 扫码，确认后自动配置并上线',
+    async onDone(r) {
+      const appId = $('#setupAppId');
+      const secret = $('#setupSecret');
+      if (appId) appId.value = r.appId || '';
+      if (secret) secret.value = r.appSecret || '';
+      const code = $('#setupQrCode');
+      if (code) code.innerHTML = '';
+      const tip = $('#setupQrTip');
+      if (tip) tip.textContent = `✓ 已拿到 AppID ${r.appId}，正在配置并上线…`;
+      const ok = await saveSetupCredentials(r.appId, r.appSecret, tip);
+      if (ok) markSetupDone('凭证已保存，机器人已上线。可以进入面板了。');
     },
   },
 };
@@ -463,7 +487,7 @@ async function pollQr() {
     if (r.status === 'pending') return;
     stopQrPoll();
     qrTaskId = '';
-    if (r.status === 'done') els.s.onDone(r);
+    if (r.status === 'done') await els.s.onDone(r);
     else tip.textContent = r.message || '二维码失效了，重新生成一个';
   } catch (e) {
     stopQrPoll();
@@ -2462,7 +2486,22 @@ function bindAutoSave() {
 
 $('#cfgForm').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const f = e.target;
+  if (await saveCfgForm()) {
+    const msg = $('#cfgMsgTop');
+    setTimeout(() => { if (msg) msg.textContent = ''; }, 4000);
+  }
+});
+
+/**
+ * 保存配置页表单。手动点「保存凭证」和扫码拿到新凭证后都走这里，
+ * 保证「填进输入框」和「真正落盘」是同一条路径，不出现两套逻辑分叉。
+ *
+ * fromQr=true 时凭据刚刚失效（旧 AppSecret 已被扫码重置），消息要交给
+ * tryOnlineAfterQr() 收尾，所以这里不设「4 秒后清空」。
+ */
+async function saveCfgForm({ fromQr = false } = {}) {
+  const f = $('#cfgForm');
+  if (!f) return false;
   const lines = (v) => v.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
   const payload = {
     appId: f.appId.value.trim(),
@@ -2514,17 +2553,19 @@ $('#cfgForm').addEventListener('submit', async (e) => {
   };
 
   const btn = f.querySelector('button[type=submit]');
-  btn.disabled = true;
+  if (btn) btn.disabled = true;
   $('#cfgMsgTop').textContent = '保存中…';
   try {
     const r = await api('/api/config', { method: 'PUT', body: JSON.stringify(payload) });
     // 后端在填完 AppID / AppSecret 后会把占位名换成官方昵称，这里同步显示
     const renamed = r?.name && r.name !== botById(CURRENT_BOT)?.name;
     // 换连接方式要重启才生效，后端会带 restartRequired + message，原样转达
-    $('#cfgMsgTop').textContent = r?.message
-      ? r.message
-      : (renamed ? `已保存，机器人昵称同步为「${r.name}」` : '已保存') +
-        (payload.appId ? '' : '（AppID 为空）');
+    $('#cfgMsgTop').textContent = fromQr
+      ? '新凭证已保存，正在尝试上线…'
+      : r?.message
+        ? r.message
+        : (renamed ? `已保存，机器人昵称同步为「${r.name}」` : '已保存') +
+          (payload.appId ? '' : '（AppID 为空）');
     f.appSecret.value = '';
     /**
      * 这份表单**包含 intents**，所以保存成功后要把「已应用值」跟上，
@@ -2533,21 +2574,237 @@ $('#cfgForm').addEventListener('submit', async (e) => {
      */
     intentsApplied = Number(payload.intents) || 0;
     renderIntentsDirty();
-    // 扫码换凭证的那条提示到此为止：凭证已落盘，再挂着「点保存设置」就是误导
+    // 提示到此为止：凭证已落盘，再挂着「点保存设置」就是误导
     resetQr();
     clearCfgDirty();
-    setTimeout(() => ($('#cfgMsgTop').textContent = ''), 4000);
     await loadBots();
-    pollStatus();
+    await pollStatus();
+    return true;
   } catch (err) {
     $('#cfgMsgTop').textContent = '保存失败: ' + err.message;
+    return false;
   } finally {
-    btn.disabled = false;
+    if (btn) btn.disabled = false;
   }
-});
+}
+
+/**
+ * 扫码换凭证后尝试上线。
+ *
+ * 旧密钥在拿到新凭证那一刻就作废了，网关可能还挂着用旧票据建立的连接，
+ * 所以先下线清掉旧连接和实例锁，再用新凭证上线（offline 在已离线时是空操作）。
+ * 上线失败不吞：后端给的 error 写回凭证区消息，状态区也会同步刷新。
+ */
+async function tryOnlineAfterQr() {
+  const msg = $('#cfgMsgTop');
+  const ok = await bringBotOnline();
+  if (msg) {
+    msg.textContent = ok
+      ? '凭证已保存，机器人已上线'
+      : '凭证已保存，但上线失败（详见状态区）';
+    const text = msg.textContent;
+    setTimeout(() => { if (msg.textContent === text) msg.textContent = ''; }, 6000);
+  }
+  return ok;
+}
+
+/**
+ * 让当前（或第一只）机器人重新上线：先下线清掉旧票据连接和实例锁，再上线。
+ * 配置页扫码、首次引导都走这里——上线结果由调用方决定怎么显示。
+ * 返回 true/false，不吞错误（细节在状态区 / 机器人 error 字段里）。
+ */
+async function bringBotOnline() {
+  const botId = CURRENT_BOT || BOTS[0]?.id;
+  if (!botId) return false;
+  const id = encodeURIComponent(botId);
+  try {
+    await api(`/api/bots/${id}/offline`, { method: 'POST', body: '{}' });
+  } catch { /* 本来就离线，忽略 */ }
+  try {
+    const r = await api(`/api/bots/${id}/online`, { method: 'POST', body: '{}' });
+    if (r?.state === 'error' || r?.online === false) {
+      throw new Error(r?.error || '连接失败');
+    }
+    await pollStatus();
+    await loadBots();
+    return true;
+  } catch (e) {
+    await pollStatus();
+    await loadBots();
+    return false;
+  }
+}
+
+/**
+ * 首次引导：只提交 AppID / AppSecret（后端是增量保存，其它字段不动），
+ * 然后上线。二维码扫完后也走这里，和手填共用同一条落盘路径。
+ */
+async function saveSetupCredentials(appId, appSecret, tipEl) {
+  if (!appId || !appSecret) {
+    if (tipEl) tipEl.textContent = 'AppID 和 AppSecret 都要填';
+    return false;
+  }
+  try {
+    const r = await api('/api/config', {
+      method: 'PUT',
+      body: JSON.stringify({ appId, appSecret }),
+    });
+    if (r?.name && botById(CURRENT_BOT)) {
+      // 昵称可能从占位名换成了官方名，刷新一下列表
+      await loadBots();
+    }
+    const ok = await bringBotOnline();
+    if (!ok && tipEl) tipEl.textContent = '凭证已保存，但上线失败；稍后可在「配置」页重试';
+    return ok;
+  } catch (e) {
+    if (tipEl) tipEl.textContent = '保存失败：' + errText(e);
+    return false;
+  }
+}
+
+/* ---------------- 首次启动引导 ---------------- */
+
+/**
+ * 引导是否该出现：只要当前机器人（或第一只）还没有 AppID，每次打开面板都弹。
+ * 之前用 localStorage 记「跳过」标记，点过「稍后再说」就再也不弹——
+ * 但引导的前提本就是「没填凭证」，跳过标记会让它和需求脱节：
+ * 用户没配好就再也进不来引导。所以这里只看 AppID，不记任何标记。
+ */
+function setupNeeded() {
+  const bot = botById(CURRENT_BOT) || BOTS[0];
+  // 全新安装：main 机器人配置在，但没有 AppID → 需要引导
+  return Boolean(bot) && !bot.appId;
+}
+
+// 引导弹层显示期间锁住背景滚动，关掉时恢复原值
+let setupBodyOverflow = null;
+let setupBodyPadRight = null;
+
+function showSetup() {
+  const mask = $('#setupMask');
+  if (!mask) return;
+  mask.hidden = false;
+  /*
+   * 滚轮落在遮罩（弹层以外的半透明区域）时，浏览器会去滚后面的面板。
+   * 锁住 body 从根上掐断这种穿透；滚动条消失会让页面变宽，补一段 padding
+   * 免得弹层位置跟着跳。原值在 hideSetup() 里还原。
+   */
+  if (setupBodyOverflow === null) {
+    setupBodyOverflow = document.body.style.overflow;
+    setupBodyPadRight = document.body.style.paddingRight;
+    const gap = window.innerWidth - document.documentElement.clientWidth;
+    if (gap > 0) document.body.style.paddingRight = `${gap}px`;
+    document.body.style.overflow = 'hidden';
+  }
+  // 已有凭证的提示语按是否有 bot 调整
+  const lead = $('#setupLead');
+  if (lead) {
+    lead.textContent = '还没有连接凭证。扫码最省事（手机 QQ 扫一下就有 AppID / AppSecret），'
+      + '也可以手动填。配置好会自动保存并尝试上线。';
+  }
+}
+
+function hideSetup() {
+  resetQr();
+  const mask = $('#setupMask');
+  if (mask) mask.hidden = true;
+  if (setupBodyOverflow !== null) {
+    document.body.style.overflow = setupBodyOverflow;
+    document.body.style.paddingRight = setupBodyPadRight;
+    setupBodyOverflow = null;
+    setupBodyPadRight = null;
+  }
+}
+
+function skipSetup() {
+  // 只是关掉弹层，不记跳过标记：没填 AppID 下次打开还会弹
+  hideSetup();
+}
+
+function markSetupDone(message) {
+  // 配置已落盘，appId 会随 loadBots() 更新，setupNeeded() 自然不再成立
+  const lead = $('#setupLead');
+  if (lead) lead.textContent = '✓ ' + message;
+  const err = $('#setupErr');
+  if (err) err.hidden = true;
+  // 成功后清掉输入框里的密钥，别留在 DOM 里
+  const secret = $('#setupSecret');
+  if (secret) secret.value = '';
+  /*
+   * 以前这里 setTimeout(hideSetup, 1200) 自动关弹层——用户还没看清
+   * 「已上线」就被弹走，也没机会用第 2 步设公网访问。现在停在成功态，
+   * 由用户自己点「完成，进入面板」才关。
+   */
+  const done = $('#setupDone');
+  if (done) done.focus();
+}
+
+function bindSetup() {
+  // 手填保存
+  $('#setupCredSave')?.addEventListener('click', async () => {
+    const appId = $('#setupAppId')?.value.trim();
+    const secret = $('#setupSecret')?.value.trim();
+    const err = $('#setupErr');
+    if (!appId || !secret) {
+      if (err) { err.textContent = '请先填 AppID 和 AppSecret'; err.hidden = false; }
+      return;
+    }
+    const btn = $('#setupCredSave');
+    if (btn) btn.disabled = true;
+    if (err) err.hidden = true;
+    const ok = await saveSetupCredentials(appId, secret, err);
+    if (btn) btn.disabled = false;
+    if (ok) markSetupDone('凭证已保存，机器人已上线。可以进入面板了。');
+  });
+
+  // 扫码
+  $('#setupQrStart')?.addEventListener('click', () => startQr('setup'));
+
+  // 公网选项显隐
+  $('#setupPublic')?.addEventListener('change', (e) => {
+    const fields = $('#setupPublicFields');
+    if (fields) fields.hidden = !e.target.checked;
+  });
+
+  // 保存访问方式（webui 全局配置，增量提交；重启才生效）
+  $('#setupNetSave')?.addEventListener('click', async () => {
+    const key = $('#setupAccessKey')?.value.trim() || '';
+    const host = $('#setupHost')?.value.trim() || '0.0.0.0';
+    const port = Number($('#setupPort')?.value) || 15207;
+    const err = $('#setupErr');
+    if (!key) {
+      if (err) { err.textContent = '对外服务必须设置访问密钥'; err.hidden = false; }
+      return;
+    }
+    const btn = $('#setupNetSave');
+    if (btn) btn.disabled = true;
+    if (err) err.hidden = true;
+    try {
+      await api('/api/config', {
+        method: 'PUT',
+        body: JSON.stringify({ webui: { host, port, accessKey: key } }),
+      });
+      if (err) {
+        err.textContent = '已保存。重启框架后生效：用局域网 / 公网地址加 ?key=你的密钥 访问面板。';
+        err.hidden = false;
+        err.classList.add('setup-ok');
+      }
+      const access = $('#setupAccessKey');
+      if (access) access.value = '';
+    } catch (e) {
+      if (err) { err.textContent = '保存失败：' + errText(e); err.hidden = false; }
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+
+  $('#setupSkip')?.addEventListener('click', skipSetup);
+  $('#setupDone')?.addEventListener('click', skipSetup);
+}
 
 // 除连接凭证 / 事件订阅外的设置：改动即存
 bindAutoSave();
+bindSetup();
 
 /* ---------------- 通知：SMTP 邮箱配置 ---------------- */
 
@@ -7197,6 +7454,9 @@ function connectStream() {
 
   await loadBots(); // 先确定当前机器人，后面的请求都会带上 ?bot=
   await pollStatus();
+  // 首次启动：没有凭证就自动进入引导（扫码 / 手填 + 可选公网），
+  // 用户跳过过则不再自动弹。放在 loadBots 之后才知道有没有 AppID。
+  if (setupNeeded()) showSetup();
   await initLogs();
   connectStream();
   initTheme();

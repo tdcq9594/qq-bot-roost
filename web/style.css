@@ -3180,3 +3180,28 @@ input.ap-range {
 .media-meta { flex: 1; min-width: 0; }
 .media-name { font-size: 13px; font-weight: 500; margin-bottom: 4px; word-break: break-all; }
 .media-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+
+/* 首次启动引导（#setupMask）：复用弹层与表单样式，这里只补它独有的几块 */
+/*
+ * 引导内容（二维码 + 手填 + 面板访问方式）高过一屏时必须让弹层自己滚。
+ * .modal.wide 只设了 max-height 没有 overflow，内容超高会溢出到背景，
+ * 结果是滚轮滚了后面的面板、弹层本身却不动——这里补上滚动容器，
+ * overscroll-behavior 阻止滚到顶/底时把滚动链传给 body。
+ */
+#setupMask .modal.wide { overflow-y: auto; overscroll-behavior: contain; }
+/* flex column 默认会压缩子项，二维码被压扁后滚动高度算不准 */
+#setupMask .modal.wide > * { flex-shrink: 0; }
+.setup-lead { margin: 0 0 16px; font-size: 13px; line-height: 1.7; color: var(--text-2); }
+.setup-step {
+  padding: 14px; margin-bottom: 14px;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel-2);
+}
+.setup-step-title { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 10px; }
+.setup-check { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; color: var(--text); }
+.setup-check input { width: 16px; height: 16px; accent-color: var(--primary); }
+.setup-note {
+  margin: 10px 0; padding: 10px 12px; font-size: 12px; line-height: 1.7;
+  color: var(--text-2); background: var(--panel-3); border-radius: var(--radius-sm);
+}
+.setup-note code { font-family: var(--font-mono, monospace); color: var(--primary); }
+.bot-form-err.setup-ok { color: var(--success, #2e7d32); }
