@@ -2,18 +2,21 @@
  * 语音转 SILK 的回归护栏。
  *
  * 2026-11-13 的现场：aurabot 用 Windows 本地语音（SAPI），输出 **22050Hz**
- * 单声道 16bit WAV。`silk.encode()` 只认 8000/12000/16000/24000，22050 不在
- * 表内时它**不报错**，吐出来的是能解码、但全静音的码流，体积还膨胀 18–29 倍。
- * 结果就是消息发得出去、QQ 里点开没声音。
+ * 单声道 16bit WAV。`silk.encode()` 对 22050 不在表内时它**不报错**，吐出来
+ * 的是能解码、但全静音的码流，体积还膨胀 18–29 倍。结果是消息发得出去、
+ * QQ 里点开没声音。
  *
- * 这里固定住两条：
- *   1. 22050 直编必须被判成「没声音」（就是当初那个 bug）；
- *   2. `toSilk()` 必须把它转成 24k 再编，产出正常体积、正常电平的 SILK。
+ * 2026-11-24 实测纠正了此前的过度归纳："只认 8000/12000/16000/24000 四档"
+ * 是错的——32k / 44.1k / 48k 也编得正常，真正静音的只有 11025/22050。
+ * 所以这里固定住三条：
+ *   1. 22050 直编必须被静音自检拦住（当初那个 bug）；
+ *   2. `toSilk()` 必须把它转成 24k 再编，产出正常体积、正常电平的 SILK；
+ *   3. 32k 等安全档位必须走 `via=wav` 直编，不白白跑一遍 ffmpeg。
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { encodeChecked, toSilk, findFfmpeg, QQ_VOICE_RATE } from '../src/onebot/voice.js';
+import { encodeChecked, toSilk, findFfmpeg, QQ_VOICE_RATE, SILK_DIRECT_RATES } from '../src/onebot/voice.js';
 import { load } from '../src/ext-deps.js';
 
 const silk = await load('silk-wasm');
@@ -81,4 +84,21 @@ test('已经是 24k 的 WAV 不需要 ffmpeg：via=wav', { skip }, async () => {
   const wav = wavSine({ rate: 24000, seconds: 1 });
   const r = await toSilk(wav, silk);
   assert.equal(r.via, 'wav');
+});
+
+test('白名单里的采样率都直编：GPT-SoVITS 的 32k 不再白跑 ffmpeg', { skip }, async () => {
+  for (const rate of [8000, 12000, 16000, 32000, 44100, 48000]) {
+    const r = await toSilk(wavSine({ rate, seconds: 1 }), silk);
+    assert.equal(r.via, 'wav', `${rate}Hz 应该直接编码`);
+    assert.ok(r.silk.length > 0 && r.silk.length < 30000, `${rate}Hz 的 SILK 体积异常：${r.silk.length}B`);
+  }
+});
+
+test('11025Hz 仍是静音档位：不能加进直编白名单', { skip }, async () => {
+  assert.equal(SILK_DIRECT_RATES.has(11025), false);
+  assert.equal(SILK_DIRECT_RATES.has(22050), false);
+  await assert.rejects(
+    () => encodeChecked(silk, wavSine({ rate: 11025, seconds: 1 })),
+    /编码后没声音/,
+  );
 });

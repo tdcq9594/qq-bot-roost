@@ -1045,6 +1045,16 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 .log-line .m.msg-err { color: var(--err); font-weight: 500; }
 .log-line .m.msg-cmd { color: var(--c-violet); }
 
+/* 连续相同日志的折叠计数（只有 [ext-bridge] INFO 会带这个徽标）。
+   复用既有变量，不新增 CSS 变量：webui-contract 对变量定义做双向比对。 */
+.log-line .log-fold {
+  flex: none;
+  font-size: 10.5px; font-weight: 600;
+  line-height: 17px; padding: 0 5px; border-radius: 4px;
+  background: var(--panel-3); color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
 @media (max-width: 860px) {
   .topbar { flex-wrap: wrap; height: auto; padding: 10px 14px; gap: 10px; }
   /**
