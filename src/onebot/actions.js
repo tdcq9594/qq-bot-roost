@@ -486,6 +486,22 @@ export function createActions({
       };
     },
 
+    /**
+     * 合并转发展开。
+     *
+     * 官方没有转发内容接口，节点来自入站 `msg_elements` 里已经带来的
+     * 102 消息元素（translate.js 在收到时调 `ids.bindForward()` 存下来）。
+     * 找不到就明确 1404——返回空 `messages` 会让客户端以为转发是空的。
+     */
+    async get_forward_msg(params) {
+      const raw = params?.id ?? params?.forward_id ?? params?.message_id;
+      const nodes = ids.getForward?.(raw);
+      if (!nodes?.length) {
+        throw obError(1404, '找不到这条合并转发（只保留本次进程收到的转发，重启或「外接」重配后就失效）');
+      }
+      return { messages: nodes };
+    },
+
     async get_group_info(params) {
       const openid = ids.openidOfGroup(params?.group_id);
       if (!openid) throw obError(1404, '这个群号没有对应的 openid，先去面板「身份」页绑一下');

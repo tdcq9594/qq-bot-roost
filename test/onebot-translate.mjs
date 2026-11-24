@@ -9,18 +9,31 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
 import { segmentsOf, toMessageEvent, rawMessageOf } from '../src/onebot/translate.js';
+import { createActions } from '../src/onebot/actions.js';
+import { OneBotIds } from '../src/onebot/ids.js';
 
 const SELF_UIN = 2854204853;
 
 /** 够用的 ids 桩：openid ↔ QQ 号、msgIdx ↔ message_id 都只是查表 */
 function stubIds({ users = {}, groups = {}, idx = {} } = {}) {
+  const forwards = new Map();
+  let nextForward = 900001;
   return {
     messageIdOfIdx: (k) => idx[String(k)] ?? '',
-    user: (openid) => users[String(openid)] ?? '',
-    group: (openid) => groups[String(openid)] ?? '',
+    user: (openid) => users[String(openid)] ?? 0,
+    group: (openid) => groups[String(openid)] ?? 0,
     bindMessage: () => 'msg-1',
+    bindForward: (nodes) => {
+      const id = nextForward++;
+      forwards.set(id, nodes);
+      return id;
+    },
+    getForward: (id) => forwards.get(Number(id)) ?? null,
   };
 }
 
@@ -87,4 +100,133 @@ test('toMessageEvent：self_id 是自己的 QQ 号，message 里带着那个 at'
   assert.equal(evt.group_id, 1130901545);
   assert.equal(evt.message[0].type, 'at');
   assert.equal(evt.message[0].data.qq, String(SELF_UIN));
+});
+
+/* ---------- 2026-11-24：官方载荷里的 ARK / 聊天记录 / 表情不再变成空段 ---------- */
+
+test('ARK 卡片 → json 段，客户端能读出标题和链接', () => {
+  const segs = segmentsOf(
+    baseMsg({
+      content: '',
+      ark: {
+        type: 'ark',
+        name: 'B站分享',
+        prompt: '分享了一个视频',
+        title: '测试视频',
+        desc: '来自 B 站',
+        url: 'https://www.bilibili.com/video/1',
+        fields: { title: '测试视频', desc: '来自 B 站', jump_url: 'https://www.bilibili.com/video/1' },
+      },
+    }),
+    stubIds(),
+    SELF_UIN,
+  );
+  const seg = segs.find((s) => s.type === 'json');
+  assert.ok(seg, 'ARK 必须产出 json 段，不能让客户端只看到空消息');
+  const card = JSON.parse(seg.data.data);
+  assert.equal(card.meta.detail_1.title, '测试视频');
+  assert.equal(card.meta.detail_1.jumpUrl, 'https://www.bilibili.com/video/1');
+  assert.equal(card.prompt, '分享了一个视频');
+  assert.match(rawMessageOf(segs), /^\[CQ:json,data=/);
+});
+
+test('表情与未知附件：face 段 + file 段，正文里的人话标记不重复显示', () => {
+  const segs = segmentsOf(
+    baseMsg({
+      content: '看这个 【表情: 幽灵】',
+      raw: {
+        content: '看这个 <faceType=1,faceId="187",ext="eyJ0ZXh0Ijoi5bm954G1In0=">',
+      },
+      attachments: [{ type: 'other', filename: 'sticker.gif', url: 'https://x/sticker.gif', contentType: 'image/gif' }],
+    }),
+    stubIds(),
+    SELF_UIN,
+  );
+  assert.deepEqual(segs.find((s) => s.type === 'face')?.data, { id: '187' });
+  assert.equal(segs.find((s) => s.type === 'text')?.data.text, '看这个 ');
+  assert.deepEqual(segs.find((s) => s.type === 'file')?.data, {
+    file: 'https://x/sticker.gif',
+    url: 'https://x/sticker.gif',
+    name: 'sticker.gif',
+  });
+  assert.match(rawMessageOf(segs), /\[CQ:face,id=187\]/);
+});
+
+test('102 聊天记录 → forward 段；get_forward_msg 能按 id 拉回节点', async () => {
+  const ids = stubIds({ users: { A: 2014433751, B: 2014433752 } });
+  const segs = segmentsOf(
+    baseMsg({
+      content: '',
+      elements: [
+        {
+          type: 'chatRecord',
+          content: '聊天记录',
+          children: [
+            { type: 'text', content: '张三：你好', author: { id: 'A', nickname: '张三', card: '三' } },
+            { type: 'text', content: '李四：收到', author: { id: 'B', nickname: '李四' } },
+          ],
+        },
+      ],
+    }),
+    ids,
+    SELF_UIN,
+  );
+  const fwd = segs.find((s) => s.type === 'forward');
+  assert.ok(fwd, '聊天记录要发 forward 段');
+  const nodes = ids.getForward(fwd.data.id);
+  assert.equal(nodes.length, 2);
+  assert.equal(nodes[0].sender.nickname, '张三');
+  assert.equal(nodes[0].sender.user_id, 2014433751);
+  assert.equal(nodes[0].message[0].data.text, '张三：你好');
+  assert.equal(nodes[1].message[0].data.text, '李四：收到');
+
+  const actions = createActions({
+    runtime: { api: {}, outbound: {}, gate: {}, groups: {}, log: {} },
+    ids,
+    selfUin: SELF_UIN,
+    botName: '测试鸟',
+    getPassive: () => null,
+    emit: () => {},
+  });
+  assert.deepEqual((await actions('get_forward_msg', { id: fwd.data.id })).messages, nodes);
+  await assert.rejects(() => actions('get_forward_msg', { id: 123456 }), /找不到这条合并转发/);
+  assert.ok(actions.names.includes('get_forward_msg'), '能力表要能看到这个 action');
+});
+
+test('引用元素：有 refMsgIdx 发 reply，没有时退成 [引用: …] 文字', () => {
+  const ids = stubIds({ idx: { REFIDX_1: 'msg-9' } });
+  const withIdx = segmentsOf(
+    baseMsg({ content: '', refMsgIdx: 'REFIDX_1', elements: [{ type: 'quote', content: '原话', msgIdx: 'REFIDX_1' }] }),
+    ids,
+    SELF_UIN,
+  );
+  assert.deepEqual(withIdx.filter((s) => s.type === 'reply'), [{ type: 'reply', data: { id: 'msg-9' } }]);
+  assert.equal(withIdx.find((s) => s.type === 'text')?.data.text, '[引用: 原话]');
+
+  const noIdx = segmentsOf(
+    baseMsg({ content: '', elements: [{ type: 'quote', content: '另一句原话' }] }),
+    stubIds(),
+    SELF_UIN,
+  );
+  assert.equal(noIdx.filter((s) => s.type === 'reply').length, 0, '没有 id 不许发 id=0 的空 reply');
+  assert.equal(noIdx.find((s) => s.type === 'text')?.data.text, '[引用: 另一句原话]');
+});
+
+test('真实 OneBotIds：转发 id 单调、不复用，且不会把节点内容写进 ids.json', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'roost-fwd-ids-'));
+  const file = path.join(dir, 'onebot-ids.json');
+  try {
+    const ids = await new OneBotIds({ file, botId: 't' }).load();
+    const a = ids.bindForward([{ message: [] }]);
+    const b = ids.bindForward([{ message: [{ type: 'text', data: { text: 'x' } }] }]);
+    assert.ok(b > a, '两组转发的 id 不能撞');
+    assert.equal(ids.getForward(b)[0].message[0].data.text, 'x');
+    assert.equal(ids.getForward(a + b), null, '不存在的 id 要明确 null');
+    await ids.flush();
+    const saved = JSON.parse(await fs.readFile(file, 'utf8'));
+    assert.equal(saved.forwards, undefined, '节点内容不该落盘');
+    assert.ok(saved.nextId > b, '计数器要落盘，重启后不复用旧号');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });

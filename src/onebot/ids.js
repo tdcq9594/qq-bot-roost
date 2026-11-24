@@ -32,6 +32,15 @@ const SYNTH_MOD = 1_000_000_000_000;
 /** 保留多少条消息映射。够 `get_msg` / 引用 / 撤回用即可 */
 const MAX_MSGS = 500;
 
+/**
+ * 合并转发只留本次进程收到的若干组，且每组最多 200 个节点。
+ *
+ * 官方没有转发内容接口，我们能给的只有入站时 `msg_elements` 已经带来的节点；
+ * 全落盘会让 ids.json 从几 KB 涨到几 MB（每次 #touch 都整份重写），不值当。
+ * id 仍从 nextId 分配，重启后不会复用旧号。
+ */
+const MAX_FORWARDS = 50;
+
 /** 落盘节流：映射变化很频繁，每条都写盘不值当 */
 const SAVE_MS = 1000;
 
@@ -69,6 +78,8 @@ export class OneBotIds {
     this.byOfficial = new Map();
     /** msgIdx → onebot message_id（引用回复用） */
     this.byIdx = new Map();
+    /** forward id → 转发节点数组（get_forward_msg 用，只在本次进程内有效） */
+    this.forwards = new Map();
   }
 
   async load() {
@@ -241,6 +252,28 @@ export class OneBotIds {
     const i = String(msgIdx ?? '');
     if (!i) return 0;
     return this.byIdx.get(i) ?? 0;
+  }
+
+  /**
+   * 给一组合并转发节点分配 id，供 `get_forward_msg` 反查。
+   *
+   * 节点内容本身不落盘（见 MAX_FORWARDS 注释），但 id 从 nextId 走，
+   * 保证重启后不会把旧 id 指到另一组转发上。
+   */
+  bindForward(nodes) {
+    if (!this.data) throw new Error('OneBotIds 还没 load()');
+    const id = this.data.nextId++;
+    this.forwards.set(id, Array.isArray(nodes) ? nodes.slice(0, 200) : []);
+    while (this.forwards.size > MAX_FORWARDS) {
+      this.forwards.delete(this.forwards.keys().next().value);
+    }
+    this.#touch();
+    return id;
+  }
+
+  /** forward id → 节点数组（找不到返回 null） */
+  getForward(id) {
+    return this.forwards.get(Number(id)) ?? null;
   }
 
   /* ---------------- 落盘 ---------------- */
