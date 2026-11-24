@@ -1165,14 +1165,24 @@ export class BotRuntime {
       this.onMessage?.(msg);
 
       /**
-       * OneBot 兼容层收消息。
+       * OneBot / 宿主协议：真·空消息不推。
+       *
+       * 空消息转过去，客户端只会收到一条没内容的 message 事件，没有意义。
+       * 判空口径跟 describeForLog 一致——正文、任意附件、ARK 卡片、消息元素
+       * 有一样就不算空：纯图 / 纯语音 / 表情（other 附件）/ 卡片都不能丢，
+       * 否则就是日志那边刚修过的误判在转发侧重演一遍。
+       *
+       * 只拦这两层：message-bus（面板 SSE）和后面的 logIncoming 是观测通道，
+       * 该看到「确实收到过这条」，保持原样。
        *
        * 传的是**完整 msg**（含 uin / msgIdx / attachments），不走 message-bus——
        * 那条通道的 payload 是对外契约，故意脱敏过，拿不到 ID 映射要的东西。
        */
-      this.onebot?.onMessage(msg);
-      /** 宿主协议：传完整 msg（原生结构），它自己挑字段 */
-      this.host?.onMessage(msg);
+      if (hasMessageContent(msg)) {
+        this.onebot?.onMessage(msg);
+        /** 宿主协议：传完整 msg（原生结构），它自己挑字段 */
+        this.host?.onMessage(msg);
+      }
     } catch (e) {
       this.log.warn(`消息广播失败: ${e.message}`);
     }
@@ -1447,6 +1457,11 @@ export class BotRuntime {
  *
  * 现在按附件类型给出人话：`[图片消息]`、`[语音消息: 转写内容]`、`[视频消息]`…
  * 文本和附件都有时一起显示（图文消息很常见）。
+ *
+ * 另外两类「有内容但正文为空」的消息以前会被误记成「(空)」：
+ *   · `type:'other'` 附件（content_type 不属于图/音/视频/文件的表情、贴纸等）；
+ *   · ARK 卡片（B 站分享、小程序、位置卡…），载荷在 `msg.ark`，不在 attachments。
+ * 这两类都要标出来，否则排查时以为框架什么都没收到，其实是日志没认出来。
  */
 export function describeForLog(msg, text = '') {
   const parts = [];
@@ -1471,7 +1486,70 @@ export function describeForLog(msg, text = '') {
     parts.push(`[文件消息: ${f?.filename || '未命名'}]`);
   }
 
+  /**
+   * parseAttachments 对认不出的 content_type 统一产出 type:'other'——表情、贴纸、
+   * 未知格式都落这里。以前没有对应分支，于是「发了东西」被记成「(空)」。
+   * 有文件名就用文件名（最可读），否则退到 content_type，都没有就只标类型。
+   */
+  for (const o of atts.filter((a) => a?.type === 'other')) {
+    const label = String(o?.filename || o?.contentType || '').trim();
+    parts.push(label ? `[其他消息: ${label}]` : '[其他消息]');
+  }
+
+  /**
+   * ARK 卡片走单独的 msg.ark（见 message.js::parseArk），不在 attachments 里，
+   * 而且通常没有正文 text——不处理照样打「(空)」。
+   * 标题最有用，其次描述/提示/名称；正文里已经出现过同样的字就不重复抄一遍。
+   * 截断到 60 字符，别让一张长标题把整行日志撑爆。
+   */
+  const ark = msg?.ark;
+  if (ark && typeof ark === 'object') {
+    const label = [ark.title, ark.desc, ark.prompt, ark.name]
+      .map((s) => String(s ?? '').trim())
+      .find(Boolean);
+    const short = label && label.length > 60 ? `${label.slice(0, 60)}…` : label;
+    parts.push(short && !said.includes(short) ? `[卡片消息: ${short}]` : '[卡片消息]');
+  }
+
+  /**
+   * 合并转发 / 引用：正文 content 可能是空串，内容全在 elements 里。
+   * 跟 hasMessageContent 对齐——日志打「(空)」的消息，就是被判空不推的那批。
+   */
+  const els = Array.isArray(msg?.elements) ? msg.elements : [];
+  if (els.length) parts.push(els.length > 1 ? `[消息元素×${els.length}]` : '[消息元素]');
+  if (String(msg?.quoted ?? '').trim()) parts.push('[引用消息]');
+
   return parts.join(' ') || '(空)';
+}
+
+/**
+ * 这条消息有没有「内容」——给协议层转发判空用。
+ *
+ * 口径跟 describeForLog 刻意保持一致：**日志打「(空)」的消息，就是不该推给
+ * 协议层的消息**。两处若各写一套判定，迟早出现「日志说空却推了」或反过来。
+ *
+ * 正文 / attachments（任意类型）/ ARK 卡片 / elements（合并转发、引用）——
+ * 有一样就算有内容。纯图片、纯语音、表情、贴纸、卡片都不是空消息，
+ * 不能因为 `content` 是空串就把它们拦掉。
+ *
+ * @param {object} msg buildMessage() 产出的消息对象
+ * @returns {boolean} true = 有内容，可转发；false = 真空消息
+ */
+export function hasMessageContent(msg) {
+  const said = String(msg?.raw?.content ?? msg?.content ?? '').trim();
+  if (said) return true;
+
+  const atts = Array.isArray(msg?.attachments) ? msg.attachments : [];
+  if (atts.length) return true; // 任意附件类型都算：image/voice/video/file/other
+
+  if (msg?.ark && typeof msg.ark === 'object') return true;
+
+  const els = Array.isArray(msg?.elements) ? msg.elements : [];
+  if (els.length) return true;
+
+  if (String(msg?.quoted ?? '').trim()) return true;
+
+  return false;
 }
 
 /**
