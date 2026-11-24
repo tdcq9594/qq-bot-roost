@@ -75,6 +75,22 @@ const log = createLogger('webui');
 const WEB_ROOT = path.join(ROOT, 'web');
 
 /**
+ * `/healthz` 的身份指纹：规范化后的代码根路径 sha256 前 12 位。
+ *
+ * 规范化两件事，因为 dsh-roost 拿的是用户在面板里填的目录字符串：
+ *   · `path.resolve` 去掉尾斜杠 / `.` / `..`
+ *   · Windows 盘符统一大写（`c:\x` 与 `C:\x` 是同一份 Roost）
+ * 不给明文路径：这个接口免密钥，回环上谁都能读，没必要把本机目录结构送出去。
+ *
+ * 抽成导出纯函数，让 dsh-roost 侧可以用同一口径做一致性测试。
+ */
+export function healthDirHash(dir) {
+  const normalized = path.resolve(String(dir || ''))
+    .replace(/^([a-z]):/, (_, drive) => drive.toUpperCase() + ':');
+  return crypto.createHash('sha256').update(normalized).digest('hex').slice(0, 12);
+}
+
+/**
  * 进程实例标识。
  *
  * 面板用它判断「服务是不是重启过」。重启意味着两件事同时发生：
@@ -1238,6 +1254,20 @@ async function startWebServerInstance({
             online,
             total: bots.length,
             uptime: Math.round(process.uptime()),
+            /**
+             * 身份字段：让外部客户端（dsh-roost）确认「应答的是哪一份 Roost」。
+             *
+             * 这个接口免密钥、谁都能答，而端口可能被**另一份** Roost 占着。
+             * 以前只给 bots 计数，外部只能靠「有 bots 数组」判在跑，于是另一个
+             * 目录的实例占着同一个端口也会被认成「本目录在跑」——接着端口、
+             * 密钥、机器人配置全串到那份实例上，界面还看起来一切正常。
+             *
+             * pid 只用于排查；dirHash 才是判据：代码根的 sha256 前 12 位，
+             * 既能精确比对又不暴露本机路径。客户端拿自己配置的目录算同一个
+             * 哈希，不匹配就当没探到。没有身份字段的老框架则由客户端自行降级。
+             */
+            pid: process.pid,
+            dirHash: healthDirHash(ROOT),
           }),
         );
       }
