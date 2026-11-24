@@ -8,9 +8,9 @@
 
 <img src="https://img.shields.io/badge/Node.js-22.13%2B-339933?logo=node.js&logoColor=white" alt="Node.js 22.13+">
 <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="零依赖">
-<img src="https://img.shields.io/badge/tests-1413%20passed-brightgreen" alt="测试 1413 项">
+<img src="https://img.shields.io/badge/tests-1445%20passed-brightgreen" alt="测试 1445 项">
 <img src="https://img.shields.io/badge/plugins-JS%20%7C%20Python%20%7C%20Go%20%7C%20any-blue" alt="多语言插件">
-<img src="https://img.shields.io/badge/version-1.1.12-blueviolet" alt="版本 1.1.12">
+<img src="https://img.shields.io/badge/version-1.1.13-blueviolet" alt="版本 1.1.13">
 <img src="https://img.shields.io/badge/license-AGPL--3.0--only-blue" alt="AGPL-3.0-only">
 <a href="https://github.com/roost-qq/qq-bot-roost/actions"><img src="https://img.shields.io/github/actions/workflow/status/roost-qq/qq-bot-roost/ci.yml?branch=master" alt="CI"></a>
 
@@ -185,8 +185,10 @@ node -v      # 需要 >= 22.13
 3. **关键**：「功能配置」里开通 **群聊** 能力，否则连接会被拒（关闭码 4014）
 
 **换凭证（1.1.4+）**：AppSecret 被开放平台重置、或者整只机器人换了账号时，
-进面板「**配置 → 连接凭证**」点「**扫码更新凭证**」，扫完 AppID / AppSecret 填进输入框，
-再点「保存设置」生效——不用删机器人重建（重建会带走配置、权限、群档案和插件存档）。
+进面板「**配置 → 连接凭证**」点「**扫码更新凭证**」，手机 QQ 扫一下即可——
+拿到新凭证后会自动保存并尝试上线，不用手动点保存，也不用删机器人重建
+（重建会带走配置、权限、群档案和插件存档）。
+只在扫码成功那一刻旧密钥才会失效；二维码还没扫时旧凭证照常有效，不会影响在线连接。
 
 ### 3. 启动
 
@@ -194,8 +196,11 @@ node -v      # 需要 >= 22.13
 node src/main.js
 ```
 
-Windows 下也可以双击 `start.bat`（它会检查 Node 版本并给出提示）。首次运行会提示输入 AppID / AppSecret，
-之后自动建好 `config/` `logs/` `data/` 并打开浏览器面板。
+Windows 下也可以双击 `start.bat`（它会检查 Node 版本并给出提示）：
+自动建好 `config/` `logs/` `data/`、启动面板并打开浏览器，**不会在命令行问 AppID / AppSecret**。
+首次启动检测到没填凭证，面板会自动进入「首次启动引导」：扫码或手填凭证，
+保存后自动上线；引导里还能顺手设置面板访问密钥 + 公网监听（改 host / 密钥需重启框架生效）。
+想跳过引导点「稍后再说」，之后到「配置 → 连接凭证」补填即可。
 
 看到这两行就成功了：
 
@@ -502,7 +507,7 @@ bot/
 │   ├── web/server.js           面板服务端（REST + SSE）
 │   └── plugin/                 插件加载、配置、依赖、子进程宿主、面板页面注册
 ├── test/
-│   ├── selftest.mjs            框架自检（695 项）
+│   ├── selftest.mjs            框架自检（712 项）
 │   ├── e2e.mjs                 端到端测试（253 项，起真实服务打接口）
 │   ├── qrlogin.mjs             扫码建机器人（8 项）
 │   └── deps.mjs                插件依赖安装（11 项）

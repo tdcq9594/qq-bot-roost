@@ -896,8 +896,9 @@ curl 'https://bot.q.qq.com/cgi-bin/v2/info/list_bots' \
         <!--
           扫码换凭证：AppSecret 会被重置、或者整只机器人换了账号时，
           与其去 q.qq.com 后台翻两个值再复制，不如扫一下。
-          和「新建机器人」用的是同一个官方绑定接口，区别只是扫完**不建新机器人**，
-          把 AppID / AppSecret 填进当前这张表单里——仍然要点「保存设置」才生效。
+          和「新建机器人」用的是同一个官方绑定接口，区别只是扫完**不建新机器人**。
+          只有拿到新凭证那一刻旧密钥才失效，所以扫到后会自动保存并尝试上线；
+          二维码还没扫 / 还在等待扫码时，旧凭证依然有效，不会动现有连接。
         -->
         <div class="nb-qr" id="cfgQr" hidden>
           <div class="nb-qr-code" id="cfgQrCode"></div>
@@ -2053,6 +2054,76 @@ curl 'https://bot.q.qq.com/cgi-bin/v2/info/list_bots' \
     <div class="modal-actions">
       <button class="btn" id="nbCancel">取消</button>
       <button class="btn primary" id="nbOk">创建并连接</button>
+    </div>
+  </div>
+</div>
+
+<!-- 首次启动引导：没有 AppID 时自动弹出，扫码或手填凭证即可开始 -->
+<div class="modal-mask" id="setupMask" hidden>
+  <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="setupTitle">
+    <h3 class="modal-title" id="setupTitle">欢迎使用栖 · 先配置一只机器人</h3>
+    <p class="setup-lead" id="setupLead">
+      还没有连接凭证。扫码最省事（手机 QQ 扫一下就有 AppID / AppSecret），也可以手动填。
+      配置好会自动保存并尝试上线。
+    </p>
+
+    <div class="setup-step">
+      <div class="setup-step-title">1 · 连接凭证</div>
+      <div class="nb-qr-wrap">
+        <button class="btn primary" id="setupQrStart" type="button">扫码获取凭证</button>
+        <i class="nb-qr-hint">推荐：不用去 q.qq.com 手动建机器人</i>
+      </div>
+      <div class="nb-qr" id="setupQr" hidden>
+        <div class="nb-qr-code" id="setupQrCode"></div>
+        <div class="nb-qr-tip" id="setupQrTip"></div>
+      </div>
+      <div class="nb-or">或者手动填（已有机器人、或扫码用不了时）</div>
+      <div class="bot-form">
+        <label>
+          <span>AppID</span>
+          <input id="setupAppId" placeholder="q.qq.com 开发设置里的 AppID" autocomplete="off">
+        </label>
+        <label>
+          <span>AppSecret</span>
+          <input id="setupSecret" type="password" placeholder="AppSecret" autocomplete="off">
+        </label>
+      </div>
+      <button class="btn" id="setupCredSave" type="button" style="margin-top:8px">保存凭证并上线</button>
+      <div class="bot-form-err" id="setupErr" hidden></div>
+    </div>
+
+    <div class="setup-step">
+      <div class="setup-step-title">2 · 面板访问方式（可选）</div>
+      <label class="setup-check">
+        <input type="checkbox" id="setupPublic">
+        <span>允许局域网 / 公网访问面板</span>
+      </label>
+      <div id="setupPublicFields" hidden>
+        <p class="setup-note">
+          对外服务必须设置访问密钥，否则任何人都能接管面板（含装插件 = 执行任意代码）。
+          改监听地址和密钥都要<b>重启框架</b>才会生效；重启后用下面的地址加 <code>?key=你的密钥</code> 访问。
+        </p>
+        <div class="bot-form">
+          <label>
+            <span>访问密钥</span>
+            <input id="setupAccessKey" type="password" placeholder="设一个长随机串" autocomplete="new-password">
+          </label>
+          <label>
+            <span>监听地址</span>
+            <input id="setupHost" value="0.0.0.0" autocomplete="off">
+          </label>
+          <label>
+            <span>端口</span>
+            <input id="setupPort" type="number" value="15207">
+          </label>
+        </div>
+        <button class="btn" id="setupNetSave" type="button" style="margin-top:8px">保存访问方式</button>
+      </div>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="setupSkip">稍后再说</button>
+      <button class="btn primary" id="setupDone">完成，进入面板</button>
     </div>
   </div>
 </div>

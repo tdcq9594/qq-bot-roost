@@ -968,45 +968,68 @@ export async function migrateToMultiBot() {
 /* 凭证                                                                */
 /* ------------------------------------------------------------------ */
 
-/** 首启向导：给指定机器人补齐 AppID / AppSecret */
+/** 首启凭证检查：缺凭证时只提示，不再在命令行拦人 */
 export async function ensureBotCredentials(botId) {
   const cfg = await loadBotConfig(botId);
   if (cfg.appId && cfg.appSecret) return cfg;
 
   /**
-   * 没有交互终端时**不要抛错**。
+   *  never block waiting for input — regardless of TTY.
    *
-   * 面板本身就是配置入口——因为没凭证就把进程弄死，用户连配的地方都进不去。
-   * 这里只提示，交给 BotRuntime 报「缺少凭证」（state=error），
-   * 面板照常启动，用户在面板里填完就能连上。
+   * 面板本身就是配置入口：以前双击 start.bat（有交互终端）时这里会 readline
+   * 问 AppID/AppSecret，卡住整条启动链——面板还没起来，用户却被要求在黑框里
+   * 输入密钥。而扫码建号的场景下，用户手上本来就没有这俩值（要去面板扫码拿）。
+   *
+   * 现在改成「只提示、不阻塞」：面板照常启动并打开浏览器，前端检测到没有
+   * AppID 会自动进入首次启动引导（扫码 / 手填二选一）。BotRuntime 拿空凭证
+   * 会报 state=error，引导里填完保存+上线后即恢复。
+   */
+  /**
+   * 交互终端下不在这里提示：main 会在面板起来之后调用 promptCredentials，
+   * 那边把「命令行填 / 回车跳过 / 面板扫码」三条路一次说清，避免刷两遍。
    */
   if (!stdin.isTTY) {
     console.warn(
       `\n[提示] 机器人 ${botId} 还没有 AppID / AppSecret。\n` +
-        `       打开面板填写，或编辑 ${rel(botPaths(botId).config)}。\n` +
-        `       面板地址见下面的日志。\n`,
+        `       面板会自动打开，在里面扫码或填写即可；也可编辑 ${rel(botPaths(botId).config)}。\n`,
     );
-    return cfg;
   }
+  return cfg;
+}
 
-  console.log(`\n机器人 ${botId} 还没有凭证，请输入 QQ 开放平台的信息（在 q.qq.com 管理端可查看）\n`);
+/**
+ * 命令行交互补凭证（可选路径，不阻塞面板启动）。
+ *
+ * 由 main 在「面板已启动 + 浏览器已打开」之后调用：有交互终端就问一句，
+ * 用户直接回车跳过（面板引导仍能填）。和面板引导写的是同一份配置，
+ * 面板那边刷新后就能看到新凭证。
+ *
+ * @returns {Promise<object|null>} 更新后的 cfg；跳过或无终端返回 null
+ */
+export async function promptCredentials(botId) {
+  if (!stdin.isTTY) return null;
+  const cfg = await loadBotConfig(botId);
+  if (cfg.appId && cfg.appSecret) return null;
+
+  console.log(`\n机器人 ${botId} 还没有凭证。可以直接在这里填，或回车跳过、去面板扫码 / 填写。\n`);
   const rl = readline.createInterface({ input: stdin, output: stdout });
   try {
-    if (!cfg.appId) cfg.appId = (await rl.question('AppID: ')).trim();
-    if (!cfg.appSecret) cfg.appSecret = (await rl.question('AppSecret: ')).trim();
+    const appId = (await rl.question('AppID（回车跳过）: ')).trim();
+    if (!appId) {
+      console.log('已跳过，请在面板里配置。');
+      return null;
+    }
+    const appSecret = (await rl.question('AppSecret: ')).trim();
+    if (!appSecret) {
+      console.log('AppSecret 为空，已跳过。');
+      return null;
+    }
+    cfg.appId = appId;
+    cfg.appSecret = appSecret;
+    await saveBotConfig(botId, cfg);
+    console.log(`已保存到 ${rel(botPaths(botId).config)}\n`);
+    return cfg;
   } finally {
     rl.close();
   }
-
-  if (!cfg.appId || !cfg.appSecret) {
-    console.warn(
-      `\n[提示] AppID 或 AppSecret 为空，这次先不连。\n` +
-        `       面板已启动，可以在里面填写后再连接。\n`,
-    );
-    return cfg;
-  }
-
-  await saveBotConfig(botId, cfg);
-  console.log(`\n已保存到 ${rel(botPaths(botId).config)}\n`);
-  return cfg;
 }
