@@ -4503,7 +4503,73 @@ await testUpdaterRestartHint();
     '日志: 图文消息两样都显示',
     describeForLog({ attachments: [{ type: 'image' }] }, '看这个') === '看这个 [图片消息]',
   );
+
+  // other 附件和 ARK 卡片：以前正文为空时都被误记成「(空)」
+  check(
+    '日志: other 附件带文件名',
+    describeForLog({ attachments: [{ type: 'other', filename: 'sticker.gif' }] }, '') === '[其他消息: sticker.gif]',
+  );
+  check(
+    '日志: other 附件退到 content_type',
+    describeForLog({ attachments: [{ type: 'other', contentType: 'application/octet-stream' }] }, '') ===
+      '[其他消息: application/octet-stream]',
+  );
+  check(
+    '日志: other 附件没信息也标出来',
+    describeForLog({ attachments: [{ type: 'other' }] }, '') === '[其他消息]',
+  );
+  check(
+    '日志: ARK 卡片带标题',
+    describeForLog({ attachments: [], ark: { title: 'B站分享' } }, '') === '[卡片消息: B站分享]',
+  );
+  check(
+    '日志: ARK 卡片无标题退到 prompt',
+    describeForLog({ attachments: [], ark: { prompt: '位置分享' } }, '') === '[卡片消息: 位置分享]',
+  );
+  check(
+    '日志: ARK 卡片正文已含标题就不重复',
+    describeForLog({ attachments: [], ark: { title: '看这个' } }, '看这个') === '看这个 [卡片消息]',
+  );
+  check(
+    '日志: 长标题截断',
+    describeForLog({ attachments: [], ark: { title: 'x'.repeat(80) } }, '').endsWith('…]'),
+  );
+  check(
+    '日志: 合并转发元素也标出来',
+    describeForLog({ attachments: [], elements: [{ type: 'chatRecord' }] }, '') === '[消息元素]',
+  );
   check('日志: 真的空才打 (空)', describeForLog({ attachments: [] }, '') === '(空)');
+}
+
+/* ---------- 协议层转发：空消息不推，有内容照推 ---------- */
+
+{
+  const { describeForLog, hasMessageContent } = await import('../src/bot.js');
+
+  // 判空口径必须跟日志「(空)」一致：日志说空 = 不推协议层
+  check('转发: 真空消息不推', hasMessageContent({ attachments: [] }) === false);
+  check('转发: 纯空白正文不推', hasMessageContent({ raw: { content: '   ' }, attachments: [] }) === false);
+  check('转发: 纯文本要推', hasMessageContent({ raw: { content: '你好' }, attachments: [] }) === true);
+  check('转发: 纯图片要推', hasMessageContent({ attachments: [{ type: 'image' }] }) === true);
+  check('转发: 纯语音要推', hasMessageContent({ attachments: [{ type: 'voice' }] }) === true);
+  check('转发: 表情(other附件)要推', hasMessageContent({ attachments: [{ type: 'other' }] }) === true);
+  check('转发: ARK 卡片要推', hasMessageContent({ attachments: [], ark: { title: 'B站分享' } }) === true);
+  check('转发: 合并转发/引用元素要推', hasMessageContent({ attachments: [], elements: [{ type: 'chatRecord' }] }) === true);
+  // 一致性：日志打「(空)」⟺ 判空不推，两边必须严格等价
+  const samples = [
+    { attachments: [] },
+    { raw: { content: '  ' }, attachments: [] },
+    { raw: { content: '你好' }, attachments: [] },
+    { attachments: [{ type: 'image' }] },
+    { attachments: [{ type: 'other' }] },
+    { attachments: [], ark: { title: 'B站分享' } },
+    { attachments: [], elements: [{ type: 'chatRecord' }] },
+    { attachments: [], quoted: '上一句' },
+  ];
+  const mismatch = samples.filter(
+    (m) => hasMessageContent(m) !== (describeForLog(m, String(m.raw?.content ?? '')) !== '(空)'),
+  );
+  check('转发: 判空与日志口径严格一致', mismatch.length === 0, JSON.stringify(mismatch));
 }
 
 /* ---------- requirements.txt 白名单 ---------- */
