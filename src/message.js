@@ -34,6 +34,16 @@ const MENTION_RE = /<@!?([0-9A-Za-z]+)>/g;
 const MENTION_TEST = /<@!?[0-9A-Za-z]+>/;
 
 /**
+ * 官方「@机器人」事件。平台推这两类事件时正文里的 `<@id>` 前缀会被剥掉、
+ * mentions 字段也常常不给，光看事件体的 detectMention 认不出来（多机器人群
+ * 尤其明显）。事件类型本身就是「有人 @ 了当前这只 bot」的确证。
+ *
+ * 只有这两类算：@别的机器人 / @全体 走 GROUP_MESSAGE_CREATE，那边靠 mentions
+ * 的 is_you 判断（issue #38 的口径），不能一概当真 @。
+ */
+const AT_EVENT_NAMES = ['GROUP_AT_MESSAGE_CREATE', 'AT_MESSAGE_CREATE'];
+
+/**
  * 去掉正文里的 @xxx，保留其余内容。
  *
  * 两种形态都要处理：
@@ -381,7 +391,14 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
   const content = stripMention(inboundFaces ? normalizeInbound(d.content) : d.content);
   const prefix = cfg.commandPrefix || '/';
   const isCommand = content.startsWith(prefix);
-  const mentioned = detectMention(d);
+  /**
+   * AT 事件补判（2026-11-25）：事件名本身就是 @ 的确证，补上正文被剥 @ 时漏掉的。
+   * **必须排除命令**：真实日志里 AT 事件绝大多数是 `/命令`，一并算真 @ 会抢插件的活，
+   * 也会让 DSH 的 window 模式被命令开窗口（issue #38 同类问题）。
+   * 命令仍走原路径（isCommand=true，addressed 照旧由命令兜底）。
+   */
+  const atByEvent = AT_EVENT_NAMES.includes(eventName) && !isCommand;
+  const mentioned = detectMention(d) || atByEvent;
   /**
    * @ 了别的机器人（issue #38）。只在官方字段**明确**时生效——正文正则
    * fallback 那条不动，避免误静默。是否因此静默由开关决定（默认静默）：

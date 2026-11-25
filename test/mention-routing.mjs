@@ -281,3 +281,39 @@ test('协议层转发：静默消息默认全交，关掉开关后不交（onebo
     '自动保存与完整保存两处都要提交');
   assert.match(app, /f\.forwardSilentToProtocol\.checked = c\.plugins\?\.forwardSilentToProtocol !== false/);
 });
+
+/* ---------------- AT 事件补判：平台剥掉 @ 前缀时的真 @ ---------------- */
+
+/** 群里 @机器人：平台推 GROUP_AT_MESSAGE_CREATE，正文的 @ 前缀被剥、mentions 常为空 */
+const buildAt = (content, mentions, extra = {}) =>
+  buildMessage('GROUP_AT_MESSAGE_CREATE', groupEvent(content, mentions, extra), { api, cfg: {} });
+
+test('AT 事件（正文被剥@、无 mentions）：仍判为真 @', () => {
+  const m = buildAt('你好呀', undefined);
+  assert.equal(m.mentioned, true, 'AT 事件本身就是 @ 的确证');
+  assert.equal(m.addressed, true);
+  assert.equal(m.silent, false);
+});
+
+test('AT 事件 + /命令：不算真 @，留给插件（不抢命令、不开 DSH 窗口）', () => {
+  const m = buildAt('/roll', undefined);
+  assert.equal(m.mentioned, false, '命令前缀要排除，否则抢插件的活');
+  assert.equal(m.isCommand, true, '命令本身仍然是命令');
+  assert.equal(m.addressed, true, '命令靠 isCommand 照旧 addressed');
+});
+
+test('频道 AT 事件同样补判；普通群消息仍不被误认', () => {
+  const guild = buildMessage('AT_MESSAGE_CREATE', {
+    ...groupEvent('在吗', undefined), channel_id: 'ch1', guild_id: 'g1',
+  }, { api, cfg: {} });
+  assert.equal(guild.mentioned, true, '频道 AT 事件也应补判');
+  const plain = build('今天天气不错', undefined);
+  assert.equal(plain.mentioned, false, 'GROUP_MESSAGE_CREATE 不猜 @');
+});
+
+test('AT 事件补判仍受 @别的机器人静默开关约束', () => {
+  const m = buildMessage('GROUP_AT_MESSAGE_CREATE', groupEvent('帮我看下', [OTHER_BOT]), { api, cfg: {} });
+  assert.equal(m.mentionedOtherBot, true);
+  assert.equal(m.mentioned, false, '官方明确 @ 了别的机器人时不能被 AT 事件补成真 @');
+  assert.equal(m.silent, true);
+});
