@@ -18,12 +18,14 @@ import { botPaths, DIRS, rel } from './paths.js';
 import { StatsStore } from './storage/index.js';
 import { createReach } from './reach.js';
 import { createLedger } from './ledger.js';
+import { createMediaStore } from './media-store.js';
 import { createGate } from './gate.js';
 import { createDeliveryLedger } from './delivery.js';
 import { sharedIdentity } from './identity.js';
 import { OneBotBridge } from './onebot/index.js';
 import { onebotAllowsCore } from './onebot/keep.js';
 import { HostBridge } from './host/index.js';
+import { isOfficialDuplicate, shouldForwardInbound } from './host/inbound-forward.js';
 
 /**
  * 一个机器人的完整运行时。
@@ -320,11 +322,28 @@ export class BotRuntime {
      * 和 `stats` 是两个库、两套保留策略：统计留 90 天聚合且不存正文，
      * 账本只留 7 天但存原文。混一个库的话「这个库会不会被拷走」就说不清了。
      */
+    /**
+     * 账本图片存储。**随 `ledger.saveImages` 一起开关**：
+     * 关着的时候连 store 都不建，`saveMedia()` 直接返回空数组，
+     * 收消息路径上一个分支都不多走。
+     */
+    this.mediaStore = cfg.ledger?.saveImages === true
+      ? createMediaStore({
+        dir: path.join(this.paths.data, 'ledger-media'),
+        /**
+         * 上限夹在 64KB–50MB：小于 64KB 连表情都存不下，
+         * 大于 50MB 一张图就能把磁盘吃穿，都不该让配置里写出来。
+         */
+        maxBytes: Math.max(64, Math.min(Number(cfg.ledger?.imageMaxKb ?? 2048) || 2048, 51200)) * 1024,
+      })
+      : null;
+
     this.ledger = createLedger({
       file: this.paths.events,
       botId: this.id,
       enabled: cfg.ledger?.enabled !== false,
       retentionDays: cfg.ledger?.retentionDays ?? 0,
+      mediaStore: this.mediaStore,
     });
 
     /**
@@ -1141,9 +1160,36 @@ export class BotRuntime {
      * 所以重推的消息一样有出处。
      */
     const rec = this.ledger?.append(msg);
+    /**
+     * 官方重推的同一条消息（相同 msg_id）。
+     *
+     * 账本已经用 dedupe 唯一约束接住了它，`append()` 会带 `duplicate: true`；
+     * 但协议层以前不看这个标记，每条重推都再广播一次。AI 宿主的合并窗口
+     * 把它们拼成一批 → 模型一次看到「你是谁」三遍（2026-11-26 用户反馈）。
+     *
+     * **只影响协议层**：账本 / metrics / 面板观测仍保留重推事实。
+     *
+     * 只有官方 `msg.id` 相同才认（`isOfficialDuplicate`）：没有 id 时账本用
+     * 「会话+时间+正文」指纹，同一秒连发两句一样的话会撞，不能连协议层一起吞。
+     */
+    const duplicate = isOfficialDuplicate(rec, msg.id);
     if (rec) {
       msg.eventId = rec.id;
       msg.eventSeq = rec.seq;
+      /**
+       * 图片留档（`ledger.saveImages` 开启时才有 store）。
+       *
+       * **一定不能 await**：一张图几 MB，下载几秒，串在这里会让整个群的
+       * 消息分发跟着等。`saveMedia` 内部逐个下载、失败跳过，
+       * 存完自己回填 `media` 列；这期间面板看到的是「这条没有图」，
+       * 一秒后再刷新就有了。
+       */
+      if (this.mediaStore) {
+        const imgs = (Array.isArray(msg.attachments) ? msg.attachments : [])
+          .filter((a) => a?.type === 'image' && a?.url)
+          .map((a) => ({ url: a.url, ct: a.contentType, w: a.width, h: a.height }));
+        if (imgs.length) this.ledger.saveMedia(rec, imgs).catch(() => {});
+      }
     }
 
     // 收到私聊 = 好友关系存在的强证据。不置 c2cPush：他能发不等于他允许机器人主动推
@@ -1157,8 +1203,10 @@ export class BotRuntime {
      * 先播出去，再做业务处理。
      *
      * 放在 pipeline 之前是有意的：外部订阅者（AI 宿主）关心的是「群里说了什么」，
-     * 不管这条消息有没有被去重/白名单/限流拦下——拦下是**本框架的**处理策略，
-     * 不该影响订阅者看到的事实。
+     * 不管这条消息有没有被业务策略（白名单/限流/暂停）拦下——拦下是**本框架的**
+     * 处理策略，不该影响订阅者看到的事实。
+     * **例外是官方重推**：那不是「又发生了一次」，而是同一条消息的第二份拷贝，
+     * 协议层重复触发会让下游回两遍（见下面 `duplicate` 的说明）。
      * 回调抛错必须吞掉：订阅者是外挂代码，不能让它把收消息搞崩。
      */
     try {
@@ -1188,7 +1236,18 @@ export class BotRuntime {
        * 日志）仍看得到，面板能查「确实收到过这条」。
        */
       const forwardSilent = cfg?.plugins?.forwardSilentToProtocol !== false;
-      if (hasMessageContent(msg) && (!msg.silent || forwardSilent)) {
+      /**
+       * **重推不重复触发协议层**（`duplicate`，见上面 `append` 的返回值）。
+       *
+       * 观测通道（message-bus / 日志 / 账本）仍看得到重推；但 OneBot / 宿主
+       * 是「收到就要处理」的触发通道，同一份消息交两次，下游就会回两次。
+       */
+      if (shouldForwardInbound({
+        hasContent: hasMessageContent(msg),
+        silent: msg.silent,
+        forwardSilent,
+        duplicate,
+      })) {
         this.onebot?.onMessage(msg);
         /** 宿主协议：传完整 msg（原生结构），它自己挑字段 */
         this.host?.onMessage(msg);

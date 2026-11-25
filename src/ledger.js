@@ -40,6 +40,7 @@ import { createLogger } from './logger.js';
 import { probeSqlite, openDatabase } from './storage/db.js';
 import { migrateEvents } from './storage/events-schema.js';
 import { SENSITIVE_KEY } from './runtime.js';
+import { ledgerTextOf, placeholderOf } from './ledger-text.js';
 
 /**
  * 账本行的固定列。
@@ -47,8 +48,11 @@ import { SENSITIVE_KEY } from './runtime.js';
  * `payload` 不在里面：那是整包报文，面板列表不需要。要发言人头像/昵称时
  * 单独用 `AUTHOR_COLS` 把它用 `json_extract` 拆成三列——一页 50 条每条
  * 几十 KB 的报文全都读上来太浪费。
+ *
+ * `content_raw` / `media` 是 v6 加的（见 `events-schema.js`）。`content_raw`
+ * 只有「清洗确实改了东西」的行才有值，多读这一列几乎不增加体积。
  */
-const EVENT_COLS = 'seq, id, kind, chat_id, user_id, user_name, content, at, time_basis, msg_idx, quoted, trace, plugin, source, bot_id';
+const EVENT_COLS = 'seq, id, kind, chat_id, user_id, user_name, content, content_raw, media, at, time_basis, msg_idx, quoted, trace, plugin, source, reply_to, bot_id';
 
 /** 从 `payload.author` 里取的三个展示字段（昵称 / 群名片 / 头像） */
 const AUTHOR_COLS = `,
@@ -135,11 +139,18 @@ export class EventLedger {
    * @param {string} p.botId
    * @param {boolean} [p.enabled]
    * @param {number} [p.retentionDays] 保留天数。**0 = 永久不删**；缺省按 0 处理
+   * @param {object|null} [p.mediaStore] 图片存储（`media-store.js`）。
+   *   不传 = 不存图；`ledger.saveImages` 关闭时调用方也不传。
    */
-  constructor({ file, botId = '', enabled = true, retentionDays = 0 }) {
+  constructor({ file, botId = '', enabled = true, retentionDays = 0, mediaStore = null }) {
     this.file = file;
     this.botId = botId;
     this.enabled = enabled !== false;
+    /**
+     * 图片存储。**和账本本体解耦**：账本关掉、库打不开都不影响它存在，
+     * 反过来没配它也只是「不存图」，入库一行不受影响。
+     */
+    this.mediaStore = mediaStore || null;
     /**
      * `0` 是**合法值**（永久），不能像以前那样 `|| 7` 把它吃掉。
      *
@@ -211,6 +222,19 @@ export class EventLedger {
     if (!this.available || this.closed || !msg) return null;
 
     const receivedAt = Date.now();
+    /**
+     * 入账前清洗（`ledger-text.js`）。
+     *
+     * `content` 存**人话**——平台表情变成 `[表情:憨笑]`、菜单按钮变成 `/ping`。
+     * dsh-roost 拼「刚才说到」、`chat_look` 翻记录、面板、检索，读的都是这一列，
+     * 以前每条路各洗一遍（面板还只洗 `<faceType>`），现在一处洗好。
+     *
+     * `content_raw` 存原文，**只在清洗确实改了东西时才有值**：绝大多数消息
+     * 没有标记，空串表示「和 content 一样」，不为每行多背一份正文。
+     */
+    const rawContent = String(msg.content ?? '');
+    const content = ledgerTextOf(rawContent) || placeholderOf(msg);
+    const contentRaw = content === rawContent ? '' : rawContent;
     const resolved = resolveTime(msg.raw, receivedAt);
     const basis = ['message', 'observation', 'unknown'].includes(timeBasis) ? timeBasis : resolved.basis;
     /**
@@ -257,8 +281,9 @@ export class EventLedger {
           `INSERT OR IGNORE INTO events
             (id, bot_id, kind, chat_id, msg_id, user_id, user_name, content,
              at, observed_at, time_basis, dedupe,
-             msg_idx, ref_msg_idx, union_openid, quoted, payload, trace, plugin, source)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+             msg_idx, ref_msg_idx, union_openid, quoted, payload, trace, plugin, source, reply_to,
+             content_raw, media)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         )
         .run(
           id,
@@ -268,7 +293,7 @@ export class EventLedger {
           msgId || null,
           String(msg.userId ?? '') || null,
           String(msg.userName ?? '') || null,
-          String(msg.content ?? ''),
+          content,
           at,
           receivedAt,
           basis,
@@ -292,6 +317,21 @@ export class EventLedger {
            * 老调用方不给就写空串——**空串表示「不知道」，不是「入站」**。
            */
           source,
+          /**
+           * 这条出站回的是哪条消息（v5）。被动回复的目标 `msg_id`；
+           * 主动推送没有目标，写 NULL。见 `events-schema.js` 的 V5。
+           */
+          String(msg.replyTo ?? '') || null,
+          /**
+           * 清洗前的原文（v6）。空串 = 和 `content` 一样（没有需要清洗的标记）。
+           * 见 `events-schema.js` 的 V6 与 `ledger-text.js`。
+           */
+          contentRaw,
+          /**
+           * 图片（v6）。**先留空**，由 `saveMedia()` 异步下载成功后回填——
+           * 下载要走网络，放进这里等于让收消息等网络。
+           */
+          '',
         );
       // changes === 0 说明撞了 dedupe 唯一约束 = 官方重推的同一条消息
       if (!r?.changes) {
@@ -360,6 +400,104 @@ export class EventLedger {
   }
 
   /**
+   * 查一批行带的图片文件（相对路径）。
+   *
+   * **删行之前调**：行一删 `media` 列就跟着没了，图片文件变成永远删不掉的孤儿。
+   * 用 `media != ''` 粗筛再解析，不引 JSON1 的 `json_each`（老 SQLite 没有）。
+   */
+  _mediaFilesOf(where, params = []) {
+    const out = [];
+    try {
+      const rows = this.db
+        .prepare(`SELECT media FROM events WHERE ${where} AND media != ''`)
+        .all(...params);
+      for (const r of rows) for (const m of mediaOf(r.media)) out.push(m.file);
+    } catch { /* 老库还没有 media 列时走到这里，忽略 */ }
+    return out;
+  }
+
+  /**
+   * 删图片文件。**不 await**：删图和删行不需要原子，
+   * 最坏结果是留一个孤儿文件，不值得让一次删除请求等几十次磁盘 IO。
+   */
+  _dropMediaFiles(files) {
+    const store = this.mediaStore;
+    if (!store || !Array.isArray(files) || !files.length) return;
+    for (const f of files) {
+      try {
+        const p = store.remove(f);
+        if (p && typeof p.catch === 'function') p.catch(() => {});
+      } catch { /* 单张删不掉不影响其它 */ }
+    }
+  }
+
+  /**
+   * 回填一条记录的图片。
+   *
+   * @param {string} id 事件 id（`append()` 的返回值）
+   * @param {Array<object>} list `[{t:'image', file, w, h, size}]`
+   * @returns {number} 受影响行数（0 = 这条已经被删了 / 库没开）
+   */
+  setMedia(id, list) {
+    if (!this.available || this.closed || !this.db) return 0;
+    try {
+      const json = Array.isArray(list) && list.length ? JSON.stringify(list) : '';
+      return Number(
+        this.db.prepare('UPDATE events SET media = ? WHERE id = ?').run(json, String(id)).changes ?? 0,
+      );
+    } catch (e) {
+      log.warn(`账本图片回填失败：${e.message}`);
+      return 0;
+    }
+  }
+
+  /**
+   * 下载并回填一条消息的图片。
+   *
+   * **调用方不要 await**：入站保存必须并行于「分发消息、回话」，
+   * 一张图几 MB 下载几秒，串进主链路会让整个群等她。
+   *
+   * @param {{id:string}} rec `append()` 的返回值
+   * @param {Array<string|{url?:string,path?:string,ct?:string,w?:number,h?:number}>} sources
+   *   URL（`https:` 开头）走下载，其它当本地路径读。
+   * @returns {Promise<Array<object>>} 存下来的条目（失败的跳过，不抛）
+   */
+  async saveMedia(rec, sources) {
+    const store = this.mediaStore;
+    const id = String(rec?.id ?? '');
+    if (!store || !id || !Array.isArray(sources) || !sources.length) return [];
+    const saved = [];
+    /** 一条消息最多存 9 张：正常图文远到不了，封顶防畸形报文一次拉爆磁盘 */
+    for (const s of sources.slice(0, 9)) {
+      const one = typeof s === 'string'
+        ? (/^https?:/i.test(s) ? { url: s } : { path: s })
+        : (s ?? {});
+      try {
+        const got = one.url
+          ? await store.saveFromUrl(one.url, one)
+          : one.path
+            ? await store.saveFromFile(one.path, one)
+            : null;
+        if (got) saved.push(got);
+      } catch (e) {
+        log.debug(`图片没存下来：${e.message}`);
+      }
+    }
+    if (saved.length) this.setMedia(id, saved);
+    return saved;
+  }
+
+  /** 有多少条带图（面板「账本」页显示用） */
+  mediaStats() {
+    if (!this.available || this.closed || !this.db) return { rows: 0 };
+    try {
+      return { rows: Number(this.db.prepare("SELECT COUNT(*) AS n FROM events WHERE media != ''").get()?.n ?? 0) };
+    } catch {
+      return { rows: 0 };
+    }
+  }
+
+  /**
    * 滚动删。按 `seq` 分批，一次 ≤5000 行。
    *
    * 删之前先解析一遍引用边——过期的边留着也没意义，
@@ -387,6 +525,14 @@ export class EventLedger {
     const cutoff = Date.now() - this.retentionDays * 24 * 3600 * 1000;
     let total = 0;
     for (;;) {
+      /**
+       * 先把这一批要删的图片路径取出来——行删掉之后 `media` 列就没了，
+       * 图片文件留在磁盘上永远没人知道该删它。
+       */
+      const files = this._mediaFilesOf(
+        'seq IN (SELECT seq FROM events WHERE at < ? ORDER BY seq LIMIT ?)',
+        [cutoff, PRUNE_BATCH],
+      );
       const r = this.db
         .prepare(
           `DELETE FROM events WHERE seq IN (
@@ -394,6 +540,7 @@ export class EventLedger {
            )`,
         )
         .run(cutoff, PRUNE_BATCH);
+      if (files.length) this._dropMediaFiles(files);
       const n = Number(r?.changes ?? 0);
       total += n;
       if (n < PRUNE_BATCH) break;
@@ -544,34 +691,56 @@ export class EventLedger {
    * @param {string} p.chatId
    * @param {number} [p.limit]
    * @param {number} [p.beforeSeq]
+   * @param {number} [p.offset] 跳过最新的多少条（分页「第 N 页」用，与 beforeSeq 互斥）
    * @param {boolean} [p.withPeople] 带上发言人的头像 / QQ 昵称 / 群昵称
    *        （面板账本要显示「谁说的」，只有 `user_name` 分不出群名片和 QQ 昵称）
    */
-  recent({ chatId, limit = 50, beforeSeq, withPeople = false } = {}) {
+  recent({ chatId, limit = 50, beforeSeq, offset = 0, withPeople = false } = {}) {
     if (!this.available || this.closed || !chatId) return [];
     const lim = Math.min(Math.max(Number(limit) || 50, 1), 500);
+    const off = Math.max(Number(offset) || 0, 0);
     const people = withPeople ? AUTHOR_COLS : '';
-    const rows = beforeSeq
-      ? this.db
-          .prepare(
-            `SELECT ${EVENT_COLS}${people}
-               FROM events WHERE bot_id = ? AND chat_id = ? AND seq < ?
-              ORDER BY seq DESC LIMIT ?`,
-          )
-          .all(this.botId, String(chatId), Number(beforeSeq), lim)
-      : this.db
-          .prepare(
-            `SELECT ${EVENT_COLS}${people}
-               FROM events WHERE bot_id = ? AND chat_id = ?
-              ORDER BY seq DESC LIMIT ?`,
-          )
-          .all(this.botId, String(chatId), lim);
+    /**
+     * 两种翻法各管一摊：
+     *   · `beforeSeq` 是游标（「比这条更早的」），追加式加载用，不怕新消息进来；
+     *   · `offset` 是分页（第 N 页），面板要显示「第 X / Y 页」就得能整页跳。
+     * 都从最新往回取，最后统一 reverse 成正序（老的在前）。
+     */
+    const rows = this.db
+      .prepare(
+        `SELECT ${EVENT_COLS}${people}
+           FROM events WHERE bot_id = ? AND chat_id = ?${beforeSeq ? ' AND seq < ?' : ''}
+          ORDER BY seq DESC LIMIT ? OFFSET ?`,
+      )
+      .all(
+        ...(beforeSeq
+          ? [this.botId, String(chatId), Number(beforeSeq), lim, off]
+          : [this.botId, String(chatId), lim, off]),
+      );
 
     return rows.reverse().map((r) => {
       const row = mapRow(r);
       if (!withPeople) return row;
       return { ...row, ...authorFieldsOf(r) };
     });
+  }
+
+  /**
+   * 某个会话有多少条（面板分页要算总页数）。
+   *
+   * 走 `(bot_id, chat_id, seq)` 索引，计数本身很便宜；但**不要拿去每次渲染
+   * 都算全库**——这里只数一个会话。查不到 / 没开账本一律 0。
+   */
+  countOf({ chatId } = {}) {
+    if (!this.available || this.closed || !chatId) return 0;
+    try {
+      const row = this.db
+        .prepare('SELECT COUNT(*) AS n FROM events WHERE bot_id = ? AND chat_id = ?')
+        .get(this.botId, String(chatId));
+      return Number(row?.n ?? 0);
+    } catch {
+      return 0;
+    }
   }
 
   /**
@@ -746,6 +915,68 @@ export class EventLedger {
     return rows.reverse().map(mapRow);
   }
 
+  /**
+   * 按官方 `msg_id` 找那一行。
+   *
+   * `get()` 收的是账本自己的 `id`（UUID），调用方手里往往只有官方 msg_id
+   * ——「这句话被回过没有」这类问题全是拿 msg_id 问的。
+   *
+   * **走 `dedupe` 的唯一索引**，不新建 `msg_id` 索引：没 msg_id 的行
+   * 用的是「会话+人+正文」指纹，有 msg_id 的行 dedupe 一定等于
+   * `${botId}:${msgId}`（见 `append`），两者是同一个键。
+   *
+   * @param {string} msgId 官方消息 id
+   * @returns {object|null}
+   */
+  byMsgId(msgId) {
+    if (!this.available || this.closed) return null;
+    const id = String(msgId ?? '').trim();
+    if (!id) return null;
+    try {
+      const r = this.db
+        .prepare(`SELECT ${EVENT_COLS} FROM events WHERE dedupe = ?`)
+        .get(`${this.botId}:${id}`);
+      return r ? mapRow(r) : null;
+    } catch (e) {
+      log.warn(`按 msg_id 查账本失败：${e.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * 这条消息引发了哪些回复（v5）。
+   *
+   * 被动回复在发送时要带被回复消息的 `msg_id`，`outbound` 现在把它顺手
+   * 记进 `reply_to`——于是「谁答了谁」变成一条可查的边，不用再按时间
+   * 相邻去猜。猜的代价很实在：AI 处理几秒，中间插进别人的话，紧邻判定
+   * 就会把回复配给错的人。
+   *
+   * 走 `events_reply_to` 索引 `(bot_id, reply_to)`，正序返回（先回的在前）。
+   *
+   * @param {string} msgId 被回复消息的官方 msg_id
+   * @param {object} [o]
+   * @param {number} [o.limit] 默认 20，上限 100
+   */
+  repliesOf(msgId, { limit = 20 } = {}) {
+    if (!this.available || this.closed) return [];
+    const id = String(msgId ?? '').trim();
+    if (!id) return [];
+    const lim = Math.min(Math.max(Number(limit) || 20, 1), 100);
+    try {
+      return this.db
+        .prepare(
+          `SELECT ${EVENT_COLS} FROM events
+            WHERE bot_id = ? AND reply_to = ?
+            ORDER BY seq ASC LIMIT ?`,
+        )
+        .all(this.botId, id, lim)
+        .map(mapRow);
+    } catch (e) {
+      log.warn(`查回复失败：${e.message}`);
+      return [];
+    }
+  }
+
   /** 面板用：总量、时间范围、保留策略 */
   stats() {
     if (!this.available || this.closed) {
@@ -872,6 +1103,8 @@ export class EventLedger {
     try {
       if (list.length) {
         const marks = list.map(() => '?').join(',');
+        /** 图片先记下来，删完就查不到了 */
+        this._dropMediaFiles(this._mediaFilesOf(`id IN (${marks})`, list));
         removed += Number(
           this.db.prepare(`DELETE FROM events WHERE id IN (${marks})`).run(...list).changes ?? 0,
         );
@@ -881,6 +1114,12 @@ export class EventLedger {
          * 用 `seq` 而不是 `at` 定「最近 N 条」：同一毫秒可能有多条，
          * 按时间排会留下谁说不清，按自增序号才是确定的。
          */
+        const keepWhere = `chat_id = ? AND seq < (
+                  SELECT MIN(seq) FROM (
+                    SELECT seq FROM events WHERE chat_id = ? ORDER BY seq DESC LIMIT ?
+                  )
+                )`;
+        this._dropMediaFiles(this._mediaFilesOf(keepWhere, [chat, chat, keep]));
         removed += Number(
           this.db
             .prepare(
@@ -894,6 +1133,8 @@ export class EventLedger {
             .run(chat, chat, keep).changes ?? 0,
         );
       } else if (ts) {
+        const beforeWhere = `at < ?${chat ? ' AND chat_id = ?' : ''}`;
+        this._dropMediaFiles(this._mediaFilesOf(beforeWhere, chat ? [ts, chat] : [ts]));
         removed += Number(
           this.db
             .prepare(
@@ -1002,6 +1243,8 @@ export class EventLedger {
            * 历史接口搬进来的，标 `onebot` 更准确）。
            */
           source: String(r?.source ?? 'import'),
+          /** 被回复的消息（v5）：导出再导入时保留这条边 */
+          replyTo: String(r?.replyTo ?? ''),
           /**
            * `append()` 只从 `raw.timestamp` 推 `at`（传 `at` 无效）。
            * 给 ISO 字符串，`resolveTime` 会解析成 `basis: 'message'`——
@@ -1011,7 +1254,26 @@ export class EventLedger {
         });
         if (!got) bad += 1;
         else if (got.duplicate) skipped += 1;
-        else added += 1;
+        else {
+          added += 1;
+          /**
+           * 原文与图片不经过 `append()`：它拿到的已经是清洗后的 `content`，
+           * 自己算出来的 `contentRaw` 会是空串、`media` 会是空——导出再导入
+           * 就把「原文」和「哪条有图」丢了，备份不完整。
+           *
+           * 这里直接回填。`media` 里的 `file` 是相对路径，**图片文件本身
+           * 不在 JSONL 里**：换台机器导入会指向不存在的文件，面板按破图处理。
+           */
+          const rawContent = String(r?.contentRaw ?? '');
+          const media = String(r?.media ?? '');
+          if (rawContent || media) {
+            try {
+              this.db
+                .prepare('UPDATE events SET content_raw = ?, media = ? WHERE id = ?')
+                .run(rawContent, media, got.id);
+            } catch { /* 回填失败不影响这条已经导进去了 */ }
+          }
+        }
       } catch {
         bad += 1;
       }
@@ -1074,7 +1336,7 @@ export class EventLedger {
       const args = [];
       if (chat) { where.push('chat_id = ?'); args.push(chat); }
       if (ts) { where.push('at < ?'); args.push(ts); }
-      const sql = `SELECT seq, id, kind, chat_id, msg_id, user_id, user_name, content, at, time_basis, plugin, source, bot_id
+      const sql = `SELECT seq, id, kind, chat_id, msg_id, user_id, user_name, content, at, time_basis, plugin, source, reply_to, bot_id
                      FROM events ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
                     ORDER BY seq ASC LIMIT ?`;
       return this.db.prepare(sql).all(...args, lim);
@@ -1107,6 +1369,22 @@ function contentOf(row) {
     return String(JSON.parse(row?.payload ?? '{}')?.content ?? '');
   } catch {
     return '';
+  }
+}
+
+/**
+ * `media` 列的 JSON → 数组。
+ *
+ * 坏数据当空：一行烂 JSON 不该把整页账本列表搞挂。只留带 `file` 的项——
+ * 没有文件名的记录面板显示不了、清理也删不到，留着没意义。
+ */
+function mediaOf(v) {
+  if (!v) return [];
+  try {
+    const a = JSON.parse(String(v));
+    return Array.isArray(a) ? a.filter((x) => x && typeof x === 'object' && x.file) : [];
+  } catch {
+    return [];
   }
 }
 
@@ -1146,6 +1424,24 @@ function mapRow(r) {
      * 老行一律空串，表示「不知道」，不要拿来判断入站还是出站。
      */
     source: r.source ?? '',
+    /**
+     * 这条出站回的是哪条消息（v5）。被动回复写目标 `msg_id`，主动推送是
+     * 空串——**空串既可能是「主动发的」，也可能是「升级前的行」**，
+     * 别拿它反过来断言"这条一定是主动推送"。
+     */
+    replyTo: r.reply_to ?? '',
+    /**
+     * 清洗前的原文（v6）。空串 = 和 `content` 一样。
+     * 面板要「看原文」时读这一列，没有就说明本来就没标记。
+     */
+    contentRaw: r.content_raw ?? '',
+    /**
+     * 图片（v6）：`[{t:'image', file, w, h, size}]`。
+     * `file` 是 `data/bots/<botId>/ledger-media/` 下的相对路径，
+     * 面板拼成 `/api/ledger/media?file=…` 才能看。
+     * 空数组两种含义（没开记录 / 这条没图），见 `events-schema.js` 的 V6。
+     */
+    media: mediaOf(r.media),
     content: contentOf(r),
   };
 }
@@ -1192,6 +1488,21 @@ export function toImportRow(r) {
      * 所以「网关收的」导回去还是 `gateway`，「OneBot 客户端发的」还是 `onebot`。
      */
     source: String(r?.source ?? ''),
+    /**
+     * 被回复的消息（v5）。不导出的话，JSONL 备份导回来「谁回了谁」就断了，
+     * 和 `source` 当年漏掉是同一个错。
+     */
+    replyTo: String(r?.reply_to ?? ''),
+    /**
+     * 清洗前的原文（v6）与图片（v6）。导出是**备份**语义：导回来的账本
+     * 要能和原来一样可读、一样看得到图。
+     *
+     * `media` 里的 `file` 是相对路径，图片文件本身**不在 JSONL 里**——
+     * 换台机器导入时那些图会指向不存在的文件（面板按破图处理）。
+     * 真要搬图得连 `data/bots/<botId>/ledger-media/` 一起拷，这条写进 RELEASE_NOTES。
+     */
+    contentRaw: String(r?.content_raw ?? ''),
+    media: String(r?.media ?? ''),
   };
 }
 
@@ -1201,9 +1512,10 @@ export function toImportRow(r) {
  * @param {string} p.botId
  * @param {boolean} [p.enabled]
  * @param {number} [p.retentionDays]
+ * @param {object|null} [p.mediaStore] 图片存储（`ledger.saveImages` 开启时才有）
  */
-export function createLedger({ file, botId, enabled, retentionDays }) {
-  return new EventLedger({ file, botId, enabled, retentionDays });
+export function createLedger({ file, botId, enabled, retentionDays, mediaStore }) {
+  return new EventLedger({ file, botId, enabled, retentionDays, mediaStore });
 }
 
 /** 目录存在性检查，测试和面板诊断用 */

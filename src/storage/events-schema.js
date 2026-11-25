@@ -12,7 +12,7 @@
  * 合表等于把统计库那句「不存消息正文」变成假话。
  */
 
-export const EVENTS_SCHEMA_VERSION = 4;
+export const EVENTS_SCHEMA_VERSION = 6;
 
 const V1 = `
 CREATE TABLE IF NOT EXISTS events (
@@ -117,6 +117,59 @@ ALTER TABLE events ADD COLUMN source TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS events_source ON events(bot_id, source) WHERE source != '';
 `;
 
+/**
+ * v5：这条出站回的是哪条消息。
+ *
+ * 被动回复（`msg.reply()`）发送时要带被回复消息的 `msg_id`（官方要求，
+ * 60 分钟窗口），但以前只在发送报文里用一次就不管了——账本里留下的是
+ * 「谁在什么时候说了什么」，**看不出「这句话是回哪句」**。
+ *
+ * 后果很具体：
+ *   · `chat_look` 翻出来的时间线，模型只能靠相邻猜谁在答谁，猜错就把
+ *     A 的问题配给 B 的回答；
+ *   · 「这句话是不是被别的插件回过了」查不出来，只能按"紧挨着"猜——
+ *     慢回复（AI 处理几秒）中间插进别人的话，就会误判；
+ *   · 运营侧想看「一条 @ 引出了几条回复、谁抢答了」也没有数据。
+ *
+ * 取值：被动回复目标的 `msg_id`（对应入站行的 `msg_id` 列）。
+ * 主动推送没有回复目标，留 NULL——**NULL 和空串意义不同**：
+ * 空串是「有目标但拿不到」，NULL 是「本来就没有」。
+ *
+ * 索引按 `(bot_id, reply_to)`：查「这条消息引发了哪些回复」是反向的主用例，
+ * 而 `bot_id` 前缀和别的索引一致。`WHERE reply_to IS NOT NULL` 把
+ * 主动推送（多数行）挡在索引外。
+ */
+const V5 = `
+ALTER TABLE events ADD COLUMN reply_to TEXT;
+CREATE INDEX IF NOT EXISTS events_reply_to ON events(bot_id, reply_to) WHERE reply_to IS NOT NULL;
+`;
+
+/**
+ * v6：可读正文 + 图片留档。
+ *
+ * **`content_raw`**：`content` 从这一版起存**清洗后**的正文（`ledger-text.js`），
+ * 平台表情 `<faceType=…>`、菜单按钮 `<qqbot-cmd-input …>` 都变成人话。
+ * 原文存在这一列，**只在两者不同时才写**——绝大多数消息没有标记，
+ * 空串表示「和 content 一样」，不为每行多背一份正文。
+ *
+ * 为什么要留原文：清洗是不可逆操作（表情名是从 base64 解出来的，标签结构没了）。
+ * 账本是「发生过什么」的档案，规则改错时要能重算，不能把原文弄丢。
+ *
+ * **`media`**：这一条带的图片，JSON 数组，空串 = 没有（或没开记录）。
+ *
+ *   [{"t":"image","file":"20261125/ab12cd34ef56.jpg","w":800,"h":600,"size":123456}]
+ *
+ * `file` 是 `data/bots/<botId>/ledger-media/` 下的相对路径。**存路径不存 URL**：
+ * QQ 的下载地址带 `rkey`，过期即失效，留 URL 等于什么都没留。
+ *
+ * `ledger.saveImages` 默认关。关闭时这一列一直是空串——**空串有两种含义**
+ * （没开记录 / 这条没图），分不出来，所以面板不要拿它推断「用户当时发没发图」。
+ */
+const V6 = `
+ALTER TABLE events ADD COLUMN content_raw TEXT NOT NULL DEFAULT '';
+ALTER TABLE events ADD COLUMN media TEXT NOT NULL DEFAULT '';
+`;
+
 /** 表里有没有这一列（迁移要幂等，重复 ALTER 会抛） */
 function hasColumn(db, table, col) {
   try {
@@ -150,6 +203,11 @@ export function migrateEvents(db) {
    * 老库若是被手工加过列、版本号却没动，只看版本会撞 duplicate column。
    */
   if (!hasColumn(db, 'events', 'source')) db.exec(V4);
+  /** v5 同样按「列在不在」判，理由与上面两条一样 */
+  if (!hasColumn(db, 'events', 'reply_to')) db.exec(V5);
+  /** v6 两列同样按「列在不在」判——老库可能被手工加过一列 */
+  if (!hasColumn(db, 'events', 'content_raw')) db.exec('ALTER TABLE events ADD COLUMN content_raw TEXT NOT NULL DEFAULT \'\'');
+  if (!hasColumn(db, 'events', 'media')) db.exec('ALTER TABLE events ADD COLUMN media TEXT NOT NULL DEFAULT \'\'');
   db.exec(`PRAGMA user_version = ${EVENTS_SCHEMA_VERSION}`);
   return { from: cur, to: EVENTS_SCHEMA_VERSION };
 }

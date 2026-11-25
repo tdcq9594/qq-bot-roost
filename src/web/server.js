@@ -34,6 +34,8 @@ import { SMTP_DEFAULTS } from '../mail/defaults.js';
 import { extractAddress } from '../mail/smtp.js';
 import { userFacingSendError } from '../outbound.js';
 import { toImportRow } from '../ledger.js';
+import { ledgerTextOf } from '../ledger-text.js';
+import { createMediaStore } from '../media-store.js';
 import { runRoute } from '../plugin/routes.js';
 import { toggleGroupPlugin } from '../plugin/groupscope.js';
 import { suspendPluginWatch } from '../services/plugin-watch.js';
@@ -228,6 +230,8 @@ const MIME = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
   '.ico': 'image/x-icon',
   '.woff2': 'font/woff2',
 };
@@ -368,14 +372,22 @@ function isSafeId(s) {
 /**
  * 账本正文的面板显示版。
  *
- * 库里存的是原文（表情是 `<faceType=6,faceId="0",ext="…">` 这种标记），直接
- * 显示会满屏尖括号。只清展示，**不改库**：导出、检索都还按原文走。
- * 清完为空但原文有内容 = 纯图 / 纯表情，给个占位词，不然那行看着像坏的。
+ * **v6 起库里存的已经是清洗后的正文**（`ledger-text.js`），这里主要是给
+ * 升级前的**老行**兜底——老行 `content` 里还是 `<faceType=…>` 原文。
+ * 清洗函数是幂等的，新行再过一遍不会变。
+ *
+ * 清完为空但原文有内容 = 老行里的纯图 / 纯语音（那时还没有占位词），
+ * 给一句人话，不然那行看着像坏的。
  */
 function ledgerDisplayContent(raw) {
   const s = String(raw ?? '');
-  const t = s.replace(/<faceType=[^>]*>/g, '').trim();
-  return t || (s ? '（表情）' : '（图片）');
+  if (!s) return '';
+  return ledgerTextOf(s) || '（无文字内容）';
+}
+
+/** 账本图片根目录（每个机器人一份，和 `media-store` 的布局一致） */
+function ledgerMediaDir(botId) {
+  return path.join(DIRS.botsData, String(botId ?? ''), 'ledger-media');
 }
 
 /**
@@ -3486,6 +3498,11 @@ async function startWebServerInstance({
           }
           return json(res, 200, {
             ...st,
+            /** 带图的条数（v6）。开着 `ledger.saveImages` 时面板显示「已留档 N 张」 */
+            mediaRows: Number(rt?.ledger?.mediaStats?.()?.rows ?? 0),
+            /** 图片留档开关（v6）：面板回填用 */
+            saveImages: rt?.cfg?.ledger?.saveImages === true,
+            imageMaxKb: Number(rt?.cfg?.ledger?.imageMaxKb ?? 2048),
             byChat: byChat.map((c) => ({
               ...c,
               /** 群名 / 私聊对方昵称；都没拿到是空串，前端回退到短码 */
@@ -3507,15 +3524,30 @@ async function startWebServerInstance({
         if (pathname === '/api/ledger' && req.method === 'GET') {
           const chatId = String(url.searchParams.get('chatId') ?? '').trim();
           if (!chatId) return json(res, 400, { error: '需要 chatId' });
-          const limit = Number(url.searchParams.get('limit') ?? 50);
+          const limit = Math.min(Math.max(Number(url.searchParams.get('limit') ?? 50) || 50, 1), 200);
           const beforeSeq = Number(url.searchParams.get('beforeSeq') ?? 0) || undefined;
-          const rows = rt?.ledger?.recent?.({ chatId, limit, beforeSeq, withPeople: true }) ?? [];
           /**
-           * 面板显示用的轻量清洗。
+           * 分页：页码从 1 起，**第 1 页 = 最新的 `limit` 条**，页码越大越早。
            *
-           * dsh-roost 的 `textOf` 在另一个仓、另一个进程，**不能 import 共用**，
-           * 所以这里按同样口径各写一份：表情原文是 `<faceType=...>`，
-           * 纯图 / 纯 @ 的 `content` 是空串。清洗只作用于展示，不改库里的原文。
+           * 以前只有「下一页」按钮，点一下就是把列表再加长 50 条，既不知道
+           * 看到哪儿、也没法回上一页。现在给页码就得知道总数，`countOf` 走
+           * `(bot_id, chat_id)` 索引，单会话计数，不算全库。
+           *
+           * `offset` 分页的固有问题：期间有新消息进来，后面的页会整体挪一格
+           * （漏一条 / 重一条）。账本是查看用途、不是逐字比对，接受这个代价；
+           * 要追最新点回第 1 页即可。`beforeSeq` 游标保留，给需要稳定性的调用方。
+           */
+          const total = Number(rt?.ledger?.countOf?.({ chatId }) ?? 0);
+          const pages = Math.max(1, Math.ceil(total / limit));
+          const askedPage = Math.max(Number(url.searchParams.get('page') ?? 0) || 0, 0);
+          const page = askedPage ? Math.min(askedPage, pages) : 1;
+          const offset = askedPage ? (page - 1) * limit : 0;
+          const rows =
+            rt?.ledger?.recent?.({ chatId, limit, beforeSeq, offset, withPeople: true }) ?? [];
+          /**
+           * v6 起清洗在**入账时**做（`ledger-text.js`），这里只给升级前的老行兜底。
+           * 以前面板、dsh-roost 各洗一份，规则已经开始分叉（面板只认 `<faceType>`），
+           * 现在只剩一处。
            */
           /** QQ 号反查：和查询页/人物反查共用同一个带缓存的解析器 */
           const uinOf = makeUinResolver(rt);
@@ -3526,9 +3558,61 @@ async function startWebServerInstance({
               openid: String(r.userId ?? ''),
               uin: uinOf(r.userId),
               content: ledgerDisplayContent(r.content),
+              /**
+               * 清洗前的原文（v6）。空串 = 和 `content` 一样，面板不用显示「原文」入口。
+               */
+              contentRaw: String(r.contentRaw ?? ''),
+              /**
+               * 图片（v6）。拼成前端能直接放进 `<img src>` 的地址——
+               * 面板走 cookie 鉴权，`<img>` 请求会自动带上，不用单独传 token。
+               */
+              media: (Array.isArray(r.media) ? r.media : []).map((m) => ({
+                ...m,
+                /**
+                 * **必须带 `bot`**：`<img>` 请求是独立的一次 HTTP，
+                 * 不带参数时 `pickRuntime()` 会退回「第一个机器人」，
+                 * 用户在多机器人面板里看第二个鸟的账本就会 404。
+                 */
+                url: m.file
+                  ? `/api/ledger/media?bot=${encodeURIComponent(String(r.botId || rt?.id || ''))}&file=${encodeURIComponent(m.file)}`
+                  : '',
+              })),
             };
           });
-          return json(res, 200, { items });
+          return json(res, 200, { items, total, page, pages, limit });
+        }
+
+        /**
+         * 账本图片（`ledger.saveImages` 开启后才有）。
+         *
+         * 走 `/api/` 前缀 = 走面板鉴权（cookie / X-Token / ?token=）。
+         * **不把 `data/bots/` 开成静态目录**：那里有账本库、身份表、配额，
+         * 挂出去等于把整台机器的聊天记录交给任何能访问面板端口的人。
+         *
+         * 文件名是内容哈希（`<sha1_16>.<ext>`），内容永不变，可以长缓存——
+         * 一页 50 条滚动时不重复下载同一张图。
+         */
+        if (pathname === '/api/ledger/media' && req.method === 'GET') {
+          const rel = String(url.searchParams.get('file') ?? '').trim();
+          /**
+           * `bot` 只认 runtimes 里真实存在的 id：前端拼 URL 时带上它，
+           * 但这个参数可以被手改，不能直接拼进路径。
+           */
+          const want = String(url.searchParams.get('bot') ?? '').trim();
+          const botId = want && runtimes.some((r) => r.id === want) ? want : String(rt?.id ?? '');
+          const abs = createMediaStore({ dir: ledgerMediaDir(botId) }).resolve(rel);
+          if (!abs) return json(res, 400, { error: '路径不合法' });
+          let buf;
+          try {
+            buf = await fs.readFile(abs);
+          } catch {
+            return json(res, 404, { error: '图片不在（可能已被清理）' });
+          }
+          res.writeHead(200, {
+            'Content-Type': MIME[path.extname(abs)] ?? 'application/octet-stream',
+            'Cache-Control': 'private, max-age=604800',
+          });
+          return res.end(buf);
         }
 
         /**
@@ -3941,6 +4025,33 @@ async function startWebServerInstance({
             if (days > 0) rt.ledger.prune?.().catch?.(() => {});
           }
           return json(res, 200, { ok: true, retentionDays: days });
+        }
+
+        /**
+         * 账本图片留档开关（v6，**默认关**）。
+         *
+         * 打开后立刻生效：新建一个 `mediaStore` 挂到 `rt.ledger` 上，
+         * 下一条消息开始下载。**已经过去的消息不会补**——那些附件的 URL
+         * 多半已经过期，硬补只会刷一堆 404 日志。
+         *
+         * 关掉只停「存新的」，已经存下的文件还在，随账本删除一起清。
+         */
+        if (pathname === '/api/ledger/images' && req.method === 'PUT') {
+          const body = await readBody(req);
+          const on = body.saveImages === true;
+          const kb = Number(body.imageMaxKb ?? cfg.ledger?.imageMaxKb ?? 2048);
+          if (!Number.isFinite(kb) || kb < 64 || kb > 51200) {
+            return json(res, 400, { error: '单张上限要在 64–51200 KB 之间' });
+          }
+          const max = Math.round(kb);
+          cfg.ledger = { ...(cfg.ledger ?? {}), saveImages: on, imageMaxKb: max };
+          await saveBotConfig(rt.id, cfg);
+          if (rt.ledger) {
+            rt.ledger.mediaStore = on
+              ? createMediaStore({ dir: ledgerMediaDir(rt.id), maxBytes: max * 1024 })
+              : null;
+          }
+          return json(res, 200, { ok: true, saveImages: on, imageMaxKb: max });
         }
 
         /**
