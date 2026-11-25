@@ -55,6 +55,9 @@ export function serializeMessage(msg, extra = {}) {
     command: msg.command || '',
     args: msg.args ?? [],
     mentioned: Boolean(msg.mentioned),
+    addressed: Boolean(msg.addressed),
+    /** 静默消息（@ 别的机器人 / 只回@模式下裸命令）：插件应直接跳过，不要搭话 */
+    silent: Boolean(msg.silent),
     isCommand: Boolean(msg.isCommand),
     at: msg.at ?? Date.now(),
     /**

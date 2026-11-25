@@ -16,6 +16,12 @@
  * **换行符要归一**：Windows 上 `core.autocrlf=true` 的仓库，检出是 CRLF，
  * 而 GitHub 打的 tarball 里是 LF。按原始字节哈希，两边永远对不上，
  * 结果是「每个插件都校验失败」——比不校验更糟。所以文本文件统一按 LF 算。
+ *
+ * 两套算法（与插件仓 scripts/hashdir.mjs、dsh-roost src/ext-bundle.js 同步）：
+ *   · algo1 = 老算法，纯文档 / LICENSE 计入指纹；旧索引的 `sha256` 是它算的；
+ *   · algo2 = 现行算法（HASH_ALGO），排除文档与运行时状态；`sha256_v2` 是它算的。
+ * 安装 / 更新时两个都认（见 plugin/market.js 的 entryHashes）；框架自更新的
+ * `hashFileList()` 仍只走下面的 `isHashedFile()`，行为不变——别把两套规则混起来。
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -23,19 +29,39 @@ import crypto from 'node:crypto';
 import { HASH_SKIP } from './skipdirs.js';
 
 /**
- * 不参与哈希的东西见 ./skipdirs.js（HASH_SKIP）。
- * **改它会改变已发布插件的 sha256，必须同步重建 index.json。**
+ * algo1 的老跳过表：1.4.0 及以前就是这几项，只用来校验旧索引的 `sha256`。
+ * 来自 ./skipdirs.js 的 HASH_SKIP——改它会改变已发布插件的 sha256，必须同步重建索引。
  */
-const SKIP_DIRS = HASH_SKIP;
-const SKIP_FILES = new Set(['.deps.json', '.DS_Store', 'Thumbs.db']);
+const LEGACY_SKIP_DIRS = HASH_SKIP;
+const LEGACY_SKIP_FILES = new Set(['.deps.json', '.DS_Store', 'Thumbs.db']);
 
 /**
- * 一个相对路径（`/` 分隔，含文件名）是否参与内容指纹。
+ * algo2 额外排除：旧依赖位置、抽帧目录与运行时状态文件。
+ * 这些文件不入库，但用户机器上会生成——带进去会让同一份插件算出不同指纹。
+ */
+const SKIP_DIRS_ALGO2 = new Set([...HASH_SKIP, 'deps', 'shots']);
+const SKIP_FILES_ALGO2 = new Set([
+  ...LEGACY_SKIP_FILES,
+  'ui-data.json', 'qr.png', 'cookie.txt',
+  'replies.json', 'replied.json', 'pending.json', 'history.json', 'seen.json',
+]);
+
+/** 纯文档不进 algo2 指纹：改 README / LICENSE 不该逼维护者重算索引。 */
+function isDocFile(name) {
+  const lower = name.toLowerCase();
+  return lower.endsWith('.md') || /^(license|licence|copying)(\.[a-z0-9]+)?$/.test(lower);
+}
+
+/** 算法版本。与插件仓 scripts/hashdir.mjs、dsh-roost src/ext-bundle.js 保持一致。 */
+export const HASH_ALGO = 2;
+
+/**
+ * 一个相对路径（`/` 分隔，含文件名）是否参与**框架自更新**的内容指纹。
  *
- * **这是唯一的排除规则**，目录遍历（collect）和发版脚本（build-sums.mjs）
- * 都必须调它，不能各自复制一份判断——2026-11 就因为发版脚本漏了这里的
- * 文档排除规则，导致 SHA256SUMS 记录的指纹含 17 个 md/LICENSE、而更新器
- * 解包后算出的不含，v1.1.11 及之后所有版本的自更新全部校验失败。
+ * **只服务 hashFileList()（框架自更新 / SHA256SUMS）**，不是插件目录哈希的排除规则：
+ * 插件目录哈希走下面 collect() 的 algo1 / algo2 两套表。两处别混——2026-11 就
+ * 因为发版脚本漏了这里的文档排除规则，导致 SHA256SUMS 记录的指纹含 17 个
+ * md/LICENSE、而更新器解包后算出的不含，v1.1.11 及之后所有版本的自更新全部失败。
  *
  * @param {string} rel 相对路径，如 `src/main.js` / `docs/架构说明.md`
  * @returns {boolean}
@@ -45,8 +71,8 @@ export function isHashedFile(rel) {
   const name = parts.pop();
   if (!name) return false;
   // 任一级目录在跳过表里就排除（与 collect 逐层剪枝等价）
-  if (parts.some((seg) => SKIP_DIRS.has(seg))) return false;
-  if (SKIP_FILES.has(name)) return false;
+  if (parts.some((seg) => LEGACY_SKIP_DIRS.has(seg))) return false;
+  if (LEGACY_SKIP_FILES.has(name)) return false;
   const lower = name.toLowerCase();
   if (lower.endsWith('.md')) return false;
   if (/^(license|licence|copying)(\.[a-z0-9]+)?$/.test(lower)) return false;
@@ -74,7 +100,9 @@ function normalize(buf) {
  * @param {string} root
  * @returns {Promise<string[]>} 已排序的相对路径
  */
-async function collect(root) {
+async function collect(root, algo) {
+  const dirs = algo >= 2 ? SKIP_DIRS_ALGO2 : LEGACY_SKIP_DIRS;
+  const files = algo >= 2 ? SKIP_FILES_ALGO2 : LEGACY_SKIP_FILES;
   const out = [];
 
   const walk = async (dir, prefix) => {
@@ -86,11 +114,12 @@ async function collect(root) {
     }
     for (const it of items) {
       if (it.isDirectory()) {
-        if (SKIP_DIRS.has(it.name)) continue;
+        if (dirs.has(it.name)) continue;
         await walk(path.join(dir, it.name), prefix ? `${prefix}/${it.name}` : it.name);
       } else if (it.isFile()) {
+        if (files.has(it.name)) continue;
+        if (algo >= 2 && isDocFile(it.name)) continue;
         const rel = prefix ? `${prefix}/${it.name}` : it.name;
-        if (!isHashedFile(rel)) continue;
         out.push(rel);
       }
       // 符号链接一律跳过：它可能指向仓库外，内容不稳定
@@ -134,7 +163,9 @@ export async function hashFileList(root, rels) {
  * 算目录的内容指纹。
  *
  * @param {string} dir 插件目录
- * @param {{exclude?: string[], only?: string[]}} [opts]
+ * @param {{algo?: number, exclude?: string[], only?: string[]}} [opts]
+ *   - `algo`：1 = 老算法（含文档），2 = 现行算法（排除文档与运行时状态）；默认 HASH_ALGO。
+ *     校验市场条目时两个都算，见 plugin/market.js 的 entryHashes。
  *   - `exclude`：精确匹配要跳过的相对路径（如 `SHA256SUMS` 这种会自引用的文件）
  *   - `only`：只算这些路径（`src` 这类目录前缀，或 `package.json` 这类文件名）。
  *     用途：GitHub 的 tarball 是**全量**（含 .github、scripts、sdk），
@@ -143,6 +174,7 @@ export async function hashFileList(root, rels) {
  * @returns {Promise<string>} 64 位十六进制
  */
 export async function hashDir(dir, opts = {}) {
+  const algo = Number.isFinite(opts.algo) ? Number(opts.algo) : HASH_ALGO;
   /**
    * 根目录不存在时必须报错，**不能静默返回空哈希**。
    *
@@ -156,7 +188,7 @@ export async function hashDir(dir, opts = {}) {
 
   const skip = new Set(opts.exclude ?? []);
   const only = (opts.only ?? []).map((p) => String(p));
-  let files = (await collect(dir)).filter((rel) => !skip.has(rel));
+  let files = (await collect(dir, algo)).filter((rel) => !skip.has(rel));
   if (only.length) {
     files = files.filter((rel) =>
       only.some((p) => rel === p || rel.startsWith(p.endsWith('/') ? p : `${p}/`)),

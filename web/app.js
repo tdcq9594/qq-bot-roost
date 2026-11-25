@@ -1961,6 +1961,13 @@ function fillForm(c) {
   f.rateLimitEnabled.checked = c.rateLimit?.enabled !== false;
   f.perChatPerMinute.value = c.rateLimit?.perChatPerMinute ?? 30;
   f.dedupWindowSec.value = c.dedupWindowSec ?? 120;
+  // @ 回复策略（bot 级；与 message.js 的 plugins.* 对应）
+  // @ 别的机器人静默：默认开，所以用 !== false（老配置没这个字段也算开）
+  f.ignoreOtherBotMention.checked = c.plugins?.ignoreOtherBotMention !== false;
+  f.groupOnlyMentioned.checked = c.plugins?.groupOnlyMentioned === true;
+  f.commandRequiresMention.checked = c.plugins?.commandRequiresMention === true;
+  // 静默消息交给协议层：默认开，所以用 !== false（老配置没这个字段也算开）
+  f.forwardSilentToProtocol.checked = c.plugins?.forwardSilentToProtocol !== false;
 
   const ml = c.messageLog ?? {};
   f.messageLogEnabled.checked = ml.enabled !== false;
@@ -1996,7 +2003,7 @@ function fillForm(c) {
       ? '当前框架没有内置信任公钥，这个开关即使打开也不起作用（框架自更新照常放行）。'
       : !trust.pubkeyValid
         ? '信任公钥配错了，解析不了——这个开关打开也不会生效。检查配置里的 security.trust.pubkey。'
-        : '开启后，框架自更新会校验 SHA256SUMS 签名，不符或缺失时拒绝更新；插件市场不做签名校验。';
+        : '开启后，框架自更新会校验 SHA256SUMS 签名，不符或缺失时拒绝更新；插件市场不做签名校验（内容哈希在「插件市场」页单独开关，默认开）。';
   }
 }
 
@@ -2430,6 +2437,12 @@ function collectAutoPayload(f) {
       perChatPerMinute: Number(f.perChatPerMinute.value) || 30,
     },
     dedupWindowSec: Number(f.dedupWindowSec.value) || 0,
+    plugins: {
+      ignoreOtherBotMention: f.ignoreOtherBotMention.checked,
+      groupOnlyMentioned: f.groupOnlyMentioned.checked,
+      commandRequiresMention: f.commandRequiresMention.checked,
+      forwardSilentToProtocol: f.forwardSilentToProtocol.checked,
+    },
     messageLog: {
       enabled: f.messageLogEnabled.checked,
       muteKinds: [
@@ -2525,6 +2538,12 @@ async function saveCfgForm({ fromQr = false } = {}) {
       perChatPerMinute: Number(f.perChatPerMinute.value) || 30,
     },
     dedupWindowSec: Number(f.dedupWindowSec.value) || 0,
+    plugins: {
+      ignoreOtherBotMention: f.ignoreOtherBotMention.checked,
+      groupOnlyMentioned: f.groupOnlyMentioned.checked,
+      commandRequiresMention: f.commandRequiresMention.checked,
+      forwardSilentToProtocol: f.forwardSilentToProtocol.checked,
+    },
     messageLog: {
       enabled: f.messageLogEnabled.checked,
       muteKinds: [
@@ -4451,6 +4470,15 @@ async function testMirrors() {
   }
 }
 
+/** 市场内容哈希开关的说明：关掉时必须把风险说清楚，别让用户以为照旧受保护 */
+function setMarketHashHint(on) {
+  const el = $('#marketHashHint');
+  if (!el) return;
+  el.textContent = on
+    ? '安装 / 更新会比对索引 sha256，内容不符就拒绝。'
+    : '已关闭：不再校验下载内容完整性，仅建议兼容旧索引时临时使用。';
+}
+
 /**
  * 拉市场数据并渲染。reveal=false 用于进插件页时的后台预拉：只填数据，不切页签。
  * 在途请求复用（loading），成功过的用缓存（loaded），只有 force 才真重拉。
@@ -4479,6 +4507,12 @@ async function loadMarket({ reveal = true, force = false } = {}) {
     }
 
     meta.textContent = `${d.repo} · 更新于 ${d.updated || '未知'}`;
+    // 内容哈希开关：后端只回「开 / 关」，老配置没字段时按默认开处理
+    const hashBox = $('#marketVerifyHash');
+    if (hashBox) {
+      hashBox.checked = d.verifyHash !== false;
+      setMarketHashHint(hashBox.checked);
+    }
     // 网络不通时后端会退回本地缓存，得让用户知道这是旧数据
     if (d.stale) {
       meta.innerHTML =
@@ -4892,6 +4926,29 @@ $('#proxySelect')?.addEventListener('change', (e) => {
   saveMirror();
 });
 $('#proxyCustom')?.addEventListener('change', saveMirror);
+
+/**
+ * 市场内容哈希校验：改完立即落盘生效，不重启。
+ * 失败时把勾选弹回去——安全开关最怕「面板显示开着、后端其实没保存」的假状态。
+ */
+$('#marketVerifyHash')?.addEventListener('change', async (e) => {
+  const on = e.target.checked;
+  try {
+    const r = await api('/api/market/settings', {
+      method: 'PUT',
+      body: JSON.stringify({ verifyHash: on }),
+    });
+    const actual = r?.verifyHash !== false;
+    if (actual !== on) e.target.checked = actual;
+    setMarketHashHint(actual);
+    toast(`内容哈希校验已${actual ? '开启' : '关闭'}`, actual ? 'ok' : 'info');
+  } catch (err) {
+    e.target.checked = !on;
+    setMarketHashHint(!on);
+    toast(`保存失败：${errText(err)}`, 'error');
+  }
+});
+
 /* 子页签：切到市场时确保数据拉过；切回已安装只切显隐，不产生请求 */
 $$('[data-plugin-subtab]').forEach((btn) => {
   btn.addEventListener('click', () => {

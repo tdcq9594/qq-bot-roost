@@ -2080,6 +2080,20 @@ async function startWebServerInstance({
             cfg.dedupWindowSec = Math.max(0, Number(body.dedupWindowSec) || 0);
           }
           /**
+           * @ 回复策略（bot 级；message.js 每条消息现读 cfg.plugins，立即生效）。
+           * 严格只认布尔，漏给的不动——面板和旧脚本可能只提交其中一个。
+           * 用 merge 而不是替换，避免冲掉 autoInstallDeps / verifyHash 等其它 plugins 字段。
+           */
+          if (body.plugins && typeof body.plugins === 'object') {
+            const patch = {};
+            for (const key of ['groupOnlyMentioned', 'ignoreOtherBotMention', 'commandRequiresMention', 'forwardSilentToProtocol']) {
+              if (typeof body.plugins[key] === 'boolean') patch[key] = body.plugins[key];
+            }
+            if (Object.keys(patch).length) {
+              cfg.plugins = { ...(cfg.plugins ?? {}), ...patch };
+            }
+          }
+          /**
            * 连接方式：面板一直在提交这个字段，但服务端从来没读过——
            * 用户选「Webhook」保存后毫无变化、也没有任何提示，以为已经切了。
            */
@@ -2763,6 +2777,8 @@ async function startWebServerInstance({
               repo: idx.repo,
               updated: idx.updated,
               source: url2 || 'default',
+              // 面板「插件市场」的内容哈希校验开关；老配置没这个字段时默认开
+              verifyHash: globalCfg?.plugins?.verifyHash !== false,
               plugins: mergeWithInstalled(idx.plugins, installedIds),
               // 本地有新版可用的插件
               updates: updates.map((u) => ({
@@ -2778,6 +2794,26 @@ async function startWebServerInstance({
           } catch (e) {
             return json(res, 502, { error: e.message });
           }
+        }
+
+        /**
+         * 市场内容哈希校验开关（全局，默认开；面板「插件市场」直接切换）。
+         *
+         * 严格只认布尔：字符串 "false" 若按真值判断会被读成「开」，
+         * 安全开关上这种错代价最大。立即生效——安装 / 更新每次都现读 globalCfg。
+         */
+        if (pathname === '/api/market/settings' && req.method === 'PUT') {
+          const body = await readBody(req);
+          if (typeof body?.verifyHash !== 'boolean') {
+            return json(res, 400, { error: 'verifyHash 必须是 true / false' });
+          }
+          globalCfg.plugins = {
+            ...(globalCfg.plugins ?? {}),
+            verifyHash: body.verifyHash,
+          };
+          await saveGlobalConfig?.(globalCfg).catch(() => {});
+          log.info(`插件市场内容哈希校验已${body.verifyHash ? '开启' : '关闭'}`);
+          return json(res, 200, { ok: true, verifyHash: body.verifyHash });
         }
 
         // 一键安装
@@ -2816,6 +2852,8 @@ async function startWebServerInstance({
               // 索引给了仓库包校验值就带上，tarball 那边会比对
               sha256: idx?.archive?.sha256 ?? idx?.sha256 ?? null,
               exists: (pid) => plugins.loaded.has(pid),
+              // 面板开关：只有显式 false 才关，老配置没这个字段时默认校验
+              verifyHash: globalCfg?.plugins?.verifyHash !== false,
             });
 
             /**
@@ -4661,6 +4699,7 @@ async function startWebServerInstance({
               pluginsDir: DIRS.plugins,
               ids: [id],
               localVersions: localVers,
+              verifyHash: globalCfg?.plugins?.verifyHash !== false,
             });
             if (r.failed.length) return json(res, 400, { error: r.failed[0].error });
             if (!r.updated.length) return json(res, 400, { error: `${id} 没有可用的更新` });
@@ -4692,6 +4731,7 @@ async function startWebServerInstance({
               index: repo.index,
               pluginsDir: DIRS.plugins,
               localVersions: localVers,
+              verifyHash: globalCfg?.plugins?.verifyHash !== false,
             });
 
             // 更新成功的逐个重载，失败的不碰

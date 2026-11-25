@@ -961,6 +961,32 @@ curl 'https://bot.q.qq.com/cgi-bin/v2/info/list_bots' \
           <label>去重窗口（秒）<input name="dedupWindowSec" type="number" min="0"></label>
         </div>
         <div class="divider"></div>
+        <div class="intent-group-title">@ 回复策略</div>
+        <div class="hint" style="margin-bottom:6px">
+          默认只有第一项开、后两项关：群里 @ 别的机器人不理会，裸 <code>/命令</code> 与免@窗口照旧算「在跟我说话」。
+          后两项只作用于群聊，私聊一对一不受影响。
+        </div>
+        <label class="switch">
+          <input type="checkbox" name="ignoreOtherBotMention" checked>
+          @ 别的机器人时静默（默认开；同时 @ 我仍照常回复）
+        </label>
+        <label class="switch">
+          <input type="checkbox" name="groupOnlyMentioned">
+          只回复 @ 我的消息（群聊里裸 <code>/命令</code> 和普通闲聊都不回应）
+        </label>
+        <label class="switch">
+          <input type="checkbox" name="commandRequiresMention">
+          /命令 必须 @ 我才回复（普通闲聊照旧进插件 / 模型）
+        </label>
+        <label class="switch">
+          <input type="checkbox" name="forwardSilentToProtocol" checked>
+          静默消息仍交给协议层（默认开；关掉后 DSH 宿主 / OneBot 客户端也看不到这些消息）
+        </label>
+        <div class="hint" style="margin-top:4px">
+          上面几种静默消息在框架内部一律不回复。本开关只管<b>要不要把它们推给外部协议层</b>：
+          默认全交（和以前一样）；关掉后连 DSH 的 AI 模式也看不到，就不会「补一句」。不影响本框架收到消息的记录。
+        </div>
+        <div class="divider"></div>
         <div class="intent-group-title">消息日志</div>
         <label class="switch">
           <input type="checkbox" name="messageLogEnabled">
@@ -1041,7 +1067,7 @@ curl 'https://bot.q.qq.com/cgi-bin/v2/info/list_bots' \
         </label>
         <div class="hint" id="trustHint">
           开启后，面板里「更新框架」会检查 Release 里的 SHA256SUMS 签名，签名不符或缺失时拒绝更新。
-          只影响框架自身升级；<b>插件市场不再做签名校验</b>，插件照常安装（下载内容仍校验 sha256）。
+          只影响框架自身升级；<b>插件市场不再做签名校验</b>，下载内容的 sha256 校验在「插件市场」页单独开关（默认开）。
           需要框架内置信任公钥——没内置时这个开关不起作用。
         </div>
         <div class="hint">
@@ -1183,8 +1209,17 @@ curl 'https://bot.q.qq.com/cgi-bin/v2/info/list_bots' \
         </div>
       </div>
 
-      <!-- 下载源：国内直连 GitHub 经常超时，这里可以换镜像 -->
       <div class="mirror-bar">
+        <!--
+          内容哈希校验：默认开。关掉后安装 / 更新不再比对索引 sha256，
+          只建议在索引与框架算法版本错位的过渡期临时用。
+        -->
+        <label class="switch small" title="安装 / 更新时比对索引里的 sha256，防止下载内容被替换">
+          <input type="checkbox" id="marketVerifyHash" checked> 校验内容哈希
+        </label>
+        <span class="hint" id="marketHashHint"></span>
+
+        <!-- 下载源：国内直连 GitHub 经常超时，这里可以换镜像 -->
         <span class="hint">下载源</span>
         <select id="mirrorSelect" class="mini-select" aria-label="下载源"></select>
         <input
