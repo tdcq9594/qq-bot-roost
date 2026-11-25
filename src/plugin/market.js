@@ -292,6 +292,23 @@ async function fetchIndexOnce(url) {
  * @returns {Promise<{id:string, dir:string}>}
  */
 /**
+ * 索引条目声明的两种目录哈希（schema 4 起双写）。
+ *
+ * 2026-11-23 的坑：插件仓把 `sha256` 退回 algo1（给老安装器用），新增
+ * `sha256_v2` 存 algo2。框架此前只算 algo2 却拿它去比 `sha256`，于是所有
+ * 带 README / LICENSE 的插件 100% 装不上。现在两个都认，任一匹配即通过。
+ * 旧索引只有 `sha256` 的也兼容：可能是 algo1，也可能是早期的 algo2 值。
+ */
+export function entryHashes(entry) {
+  const legacy = String(entry?.sha256 ?? '').toLowerCase();
+  const current = String(entry?.sha256_v2 ?? '').toLowerCase();
+  return {
+    legacy: /^[0-9a-f]{64}$/.test(legacy) ? legacy : '',
+    current: /^[0-9a-f]{64}$/.test(current) ? current : '',
+  };
+}
+
+/**
  * 校验失败时说清楚：到底是「索引过期」还是「内容真被改了」。
  *
  * 这两种情况用户要做的事完全不同：
@@ -311,10 +328,13 @@ async function shaMismatchError(entry, dir, got) {
         '  已中止，原有插件未动。',
     );
   }
+  const { legacy, current } = entryHashes(entry);
+  const expected = [...new Set([current, legacy].filter(Boolean))];
   return new Error(
     '插件内容校验失败（sha256 不匹配）\n' +
-      `  索引 ${entry.sha256}\n  实际 ${got}\n` +
-      '  索引和实际内容对不上，可能是仓库被改动。已中止，原有插件未动。',
+      `  索引 ${expected.join(' / ') || '（没有哈希）'}\n  实际 ${got}\n` +
+      '  索引和实际内容对不上：可能是仓库被改动，也可能是索引与框架的哈希算法版本不一致。\n' +
+      '  先刷新市场 / 升级框架再试；仍失败就别装。已中止，原有插件未动。',
   );
 }
 
@@ -340,13 +360,40 @@ async function readVersionLoose(dir) {
   }
 }
 
-/** 插件安装时用，逻辑同 installPlugin 里的校验 */
-export async function verifyPluginDir(entry, dir) {
-  if (!entry?.sha256) return;
-  const got = await hashDir(dir);
-  if (got !== String(entry.sha256).toLowerCase()) {
-    throw await shaMismatchError(entry, dir, got);
+/**
+ * 校验插件目录内容。安装 / 更新共用一套规则，避免两边各自漂移。
+ *
+ * 双算法任一匹配即通过：现行索引 `sha256` 是 algo1、`sha256_v2` 是 algo2；
+ * 老索引只有 `sha256`，值可能是任一算法算出来的，两种都试一遍。
+ *
+ * @param {object} entry 索引条目
+ * @param {string} dir 待校验的插件目录
+ * @param {{verifyHash?: boolean}} [opts] verifyHash=false 时跳过校验（面板开关，默认开）
+ */
+export async function verifyPluginDir(entry, dir, opts = {}) {
+  const { legacy, current } = entryHashes(entry);
+  if (!legacy && !current) {
+    log.warn(`索引里没有 ${entry?.id} 的 sha256，本次未做内容校验`);
+    return;
   }
+  if (opts.verifyHash === false) {
+    log.warn(`插件 ${entry?.id} 的内容哈希校验已被关闭（market.verifyHash=false）`);
+    return;
+  }
+
+  const gotCurrent = await hashDir(dir);
+  if ((current && gotCurrent === current) || (legacy && gotCurrent === legacy)) {
+    log.info(`插件 ${entry?.id} 内容 sha256 校验通过`);
+    return;
+  }
+  if (legacy) {
+    const gotLegacy = await hashDir(dir, { algo: 1 });
+    if (gotLegacy === legacy) {
+      log.info(`插件 ${entry?.id} 内容 sha256 校验通过（algo1）`);
+      return;
+    }
+  }
+  throw await shaMismatchError(entry, dir, gotCurrent);
 }
 
 /**
@@ -517,7 +564,9 @@ export function isExtensionEntry(entry) {
   return entry?.kind === 'dsh-extension';
 }
 
-export async function installPlugin({ entry, pluginsDir, repo, branch = 'main', exists, sha256 = null }) {
+export async function installPlugin({
+  entry, pluginsDir, repo, branch = 'main', exists, sha256 = null, verifyHash = true,
+}) {
   const id = String(entry?.id ?? '').trim();
   if (isExtensionEntry(entry)) {
     throw new Error(`「${id}」是 DSH 扩展，不归框架插件市场；请在 dsh-roost 面板的「设置 → 扩展」里安装`);
@@ -566,15 +615,7 @@ export async function installPlugin({ entry, pluginsDir, repo, branch = 'main', 
      * 没有稳定的压缩包哈希可对。校验放在**拷贝进 plugins/ 之前**，
      * 对不上就什么都不留。
      */
-    if (entry.sha256) {
-      const got = await hashDir(resolved);
-      if (got !== String(entry.sha256).toLowerCase()) {
-        throw await shaMismatchError(entry, resolved, got);
-      }
-      log.info(`插件 ${id} 内容 sha256 校验通过`);
-    } else {
-      log.warn(`索引里没有 ${id} 的 sha256，本次安装未做内容校验`);
-    }
+    await verifyPluginDir(entry, resolved, { verifyHash });
 
     const dest = path.join(pluginsDir, id);
     await fs.rm(dest, { recursive: true, force: true });
@@ -589,14 +630,22 @@ export async function installPlugin({ entry, pluginsDir, repo, branch = 'main', 
 
 /**
  * 把市场索引和本地已装插件对上，给面板用。
+ *
+ * DSH 扩展（`kind: dsh-extension`）与框架插件共用同一份 index.json，但装的位置、
+ * 安装器、运行形态都不同——框架面板列出来只会让用户点了安装再报错。这里就把
+ * 扩展从面板列表里滤掉（执行层 `installPlugin` 的守卫仍在，两道都要有）。
+ * `detectUpdates` 也跳过扩展，所以分类计数、更新提示、卡片列表口径一致。
+ *
  * @param {object[]} indexPlugins
  * @param {Set<string>} installedIds
  */
 export function mergeWithInstalled(indexPlugins, installedIds) {
-  return indexPlugins.map((p) => ({
-    ...p,
-    installed: installedIds.has(p.id),
-  }));
+  return indexPlugins
+    .filter((p) => !isExtensionEntry(p))
+    .map((p) => ({
+      ...p,
+      installed: installedIds.has(p.id),
+    }));
 }
 
 /* ------------------------------------------------------------------ */
@@ -799,9 +848,12 @@ export async function syncCodeTree(src, dest, keepTop) {
  * @param {string} p.pluginsDir 目标插件目录
  * @param {string[]} [p.ids]    只更新这些；不传则更新全部「有新版」的
  * @param {Object<string,string>} [p.localVersions] 本地版本，用于判断谁有新版
+ * @param {boolean} [p.verifyHash] 是否校验目录内容，默认 true（面板可关）
  * @returns {Promise<{updated:Array, skipped:Array, failed:Array}>}
  */
-export async function updatePlugins({ tmp, index, pluginsDir, ids, localVersions = {} }) {
+export async function updatePlugins({
+  tmp, index, pluginsDir, ids, localVersions = {}, verifyHash = true,
+}) {
   const want = ids?.length ? new Set(ids) : null;
   const result = { updated: [], skipped: [], failed: [] };
 
@@ -839,12 +891,7 @@ export async function updatePlugins({ tmp, index, pluginsDir, ids, localVersions
        * 「第一次装的时候小心，以后随便覆盖」，供应链校验的意义就没了。
        * 校验放在**动旧目录之前**：对不上就什么都不碰，用户手上的插件还是好的。
        */
-      if (entry.sha256) {
-        const got = await hashDir(src);
-        if (got !== String(entry.sha256).toLowerCase()) {
-          throw await shaMismatchError(entry, src, got);
-        }
-      }
+      await verifyPluginDir(entry, src, { verifyHash });
 
       const hadOld = await fs.stat(dest).catch(() => null);
 

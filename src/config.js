@@ -177,10 +177,16 @@ const GLOBAL_DEFAULTS = {
     intervalHours: 6,
   },
 
-  plugins: {
-    autoInstallDeps: true,
-    /** Go 插件用的 go 可执行文件路径，留空则用 PATH 里的 go 或 GO_BIN 环境变量 */
-    goBin: '',
+    plugins: {
+      autoInstallDeps: true,
+      /**
+       * 插件市场安装 / 更新时校验目录内容哈希，默认开。
+       * 关掉等于放弃供应链完整性校验（只靠 https 和索引本身），市场页会明确提示风险；
+       * 只在索引与框架算法版本错位的过渡期临时用，修好后请打开。
+       */
+      verifyHash: true,
+      /** Go 插件用的 go 可执行文件路径，留空则用 PATH 里的 go 或 GO_BIN 环境变量 */
+      goBin: '',
     /**
      * 插件市场索引地址，换成你自己的插件仓库即可。
      *

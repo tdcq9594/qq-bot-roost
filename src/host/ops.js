@@ -373,6 +373,8 @@ export function registerOps(def, { R, err, log = () => {} }) {
         branch: idx.branch || 'main',
         sha256: idx?.archive?.sha256 ?? idx?.sha256 ?? null,
         exists: (pid) => plugins().loaded.has(pid),
+        // 与面板共用同一个全局开关，老配置默认开
+        verifyHash: R.globalCfg?.plugins?.verifyHash !== false,
       });
       await ensurePluginInList(R, r.id, true, err);
       const scanned = await plugins().rescan();
@@ -428,6 +430,7 @@ export function registerOps(def, { R, err, log = () => {} }) {
       const r = await updatePlugins({
         tmp: repo.tmp, index: repo.index, pluginsDir: DIRS.plugins,
         ids: [id], localVersions: localVers,
+        verifyHash: R.globalCfg?.plugins?.verifyHash !== false,
       });
       if (r.failed.length) throw err.bad(r.failed[0].error);
       if (!r.updated.length) throw err.bad(`${id} 没有可用的更新`);
@@ -448,6 +451,7 @@ export function registerOps(def, { R, err, log = () => {} }) {
       const r = await updatePlugins({
         tmp: repo.tmp, index: repo.index,
         pluginsDir: DIRS.plugins, localVersions: localVers,
+        verifyHash: R.globalCfg?.plugins?.verifyHash !== false,
       });
       for (const u of r.updated) {
         await plugins().reload(u.id).catch((e) => log(`插件 ${u.id} 重载失败：${e.message}`));

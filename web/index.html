@@ -1041,7 +1041,7 @@ curl 'https://bot.q.qq.com/cgi-bin/v2/info/list_bots' \
         </label>
         <div class="hint" id="trustHint">
           开启后，面板里「更新框架」会检查 Release 里的 SHA256SUMS 签名，签名不符或缺失时拒绝更新。
-          只影响框架自身升级；<b>插件市场不再做签名校验</b>，插件照常安装（下载内容仍校验 sha256）。
+          只影响框架自身升级；<b>插件市场不再做签名校验</b>，下载内容的 sha256 校验在「插件市场」页单独开关（默认开）。
           需要框架内置信任公钥——没内置时这个开关不起作用。
         </div>
         <div class="hint">
@@ -1183,8 +1183,17 @@ curl 'https://bot.q.qq.com/cgi-bin/v2/info/list_bots' \
         </div>
       </div>
 
-      <!-- 下载源：国内直连 GitHub 经常超时，这里可以换镜像 -->
       <div class="mirror-bar">
+        <!--
+          内容哈希校验：默认开。关掉后安装 / 更新不再比对索引 sha256，
+          只建议在索引与框架算法版本错位的过渡期临时用。
+        -->
+        <label class="switch small" title="安装 / 更新时比对索引里的 sha256，防止下载内容被替换">
+          <input type="checkbox" id="marketVerifyHash" checked> 校验内容哈希
+        </label>
+        <span class="hint" id="marketHashHint"></span>
+
+        <!-- 下载源：国内直连 GitHub 经常超时，这里可以换镜像 -->
         <span class="hint">下载源</span>
         <select id="mirrorSelect" class="mini-select" aria-label="下载源"></select>
         <input
