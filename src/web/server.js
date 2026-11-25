@@ -3551,7 +3551,14 @@ async function startWebServerInstance({
                */
               media: (Array.isArray(r.media) ? r.media : []).map((m) => ({
                 ...m,
-                url: m.file ? `/api/ledger/media?file=${encodeURIComponent(m.file)}` : '',
+                /**
+                 * **必须带 `bot`**：`<img>` 请求是独立的一次 HTTP，
+                 * 不带参数时 `pickRuntime()` 会退回「第一个机器人」，
+                 * 用户在多机器人面板里看第二个鸟的账本就会 404。
+                 */
+                url: m.file
+                  ? `/api/ledger/media?bot=${encodeURIComponent(String(r.botId || rt?.id || ''))}&file=${encodeURIComponent(m.file)}`
+                  : '',
               })),
             };
           });
@@ -3570,7 +3577,13 @@ async function startWebServerInstance({
          */
         if (pathname === '/api/ledger/media' && req.method === 'GET') {
           const rel = String(url.searchParams.get('file') ?? '').trim();
-          const abs = createMediaStore({ dir: ledgerMediaDir(rt?.id) }).resolve(rel);
+          /**
+           * `bot` 只认 runtimes 里真实存在的 id：前端拼 URL 时带上它，
+           * 但这个参数可以被手改，不能直接拼进路径。
+           */
+          const want = String(url.searchParams.get('bot') ?? '').trim();
+          const botId = want && runtimes.some((r) => r.id === want) ? want : String(rt?.id ?? '');
+          const abs = createMediaStore({ dir: ledgerMediaDir(botId) }).resolve(rel);
           if (!abs) return json(res, 400, { error: '路径不合法' });
           let buf;
           try {
