@@ -1961,6 +1961,13 @@ function fillForm(c) {
   f.rateLimitEnabled.checked = c.rateLimit?.enabled !== false;
   f.perChatPerMinute.value = c.rateLimit?.perChatPerMinute ?? 30;
   f.dedupWindowSec.value = c.dedupWindowSec ?? 120;
+  // @ 回复策略（bot 级；与 message.js 的 plugins.* 对应）
+  // @ 别的机器人静默：默认开，所以用 !== false（老配置没这个字段也算开）
+  f.ignoreOtherBotMention.checked = c.plugins?.ignoreOtherBotMention !== false;
+  f.groupOnlyMentioned.checked = c.plugins?.groupOnlyMentioned === true;
+  f.commandRequiresMention.checked = c.plugins?.commandRequiresMention === true;
+  // 静默消息交给协议层：默认开，所以用 !== false（老配置没这个字段也算开）
+  f.forwardSilentToProtocol.checked = c.plugins?.forwardSilentToProtocol !== false;
 
   const ml = c.messageLog ?? {};
   f.messageLogEnabled.checked = ml.enabled !== false;
@@ -2430,6 +2437,12 @@ function collectAutoPayload(f) {
       perChatPerMinute: Number(f.perChatPerMinute.value) || 30,
     },
     dedupWindowSec: Number(f.dedupWindowSec.value) || 0,
+    plugins: {
+      ignoreOtherBotMention: f.ignoreOtherBotMention.checked,
+      groupOnlyMentioned: f.groupOnlyMentioned.checked,
+      commandRequiresMention: f.commandRequiresMention.checked,
+      forwardSilentToProtocol: f.forwardSilentToProtocol.checked,
+    },
     messageLog: {
       enabled: f.messageLogEnabled.checked,
       muteKinds: [
@@ -2525,6 +2538,12 @@ async function saveCfgForm({ fromQr = false } = {}) {
       perChatPerMinute: Number(f.perChatPerMinute.value) || 30,
     },
     dedupWindowSec: Number(f.dedupWindowSec.value) || 0,
+    plugins: {
+      ignoreOtherBotMention: f.ignoreOtherBotMention.checked,
+      groupOnlyMentioned: f.groupOnlyMentioned.checked,
+      commandRequiresMention: f.commandRequiresMention.checked,
+      forwardSilentToProtocol: f.forwardSilentToProtocol.checked,
+    },
     messageLog: {
       enabled: f.messageLogEnabled.checked,
       muteKinds: [

@@ -182,7 +182,8 @@ export function ratelimitMiddleware(cfg, { isSticky = () => false, metrics = nul
   return async (ctx, next) => {
     const rl = cfg.rateLimit ?? {};
     const msg = ctx.msg;
-    const addressed = msg.mentioned || msg.isCommand || isSticky(msg.chatId);
+    // 静默消息（@ 别的机器人 / 只回@模式下的裸命令）不占额度，也不该被限流回复打岔
+    const addressed = !msg.silent && (msg.mentioned || msg.isCommand || isSticky(msg.chatId));
     if (!rl.enabled || !msg.chatId || !addressed) return next();
 
     const limit = Math.max(1, rl.perChatPerMinute ?? 30);

@@ -153,6 +153,33 @@ function detectMention(d) {
 }
 
 /**
+ * 这条消息是否**明确只 @ 了别的机器人**（issue #38）。
+ *
+ * 官方 `GroupMentionsUser` 里 `is_you` 才是「@ 的是当前这个 bot」，`bot`
+ * 只表示「被 @ 的是个机器人」。`detectMention()` 历史用 `is_you || bot`
+ * 做「有没有 @ 我」的宽松判断，于是多机器人群里 @B 也被算成 @ 我。
+ *
+ * 这里不推翻那个宽松口径（正文正则 fallback 还要靠它），而是单独识别
+ * 「官方字段明确说 @ 了机器人、但明确不是我」的情况：
+ *   · `m.bot === true && m.is_you === false` —— 明确是别的机器人
+ *   · 只要有一个 `m.is_you === true` 就不算（同时 @ 了我，该响应）
+ *   · `scope === 'all'` 是 @全体，不是 @机器人，不算
+ *   · 没有官方 mentions 字段（如 GROUP_AT_MESSAGE_CREATE）时返回 false——
+ *     那种事件 content 已去掉 @ 前缀，无从判断，不能瞎静默
+ *
+ * 保守取向：宁可漏静默（多回一句），不可误静默（该回的没回）。
+ */
+function detectOtherBotMention(d) {
+  const list = Array.isArray(d?.mentions) ? d.mentions : [];
+  if (!list.length) return false;
+  // 同时 @ 了我 → 按「@ 我」处理，不静默
+  if (list.some((m) => m && m.is_you === true)) return false;
+  return list.some(
+    (m) => m && m.bot === true && m.is_you === false && m.scope !== 'all',
+  );
+}
+
+/**
  * 附件归一化。
  *
  * 官方事件里的 `attachments[]` 是图片 / 语音 / 视频 / 文件**唯一**的载体——
@@ -355,6 +382,16 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
   const prefix = cfg.commandPrefix || '/';
   const isCommand = content.startsWith(prefix);
   const mentioned = detectMention(d);
+  /**
+   * @ 了别的机器人（issue #38）。只在官方字段**明确**时生效——正文正则
+   * fallback 那条不动，避免误静默。是否因此静默由开关决定（默认静默）：
+   * `ignoreOtherBotMention=false` 时恢复旧行为（@ 任意机器人都算 @ 我）。
+   * `mentionedOtherBot` 始终报告「检测到」这个事实，与开关无关。
+   */
+  const mentionedOtherBot = detectOtherBotMention(d);
+  const ignoreOtherBot =
+    mentionedOtherBot && cfg?.plugins?.ignoreOtherBotMention !== false;
+  const effectiveMentioned = ignoreOtherBot ? false : mentioned;
   const chatId = groupId || userId;
   const receivedAt = Date.now();
 
@@ -381,7 +418,24 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
 
   // 没 @ 也不算命令，但可能处在免@窗口内 —— 此时同样算「在跟机器人说话」
   const sticky = Boolean(session?.isSticky(chatId));
-  const addressed = mentioned || isCommand || sticky;
+  /**
+   * 「只回复 @ 我」开关（plugins.groupOnlyMentioned，默认关）：
+   * 开后群聊里只有明确 @ 本机器人的消息才算 addressed，裸 `/命令` 与
+   * 免@窗口都不算。单聊天生是一对一，不受影响。
+   *
+   * 与 issue #38 的 @ 别的机器人静默叠加：后者默认开，可用
+   * `ignoreOtherBotMention=false` 关掉，关掉后 @ 别的机器人恢复旧行为。
+   */
+  const onlyMentioned = cfg?.plugins?.groupOnlyMentioned === true && kind === 'group';
+  /** 「命令必须 @ 我」开关（plugins.commandRequiresMention，默认关）：只管命令，闲聊不受影响 */
+  const cmdRequiresMention =
+    cfg?.plugins?.commandRequiresMention === true &&
+    kind === 'group' &&
+    isCommand &&
+    !effectiveMentioned;
+  const addressed =
+    !ignoreOtherBot &&
+    (effectiveMentioned || (onlyMentioned || cmdRequiresMention ? false : isCommand || sticky));
 
   /**
    * 官方事件里以前被整个丢掉的载荷。
@@ -462,7 +516,10 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
 
     content,
     raw: d,
-    mentioned,
+    /** 修正后的「@ 我」：@ 了别的机器人时这里是 false（issue #38） */
+    mentioned: effectiveMentioned,
+    /** 明确 @ 了别的机器人（客观检测结果，与 ignoreOtherBotMention 开关无关） */
+    mentionedOtherBot,
     /**
      * 本条消息 @ 了谁（不含机器人自己）。
      *
@@ -547,7 +604,10 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
     quoted: elements.find((e) => e.type === 'quote')?.content ?? '',
 
     sticky,
+    /** 是否「在跟我说话」：@ 别的机器人 / 只回@模式下的裸命令都为 false */
     addressed,
+    /** 是否该整条静默（命令闸与会话投递统一读它） */
+    silent: ignoreOtherBot || (onlyMentioned && !effectiveMentioned) || cmdRequiresMention,
     isCommand,
     receivedAt, // 被动回复窗口从这里开始算，出站调度器要用
     replied: false, // 任何发送动作都会置为 true，供内核判断「有没有插件回应」

@@ -2080,6 +2080,20 @@ async function startWebServerInstance({
             cfg.dedupWindowSec = Math.max(0, Number(body.dedupWindowSec) || 0);
           }
           /**
+           * @ 回复策略（bot 级；message.js 每条消息现读 cfg.plugins，立即生效）。
+           * 严格只认布尔，漏给的不动——面板和旧脚本可能只提交其中一个。
+           * 用 merge 而不是替换，避免冲掉 autoInstallDeps / verifyHash 等其它 plugins 字段。
+           */
+          if (body.plugins && typeof body.plugins === 'object') {
+            const patch = {};
+            for (const key of ['groupOnlyMentioned', 'ignoreOtherBotMention', 'commandRequiresMention', 'forwardSilentToProtocol']) {
+              if (typeof body.plugins[key] === 'boolean') patch[key] = body.plugins[key];
+            }
+            if (Object.keys(patch).length) {
+              cfg.plugins = { ...(cfg.plugins ?? {}), ...patch };
+            }
+          }
+          /**
            * 连接方式：面板一直在提交这个字段，但服务端从来没读过——
            * 用户选「Webhook」保存后毫无变化、也没有任何提示，以为已经切了。
            */

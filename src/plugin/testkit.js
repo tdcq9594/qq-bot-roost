@@ -237,6 +237,7 @@ export function makeMsg({
   sticky = false,
   mentions = null,
   raw = null,
+  silent,
 } = {}) {
   const replies = [];
   /** markdown 消息单独记一份，好断言「走的是富文本还是纯文本」 */
@@ -261,8 +262,10 @@ export function makeMsg({
     args: isCommand ? parts.slice(1) : parts,
     isCommand,
     mentioned,
-    // 和 message.js 保持一致：@ 了、是命令、或还在免 @ 窗口里，都算「在跟我说话」
-    addressed: mentioned || isCommand || sticky,
+    // 和 message.js 保持一致：@ 了、是命令、或还在免 @ 窗口里，都算「在跟我说话」；
+    // silent 由调用方显式给（@ 别的机器人 / 只回@模式），默认按没有静默处理
+    silent: Boolean(silent),
+    addressed: silent ? false : mentioned || isCommand || sticky,
     sticky,
     mentions: mentions ?? [],
     raw: raw ?? (kind === 'group' ? { author: { member_role: 'member' } } : {}),
@@ -374,6 +377,7 @@ export async function runCommand(plugin, command, opts = {}) {
     mentioned: opts.mentioned,
     mentions: opts.mentions,
     raw: opts.raw,
+    silent: opts.silent,
   });
 
   await handler(msg, { args: msg.args, raw: msg.content });

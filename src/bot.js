@@ -1178,7 +1178,17 @@ export class BotRuntime {
        * 传的是**完整 msg**（含 uin / msgIdx / attachments），不走 message-bus——
        * 那条通道的 payload 是对外契约，故意脱敏过，拿不到 ID 映射要的东西。
        */
-      if (hasMessageContent(msg)) {
+      /**
+       * 「静默消息是否交给协议层」开关（plugins.forwardSilentToProtocol，默认 true）：
+       * silent 消息（@ 别的机器人 / 只回@模式的闲聊 / 命令必须@模式的裸命令）
+       * 在框架内部一律不响应，但要不要让 DSH 宿主 / OneBot 客户端也看到它，
+       * 交给用户决定——默认照旧全交（`!== false` 让没写过这个字段的老配置保持原样）。
+       * 关掉后这些消息不进协议层：DSH 的 ai 模式就不会再「补一句」（issue #38 的另一半）。
+       * 注意转发在下面的静默闸之前，所以必须在这一层拦；观测通道（message-bus /
+       * 日志）仍看得到，面板能查「确实收到过这条」。
+       */
+      const forwardSilent = cfg?.plugins?.forwardSilentToProtocol !== false;
+      if (hasMessageContent(msg) && (!msg.silent || forwardSilent)) {
         this.onebot?.onMessage(msg);
         /** 宿主协议：传完整 msg（原生结构），它自己挑字段 */
         this.host?.onMessage(msg);
@@ -1208,7 +1218,8 @@ export class BotRuntime {
 
       this.logIncoming(msg);
 
-      if (msg.mentioned || msg.isCommand) session.markAddressed(msg.chatId);
+      // @ 别的机器人 / 只回@模式下的裸命令：不写免@窗口，免得后续闲聊被当 addressed（issue #38）
+      if (!msg.silent && (msg.mentioned || msg.isCommand)) session.markAddressed(msg.chatId);
 
       /**
        * 兼容模式「独占」：**插件**不再回话，内核命令也只留绑定那四条。
@@ -1250,6 +1261,14 @@ export class BotRuntime {
       });
 
       this.#rememberPerson(msg);
+
+      /**
+       * 静默消息（issue #38）：明确 @ 了别的机器人，或「只回@ / 命令必须@」模式下的裸命令。
+       * 放在 pipeline 之后：去重 / 白名单 / 限流 / 暂停闸照跑（别的地方也别想绕过），
+       * 但到这里整条掐断——不执行命令、不 session.deliver、不进插件与 AI 模型。
+       * 观测（metrics / stats / 记人）在上面已经做完，面板仍看得到「收到过这条」。
+       */
+      if (msg.silent) return;
 
       if (msg.isCommand && commandEntry) {
         /**

@@ -961,6 +961,32 @@ curl 'https://bot.q.qq.com/cgi-bin/v2/info/list_bots' \
           <label>去重窗口（秒）<input name="dedupWindowSec" type="number" min="0"></label>
         </div>
         <div class="divider"></div>
+        <div class="intent-group-title">@ 回复策略</div>
+        <div class="hint" style="margin-bottom:6px">
+          默认只有第一项开、后两项关：群里 @ 别的机器人不理会，裸 <code>/命令</code> 与免@窗口照旧算「在跟我说话」。
+          后两项只作用于群聊，私聊一对一不受影响。
+        </div>
+        <label class="switch">
+          <input type="checkbox" name="ignoreOtherBotMention" checked>
+          @ 别的机器人时静默（默认开；同时 @ 我仍照常回复）
+        </label>
+        <label class="switch">
+          <input type="checkbox" name="groupOnlyMentioned">
+          只回复 @ 我的消息（群聊里裸 <code>/命令</code> 和普通闲聊都不回应）
+        </label>
+        <label class="switch">
+          <input type="checkbox" name="commandRequiresMention">
+          /命令 必须 @ 我才回复（普通闲聊照旧进插件 / 模型）
+        </label>
+        <label class="switch">
+          <input type="checkbox" name="forwardSilentToProtocol" checked>
+          静默消息仍交给协议层（默认开；关掉后 DSH 宿主 / OneBot 客户端也看不到这些消息）
+        </label>
+        <div class="hint" style="margin-top:4px">
+          上面几种静默消息在框架内部一律不回复。本开关只管<b>要不要把它们推给外部协议层</b>：
+          默认全交（和以前一样）；关掉后连 DSH 的 AI 模式也看不到，就不会「补一句」。不影响本框架收到消息的记录。
+        </div>
+        <div class="divider"></div>
         <div class="intent-group-title">消息日志</div>
         <label class="switch">
           <input type="checkbox" name="messageLogEnabled">
