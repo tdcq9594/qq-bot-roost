@@ -539,7 +539,7 @@ export class Outbound {
    * —— 单聊长回复会整条不进账本、「谁」列依旧空（复核抓到的 P1）。
    * 由调用方在**发送成功之后**调一次，幂等由调用方保证。
    */
-  recordDirect({ kind, target, content, payload = null, plugin = '', id = '', source = '' } = {}) {
+  recordDirect({ kind, target, content, payload = null, plugin = '', id = '', source = '', traceId = '', replyTo = '' } = {}) {
     this.#recordOutbound(
       {
         kind,
@@ -551,6 +551,9 @@ export class Outbound {
         payload: payload ?? { content: String(content ?? '') },
         plugin,
         source,
+        /** 同 `send()`：链路 id / 被回复的消息，直连 api 的路径要自己带 */
+        traceId,
+        replyTo,
       },
       { id: String(id ?? '') },
     );
@@ -559,7 +562,7 @@ export class Outbound {
   #recordOutbound(opts, r) {
     if (!this.ledger?.append) return;
     try {
-      this.ledger.append(
+      const rec = this.ledger.append(
         {
           kind: String(opts.kind ?? ''),
           chatId: String(opts.target ?? ''),
@@ -580,9 +583,38 @@ export class Outbound {
            * 从哪个口子出去的（v4 账本列）。推断规则见上面的 `sourceOf()`。
            */
           source: sourceOf(opts),
+          /**
+           * 链路 id（v2 列，以前出站一直写空串）。
+           *
+           * 入站和它引发的所有回复共用同一个 traceId（`buildMessage` 生成，
+           * `host/serialize.js` 也把它交给 DSH）。不记的话，账本只能按时间
+           * 相邻猜「这句话是回哪句」——慢回复中间插进别人的话就配错了。
+           */
+          traceId: String(opts.traceId ?? ''),
+          /**
+           * 这条出的回的是哪条消息（v5 列）。被动回复的报文里带
+           * `msgId` = 被回复消息的官方 id，正好就是那条入站行的 `msg_id`。
+           *
+           * 用**原 opts** 取，不是发送时删掉 `msgId` 的 fallback：
+           * 被动窗口过期后自动改发主动，是「没发成 Passive、换一种发」，
+           * 它本来要回的还是那条消息。主动推送没有 `msgId`，落 NULL。
+           */
+          replyTo: String(opts.replyTo || opts.payload?.msgId || ''),
         },
         { timeBasis: 'observation' },
       );
+      /**
+       * 出站图片留档（`ledger.saveImages` 开启时 `saveMedia` 才真的干活）。
+       *
+       * 源从 `message.js` 一路带下来：本地图是绝对路径，公网图是 URL。
+       * **上传之后就换不回来了**——`file_info` / `qqbot-media://` 都没有
+       * 反向解析，只有调用方手里那一刻知道原文件在哪。
+       *
+       * 不 await：存图比发消息慢，账本记一行不该等它。
+       */
+      if (rec && Array.isArray(opts.mediaSrc) && opts.mediaSrc.length) {
+        this.ledger.saveMedia(rec, opts.mediaSrc).catch(() => {});
+      }
     } catch (e) {
       log.warn(`出站没记进账本（不影响发送）：${e.message}`);
     }
