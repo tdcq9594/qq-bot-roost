@@ -25,6 +25,7 @@ import { sharedIdentity } from './identity.js';
 import { OneBotBridge } from './onebot/index.js';
 import { onebotAllowsCore } from './onebot/keep.js';
 import { HostBridge } from './host/index.js';
+import { isOfficialDuplicate, shouldForwardInbound } from './host/inbound-forward.js';
 
 /**
  * 一个机器人的完整运行时。
@@ -1159,6 +1160,19 @@ export class BotRuntime {
      * 所以重推的消息一样有出处。
      */
     const rec = this.ledger?.append(msg);
+    /**
+     * 官方重推的同一条消息（相同 msg_id）。
+     *
+     * 账本已经用 dedupe 唯一约束接住了它，`append()` 会带 `duplicate: true`；
+     * 但协议层以前不看这个标记，每条重推都再广播一次。AI 宿主的合并窗口
+     * 把它们拼成一批 → 模型一次看到「你是谁」三遍（2026-11-26 用户反馈）。
+     *
+     * **只影响协议层**：账本 / metrics / 面板观测仍保留重推事实。
+     *
+     * 只有官方 `msg.id` 相同才认（`isOfficialDuplicate`）：没有 id 时账本用
+     * 「会话+时间+正文」指纹，同一秒连发两句一样的话会撞，不能连协议层一起吞。
+     */
+    const duplicate = isOfficialDuplicate(rec, msg.id);
     if (rec) {
       msg.eventId = rec.id;
       msg.eventSeq = rec.seq;
@@ -1189,8 +1203,10 @@ export class BotRuntime {
      * 先播出去，再做业务处理。
      *
      * 放在 pipeline 之前是有意的：外部订阅者（AI 宿主）关心的是「群里说了什么」，
-     * 不管这条消息有没有被去重/白名单/限流拦下——拦下是**本框架的**处理策略，
-     * 不该影响订阅者看到的事实。
+     * 不管这条消息有没有被业务策略（白名单/限流/暂停）拦下——拦下是**本框架的**
+     * 处理策略，不该影响订阅者看到的事实。
+     * **例外是官方重推**：那不是「又发生了一次」，而是同一条消息的第二份拷贝，
+     * 协议层重复触发会让下游回两遍（见下面 `duplicate` 的说明）。
      * 回调抛错必须吞掉：订阅者是外挂代码，不能让它把收消息搞崩。
      */
     try {
@@ -1220,7 +1236,18 @@ export class BotRuntime {
        * 日志）仍看得到，面板能查「确实收到过这条」。
        */
       const forwardSilent = cfg?.plugins?.forwardSilentToProtocol !== false;
-      if (hasMessageContent(msg) && (!msg.silent || forwardSilent)) {
+      /**
+       * **重推不重复触发协议层**（`duplicate`，见上面 `append` 的返回值）。
+       *
+       * 观测通道（message-bus / 日志 / 账本）仍看得到重推；但 OneBot / 宿主
+       * 是「收到就要处理」的触发通道，同一份消息交两次，下游就会回两次。
+       */
+      if (shouldForwardInbound({
+        hasContent: hasMessageContent(msg),
+        silent: msg.silent,
+        forwardSilent,
+        duplicate,
+      })) {
         this.onebot?.onMessage(msg);
         /** 宿主协议：传完整 msg（原生结构），它自己挑字段 */
         this.host?.onMessage(msg);

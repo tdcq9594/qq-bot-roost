@@ -257,11 +257,16 @@ test('ignoreOtherBotMention：配置 / 面板 / 保存 / merge 四处接线齐�
 
 test('协议层转发：静默消息默认全交，关掉开关后不交（onebot + host）', () => {
   const src = fs.readFileSync(new URL('../src/bot.js', import.meta.url), 'utf8');
-  // 闸门必须读 forwardSilentToProtocol，默认 !== false（老配置照旧全交）
-  assert.match(src, /const forwardSilent = cfg\?\.plugins\?\.forwardSilentToProtocol !== false/);
-  assert.match(src, /hasMessageContent\(msg\) && \(!msg\.silent \|\| forwardSilent\)/);
+  // 判据收在 shouldForwardInbound 里：静默开关 + 内容 + 官方重推三条都在这一处
+  const gate = src.indexOf('shouldForwardInbound({');
+  assert.ok(gate > 0, '协议层转发要走 shouldForwardInbound');
+  const gateBody = src.slice(gate, gate + 260);
+  assert.match(gateBody, /hasContent: hasMessageContent\(msg\)/);
+  assert.match(gateBody, /silent: msg\.silent/);
+  assert.match(gateBody, /forwardSilent/, '闸门必须读 forwardSilentToProtocol，默认 !== false（老配置照旧全交）');
+  assert.match(gateBody, /duplicate/, '官方重推不重复触发协议层');
   // 闸门在静默闸之前——协议转发发生在 bot.js 更靠前的位置，所以必须在这一层拦
-  const forwardGate = src.indexOf('const forwardSilent = cfg?.plugins?.forwardSilentToProtocol');
+  const forwardGate = gate;
   const silentGate = src.indexOf('if (msg.silent) return;');
   assert.ok(forwardGate > 0 && silentGate > forwardGate,
     '协议转发闸门必须在静默闸之前');
