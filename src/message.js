@@ -660,7 +660,11 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
      * `fileType` 也摘出来：它只用于账本给「（图片）/（语音）/（文件）」占位，
      * 混进 body 会被 api 当未知参数带出去。
      */
-    const { requestId, plugin, fileType, ...rest } = opts ?? {};
+    /**
+     * `mediaSrc` 也摘出来：它是**账本图片留档的源**（本地绝对路径或远程 URL），
+     * 只给 `ledger.saveMedia()` 用。混进 body 会被 api 当未知参数带出去。
+     */
+    const { requestId, plugin, fileType, mediaSrc, ...rest } = opts ?? {};
     /**
      * 出站归属统一在这里注入 —— **一处覆盖所有发送路径**。
      *
@@ -691,6 +695,11 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
       ...(requestId ? { requestId: String(requestId) } : {}),
       ...(sender ? { plugin: sender } : {}),
       ...(fileType ? { fileType: Number(fileType) } : {}),
+      /**
+       * 图片留档的源文件（账本用）。本地图给绝对路径，远程图给 URL；
+       * `ledger.saveImages` 关着时 `Outbound` 那边直接忽略。
+       */
+      ...(Array.isArray(mediaSrc) && mediaSrc.length ? { mediaSrc } : {}),
       /**
        * 链路 id：出站要跟触发它的那条入站同 id，账本才能把
        * 「这句话是回哪轮」查出来（`ledger.repliesOf()`）。
@@ -783,7 +792,11 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
     if (text === undefined || text === null || text === '') return Promise.resolve(null);
     if (kind !== 'group' || !msg.id || !userOpenid) return msg.replyNow(text, opts);
 
-    const { requestId, plugin, fileType, ...rest } = opts ?? {};
+    /**
+     * `mediaSrc` 也摘出来：它是**账本图片留档的源**（本地绝对路径或远程 URL），
+     * 只给 `ledger.saveMedia()` 用。混进 body 会被 api 当未知参数带出去。
+     */
+    const { requestId, plugin, fileType, mediaSrc, ...rest } = opts ?? {};
     const sender = String(plugin ?? msg.pluginId ?? '');
     const body = { msgId: msg.id, content: String(text), ...rest };
     msg.replied = true;
@@ -1204,6 +1217,14 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
         media: { file_info: up.file_info },
         /** 有效类型（可能因超过软限被降级成 FILE），账本占位按它来 */
         fileType: effectiveType,
+        /**
+         * 账本留档的源。**上传之后就只剩 `file_info` 了**，本地路径/原始 URL
+         * 不在这里带上，账本永远不知道自己发的是哪张图（`qqbot-media://`
+         * 和 `image_id` 都换不回文件）。
+         */
+        ...(fileType === FILE_TYPE.IMAGE
+          ? { mediaSrc: [{ ...(local ? { path: source } : { url: source }) }] }
+          : {}),
         /** 供 replyAuto 降级后的独立图各自绑定幂等键；老调用方不传，行为不变 */
         ...(requestId ? { requestId: String(requestId) } : {}),
       }, true);
@@ -1299,8 +1320,17 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
       const asMarkdown = plan.mode === 'markdown' || !!keyboard;
       const payload = asMarkdown ? { markdown: { content: raw } } : { content: raw };
       if (keyboard) payload.keyboard = keyboard;
+      /**
+       * 公网图也留档：那个 URL 现在还能下载，过几天就 404 了。
+       * 本地图在这个分支里没有（有的话会走下面第 3 段预上传）。
+       */
+      const remoteSrc = plan.remote.map((n) => ({ url: n.src }));
       try {
-        return await send({ ...payload, ...(rid ? { requestId: rid } : {}) }, true);
+        return await send({
+          ...payload,
+          ...(remoteSrc.length ? { mediaSrc: remoteSrc } : {}),
+          ...(rid ? { requestId: rid } : {}),
+        }, true);
       } catch (e) {
         log.error(`replyAuto 发送失败(${plan.mode}):`, e.message);
         /** 失败也要给诊断回调一个终态：只返回 null，调用方分不清「空内容」和「没发出去」 */
@@ -1373,6 +1403,11 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
           const r = await send({
             markdown: { content: md },
             ...(keyboard ? { keyboard } : {}),
+            /**
+             * 账本留档：这时 `valid` 里的本地图**已经上传完**，`md` 里是
+             * `qqbot-media://` 引用，换不回文件。源路径只有这里还拿着。
+             */
+            ...(valid.length ? { mediaSrc: valid.map((n) => ({ path: n.resolvedPath })) } : {}),
             ...(rid ? { requestId: rid } : {}),
           }, true);
           report({ mode: 'markdown', uploads: uploads.length });

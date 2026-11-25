@@ -2044,6 +2044,24 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 #tab-ledger .lg-name { display: inline-block; }
 #tab-ledger .lg-sub { display: block; max-width: 170px; margin-top: 1px; }
 #tab-ledger .lg-content { word-break: break-word; }
+/**
+ * 账本图片缩略图（v6）。
+ *
+ * **CSS 缩放，不是真缩略图文件**——框架零依赖，没有图片缩放能力。
+ * `object-fit: cover` + 固定上限，一张竖图和横图占的格子一样大，
+ * 列表不会被某张长图撑得忽高忽低。`loading="lazy"` 在 app.js 里给。
+ */
+.lg-thumbs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.lg-thumb-a { display: inline-block; line-height: 0; border-radius: 8px; overflow: hidden; }
+.lg-thumb {
+  max-width: 120px;
+  max-height: 80px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid rgba(127, 127, 127, .28);
+  transition: transform .12s ease;
+}
+.lg-thumb:hover { transform: scale(1.04); }
 /* 概览里的时间范围：两行短格式，字号小一档，别撑破卡片 */
 #tab-ledger .card .v.lg-range-v {
   font-size: 12.5px;

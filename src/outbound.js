@@ -562,7 +562,7 @@ export class Outbound {
   #recordOutbound(opts, r) {
     if (!this.ledger?.append) return;
     try {
-      this.ledger.append(
+      const rec = this.ledger.append(
         {
           kind: String(opts.kind ?? ''),
           chatId: String(opts.target ?? ''),
@@ -603,6 +603,18 @@ export class Outbound {
         },
         { timeBasis: 'observation' },
       );
+      /**
+       * 出站图片留档（`ledger.saveImages` 开启时 `saveMedia` 才真的干活）。
+       *
+       * 源从 `message.js` 一路带下来：本地图是绝对路径，公网图是 URL。
+       * **上传之后就换不回来了**——`file_info` / `qqbot-media://` 都没有
+       * 反向解析，只有调用方手里那一刻知道原文件在哪。
+       *
+       * 不 await：存图比发消息慢，账本记一行不该等它。
+       */
+      if (rec && Array.isArray(opts.mediaSrc) && opts.mediaSrc.length) {
+        this.ledger.saveMedia(rec, opts.mediaSrc).catch(() => {});
+      }
     } catch (e) {
       log.warn(`出站没记进账本（不影响发送）：${e.message}`);
     }

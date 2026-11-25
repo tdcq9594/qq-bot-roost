@@ -595,6 +595,9 @@ test('toImportRow：库里 snake_case → 导入用 camelCase，多余字段丢�
     source: 'onebot',
     /** v5：被回复的消息，导出再导入不能丢 */
     replyTo: 'm0',
+    /** v6：原文（清洗前）与图片，备份要带出去；这条没标记也没图，所以都是空串 */
+    contentRaw: '',
+    media: '',
   });
 });
 

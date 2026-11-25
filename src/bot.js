@@ -18,6 +18,7 @@ import { botPaths, DIRS, rel } from './paths.js';
 import { StatsStore } from './storage/index.js';
 import { createReach } from './reach.js';
 import { createLedger } from './ledger.js';
+import { createMediaStore } from './media-store.js';
 import { createGate } from './gate.js';
 import { createDeliveryLedger } from './delivery.js';
 import { sharedIdentity } from './identity.js';
@@ -320,11 +321,28 @@ export class BotRuntime {
      * 和 `stats` 是两个库、两套保留策略：统计留 90 天聚合且不存正文，
      * 账本只留 7 天但存原文。混一个库的话「这个库会不会被拷走」就说不清了。
      */
+    /**
+     * 账本图片存储。**随 `ledger.saveImages` 一起开关**：
+     * 关着的时候连 store 都不建，`saveMedia()` 直接返回空数组，
+     * 收消息路径上一个分支都不多走。
+     */
+    this.mediaStore = cfg.ledger?.saveImages === true
+      ? createMediaStore({
+        dir: path.join(this.paths.data, 'ledger-media'),
+        /**
+         * 上限夹在 64KB–50MB：小于 64KB 连表情都存不下，
+         * 大于 50MB 一张图就能把磁盘吃穿，都不该让配置里写出来。
+         */
+        maxBytes: Math.max(64, Math.min(Number(cfg.ledger?.imageMaxKb ?? 2048) || 2048, 51200)) * 1024,
+      })
+      : null;
+
     this.ledger = createLedger({
       file: this.paths.events,
       botId: this.id,
       enabled: cfg.ledger?.enabled !== false,
       retentionDays: cfg.ledger?.retentionDays ?? 0,
+      mediaStore: this.mediaStore,
     });
 
     /**
@@ -1144,6 +1162,20 @@ export class BotRuntime {
     if (rec) {
       msg.eventId = rec.id;
       msg.eventSeq = rec.seq;
+      /**
+       * 图片留档（`ledger.saveImages` 开启时才有 store）。
+       *
+       * **一定不能 await**：一张图几 MB，下载几秒，串在这里会让整个群的
+       * 消息分发跟着等。`saveMedia` 内部逐个下载、失败跳过，
+       * 存完自己回填 `media` 列；这期间面板看到的是「这条没有图」，
+       * 一秒后再刷新就有了。
+       */
+      if (this.mediaStore) {
+        const imgs = (Array.isArray(msg.attachments) ? msg.attachments : [])
+          .filter((a) => a?.type === 'image' && a?.url)
+          .map((a) => ({ url: a.url, ct: a.contentType, w: a.width, h: a.height }));
+        if (imgs.length) this.ledger.saveMedia(rec, imgs).catch(() => {});
+      }
     }
 
     // 收到私聊 = 好友关系存在的强证据。不置 c2cPush：他能发不等于他允许机器人主动推

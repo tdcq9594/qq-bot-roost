@@ -3799,6 +3799,7 @@ async function loadLedger() {
     renderLedgerStats(st);
     renderLedgerChats(st);
     syncLedgerRetention(st?.retentionDays);
+    syncLedgerImages(st);
   } catch (e) {
     body.innerHTML = `<tr><td colspan="5" class="empty">加载失败: ${escapeHtml(e.message)}</td></tr>`;
   }
@@ -3821,6 +3822,12 @@ function renderLedgerStats(st) {
   const range = st?.oldestAt
     ? `${fmtShort(st.oldestAt)}<br>→ ${fmtShort(st.newestAt)}`
     : '还没有记录';
+  /**
+   * 有图才出这张卡：留档关着时 `mediaRows` 恒为 0，
+   * 每台机器都挂一张「图片留档 0 条」的卡只是噪音。
+   */
+  const mediaRows = Number(st?.mediaRows ?? 0);
+  if (mediaRows) cards.push(['图片留档', `${mediaRows} 条`]);
   el.innerHTML = cards
     .map(([k, v]) => `<div class="card"><div class="k">${k}</div><div class="v">${escapeHtml(String(v))}</div></div>`)
     .join('') + `<div class="card"><div class="k">时间范围</div><div class="v lg-range-v">${range}</div></div>`;
@@ -3871,6 +3878,26 @@ function syncLedgerRetention(days) {
     sel.value = 'custom';
     input.style.display = '';
     input.value = String(d);
+  }
+}
+
+/**
+ * 图片留档开关的回填。
+ *
+ * 关着的时候给一句「已过去的消息不补」——用户点开开关时最容易的误解
+ * 就是「打开之后以前的图也会出现」，而实际只从下一条消息开始。
+ */
+function syncLedgerImages(st) {
+  const on = $('#ledgerSaveImages');
+  const kb = $('#ledgerImageMax');
+  const hint = $('#ledgerMediaHint');
+  if (on) on.checked = st?.saveImages === true;
+  if (kb) kb.value = String(Number(st?.imageMaxKb ?? 2048));
+  if (hint) {
+    const n = Number(st?.mediaRows ?? 0);
+    hint.textContent = n
+      ? `已留档 ${n} 条消息的图片`
+      : '开启后新收到的图片会下载留档；已过去的消息不补';
   }
 }
 
@@ -3936,6 +3963,17 @@ async function loadLedgerRows(reset) {
           const name = String(x.userName ?? '').trim() || card || nick || who;
           const sub = nick && nick !== name ? nick : '';
           const av = ledgerAvatar(x.avatar);
+          /**
+           * 图片（v6）。缩略图是**浏览器缩放**出来的，不是真缩略图文件——
+           * 框架零依赖，没有图片缩放能力。`loading="lazy"` 保证滚动到才下载，
+           * 一页 50 条不会一上来就拉几十张图。
+           *
+           * 文件名是内容哈希，同一张图被转发多次只存一份、也只下载一次。
+           */
+          const thumbs = (Array.isArray(x.media) ? x.media : [])
+            .filter((m) => m && m.url)
+            .map((m) => `<a class="lg-thumb-a" href="${escapeHtml(m.url)}" target="_blank" rel="noopener"><img class="lg-thumb" src="${escapeHtml(m.url)}" alt="图片" loading="lazy" referrerpolicy="no-referrer"></a>`)
+            .join('');
           return `<tr data-openid="${escapeHtml(String(x.openid ?? x.userId ?? ''))}" data-uin="${escapeHtml(String(x.uin ?? ''))}">
             <td class="lg-when">${escapeHtml(fmtWhen(x.at))}</td>
             <td class="lg-who" title="${escapeHtml(name)}">${av
@@ -3943,7 +3981,9 @@ async function loadLedgerRows(reset) {
             : ''}<span class="lg-name">${escapeHtml(name)}</span>${sub
             ? `<span class="sub lg-sub">${escapeHtml(sub)}</span>`
             : ''}</td>
-            <td class="lg-content">${escapeHtml(String(x.content ?? '').slice(0, 200))}</td>
+            <td class="lg-content">${escapeHtml(String(x.content ?? '').slice(0, 200))}${thumbs
+            ? `<div class="lg-thumbs">${thumbs}</div>`
+            : ''}</td>
           </tr>`;
         })
         .join(''),
@@ -4022,6 +4062,30 @@ $('#ledgerRetentionSave')?.addEventListener('click', async () => {
     await api('/api/ledger/retention', { method: 'PUT', body: JSON.stringify({ days: raw }) });
     alert(raw === 0 ? '已改成永久保留' : `已改成保留 ${raw} 天，超出部分会在下次清理时删掉`);
     await loadLedger();
+  } catch (e) {
+    alert(`保存失败: ${e.message}`);
+  }
+});
+
+/**
+ * 图片留档保存。
+ *
+ * 打开时提醒「只从下一条开始」：用户最容易误以为打开就能补回以前的图，
+ * 而那些附件的 URL 早过期了，补也补不回来。
+ */
+$('#ledgerImagesSave')?.addEventListener('click', async () => {
+  const on = $('#ledgerSaveImages')?.checked === true;
+  const kb = Number($('#ledgerImageMax')?.value);
+  if (!Number.isFinite(kb) || kb < 64 || kb > 51200) return alert('单张上限要在 64–51200 KB 之间');
+  try {
+    await api('/api/ledger/images', {
+      method: 'PUT',
+      body: JSON.stringify({ saveImages: on, imageMaxKb: kb }),
+    });
+    alert(on ? `已开启图片留档（单张 ≤ ${kb} KB），从下一条消息开始生效` : '已关闭图片留档（已存的图还在，随账本一起删）');
+    await loadLedger();
+    /** 正在看某个会话就把列表也刷一遍，缩略图立刻出来 */
+    if (ledgerView.chatId) await loadLedgerRows(true);
   } catch (e) {
     alert(`保存失败: ${e.message}`);
   }

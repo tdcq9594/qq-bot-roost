@@ -12,7 +12,7 @@
  * 合表等于把统计库那句「不存消息正文」变成假话。
  */
 
-export const EVENTS_SCHEMA_VERSION = 5;
+export const EVENTS_SCHEMA_VERSION = 6;
 
 const V1 = `
 CREATE TABLE IF NOT EXISTS events (
@@ -144,6 +144,32 @@ ALTER TABLE events ADD COLUMN reply_to TEXT;
 CREATE INDEX IF NOT EXISTS events_reply_to ON events(bot_id, reply_to) WHERE reply_to IS NOT NULL;
 `;
 
+/**
+ * v6：可读正文 + 图片留档。
+ *
+ * **`content_raw`**：`content` 从这一版起存**清洗后**的正文（`ledger-text.js`），
+ * 平台表情 `<faceType=…>`、菜单按钮 `<qqbot-cmd-input …>` 都变成人话。
+ * 原文存在这一列，**只在两者不同时才写**——绝大多数消息没有标记，
+ * 空串表示「和 content 一样」，不为每行多背一份正文。
+ *
+ * 为什么要留原文：清洗是不可逆操作（表情名是从 base64 解出来的，标签结构没了）。
+ * 账本是「发生过什么」的档案，规则改错时要能重算，不能把原文弄丢。
+ *
+ * **`media`**：这一条带的图片，JSON 数组，空串 = 没有（或没开记录）。
+ *
+ *   [{"t":"image","file":"20261125/ab12cd34ef56.jpg","w":800,"h":600,"size":123456}]
+ *
+ * `file` 是 `data/bots/<botId>/ledger-media/` 下的相对路径。**存路径不存 URL**：
+ * QQ 的下载地址带 `rkey`，过期即失效，留 URL 等于什么都没留。
+ *
+ * `ledger.saveImages` 默认关。关闭时这一列一直是空串——**空串有两种含义**
+ * （没开记录 / 这条没图），分不出来，所以面板不要拿它推断「用户当时发没发图」。
+ */
+const V6 = `
+ALTER TABLE events ADD COLUMN content_raw TEXT NOT NULL DEFAULT '';
+ALTER TABLE events ADD COLUMN media TEXT NOT NULL DEFAULT '';
+`;
+
 /** 表里有没有这一列（迁移要幂等，重复 ALTER 会抛） */
 function hasColumn(db, table, col) {
   try {
@@ -179,6 +205,9 @@ export function migrateEvents(db) {
   if (!hasColumn(db, 'events', 'source')) db.exec(V4);
   /** v5 同样按「列在不在」判，理由与上面两条一样 */
   if (!hasColumn(db, 'events', 'reply_to')) db.exec(V5);
+  /** v6 两列同样按「列在不在」判——老库可能被手工加过一列 */
+  if (!hasColumn(db, 'events', 'content_raw')) db.exec('ALTER TABLE events ADD COLUMN content_raw TEXT NOT NULL DEFAULT \'\'');
+  if (!hasColumn(db, 'events', 'media')) db.exec('ALTER TABLE events ADD COLUMN media TEXT NOT NULL DEFAULT \'\'');
   db.exec(`PRAGMA user_version = ${EVENTS_SCHEMA_VERSION}`);
   return { from: cur, to: EVENTS_SCHEMA_VERSION };
 }
