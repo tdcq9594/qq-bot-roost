@@ -691,6 +691,11 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
       ...(requestId ? { requestId: String(requestId) } : {}),
       ...(sender ? { plugin: sender } : {}),
       ...(fileType ? { fileType: Number(fileType) } : {}),
+      /**
+       * 链路 id：出站要跟触发它的那条入站同 id，账本才能把
+       * 「这句话是回哪轮」查出来（`ledger.repliesOf()`）。
+       */
+      traceId: msg.traceId,
     });
   };
 
@@ -793,6 +798,8 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
       ...(requestId ? { requestId: String(requestId) } : {}),
       ...(sender ? { plugin: sender } : {}),
       ...(fileType ? { fileType: Number(fileType) } : {}),
+      /** 同 `reply()`：同一轮的所有出站共用一个 traceId */
+      traceId: msg.traceId,
     });
   };
 
@@ -1605,6 +1612,9 @@ export function buildMessage(eventName, d, { api, cfg, outbound, session, traceI
               /** 流式绕过了 outbound.send，来源要显式给，否则账本里是空串 */
               source: 'plugin',
               id: String(r?.id ?? streamId ?? ''),
+              /** 同 `reply()`：链路 id + 被回复的那条消息（流式也是被动回复） */
+              traceId: msg.traceId,
+              replyTo: msg.id,
             });
           } catch (e) {
             log.warn(`流式回复没记进账本（不影响发送）：${e.message}`);

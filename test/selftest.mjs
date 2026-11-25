@@ -5153,6 +5153,35 @@ async function testLedger() {
   check('账本: 升级后能写 trace', upLed.get(newOnOld.id)?.trace === 't-new');
   upLed.close();
 
+  /**
+   * 4d) v5「这条回的是哪条」：老库要能补列，补完能写能查。
+   *
+   * 和 4c 一样用真的 DROP COLUMN 造老库——迁移最怕「列已存在」和
+   * 「版本号卡在中间」这两种状态。
+   */
+  const v5File = path.join(dir, 'v5.db');
+  const v5Old = new EventLedger({ file: v5File, botId: 'b1' });
+  v5Old.open();
+  v5Old.append(mkMsg({ id: 'v5-q', content: '在吗' }));
+  v5Old.append(mkMsg({ id: 'v5-a', content: '在的', replyTo: 'v5-q' }));
+  v5Old.db.exec('DROP INDEX IF EXISTS events_reply_to');
+  v5Old.db.exec('ALTER TABLE events DROP COLUMN reply_to');
+  v5Old.db.exec('PRAGMA user_version = 4');
+  v5Old.close();
+
+  const up5 = new EventLedger({ file: v5File, botId: 'b1' });
+  check('账本: 老库能升到 v5', up5.open() === true);
+  const added5 = up5.append(mkMsg({ id: 'v5-a2', content: '升级后的回复', replyTo: 'v5-q' }));
+  /** `get()` 是原样行（snake_case），要看 camelCase 走 `byMsgId()` */
+  check('账本: reply_to 写下来了', up5.get(added5.id)?.reply_to === 'v5-q', JSON.stringify(up5.get(added5.id)?.reply_to));
+  check('账本: repliesOf 查得回这条回复', up5.repliesOf('v5-q').length === 1, String(up5.repliesOf('v5-q').length));
+  check('账本: byMsgId 按官方 msg_id 找得到原消息', up5.byMsgId('v5-q')?.content === '在吗', JSON.stringify(up5.byMsgId('v5-q')?.content));
+  check('账本: byMsgId 带回 replyTo', up5.byMsgId('v5-a2')?.replyTo === 'v5-q', JSON.stringify(up5.byMsgId('v5-a2')?.replyTo));
+  const plain5 = up5.append(mkMsg({ id: 'v5-p', content: '主动推送' }));
+  check('账本: 没有回复目标时 replyTo 是空串', up5.byMsgId('v5-p')?.replyTo === '', JSON.stringify(up5.byMsgId('v5-p')?.replyTo));
+  check('账本: repliesOf 不把主动推送算成回复', up5.repliesOf('v5-q').length === 1);
+  up5.close();
+
   // 5) 时间三态
   const t1 = resolveTime({ timestamp: 1700000000000 });
   check('账本: 毫秒时间戳判为 message', t1.basis === 'message' && t1.at === 1700000000000, JSON.stringify(t1));

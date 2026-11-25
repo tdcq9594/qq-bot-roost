@@ -48,7 +48,7 @@ import { SENSITIVE_KEY } from './runtime.js';
  * 单独用 `AUTHOR_COLS` 把它用 `json_extract` 拆成三列——一页 50 条每条
  * 几十 KB 的报文全都读上来太浪费。
  */
-const EVENT_COLS = 'seq, id, kind, chat_id, user_id, user_name, content, at, time_basis, msg_idx, quoted, trace, plugin, source, bot_id';
+const EVENT_COLS = 'seq, id, kind, chat_id, user_id, user_name, content, at, time_basis, msg_idx, quoted, trace, plugin, source, reply_to, bot_id';
 
 /** 从 `payload.author` 里取的三个展示字段（昵称 / 群名片 / 头像） */
 const AUTHOR_COLS = `,
@@ -257,8 +257,8 @@ export class EventLedger {
           `INSERT OR IGNORE INTO events
             (id, bot_id, kind, chat_id, msg_id, user_id, user_name, content,
              at, observed_at, time_basis, dedupe,
-             msg_idx, ref_msg_idx, union_openid, quoted, payload, trace, plugin, source)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+             msg_idx, ref_msg_idx, union_openid, quoted, payload, trace, plugin, source, reply_to)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         )
         .run(
           id,
@@ -292,6 +292,11 @@ export class EventLedger {
            * 老调用方不给就写空串——**空串表示「不知道」，不是「入站」**。
            */
           source,
+          /**
+           * 这条出站回的是哪条消息（v5）。被动回复的目标 `msg_id`；
+           * 主动推送没有目标，写 NULL。见 `events-schema.js` 的 V5。
+           */
+          String(msg.replyTo ?? '') || null,
         );
       // changes === 0 说明撞了 dedupe 唯一约束 = 官方重推的同一条消息
       if (!r?.changes) {
@@ -746,6 +751,68 @@ export class EventLedger {
     return rows.reverse().map(mapRow);
   }
 
+  /**
+   * 按官方 `msg_id` 找那一行。
+   *
+   * `get()` 收的是账本自己的 `id`（UUID），调用方手里往往只有官方 msg_id
+   * ——「这句话被回过没有」这类问题全是拿 msg_id 问的。
+   *
+   * **走 `dedupe` 的唯一索引**，不新建 `msg_id` 索引：没 msg_id 的行
+   * 用的是「会话+人+正文」指纹，有 msg_id 的行 dedupe 一定等于
+   * `${botId}:${msgId}`（见 `append`），两者是同一个键。
+   *
+   * @param {string} msgId 官方消息 id
+   * @returns {object|null}
+   */
+  byMsgId(msgId) {
+    if (!this.available || this.closed) return null;
+    const id = String(msgId ?? '').trim();
+    if (!id) return null;
+    try {
+      const r = this.db
+        .prepare(`SELECT ${EVENT_COLS} FROM events WHERE dedupe = ?`)
+        .get(`${this.botId}:${id}`);
+      return r ? mapRow(r) : null;
+    } catch (e) {
+      log.warn(`按 msg_id 查账本失败：${e.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * 这条消息引发了哪些回复（v5）。
+   *
+   * 被动回复在发送时要带被回复消息的 `msg_id`，`outbound` 现在把它顺手
+   * 记进 `reply_to`——于是「谁答了谁」变成一条可查的边，不用再按时间
+   * 相邻去猜。猜的代价很实在：AI 处理几秒，中间插进别人的话，紧邻判定
+   * 就会把回复配给错的人。
+   *
+   * 走 `events_reply_to` 索引 `(bot_id, reply_to)`，正序返回（先回的在前）。
+   *
+   * @param {string} msgId 被回复消息的官方 msg_id
+   * @param {object} [o]
+   * @param {number} [o.limit] 默认 20，上限 100
+   */
+  repliesOf(msgId, { limit = 20 } = {}) {
+    if (!this.available || this.closed) return [];
+    const id = String(msgId ?? '').trim();
+    if (!id) return [];
+    const lim = Math.min(Math.max(Number(limit) || 20, 1), 100);
+    try {
+      return this.db
+        .prepare(
+          `SELECT ${EVENT_COLS} FROM events
+            WHERE bot_id = ? AND reply_to = ?
+            ORDER BY seq ASC LIMIT ?`,
+        )
+        .all(this.botId, id, lim)
+        .map(mapRow);
+    } catch (e) {
+      log.warn(`查回复失败：${e.message}`);
+      return [];
+    }
+  }
+
   /** 面板用：总量、时间范围、保留策略 */
   stats() {
     if (!this.available || this.closed) {
@@ -1002,6 +1069,8 @@ export class EventLedger {
            * 历史接口搬进来的，标 `onebot` 更准确）。
            */
           source: String(r?.source ?? 'import'),
+          /** 被回复的消息（v5）：导出再导入时保留这条边 */
+          replyTo: String(r?.replyTo ?? ''),
           /**
            * `append()` 只从 `raw.timestamp` 推 `at`（传 `at` 无效）。
            * 给 ISO 字符串，`resolveTime` 会解析成 `basis: 'message'`——
@@ -1074,7 +1143,7 @@ export class EventLedger {
       const args = [];
       if (chat) { where.push('chat_id = ?'); args.push(chat); }
       if (ts) { where.push('at < ?'); args.push(ts); }
-      const sql = `SELECT seq, id, kind, chat_id, msg_id, user_id, user_name, content, at, time_basis, plugin, source, bot_id
+      const sql = `SELECT seq, id, kind, chat_id, msg_id, user_id, user_name, content, at, time_basis, plugin, source, reply_to, bot_id
                      FROM events ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
                     ORDER BY seq ASC LIMIT ?`;
       return this.db.prepare(sql).all(...args, lim);
@@ -1146,6 +1215,12 @@ function mapRow(r) {
      * 老行一律空串，表示「不知道」，不要拿来判断入站还是出站。
      */
     source: r.source ?? '',
+    /**
+     * 这条出站回的是哪条消息（v5）。被动回复写目标 `msg_id`，主动推送是
+     * 空串——**空串既可能是「主动发的」，也可能是「升级前的行」**，
+     * 别拿它反过来断言"这条一定是主动推送"。
+     */
+    replyTo: r.reply_to ?? '',
     content: contentOf(r),
   };
 }
@@ -1192,6 +1267,11 @@ export function toImportRow(r) {
      * 所以「网关收的」导回去还是 `gateway`，「OneBot 客户端发的」还是 `onebot`。
      */
     source: String(r?.source ?? ''),
+    /**
+     * 被回复的消息（v5）。不导出的话，JSONL 备份导回来「谁回了谁」就断了，
+     * 和 `source` 当年漏掉是同一个错。
+     */
+    replyTo: String(r?.reply_to ?? ''),
   };
 }
 

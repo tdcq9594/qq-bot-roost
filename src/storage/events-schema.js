@@ -12,7 +12,7 @@
  * 合表等于把统计库那句「不存消息正文」变成假话。
  */
 
-export const EVENTS_SCHEMA_VERSION = 4;
+export const EVENTS_SCHEMA_VERSION = 5;
 
 const V1 = `
 CREATE TABLE IF NOT EXISTS events (
@@ -117,6 +117,33 @@ ALTER TABLE events ADD COLUMN source TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS events_source ON events(bot_id, source) WHERE source != '';
 `;
 
+/**
+ * v5：这条出站回的是哪条消息。
+ *
+ * 被动回复（`msg.reply()`）发送时要带被回复消息的 `msg_id`（官方要求，
+ * 60 分钟窗口），但以前只在发送报文里用一次就不管了——账本里留下的是
+ * 「谁在什么时候说了什么」，**看不出「这句话是回哪句」**。
+ *
+ * 后果很具体：
+ *   · `chat_look` 翻出来的时间线，模型只能靠相邻猜谁在答谁，猜错就把
+ *     A 的问题配给 B 的回答；
+ *   · 「这句话是不是被别的插件回过了」查不出来，只能按"紧挨着"猜——
+ *     慢回复（AI 处理几秒）中间插进别人的话，就会误判；
+ *   · 运营侧想看「一条 @ 引出了几条回复、谁抢答了」也没有数据。
+ *
+ * 取值：被动回复目标的 `msg_id`（对应入站行的 `msg_id` 列）。
+ * 主动推送没有回复目标，留 NULL——**NULL 和空串意义不同**：
+ * 空串是「有目标但拿不到」，NULL 是「本来就没有」。
+ *
+ * 索引按 `(bot_id, reply_to)`：查「这条消息引发了哪些回复」是反向的主用例，
+ * 而 `bot_id` 前缀和别的索引一致。`WHERE reply_to IS NOT NULL` 把
+ * 主动推送（多数行）挡在索引外。
+ */
+const V5 = `
+ALTER TABLE events ADD COLUMN reply_to TEXT;
+CREATE INDEX IF NOT EXISTS events_reply_to ON events(bot_id, reply_to) WHERE reply_to IS NOT NULL;
+`;
+
 /** 表里有没有这一列（迁移要幂等，重复 ALTER 会抛） */
 function hasColumn(db, table, col) {
   try {
@@ -150,6 +177,8 @@ export function migrateEvents(db) {
    * 老库若是被手工加过列、版本号却没动，只看版本会撞 duplicate column。
    */
   if (!hasColumn(db, 'events', 'source')) db.exec(V4);
+  /** v5 同样按「列在不在」判，理由与上面两条一样 */
+  if (!hasColumn(db, 'events', 'reply_to')) db.exec(V5);
   db.exec(`PRAGMA user_version = ${EVENTS_SCHEMA_VERSION}`);
   return { from: cur, to: EVENTS_SCHEMA_VERSION };
 }

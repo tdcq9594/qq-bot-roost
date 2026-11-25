@@ -47,9 +47,16 @@ function rig(t, { delivery = null } = {}) {
     fs.rmSync(dir, { recursive: true, force: true, maxRetries: 6, retryDelay: 60 });
   });
   const calls = { group: 0, c2c: 0 };
+  /**
+   * 每条出站给不同的 msg_id。真机上服务端本来就不会返回同一个 id，
+   * 而账本按 `bot_id:msg_id` 去重——固定 id 会让「连发两条」被静默吞成一条，
+   * 测「一条入站引出多条回复」时尤其会误判。
+   */
+  let sent = 0;
+  const nextId = () => { sent += 1; return `msg-out-${sent}`; };
   const api = {
-    sendGroup: async () => { calls.group += 1; return { id: 'msg-out-1' }; },
-    sendC2C: async () => { calls.c2c += 1; return { id: 'msg-out-1' }; },
+    sendGroup: async () => { calls.group += 1; return { id: nextId() }; },
+    sendC2C: async () => { calls.c2c += 1; return { id: nextId() }; },
   };
   const out = new Outbound({
     api,
@@ -109,6 +116,49 @@ test('出站入账：没有 requestId（被动回复 / 富媒体 / 菜单）也�
   assert.equal(rows[0].botId, 'main', 'botId 要带出来（前端显示 main 靠它）');
   assert.equal(rows[0].content, '你好');
   assert.equal(rows[0].timeBasis, 'observation');
+});
+
+test('出站入账：被动回复记下「回的是哪条」和同一轮的 traceId', async (t) => {
+  const { ledger, out } = rig(t);
+  await out.send(base({ plugin: 'ai-chat', traceId: 'tr-1' }));
+  const rows = ledger.recent({ chatId: 'g1', limit: 10 });
+  assert.equal(rows.length, 1);
+  /**
+   * `reply_to` 从报文里的 `msgId` 取——那正是被动回复要求带的被回复消息 id，
+   * 也就是入站行的 `msg_id`。以前只用一次就丢了，账本里看不出「这句回哪句」。
+   */
+  assert.equal(rows[0].replyTo, 'in-1');
+  assert.equal(rows[0].trace, 'tr-1', '出站也要带 trace，和入站同一条链路');
+});
+
+test('出站入账：主动推送没有回复目标，replyTo 为空', async (t) => {
+  const { ledger, out } = rig(t);
+  await out.send({ kind: 'group', target: 'g1', chatKey: 'group:g1', payload: { content: '主动说一句' } });
+  const rows = ledger.recent({ chatId: 'g1', limit: 10 });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].replyTo, '', '主动推送不该凭空造一条"回复某条"的边');
+});
+
+test('repliesOf / byMsgId：一条入站和它的回复能互相查到', async (t) => {
+  const { ledger, out } = rig(t);
+  ledger.append({
+    id: 'in-9',
+    kind: 'group',
+    chatId: 'g1',
+    userName: '甲',
+    content: '在吗',
+    source: 'gateway',
+    raw: { timestamp: Date.now() },
+  });
+  await out.send(base({ plugin: 'ai-chat', traceId: 'tr-9', payload: { msgId: 'in-9', content: '在的' } }));
+  await out.send(base({ plugin: 'echo', traceId: 'tr-9', payload: { msgId: 'in-9', content: '在吗' } }));
+
+  const replies = ledger.repliesOf('in-9');
+  assert.deepEqual(replies.map((r) => r.plugin), ['ai-chat', 'echo'], '先回的在前');
+  assert.ok(replies.every((r) => r.replyTo === 'in-9'));
+  assert.equal(ledger.byMsgId('in-9')?.content, '在吗');
+  assert.equal(ledger.repliesOf('不存在').length, 0);
+  assert.equal(ledger.repliesOf('').length, 0, '空 msg_id 不该扫全表');
 });
 
 test('出站入账：富媒体占位 + plugin（验收 4 的前提）', async (t) => {
@@ -527,6 +577,7 @@ test('toImportRow：库里 snake_case → 导入用 camelCase，多余字段丢�
     content: 'hi',
     plugin: 'ai-chat',
     source: 'onebot',
+    reply_to: 'm0',
     /** 下面这些不在导入形状里，不能让它们漏进去（导回时会被当成未知字段） */
     seq: 9,
     bot_id: 'main',
@@ -542,6 +593,8 @@ test('toImportRow：库里 snake_case → 导入用 camelCase，多余字段丢�
     content: 'hi',
     plugin: 'ai-chat',
     source: 'onebot',
+    /** v5：被回复的消息，导出再导入不能丢 */
+    replyTo: 'm0',
   });
 });
 
