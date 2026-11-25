@@ -691,34 +691,56 @@ export class EventLedger {
    * @param {string} p.chatId
    * @param {number} [p.limit]
    * @param {number} [p.beforeSeq]
+   * @param {number} [p.offset] 跳过最新的多少条（分页「第 N 页」用，与 beforeSeq 互斥）
    * @param {boolean} [p.withPeople] 带上发言人的头像 / QQ 昵称 / 群昵称
    *        （面板账本要显示「谁说的」，只有 `user_name` 分不出群名片和 QQ 昵称）
    */
-  recent({ chatId, limit = 50, beforeSeq, withPeople = false } = {}) {
+  recent({ chatId, limit = 50, beforeSeq, offset = 0, withPeople = false } = {}) {
     if (!this.available || this.closed || !chatId) return [];
     const lim = Math.min(Math.max(Number(limit) || 50, 1), 500);
+    const off = Math.max(Number(offset) || 0, 0);
     const people = withPeople ? AUTHOR_COLS : '';
-    const rows = beforeSeq
-      ? this.db
-          .prepare(
-            `SELECT ${EVENT_COLS}${people}
-               FROM events WHERE bot_id = ? AND chat_id = ? AND seq < ?
-              ORDER BY seq DESC LIMIT ?`,
-          )
-          .all(this.botId, String(chatId), Number(beforeSeq), lim)
-      : this.db
-          .prepare(
-            `SELECT ${EVENT_COLS}${people}
-               FROM events WHERE bot_id = ? AND chat_id = ?
-              ORDER BY seq DESC LIMIT ?`,
-          )
-          .all(this.botId, String(chatId), lim);
+    /**
+     * 两种翻法各管一摊：
+     *   · `beforeSeq` 是游标（「比这条更早的」），追加式加载用，不怕新消息进来；
+     *   · `offset` 是分页（第 N 页），面板要显示「第 X / Y 页」就得能整页跳。
+     * 都从最新往回取，最后统一 reverse 成正序（老的在前）。
+     */
+    const rows = this.db
+      .prepare(
+        `SELECT ${EVENT_COLS}${people}
+           FROM events WHERE bot_id = ? AND chat_id = ?${beforeSeq ? ' AND seq < ?' : ''}
+          ORDER BY seq DESC LIMIT ? OFFSET ?`,
+      )
+      .all(
+        ...(beforeSeq
+          ? [this.botId, String(chatId), Number(beforeSeq), lim, off]
+          : [this.botId, String(chatId), lim, off]),
+      );
 
     return rows.reverse().map((r) => {
       const row = mapRow(r);
       if (!withPeople) return row;
       return { ...row, ...authorFieldsOf(r) };
     });
+  }
+
+  /**
+   * 某个会话有多少条（面板分页要算总页数）。
+   *
+   * 走 `(bot_id, chat_id, seq)` 索引，计数本身很便宜；但**不要拿去每次渲染
+   * 都算全库**——这里只数一个会话。查不到 / 没开账本一律 0。
+   */
+  countOf({ chatId } = {}) {
+    if (!this.available || this.closed || !chatId) return 0;
+    try {
+      const row = this.db
+        .prepare('SELECT COUNT(*) AS n FROM events WHERE bot_id = ? AND chat_id = ?')
+        .get(this.botId, String(chatId));
+      return Number(row?.n ?? 0);
+    } catch {
+      return 0;
+    }
   }
 
   /**

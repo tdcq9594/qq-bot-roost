@@ -3524,9 +3524,26 @@ async function startWebServerInstance({
         if (pathname === '/api/ledger' && req.method === 'GET') {
           const chatId = String(url.searchParams.get('chatId') ?? '').trim();
           if (!chatId) return json(res, 400, { error: '需要 chatId' });
-          const limit = Number(url.searchParams.get('limit') ?? 50);
+          const limit = Math.min(Math.max(Number(url.searchParams.get('limit') ?? 50) || 50, 1), 200);
           const beforeSeq = Number(url.searchParams.get('beforeSeq') ?? 0) || undefined;
-          const rows = rt?.ledger?.recent?.({ chatId, limit, beforeSeq, withPeople: true }) ?? [];
+          /**
+           * 分页：页码从 1 起，**第 1 页 = 最新的 `limit` 条**，页码越大越早。
+           *
+           * 以前只有「下一页」按钮，点一下就是把列表再加长 50 条，既不知道
+           * 看到哪儿、也没法回上一页。现在给页码就得知道总数，`countOf` 走
+           * `(bot_id, chat_id)` 索引，单会话计数，不算全库。
+           *
+           * `offset` 分页的固有问题：期间有新消息进来，后面的页会整体挪一格
+           * （漏一条 / 重一条）。账本是查看用途、不是逐字比对，接受这个代价；
+           * 要追最新点回第 1 页即可。`beforeSeq` 游标保留，给需要稳定性的调用方。
+           */
+          const total = Number(rt?.ledger?.countOf?.({ chatId }) ?? 0);
+          const pages = Math.max(1, Math.ceil(total / limit));
+          const askedPage = Math.max(Number(url.searchParams.get('page') ?? 0) || 0, 0);
+          const page = askedPage ? Math.min(askedPage, pages) : 1;
+          const offset = askedPage ? (page - 1) * limit : 0;
+          const rows =
+            rt?.ledger?.recent?.({ chatId, limit, beforeSeq, offset, withPeople: true }) ?? [];
           /**
            * v6 起清洗在**入账时**做（`ledger-text.js`），这里只给升级前的老行兜底。
            * 以前面板、dsh-roost 各洗一份，规则已经开始分叉（面板只认 `<faceType>`），
@@ -3562,7 +3579,7 @@ async function startWebServerInstance({
               })),
             };
           });
-          return json(res, 200, { items });
+          return json(res, 200, { items, total, page, pages, limit });
         }
 
         /**

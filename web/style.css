@@ -2045,6 +2045,33 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 #tab-ledger .lg-sub { display: block; max-width: 170px; margin-top: 1px; }
 #tab-ledger .lg-content { word-break: break-word; }
 /**
+ * 账本分页条。
+ *
+ * 以前只有一个「下一页」按钮（点了是加长列表），看不出现在在第几页。
+ * 现在是「上一页 / 第 N / M 页 / 下一页 + 共 K 条」，一行放不下就换行。
+ */
+#tab-ledger .ledger-pager {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+#tab-ledger .ledger-page { font-size: 12px; color: var(--text-2); }
+#tab-ledger .ledger-page-input {
+  width: 56px;
+  padding: 2px 4px;
+  font: inherit;
+  font-size: 12px;
+  text-align: center;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+#tab-ledger .ledger-page-input:focus { outline: none; border-color: var(--primary-border); box-shadow: 0 0 0 3px var(--primary-ring); }
+#tab-ledger .ledger-total { margin-left: auto; }
+/**
  * 账本图片缩略图（v6）。
  *
  * **CSS 缩放，不是真缩略图文件**——框架零依赖，没有图片缩放能力。

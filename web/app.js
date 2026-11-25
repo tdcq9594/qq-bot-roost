@@ -3768,8 +3768,14 @@ async function loadPlugins() {
 /* ---------------- 事件账本 ---------------- */
 
 const LEDGER_KIND = { group: '群', c2c: '私聊', guild: '频道', dm: '私信' };
-/** 当前展开的会话；`cursor` 是上一页最早那条的 seq（账本 recent 返回正序） */
-let ledgerView = { chatId: '', cursor: 0 };
+/**
+ * 当前展开的会话 + 分页状态。
+ *
+ * 页码从 1 起，**第 1 页 = 最新的 `limit` 条**，页码越大越早；页内按时间正序
+ * （老的在上）。以前是 `cursor`（追加式加载），点「下一页」只是把列表再加长
+ * 50 条，看不出在第几页、也回不去——所以改成整页翻。
+ */
+let ledgerView = { chatId: '', page: 1, pages: 1, total: 0, limit: 50 };
 
 function fmtBytes(n) {
   const v = Number(n) || 0;
@@ -3902,7 +3908,7 @@ function syncLedgerImages(st) {
 }
 
 async function openLedgerChat(chatId, name = '') {
-  ledgerView = { chatId, cursor: 0 };
+  ledgerView = { chatId, page: 1, pages: 1, total: 0, limit: 50 };
   const box = $('#ledgerRowsBox');
   if (box) box.hidden = false;
   const t = $('#ledgerRowsTitle');
@@ -3914,84 +3920,117 @@ async function openLedgerChat(chatId, name = '') {
   }
   const body = $('#ledgerRows');
   if (body) body.innerHTML = '<tr><td colspan="3" class="empty">加载中…</td></tr>';
-  await loadLedgerRows(true);
+  await loadLedgerRows();
 }
 
-async function loadLedgerRows(reset) {
+/**
+ * 分页条：页码、总页数、总条数、上一页 / 下一页可用性。
+ *
+ * 输入框正在打字时**不回写 value**——用户敲「12」敲到一半，这里把 value 改成
+ * 「1」就把光标顶掉了。
+ */
+function renderLedgerPager() {
+  const prev = $('#ledgerPrev');
+  const next = $('#ledgerNext');
+  const input = $('#ledgerPageInput');
+  const pages = $('#ledgerPages');
+  const total = $('#ledgerTotal');
+  if (input) {
+    input.max = String(ledgerView.pages);
+    if (document.activeElement !== input) input.value = String(ledgerView.page);
+  }
+  if (pages) pages.textContent = String(ledgerView.pages);
+  if (total) total.textContent = ledgerView.total ? `共 ${ledgerView.total} 条` : '没有记录';
+  if (prev) prev.disabled = ledgerView.page <= 1;
+  if (next) next.disabled = ledgerView.page >= ledgerView.pages;
+}
+
+/** 跳到第 n 页（超出范围夹紧）。同页不重复请求，只把输入框还原成真实页码 */
+async function goLedgerPage(n) {
+  const target = Math.min(Math.max(Number(n) || 1, 1), Math.max(ledgerView.pages, 1));
+  if (target === ledgerView.page) {
+    renderLedgerPager();
+    return;
+  }
+  ledgerView.page = target;
+  await loadLedgerRows();
+}
+
+async function loadLedgerRows() {
   const body = $('#ledgerRows');
   const chatId = ledgerView.chatId;
   if (!body || !chatId) return;
+  body.innerHTML = '<tr><td colspan="3" class="empty">加载中…</td></tr>';
   try {
-    const q = new URLSearchParams({ chatId, limit: '50' });
-    if (!reset && ledgerView.cursor) q.set('beforeSeq', String(ledgerView.cursor));
+    const q = new URLSearchParams({
+      chatId,
+      limit: String(ledgerView.limit),
+      page: String(ledgerView.page),
+    });
     const d = await api(`/api/ledger?${q.toString()}`);
     const items = d?.items ?? [];
-    if (reset) body.innerHTML = '';
-    if (!items.length && reset) {
+    ledgerView.total = Number(d?.total ?? items.length);
+    ledgerView.pages = Math.max(1, Number(d?.pages ?? 1));
+    /** 后端会把越界页码夹到最后一页，前端跟着收敛，免得两边显示不一致 */
+    ledgerView.page = Math.min(Math.max(Number(d?.page ?? ledgerView.page) || 1, 1), ledgerView.pages);
+    if (!items.length) {
       body.innerHTML = '<tr><td colspan="3" class="empty">这个会话没有记录</td></tr>';
-      const more = $('#ledgerMore');
-      if (more) more.disabled = true;
+      renderLedgerPager();
       return;
     }
-    body.insertAdjacentHTML(
-      'afterbegin',
-      items
-        .map((x) => {
-          /**
-           * 「谁」列的兜底顺序：插件名 → 来源（OneBot / 宿主 / …）→ 机器人实例名。
-           *
-           * 加来源这一档是因为 OneBot 客户端发的消息 `plugin` 是空串，
-           * 以前一律显示成 `main`——和「机器人自己内建的菜单」长得一样，
-           * 排查时分不出这句话是谁让发的。入站（gateway/webhook）不进这一档：
-           * 那些行有 userName，本来就不会走到兜底。
-           */
-          const srcTag = x.source && x.source !== 'gateway' && x.source !== 'webhook'
-            ? (SOURCE_LABEL[x.source] ?? String(x.source))
-            : '';
-          const actor = x.plugin && x.plugin !== '__core' ? x.plugin : (srcTag || x.botId || 'main');
-          const who = x.userName || x.userId || actor;
-          /**
-           * 发言人：群名片优先（`userName` 现在就是群内昵称），QQ 昵称放第二行。
-           *
-           * 两个名字一样就只留一行——不然每行都重复一遍，反而更难扫。
-           * 头像用缩略图（`s=640` 换成 `s=100`），一页 50 条不然要拖几百 KB。
-           * openid / QQ 号**不进界面文字**，只放 `data-*`：调试和复制要用，
-           * 但账本列表是给人扫的，塞两串长 id 只会把内容挤没。
-           */
-          const nick = String(x.nickname ?? '').trim();
-          const card = String(x.card ?? '').trim();
-          const name = String(x.userName ?? '').trim() || card || nick || who;
-          const sub = nick && nick !== name ? nick : '';
-          const av = ledgerAvatar(x.avatar);
-          /**
-           * 图片（v6）。缩略图是**浏览器缩放**出来的，不是真缩略图文件——
-           * 框架零依赖，没有图片缩放能力。`loading="lazy"` 保证滚动到才下载，
-           * 一页 50 条不会一上来就拉几十张图。
-           *
-           * 文件名是内容哈希，同一张图被转发多次只存一份、也只下载一次。
-           */
-          const thumbs = (Array.isArray(x.media) ? x.media : [])
-            .filter((m) => m && m.url)
-            .map((m) => `<a class="lg-thumb-a" href="${escapeHtml(m.url)}" target="_blank" rel="noopener"><img class="lg-thumb" src="${escapeHtml(m.url)}" alt="图片" loading="lazy" referrerpolicy="no-referrer"></a>`)
-            .join('');
-          return `<tr data-openid="${escapeHtml(String(x.openid ?? x.userId ?? ''))}" data-uin="${escapeHtml(String(x.uin ?? ''))}">
-            <td class="lg-when">${escapeHtml(fmtWhen(x.at))}</td>
-            <td class="lg-who" title="${escapeHtml(name)}">${av
-            ? `<img class="who-av lg-av" src="${escapeHtml(av)}" alt="" loading="lazy" referrerpolicy="no-referrer">`
-            : ''}<span class="lg-name">${escapeHtml(name)}</span>${sub
-            ? `<span class="sub lg-sub">${escapeHtml(sub)}</span>`
-            : ''}</td>
-            <td class="lg-content">${escapeHtml(String(x.content ?? '').slice(0, 200))}${thumbs
-            ? `<div class="lg-thumbs">${thumbs}</div>`
-            : ''}</td>
-          </tr>`;
-        })
-        .join(''),
-    );
-    /** 账本返回的是**正序**（老的在前），所以「更早的一页」的游标是第一条的 seq */
-    ledgerView.cursor = items.length ? Number(items[0].seq) : 0;
-    const more = $('#ledgerMore');
-    if (more) more.disabled = items.length < 50;
+    body.innerHTML = items
+      .map((x) => {
+        /**
+         * 「谁」列的兜底顺序：插件名 → 来源（OneBot / 宿主 / …）→ 机器人实例名。
+         *
+         * 加来源这一档是因为 OneBot 客户端发的消息 `plugin` 是空串，
+         * 以前一律显示成 `main`——和「机器人自己内建的菜单」长得一样，
+         * 排查时分不出这句话是谁让发的。入站（gateway/webhook）不进这一档：
+         * 那些行有 userName，本来就不会走到兜底。
+         */
+        const srcTag = x.source && x.source !== 'gateway' && x.source !== 'webhook'
+          ? (SOURCE_LABEL[x.source] ?? String(x.source))
+          : '';
+        const actor = x.plugin && x.plugin !== '__core' ? x.plugin : (srcTag || x.botId || 'main');
+        const who = x.userName || x.userId || actor;
+        /**
+         * 发言人：群名片优先（`userName` 现在就是群内昵称），QQ 昵称放第二行。
+         *
+         * 两个名字一样就只留一行——不然每行都重复一遍，反而更难扫。
+         * 头像用缩略图（`s=640` 换成 `s=100`），一页 50 条不然要拖几百 KB。
+         * openid / QQ 号**不进界面文字**，只放 `data-*`：调试和复制要用，
+         * 但账本列表是给人扫的，塞两串长 id 只会把内容挤没。
+         */
+        const nick = String(x.nickname ?? '').trim();
+        const card = String(x.card ?? '').trim();
+        const name = String(x.userName ?? '').trim() || card || nick || who;
+        const sub = nick && nick !== name ? nick : '';
+        const av = ledgerAvatar(x.avatar);
+        /**
+         * 图片（v6）。缩略图是**浏览器缩放**出来的，不是真缩略图文件——
+         * 框架零依赖，没有图片缩放能力。`loading="lazy"` 保证滚动到才下载，
+         * 一页 50 条不会一上来就拉几十张图。
+         *
+         * 文件名是内容哈希，同一张图被转发多次只存一份、也只下载一次。
+         */
+        const thumbs = (Array.isArray(x.media) ? x.media : [])
+          .filter((m) => m && m.url)
+          .map((m) => `<a class="lg-thumb-a" href="${escapeHtml(m.url)}" target="_blank" rel="noopener"><img class="lg-thumb" src="${escapeHtml(m.url)}" alt="图片" loading="lazy" referrerpolicy="no-referrer"></a>`)
+          .join('');
+        return `<tr data-openid="${escapeHtml(String(x.openid ?? x.userId ?? ''))}" data-uin="${escapeHtml(String(x.uin ?? ''))}">
+          <td class="lg-when">${escapeHtml(fmtWhen(x.at))}</td>
+          <td class="lg-who" title="${escapeHtml(name)}">${av
+          ? `<img class="who-av lg-av" src="${escapeHtml(av)}" alt="" loading="lazy" referrerpolicy="no-referrer">`
+          : ''}<span class="lg-name">${escapeHtml(name)}</span>${sub
+          ? `<span class="sub lg-sub">${escapeHtml(sub)}</span>`
+          : ''}</td>
+          <td class="lg-content">${escapeHtml(String(x.content ?? '').slice(0, 200))}${thumbs
+          ? `<div class="lg-thumbs">${thumbs}</div>`
+          : ''}</td>
+        </tr>`;
+      })
+      .join('');
+    renderLedgerPager();
   } catch (e) {
     body.innerHTML = `<tr><td colspan="3" class="empty">加载失败: ${escapeHtml(e.message)}</td></tr>`;
   }
@@ -4023,7 +4062,7 @@ async function ledgerDelete(cond) {
     });
     alert(r?.message || `删了 ${r?.removed ?? 0} 条`);
     await loadLedger();
-    if (ledgerView.chatId) await loadLedgerRows(true);
+    if (ledgerView.chatId) await loadLedgerRows();
   } catch (e) {
     alert(`删除失败: ${e.message}`);
   }
@@ -4038,7 +4077,16 @@ $('#ledgerChats')?.addEventListener('click', (e) => {
   if (del) return ledgerDelete({ chatId: del.getAttribute('data-ledger-del') });
 });
 
-$('#ledgerMore')?.addEventListener('click', () => loadLedgerRows(false));
+$('#ledgerPrev')?.addEventListener('click', () => goLedgerPage(ledgerView.page - 1));
+$('#ledgerNext')?.addEventListener('click', () => goLedgerPage(ledgerView.page + 1));
+/** 输入页码：回车或失焦都跳；输错（0 / 超范围）夹到合法区间 */
+$('#ledgerPageInput')?.addEventListener('change', (e) => goLedgerPage(e.target.value));
+$('#ledgerPageInput')?.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  e.preventDefault();
+  goLedgerPage(e.target.value);
+  e.target.blur();
+});
 
 $('#ledgerDelChat')?.addEventListener('click', () => {
   if (!ledgerView.chatId) return;
@@ -4085,7 +4133,7 @@ $('#ledgerImagesSave')?.addEventListener('click', async () => {
     alert(on ? `已开启图片留档（单张 ≤ ${kb} KB），从下一条消息开始生效` : '已关闭图片留档（已存的图还在，随账本一起删）');
     await loadLedger();
     /** 正在看某个会话就把列表也刷一遍，缩略图立刻出来 */
-    if (ledgerView.chatId) await loadLedgerRows(true);
+    if (ledgerView.chatId) await loadLedgerRows();
   } catch (e) {
     alert(`保存失败: ${e.message}`);
   }
@@ -4172,7 +4220,7 @@ $('#ledgerImportFile')?.addEventListener('change', async (e) => {
     });
     alert(r?.message || '导入完成');
     await loadLedger();
-    if (ledgerView.chatId) await loadLedgerRows(true);
+    if (ledgerView.chatId) await loadLedgerRows();
   } catch (err) {
     alert(`导入失败: ${err.message}`);
   } finally {

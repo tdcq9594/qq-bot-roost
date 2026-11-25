@@ -1419,10 +1419,20 @@ curl 'https://bot.q.qq.com/cgi-bin/v2/info/list_bots' \
             <tbody id="ledgerRows"></tbody>
           </table>
         </div>
-        <div class="btn-row">
-          <button id="ledgerMore" class="btn small">下一页</button>
+        <!--
+          分页条。第 1 页是最新的那 limit 条，页码越大越早；页内按时间正序。
+          以前只有一个「下一页」按钮，点了是把列表再加长 50 条，既看不出在看
+          哪儿、也回不去上一页。
+        -->
+        <div class="ledger-pager">
+          <button id="ledgerPrev" class="btn small" title="更近的记录">上一页</button>
+          <span class="ledger-page">第
+            <input id="ledgerPageInput" class="ledger-page-input" type="number" min="1" value="1" aria-label="页码">
+            / <span id="ledgerPages">1</span> 页</span>
+          <button id="ledgerNext" class="btn small" title="更早的记录">下一页</button>
+          <span class="hint ledger-total" id="ledgerTotal"></span>
         </div>
-        <!-- 删会话记录不可逆，单独成块并写清后果，别和「下一页」混排 -->
+        <!-- 删会话记录不可逆，单独成块并写清后果，别和分页条混排 -->
         <div class="danger-zone">
           <div class="danger-hd">危险操作</div>
           <div class="danger-desc">删掉这个会话的全部记录，不可撤销，导出过的才有备份。</div>
