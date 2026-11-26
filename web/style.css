@@ -1215,6 +1215,26 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
 .perm-legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); }
 .perm-legend b { color: var(--primary-text); font-family: var(--mono); margin-right: 4px; }
 
+/* ---------- 权限人员一览（按等级分组） ---------- */
+.roster-list { display: flex; flex-direction: column; gap: 14px; }
+.roster-group { border-top: 1px solid var(--border); padding-top: 10px; }
+.roster-group:first-child { border-top: 0; padding-top: 0; }
+.roster-group-hd {
+  display: flex; align-items: baseline; gap: 8px;
+  font-size: 13px; font-weight: 600; margin-bottom: 8px;
+}
+.roster-group-hd .lv-num { font-family: var(--mono); color: var(--primary-text); }
+.roster-group-hd .count { font-size: 11.5px; font-weight: 400; color: var(--muted); }
+.roster-people { display: flex; flex-wrap: wrap; gap: 8px; }
+.roster-person {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 10px; font-size: 12.5px;
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.roster-person .who-av { width: 22px; height: 22px; }
+.roster-person .scope-note { font-size: 11px; color: var(--muted); }
+
 /* ---------- 日志图例 ---------- */
 .log-legend {
   display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
