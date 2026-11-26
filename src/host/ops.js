@@ -255,7 +255,8 @@ export function registerOps(def, { R, err, log = () => {} }) {
     const ms = Number(p.ms) || 0;
     if (!chatId || ms <= 0) throw err.bad('要给 chatId 和正数 ms');
     if (!R.gate) throw err.notReady('暂停闸未就绪');
-    return await R.gate.setSilence(chatId, Math.min(ms, 30 * 86_400_000), {
+    /** 30 天上限在 `setSilence` 里夹（`gate.js` 的 `MAX_SILENCE_MS`），这里不再重复 */
+    return await R.gate.setSilence(chatId, ms, {
       by: 'host', reason: str(p.reason).slice(0, 200),
     });
   });

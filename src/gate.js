@@ -31,6 +31,16 @@
 import path from 'node:path';
 import { readJsonSafe, writeJsonAtomic } from './fsutil.js';
 
+/**
+ * 单次静默的上限：30 天。
+ *
+ * **唯一出口**。以前这个上限只写在 `host/ops.js` 的 `gate.silence` 里，
+ * 而 `gate.set` 的 `silence` 分支直接调 `setSilence`，不夹——同一个字段
+ * 两条写入口径不同，面板传 400 天就真写 400 天。现在夹在 `setSilence`
+ * 本身，任何调用方（含将来的新入口）都受保护，调用方不必再自己夹。
+ */
+export const MAX_SILENCE_MS = 30 * 86_400_000;
+
 /** 空状态。每次读盘都从它展开，字段少一个也不会 undefined */
 const EMPTY = () => ({
   paused: false,
@@ -201,14 +211,19 @@ export function createGate({ dir, botId, log = () => {} }) {
    * `until` 存绝对时间戳而不是「剩余毫秒」：进程重启后剩余时间还得重新算，
    * 而「到几点解除」是事实，重启也成立。
    *
+   * 上限夹在这里而不是调用方：`setSilence` 有两个写入口（`gate.set` 的
+   * silence 分支、`gate.silence`），只在一处夹等于没夹——见 `MAX_SILENCE_MS`。
+   *
    * @param {string} chatId
    * @param {number} ms 静默多久；`<= 0` 表示解除
    */
   async function setSilence(chatId, ms, meta) {
     await open();
     if (!chatId) throw new Error('缺 chatId');
+    /** 超限**夹到 30 天**而不是报错：`<<silence: 1y>>` 这种写法该静默就静默，别因为写大了整条失效 */
+    const capped = Math.min(Math.max(0, Number(ms) || 0), MAX_SILENCE_MS);
     const silence = { ...(bot.silence ?? {}) };
-    if (ms > 0) silence[chatId] = Date.now() + ms;
+    if (capped > 0) silence[chatId] = Date.now() + capped;
     else delete silence[chatId];
     bot = { ...bot, silence };
     await saveBot();
