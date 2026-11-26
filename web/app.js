@@ -293,7 +293,7 @@ async function selectBot(id) {
   if (tab === 'onebot') loadOnebot();
   if (tab === 'delivery') loadDelivery();
   if (tab === 'groups') loadGroups();
-  if (tab === 'roles') { loadRoles(); loadPeople(); }
+  if (tab === 'roles') { loadRoles(); loadRoster(); loadPeople(); }
   if (tab === 'media') loadMedia();
   if (tab === 'stats') loadStats();
   // 体检是按机器人做的，切了要重查
@@ -1484,6 +1484,7 @@ function activateTab(name) {
   if (name === 'delivery') safeLoad('delivery', loadDelivery);
   if (name === 'roles') {
     safeLoad('roles', loadRoles);
+    safeLoad('roles', loadRoster);
     safeLoad('roles', loadPeople);
   }
   if (name === 'identity') safeLoad('identity', loadIdentity);
@@ -5560,7 +5561,7 @@ function renderOwners() {
   const wrap = $('#ownerChips');
   if (!wrap) return;
   if (!owners.length) {
-    wrap.innerHTML = '<span class="hint">还没有主人。机器人被拉进群后会自动把邀请人设为主人，也可以手动添加。</span>';
+    wrap.innerHTML = '<span class="hint">还没有主人。可以在这里手动添加，或去「权限」页绑定；机器人被拉进群不会自动产生主人。</span>';
     return;
   }
   /**
@@ -6319,6 +6320,88 @@ $('#groupInput')?.addEventListener('keydown', (e) => {
 const LEVEL_TEXT = { 0: '主人', 1: '管理员', 2: '群管', 3: '助手' };
 const levelText = (n) => LEVEL_TEXT[n] ?? (n >= 9999 ? '普通成员' : `${n} 级管理`);
 
+/**
+ * 人员一览：按权限等级分组，昵称优先。
+ *
+ * 昵称/头像来自「最近说过话的人」内存索引（重启即空），而 owner 只存 openid，
+ * 所以这里用 openid 把两份数据对起来：roles 行自带 name，owner 行靠 candidates 补。
+ * 没说过话的人补不到，只能显示截断 openid——如实显示，不编一个名字出来。
+ */
+async function loadRoster() {
+  const box = $('#rosterList');
+  if (!box) return;
+  try {
+    const [rolesData, people] = await Promise.all([
+      api('/api/roles'),
+      api('/api/roles/candidates').catch(() => []),
+    ]);
+    const byOpenid = new Map();
+    for (const p of Array.isArray(people) ? people : []) {
+      if (p?.openid) byOpenid.set(p.openid, p);
+    }
+
+    const rows = [
+      ...(rolesData?.owners ?? []).map((openid) => ({ scope: 'global', openid, level: 0 })),
+      ...(rolesData?.rows ?? []),
+    ];
+    if (!rows.length) {
+      box.innerHTML = '<div class="empty">还没有配置权限</div>';
+      return;
+    }
+
+    // 按等级分组，再按 openid 去重（同一人可能在多个群有不同等级，各归各组）
+    const groups = new Map();
+    for (const r of rows) {
+      const lv = Number(r.level);
+      const key = Number.isInteger(lv) ? lv : 9999;
+      const person = byOpenid.get(r.openid) ?? {};
+      // 频道事件常拿不到 name，退回 QQ 昵称 → 群名片；两者都为空才显示截断 openid
+      const name = String(r.name || person.name || person.nickname || person.card || '').trim();
+      const avatar = String(person.avatar || '').trim();
+      if (!groups.has(key)) groups.set(key, new Map());
+      const bucket = groups.get(key);
+      // 同一等级同一人，合并作用域（如同时管两个群）
+      const prev = bucket.get(r.openid);
+      const scopeNote = r.scope === 'global' ? '全局' : scopeText(r.scope);
+      if (prev) {
+        if (!prev.scopes.includes(scopeNote)) prev.scopes.push(scopeNote);
+      } else {
+        bucket.set(r.openid, { openid: r.openid, name, avatar, scopes: [scopeNote] });
+      }
+    }
+
+    const order = [...groups.keys()].sort((a, b) => a - b);
+    box.innerHTML = order
+      .map((lv) => {
+        const peopleIn = [...groups.get(lv).values()];
+        return `<div class="roster-group">
+          <div class="roster-group-hd">
+            <span class="lv-num">${lv}</span>
+            <span>${escapeHtml(levelText(lv))}</span>
+            <span class="count">${peopleIn.length} 人</span>
+          </div>
+          <div class="roster-people">
+            ${peopleIn
+              .map(
+                (p) =>
+                  `<span class="roster-person" title="${escapeHtml(p.openid)}">${labelWithAvatar(
+                    p.name,
+                    p.openid,
+                    p.avatar,
+                  )}<span class="scope-note">${escapeHtml(p.scopes.join(' / '))}</span></span>`,
+              )
+              .join('')}
+          </div>
+        </div>`;
+      })
+      .join('');
+  } catch (e) {
+    box.innerHTML = `<div class="empty">读取失败：${escapeHtml(e.message)}</div>`;
+  }
+}
+
+$('#btnReloadRoster')?.addEventListener('click', loadRoster);
+
 /** 多久以前说过话 */
 function agoText(ts) {
   const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
@@ -6377,7 +6460,11 @@ async function loadRoles() {
   if (!body) return;
   try {
     const data = await api('/api/roles');
-    const rows = data.rows ?? [];
+    // 主人存在 config.owners、不在 roles 表里；并进同一张表展示，0 级排在最前
+    const rows = [
+      ...(data.owners ?? []).map((openid) => ({ scope: 'global', openid, level: 0, isOwner: true })),
+      ...(data.rows ?? []),
+    ];
 
     // 作用域候选：global + 已知群
     const scopes = new Set(['global']);
@@ -6398,7 +6485,7 @@ async function loadRoles() {
           <td title="${escapeHtml(r.scope)}">${escapeHtml(r.groupName ? `${r.groupName}（${shortId(r.scope.split(':').slice(1).join(':'))}）` : scopeText(r.scope))}</td>
           <td title="${escapeHtml(r.openid)}">${labelWithId(r.name, r.openid)}</td>
           <td>${levelText(r.level)} <span class="hint">${r.level}</span></td>
-          <td class="num"><button class="btn small danger" data-scope="${escapeHtml(r.scope)}" data-openid="${escapeHtml(r.openid)}">移除</button></td>
+          <td class="num"><button class="btn small danger" data-scope="${escapeHtml(r.scope)}" data-openid="${escapeHtml(r.openid)}" data-owner="${r.isOwner ? '1' : '0'}">移除</button></td>
         </tr>`,
       )
       .join('');
@@ -6407,11 +6494,12 @@ async function loadRoles() {
       btn.addEventListener('click', async () => {
         btn.disabled = true;
         try {
-          await api('/api/roles/remove', {
+          const isOwner = btn.dataset.owner === '1';
+          await api(isOwner ? '/api/owners/remove' : '/api/roles/remove', {
             method: 'POST',
             body: JSON.stringify({ scope: btn.dataset.scope, openid: btn.dataset.openid }),
           });
-          await loadRoles();
+          await Promise.all([loadRoles(), loadRoster()]);
         } catch (e) {
           alert('移除失败: ' + e.message);
           btn.disabled = false;
@@ -6444,15 +6532,25 @@ $('#peopleList')?.addEventListener('click', (e) => {
 $('#btnAddRole')?.addEventListener('click', async () => {
   const scope = $('#roleScope').value.trim();
   const openid = $('#roleOpenid').value.trim();
-  const level = Number($('#roleLevel').value);
-  if (!scope || !openid) return alert('作用域和 openid 都要填');
+  const levelRaw = $('#roleLevel').value.trim();
+  // 空框不能当 0 级主人：Number('') === 0，手一抖就绑了个主人代价太大
+  if (!levelRaw) return alert('请填等级');
+  const level = Number(levelRaw);
+  if (!Number.isInteger(level) || level < 0 || level > 98) return alert('等级需是 0-98 的整数');
+  if (!openid) return alert('openid 要填');
   try {
-    await api('/api/roles/set', {
-      method: 'POST',
-      body: JSON.stringify({ scope, openid, level }),
-    });
+    if (level === 0) {
+      // 主人是全局 0 级，存 config.owners，不走 roles 表；作用域在这里没有意义
+      await api('/api/owners/add', { method: 'POST', body: JSON.stringify({ openid }) });
+    } else {
+      if (!scope) return alert('作用域要填');
+      await api('/api/roles/set', {
+        method: 'POST',
+        body: JSON.stringify({ scope, openid, level }),
+      });
+    }
     $('#roleOpenid').value = '';
-    await loadRoles();
+    await Promise.all([loadRoles(), loadRoster()]);
   } catch (e) {
     alert('保存失败: ' + e.message);
   }

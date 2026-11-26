@@ -4442,6 +4442,46 @@ async function startWebServerInstance({
           });
           return json(res, 200, { owners: cfg.owners, rows: enriched });
         }
+        /**
+         * 主人（owner）专用接口
+         * ====================
+         * 主人存在 config/bot.json 的 owners 数组里（全局 0 级），和 roles 表是两套东西：
+         * /api/roles/set 明确拒绝 level 0，否则会出现「roles 表有 0 级、owners 里却没有」的两套真相。
+         * 权限页要能直接绑主人，就走这一对接口，写同一份 cfg.owners、同一条 saveBotConfig 落盘路径
+         * （owners 在 saveBotConfig 白名单里，重启不丢）。openid 校验与群组页 addOwner 保持一致。
+         */
+        if (pathname === '/api/owners/add' && req.method === 'POST') {
+          const body = await readBody(req);
+          // 必须先判类型：String(number/array) 会变成合法 hex，String({toString}) 会抛 500
+          if (typeof body?.openid !== 'string') {
+            return json(res, 400, { error: 'openid 必须是字符串' });
+          }
+          const openid = body.openid.trim();
+          if (!/^[0-9A-Fa-f]{16,64}$/.test(openid)) {
+            return json(res, 400, { error: 'openid 应是一串十六进制字符（16–64 位）' });
+          }
+          if (!Array.isArray(cfg.owners)) cfg.owners = [];
+          if (!cfg.owners.includes(openid)) {
+            cfg.owners.push(openid);
+            await saveBotConfig(rt.id, cfg);
+            log.info('通过面板绑定主人');
+          }
+          return json(res, 200, { ok: true, owners: cfg.owners });
+        }
+        if (pathname === '/api/owners/remove' && req.method === 'POST') {
+          const body = await readBody(req);
+          if (typeof body?.openid !== 'string') {
+            return json(res, 400, { error: 'openid 必须是字符串' });
+          }
+          const openid = body.openid.trim();
+          const next = (Array.isArray(cfg.owners) ? cfg.owners : []).filter((x) => x !== openid);
+          if (next.length !== (cfg.owners?.length ?? 0)) {
+            cfg.owners = next;
+            await saveBotConfig(rt.id, cfg);
+            log.info('通过面板解绑主人');
+          }
+          return json(res, 200, { ok: true, owners: cfg.owners });
+        }
         if (pathname === '/api/roles/set' && req.method === 'POST') {
           const body = await readBody(req);
           const scope = String(body.scope || '').trim();

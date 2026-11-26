@@ -1854,7 +1854,7 @@ curl 'https://bot.q.qq.com/cgi-bin/v2/info/list_bots' \
       </ul>
       <div class="hint" style="margin-top:8px">
         要调整或撤销，去「权限」页改对应的 <code>group:xxx</code> 作用域。
-        全局主人只能在 config.json 的 owners 里配，或首次启动时用认领码认领。
+        全局主人可在「权限」页绑定，或写进 config/bot.json 的 owners；只有还没有主人时才能用启动日志里的认领码认领。
       </div>
     </div>
 
@@ -1932,7 +1932,7 @@ curl 'https://bot.q.qq.com/cgi-bin/v2/info/list_bots' \
       </div>
       <div class="perm-legend">
         <span class="hint" style="margin-right:6px">数字越小权限越高：</span>
-        <span><b>0</b> 主人（config.json）</span>
+        <span><b>0</b> 主人（config/bot.json，也可在下方绑定）</span>
         <span><b>1</b> 管理员</span>
         <span><b>2</b> 群管</span>
         <span><b>3</b> 助手</span>
@@ -1955,13 +1955,24 @@ curl 'https://bot.q.qq.com/cgi-bin/v2/info/list_bots' \
         <input id="roleScope" list="scopeList" placeholder="作用域，如 group:xxx / global">
         <datalist id="scopeList"></datalist>
         <input id="roleOpenid" placeholder="openid">
-        <input id="roleLevel" type="number" min="1" max="998" value="2"
+        <input id="roleLevel" type="number" min="0" max="98" value="2"
                style="width:120px" title="数字越小权限越高">
-        <span class="hint">等级（1 管理员 / 2 群管 / 3 助手 / 10+ 插件区，最大 998）</span>
+        <span class="hint">等级（0 主人 / 1 管理员 / 2 群管 / 3 助手 / 10+ 插件区，最大 98；选 0 时作用域会被忽略）</span>
         <button class="btn primary" id="btnAddRole">保存</button>
       </div>
       <div class="hint" style="margin-top:8px">
         面板操作视为本机管理员行为，不受等级限制；聊天里请用 /admin set。
+      </div>
+    </div>
+
+    <div class="box">
+      <div class="box-hd">
+        <h3>人员一览</h3>
+        <span class="hint">按权限等级分组，优先显示昵称；没说过话的人只有 openid</span>
+        <button class="btn small" id="btnReloadRoster">刷新</button>
+      </div>
+      <div id="rosterList" class="roster-list">
+        <div class="empty">还没有配置权限</div>
       </div>
     </div>
 
