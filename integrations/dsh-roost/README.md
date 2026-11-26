@@ -28,24 +28,17 @@ DSH（AI 调工具）── HTTP ──> Roost 面板 :15207 ──> 机器人
 
 ## 安装
 
-### 方式一：从本地目录（开发/试用）
-
-```bash
-dsh plugin --profile desktop add /path/to/qq-bot-roost/integrations/dsh-roost
-```
-
-### 方式二：从 GitHub
-
-本插件已拆为独立仓库 [roost-qq/dsh-roost](https://github.com/roost-qq/dsh-roost)，
-请到那边按 README 安装。本目录是框架内置的旧版副本，仅作参考，不建议再安装。
-
-### 方式三：从 npm（发布后可用）
+本插件已拆为独立仓库 **[roost-qq/dsh-roost](https://github.com/roost-qq/dsh-roost)**，
+已发布到 npm。生产使用请到那边按 README 安装：
 
 ```bash
 dsh plugin --profile desktop add dsh-roost
 ```
 
 装完**重启 DSH**（或刷新 web 界面）。
+
+> 本目录是框架内置的旧版副本，仅作参考与开发调试，**不建议再安装**。
+> 调试本副本时才用 `dsh plugin --profile desktop add /path/to/qq-bot-roost/integrations/dsh-roost`。
 
 ---
 

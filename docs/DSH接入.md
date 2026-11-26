@@ -59,44 +59,26 @@ INFO  [webui] 可视化面板: http://127.0.0.1:15207/
 
 ## 安装
 
-插件在仓库的 `integrations/dsh-roost/` 目录。
-
-### 方式一：本地目录（推荐，确定可用）
-
-```bash
-npx @deepseek-ai/dsh plugin --profile desktop add "/绝对路径/qq-bot-roost/integrations/dsh-roost"
-```
-
-Windows 路径要加引号：
-
-```bash
-npx @deepseek-ai/dsh plugin --profile desktop add "C:\Users\你的用户名\qq-bot-roost\integrations\dsh-roost"
-```
-
-> `--profile` 后面填你的 profile 名。桌面版通常是 `desktop`，
-> 不确定就看 `~/.dsh/profiles/` 下有哪些目录。
-
-### 方式二：从 npm（尚未发布）
+插件已拆为独立仓库 **[roost-qq/dsh-roost](https://github.com/roost-qq/dsh-roost)**，
+并已发布到 npm。推荐从 npm 安装：
 
 ```bash
 npx @deepseek-ai/dsh plugin --profile desktop add dsh-roost
 ```
 
-> 包已经准备好了（`integrations/dsh-roost/`），但还没发到 npm。
-> 发布之后这条命令才可用。
-
-### 方式三：从 GitHub
+也可以从 GitHub 装：
 
 ```bash
-npx @deepseek-ai/dsh plugin --profile desktop add github:roost-qq/qq-bot-roost
+npx @deepseek-ai/dsh plugin --profile desktop add github:roost-qq/dsh-roost
 ```
 
-**这条目前装不了。** 原因：`dsh plugin add github:...` 会把整个仓库当插件包，
-但插件的 `package.json` 在 `integrations/dsh-roost/` 子目录里，
-而 pnpm 的 git 依赖没有可靠的「指定子目录」语法。
+装完**重启 DSH**（或刷新 web 界面）。
 
-要支持这种方式，得把插件拆成独立仓库（`roost-qq/dsh-roost`）。
-**在拆之前，用方式一。**
+> `--profile` 后面填你的 profile 名。桌面版通常是 `desktop`，
+> 不确定就看 `~/.dsh/profiles/` 下有哪些目录。
+>
+> 本框架仓库的 `integrations/dsh-roost/` 是内置的旧版副本，仅作参考与开发调试，
+> **不要再按旧教程从本地目录安装**。完整配置、能力与排错见独立仓 README。
 
 ---
 
@@ -236,8 +218,8 @@ AI 看到后者只会瞎猜，看到前者才知道该建议你启动 Roost。
 
 ## 后续
 
-- [ ] 发到 npm，让 `dsh plugin add dsh-roost` 可用
-- [ ] 拆独立仓库，支持 `github:roost-qq/dsh-roost`
+- [x] 拆独立仓库（`roost-qq/dsh-roost`），支持 `github:roost-qq/dsh-roost`
+- [x] 发到 npm，让 `dsh plugin add dsh-roost` 可用
 - [ ] 提交到 DSH 插件市场收录
 
 ---

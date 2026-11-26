@@ -13,10 +13,12 @@
 框架整体安全工程水平**高于同类开源机器人项目**。敏感凭证的 Ed25519 验签、面板 `timingSafeEqual` + 同源 + Content-Type 精确匹配、子进程环境变量白名单、供应链 sha256 + 解压炸弹防护、权限模型无自提权路径、4902 实例互斥——这些都是**已实现且经代码核实**的强控制。
 
 **真实风险集中在「配置安全」与「信任边界一致性」两类**：
-1. 面板绑定非 loopback 但**未强制** accessKey 时，远程可完全控制（含插件安装 → RCE）。默认安全 + doctor 软告警，但**无硬阻断**。
+1. 面板绑定非 loopback 且未设 accessKey 时会在**启动期直接拒绝**（2026-10-31 已修复，见第 5 节 F-01 的「状态」行），不再是软告警。
 2. 插件依赖安装（`deps.js`）**未复用**子进程的 env 白名单，把完整环境（含 AppSecret/accessKey）泄漏给 `pip install`/`npm install` 进程，与文档宣称的「彻底隔离」矛盾。
 
 其余均为低危残留（回放窗口、loopback SSRF、密钥走 query string、CSRF 仅挡浏览器跨站、密钥无爆破限速），不构成默认可用风险。
+
+> 本摘要写于 2025-10-25 审计当时，2026-10-31 复核后已按修复后的状态更新执行摘要；下方第 5 节各发现保留审计当时的原始记录作为背景，以每条自己的「状态」行现行结论为准。
 
 ---
 
@@ -67,7 +69,7 @@
 - accessKey 强度：用户自设（`config.js:27` 默认空，无自动生成）。常量比较 `crypto.timingSafeEqual`(`server.js:187-196`)。**已验证**。
 - CSRF/同源：写操作**精确** `application/json`（修复 `text/plain;application/json` 绕过）(`server.js:406-409,548-550`)；同源校验在**路由前**(`server.js:543-553`)。**已验证**。
 - Content-Type 精确匹配、?source= 经 `assertSafeIndexUrl` —— **已验证**。
-- 是否强制 127.0.0.1：**否**。默认 `127.0.0.1`(`server.js:241`)，但用户可设 `0.0.0.0`；此时若 `accessKey` 为空，`authorized()` 直接 `return true`(`server.js:389`)。 doctor 仅软告警(`doctor.js:172-178`)，**无硬阻断** → **F-01**。
+- 是否强制 127.0.0.1：**否**。默认 `127.0.0.1`(`server.js:241`)，用户可设 `0.0.0.0`；但非 loopback 且未设 `accessKey` 时**启动期直接拒绝**(`server.js:540-556`，2026-10-31 修复)，不再软告警 → **F-01（已修复）**。
 
 ### 清单 #4 SSRF —— ⚠️ 基本封堵，残留 loopback
 - 市场 `?source=` → `fetchIndex` → `assertSafeIndexUrl` 仅放行 https / loopback-http(`market.js:44-60,1213`)。**已验证**。

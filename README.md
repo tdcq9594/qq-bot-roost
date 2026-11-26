@@ -23,8 +23,8 @@
 用 Node.js 从零实现 QQ 开放平台 v2 协议，**不依赖任何第三方包**——装个 Node 22 就能跑，
 不需要 `npm install`，**装插件和更新框架也不需要 git**（下载 GitHub 的 tar 包自己解，不调外部命令）。
 
-官方接口比第三方协议严格得多：群聊被动回复 5 分钟、同一条最多回 5 次（单聊 60 分钟 / 4 次）、
-发送接口 100 QPS、主动消息单会话 20 条/分钟且每群每天 1000 条。
+官方接口比第三方协议严格得多：群聊和单聊被动回复都是 60 分钟（频道 / 私信仍 5 分钟），
+同一条最多回 5 次（单聊 4 次）、发送接口 100 QPS、主动消息单会话 20 条/分钟且每群每天 1000 条。
 这些限制框架已经统一兜住，写插件时不用算时间、不用管额度，调 `msg.reply()` 就行。
 
 插件有两种形态，互不影响：
@@ -62,7 +62,7 @@
 
 **官方接口这一层**
 
-- **限制全兜底**：出站调度器统一处理被动窗口（群 5 分钟 / 单聊 60 分钟）、会话内限速、主动消息每日额度、断线拒发、审核中识别——插件只管调 `msg.reply()`
+- **限制全兜底**：出站调度器统一处理被动窗口（群 / 单聊 60 分钟，频道 / 私信 5 分钟）、会话内限速、主动消息每日额度、断线拒发、审核中识别——插件只管调 `msg.reply()`
 - **`msg_seq` 自动维护**：同一 `msg_id` 被动回复必须递增，这是官方硬要求，漏一次就发不出去
 - **免@粘性**：@ 过一次后 N 分钟内该会话免@ 也算在跟机器人说话
 - **多轮对话**：`ctx.prompt()` 问一句等回答，文字游戏的地基
@@ -483,7 +483,7 @@ bot/
 │   ├── paths.js                全项目路径的唯一来源（按机器人参数化）
 │   ├── config.js               全局配置 + 机器人配置 + 迁移
 │   ├── events.js               47 个官方事件的登记表
-│   ├── endpoints.js            50 个官方 HTTP 接口清单（测试校验覆盖率）
+│   ├── endpoints.js            95 个官方 HTTP 接口清单（测试校验覆盖率）
 │   ├── outbound.js             出站调度器：窗口 / 限速 / 额度 / 降级
 │   ├── pipeline.js             中间件管道
 │   ├── session.js              多轮对话 + 免@粘性
@@ -576,7 +576,7 @@ npm run test:plugin -- my-plugin --list     # 列出这个插件注册了哪些�
 造一个假 ctx 和假 msg，把命令跑一遍看回复。想写断言就在自己的测试里
 `import { runCommand } from './src/plugin/testkit.js'`。
 
-**真机联调**：mock 测不出 intents、被动回复 5 分钟窗口、`msg_seq` 这些只有真网关才有的东西。
+**真机联调**：mock 测不出 intents、被动回复窗口、`msg_seq` 这些只有真网关才有的东西。
 用一个 QQ 小号（走 SnowLuma / NapCat 这类 OneBot v11 实现）在真群里 @ 机器人，就能测：
 
 ```bash
@@ -610,7 +610,7 @@ mock 模式下：直接输入文本 = 模拟一条群 @ 消息；`!as <openid>` 
   （转码器是原生二进制，塞进框架就破了零依赖）
 - **图片渲染要自己装依赖**：`plugins/render` 是示例，依赖 `@napi-rs/canvas` 可选安装，
   没装时命令会明确告诉你怎么装，不会静默失败
-- **面板无登录态**：只有访问密钥校验，没有会话，别直接暴露到公网
+- **面板用访问密钥换 HttpOnly 会话 Cookie**：带 `?key=` 打开一次即跳转到干净地址，密钥不留地址栏/日志；会话只在内存，重启需重新进。没有传统用户名密码登录，仍不建议直接暴露公网，见 [SECURITY.md](SECURITY.md)
 
 细节和应对方式见 [docs/官方接口限制.md](docs/官方接口限制.md)。
 
@@ -693,8 +693,8 @@ mock 模式下：直接输入文本 = 模拟一条群 @ 消息；`!as <openid>` 
 
 ## 集成：DeepSeek Harness
 
-仓库里带了一个 DSH 插件（`integrations/dsh-roost/`），装进
-[DeepSeek Harness](https://deepseek-harness.github.io/) 之后可以直接对 AI 说：
+DSH 插件已拆为独立仓库 **[roost-qq/dsh-roost](https://github.com/roost-qq/dsh-roost)**
+（已发 npm）。装进 [DeepSeek Harness](https://deepseek-harness.github.io/) 后可以直接对 AI 说：
 
 > 机器人现在在线吗？收了多少消息？
 > 看看最近的报错日志
@@ -704,10 +704,11 @@ mock 模式下：直接输入文本 = 模拟一条群 @ 消息；`!as <openid>` 
 Roost 是常驻服务，DSH 一关机器人不能跟着掉线。
 
 ```bash
-npx @deepseek-ai/dsh plugin --profile desktop add "/绝对路径/qq-bot-roost/integrations/dsh-roost"
+npx @deepseek-ai/dsh plugin --profile desktop add dsh-roost
 ```
 
 六个工具：`roost_status` `roost_plugins` `roost_logs`（只读）、
 `roost_plugin_toggle` `roost_send` `roost_reconnect`（写操作）。
 
-完整步骤、配置、排查见 **[DSH 接入指南](docs/DSH接入.md)**。
+完整步骤、配置、排查见独立仓 README 与框架侧的 **[DSH 接入指南](docs/DSH接入.md)**。
+（本仓 `integrations/dsh-roost/` 是旧版副本，仅供开发调试，不要再安装。）
