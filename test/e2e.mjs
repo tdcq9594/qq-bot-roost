@@ -470,6 +470,31 @@ async function testGroupsAndRoles() {
     body: JSON.stringify({ scope: 'group:e2e', openid: 'u1' }),
   });
   ok('权限: 可移除', rm.status === 200, rm.data?.error || '');
+
+  // 主人走专用接口写 config.owners，不走 roles 表（两套真相不能混）
+  const ownerId = 'A'.repeat(32);
+  const ownerAdd = await api('/api/owners/add', {
+    method: 'POST',
+    body: JSON.stringify({ openid: ownerId }),
+  });
+  ok('主人: 可绑定', ownerAdd.status === 200 && ownerAdd.data?.owners?.includes(ownerId), ownerAdd.data?.error || '');
+  const ownerList = await api('/api/roles');
+  ok('主人: 出现在权限列表', ownerList.data?.owners?.includes(ownerId));
+  const ownerBad = await api('/api/owners/add', {
+    method: 'POST',
+    body: JSON.stringify({ openid: 'not-an-openid' }),
+  });
+  ok('主人: 拒绝非法 openid', ownerBad.status === 400, ownerBad.data?.error || '');
+  const ownerViaRole = await api('/api/roles/set', {
+    method: 'POST',
+    body: JSON.stringify({ scope: 'global', openid: ownerId, level: 0 }),
+  });
+  ok('主人: roles/set 仍拒绝 0 级', ownerViaRole.status === 400, ownerViaRole.data?.error || '');
+  const ownerRm = await api('/api/owners/remove', {
+    method: 'POST',
+    body: JSON.stringify({ openid: ownerId }),
+  });
+  ok('主人: 可解绑', ownerRm.status === 200 && !ownerRm.data?.owners?.includes(ownerId), ownerRm.data?.error || '');
 }
 
 async function testEventsAndLogs() {
