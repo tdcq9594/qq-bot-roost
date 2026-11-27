@@ -351,15 +351,18 @@ export class BotRuntime {
      * 账本图片存储。**随 `ledger.saveImages` 一起开关**：
      * 关着的时候连 store 都不建，`saveMedia()` 直接返回空数组，
      * 收消息路径上一个分支都不多走。
+     *
+     * **只在构造时建一次，之后唯一的数据源是 `ledger.mediaStore`**：
+     * 面板上的开关改的是它（`web/server.js` 的 `PUT /api/ledger/images`）。
+     * 这里再留一份 `this.mediaStore` 快照就是第二个真相——曾经用它做入站
+     * 判定，结果「面板打开留档、群里发图却没缩略图」，要重启才生效。
      */
-    this.mediaStore = createBotMediaStore(cfg, this.paths.data);
-
     this.ledger = createLedger({
       file: this.paths.events,
       botId: this.id,
       enabled: cfg.ledger?.enabled !== false,
       retentionDays: cfg.ledger?.retentionDays ?? 0,
-      mediaStore: this.mediaStore,
+      mediaStore: createBotMediaStore(cfg, this.paths.data),
     });
 
     /**
@@ -1054,6 +1057,30 @@ export class BotRuntime {
   }
 
   /**
+   * 入站图片留档（`ledger.saveImages` 开着时才真的下载）。
+   *
+   * **不在这里判断开关**：开关的唯一数据源是 `ledger.mediaStore`，面板
+   * 打开/关掉它立刻生效（`saveMedia()` 内部按当前 store 决定干不干活）。
+   * 过去这里读的是构造期快照，于是「面板打开留档、群里发图却没缩略图」，
+   * 而同样是留档的出站发图却立刻有——同一个开关两种表现。
+   *
+   * **调用方不要 await**：一张图几 MB，下载几秒，串在分发链路上会让整个群
+   * 等她。`saveMedia()` 内部逐个下载、失败跳过，存完自己回填 `media` 列；
+   * 这期间面板看到的是「这条没有图」，一秒后刷新就有了。
+   *
+   * @param {{id:string}} rec `append()` 的返回值
+   * @param {object} msg 入站消息（只要有 `attachments`）
+   * @returns {Promise<Array<object>>} 存下来的条目；没图 / 没开工时是空数组
+   */
+  saveInboundMedia(rec, msg) {
+    const imgs = (Array.isArray(msg?.attachments) ? msg.attachments : [])
+      .filter((a) => a?.type === 'image' && a?.url)
+      .map((a) => ({ url: a.url, ct: a.contentType, w: a.width, h: a.height }));
+    if (!imgs.length || !rec) return Promise.resolve([]);
+    return this.ledger.saveMedia(rec, imgs).catch(() => []);
+  }
+
+  /**
    * 这个方法和单机器人时的逻辑一致，只是绑到了某个实例上。
    * 所有事件都会转交给插件，未知事件也不例外。
    */
@@ -1192,20 +1219,7 @@ export class BotRuntime {
     if (rec) {
       msg.eventId = rec.id;
       msg.eventSeq = rec.seq;
-      /**
-       * 图片留档（`ledger.saveImages` 开启时才有 store）。
-       *
-       * **一定不能 await**：一张图几 MB，下载几秒，串在这里会让整个群的
-       * 消息分发跟着等。`saveMedia` 内部逐个下载、失败跳过，
-       * 存完自己回填 `media` 列；这期间面板看到的是「这条没有图」，
-       * 一秒后再刷新就有了。
-       */
-      if (this.mediaStore) {
-        const imgs = (Array.isArray(msg.attachments) ? msg.attachments : [])
-          .filter((a) => a?.type === 'image' && a?.url)
-          .map((a) => ({ url: a.url, ct: a.contentType, w: a.width, h: a.height }));
-        if (imgs.length) this.ledger.saveMedia(rec, imgs).catch(() => {});
-      }
+      this.saveInboundMedia(rec, msg);
     }
 
     // 收到私聊 = 好友关系存在的强证据。不置 c2cPush：他能发不等于他允许机器人主动推
