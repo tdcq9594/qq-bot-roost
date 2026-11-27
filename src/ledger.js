@@ -40,6 +40,7 @@ import { createLogger } from './logger.js';
 import { probeSqlite, openDatabase } from './storage/db.js';
 import { migrateEvents } from './storage/events-schema.js';
 import { SENSITIVE_KEY } from './runtime.js';
+import { createMediaStore } from './media-store.js';
 import { ledgerTextOf, placeholderOf } from './ledger-text.js';
 
 /**
@@ -141,16 +142,25 @@ export class EventLedger {
    * @param {number} [p.retentionDays] 保留天数。**0 = 永久不删**；缺省按 0 处理
    * @param {object|null} [p.mediaStore] 图片存储（`media-store.js`）。
    *   不传 = 不存图；`ledger.saveImages` 关闭时调用方也不传。
+   * @param {string} [p.mediaDir] 图片根目录。**关档后清孤儿要用**，
+   *   不传就从 `mediaStore.dirOf()` 取；两样都没有才真的删不掉文件。
    */
-  constructor({ file, botId = '', enabled = true, retentionDays = 0, mediaStore = null }) {
+  constructor({ file, botId = '', enabled = true, retentionDays = 0, mediaStore = null, mediaDir = '' }) {
     this.file = file;
     this.botId = botId;
     this.enabled = enabled !== false;
+    /**
+     * 图片目录缓存。`mediaStore` 会被面板换掉/置空，但**磁盘上已经存下的图
+     * 还得能删**——所以目录单独记一份，由 `mediaStore` 的 setter 顺手更新。
+     */
+    this._mediaDir = String(mediaDir || '');
     /**
      * 图片存储。**和账本本体解耦**：账本关掉、库打不开都不影响它存在，
      * 反过来没配它也只是「不存图」，入库一行不受影响。
      */
     this.mediaStore = mediaStore || null;
+    /** 关档后临时建一个「只用来删文件」的 store（见 `_storeForDelete`） */
+    this._deleteStore = null;
     /**
      * `0` 是**合法值**（永久），不能像以前那样 `|| 7` 把它吃掉。
      *
@@ -168,6 +178,29 @@ export class EventLedger {
     this.warned = false;
     /** 待压缩标记（面板点「压缩」后置位，定时清理时消费） */
     this.needVacuum = false;
+  }
+
+  /**
+   * 图片存储。**开关的唯一真相**：面板直接给它赋值（`web/server.js` 的
+   * `PUT /api/ledger/images`），入站与出站留档都按它**当前**的值决定干不干活。
+   * 别再在别处留构造期快照——那会让「面板打开了却不生效」。
+   */
+  get mediaStore() {
+    return this._mediaStore || null;
+  }
+
+  set mediaStore(store) {
+    this._mediaStore = store || null;
+    /** 顺手记目录：置空之后磁盘上已有的图还得能删（见 `_storeForDelete`） */
+    if (typeof store?.dirOf === 'function') {
+      const dir = String(store.dirOf() || '');
+      if (dir) this._mediaDir = dir;
+    }
+  }
+
+  /** 图片根目录：显式传入的优先，否则取最后一次见到的 store 目录 */
+  get mediaDir() {
+    return this._mediaDir || '';
   }
 
   /** 打开库并建表。失败只警告——账本是增强功能，不能因此让机器人起不来 */
@@ -417,13 +450,76 @@ export class EventLedger {
   }
 
   /**
-   * 删图片文件。**不 await**：删图和删行不需要原子，
+   * 从一批文件里挑出「已经没有任何行引用」的那些（引用计数归零的）。
+   *
+   * 图片按**内容哈希**命名，同一张图被转发多次只存一份，于是多行的
+   * `media[].file` 指向同一个文件。只要还有一行指着它就绝不能删：删一条
+   * 消息把别人的图打成破图，比留一个孤儿文件糟得多。
+   *
+   * **必须在行删掉之后调用**（见 `_dropMediaFiles` 各调用点）：行还在时
+   * 它自己也算一个引用，文件会永远删不掉。
+   *
+   * 查不动（老库没 `media` 列、库已关）就返回空数组——宁可留孤儿，不误删。
+   *
+   * @param {string[]} files 相对路径
+   * @returns {string[]} 可以安全删掉的文件
+   */
+  _unreferencedFiles(files) {
+    const want = new Set(
+      (Array.isArray(files) ? files : []).filter((f) => typeof f === 'string' && f),
+    );
+    if (!want.size || !this.db) return [];
+    const alive = new Set();
+    try {
+      /**
+       * 一次全扫，不全扫完：候选文件全都被别人指着就可以停（删共享副本时
+       * 第一行多半就命中了）。**不按文件逐个 `instr()` 查**——那样每删一批
+       * 都是「文件数 × 行数」次子串匹配，5 万行删 500 张要 1.4 秒。
+       */
+      const rows = this.db.prepare("SELECT media FROM events WHERE media != ''").all();
+      for (const r of rows) {
+        for (const m of mediaOf(r.media)) {
+          if (want.has(m.file)) alive.add(m.file);
+        }
+        if (alive.size === want.size) break;
+      }
+    } catch {
+      return [];
+    }
+    return [...want].filter((f) => !alive.has(f));
+  }
+
+  /**
+   * 删文件用的 store。
+   *
+   * 正常情况下就是 `mediaStore`；面板关掉「图片留档」后它被置空，但磁盘上
+   * 已经存下的图还得能清（删账本 / 保留期清理）。这时按构造时记下的
+   * `mediaDir` 临时建一个**只用于删除**的 store——`remove()` 只做路径
+   * 校验 + unlink，不下载也不落盘，留着不占资源。
+   *
+   * 连目录都没有就放弃：宁可留孤儿文件，也不能拿空路径去删别处的东西。
+   */
+  _storeForDelete() {
+    if (this.mediaStore) return this.mediaStore;
+    if (!this.mediaDir) return null;
+    if (!this._deleteStore) this._deleteStore = createMediaStore({ dir: this.mediaDir });
+    return this._deleteStore;
+  }
+
+  /**
+   * 删图片文件。
+   *
+   * 删之前先过一遍引用计数（`_unreferencedFiles`）——去重之后一个文件可能
+   * 被多条消息共用，直接 unlink 会让剩下的消息变破图。
+   *
+   * **不 await**：删图和删行不需要原子，
    * 最坏结果是留一个孤儿文件，不值得让一次删除请求等几十次磁盘 IO。
    */
   _dropMediaFiles(files) {
-    const store = this.mediaStore;
-    if (!store || !Array.isArray(files) || !files.length) return;
-    for (const f of files) {
+    if (!Array.isArray(files) || !files.length) return;
+    const store = this._storeForDelete();
+    if (!store) return;
+    for (const f of this._unreferencedFiles(files)) {
       try {
         const p = store.remove(f);
         if (p && typeof p.catch === 'function') p.catch(() => {});
@@ -527,7 +623,8 @@ export class EventLedger {
     for (;;) {
       /**
        * 先把这一批要删的图片路径取出来——行删掉之后 `media` 列就没了，
-       * 图片文件留在磁盘上永远没人知道该删它。
+       * 图片文件留在磁盘上永远没人知道该删它。真正 unlink 放在 DELETE 之后：
+       * 引用计数要在行消失后才算得准（见 `_unreferencedFiles`）。
        */
       const files = this._mediaFilesOf(
         'seq IN (SELECT seq FROM events WHERE at < ? ORDER BY seq LIMIT ?)',
@@ -1103,11 +1200,12 @@ export class EventLedger {
     try {
       if (list.length) {
         const marks = list.map(() => '?').join(',');
-        /** 图片先记下来，删完就查不到了 */
-        this._dropMediaFiles(this._mediaFilesOf(`id IN (${marks})`, list));
+        /** 图片先记下来，删完就查不到了；**删文件要等行没了**再算引用计数 */
+        const files = this._mediaFilesOf(`id IN (${marks})`, list);
         removed += Number(
           this.db.prepare(`DELETE FROM events WHERE id IN (${marks})`).run(...list).changes ?? 0,
         );
+        this._dropMediaFiles(files);
       }
       if (keep && chat) {
         /**
@@ -1119,7 +1217,7 @@ export class EventLedger {
                     SELECT seq FROM events WHERE chat_id = ? ORDER BY seq DESC LIMIT ?
                   )
                 )`;
-        this._dropMediaFiles(this._mediaFilesOf(keepWhere, [chat, chat, keep]));
+        const keepFiles = this._mediaFilesOf(keepWhere, [chat, chat, keep]);
         removed += Number(
           this.db
             .prepare(
@@ -1132,9 +1230,10 @@ export class EventLedger {
             )
             .run(chat, chat, keep).changes ?? 0,
         );
+        this._dropMediaFiles(keepFiles);
       } else if (ts) {
         const beforeWhere = `at < ?${chat ? ' AND chat_id = ?' : ''}`;
-        this._dropMediaFiles(this._mediaFilesOf(beforeWhere, chat ? [ts, chat] : [ts]));
+        const beforeFiles = this._mediaFilesOf(beforeWhere, chat ? [ts, chat] : [ts]);
         removed += Number(
           this.db
             .prepare(
@@ -1142,6 +1241,7 @@ export class EventLedger {
             )
             .run(...(chat ? [ts, chat] : [ts])).changes ?? 0,
         );
+        this._dropMediaFiles(beforeFiles);
       }
       if (removed) {
         this.db.exec('DELETE FROM event_refs WHERE from_id NOT IN (SELECT id FROM events)');
@@ -1513,9 +1613,10 @@ export function toImportRow(r) {
  * @param {boolean} [p.enabled]
  * @param {number} [p.retentionDays]
  * @param {object|null} [p.mediaStore] 图片存储（`ledger.saveImages` 开启时才有）
+ * @param {string} [p.mediaDir] 图片根目录（关档后清孤儿用；不传从 store 取）
  */
-export function createLedger({ file, botId, enabled, retentionDays, mediaStore }) {
-  return new EventLedger({ file, botId, enabled, retentionDays, mediaStore });
+export function createLedger({ file, botId, enabled, retentionDays, mediaStore, mediaDir }) {
+  return new EventLedger({ file, botId, enabled, retentionDays, mediaStore, mediaDir });
 }
 
 /** 目录存在性检查，测试和面板诊断用 */

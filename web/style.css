@@ -2109,6 +2109,56 @@ label.switch.small { font-size: 12.5px; color: var(--muted); }
   transition: transform .12s ease;
 }
 .lg-thumb:hover { transform: scale(1.04); }
+/**
+ * 图片留档设置条：滑块开关在左，单张上限 + 保存在右，说明另起一行。
+ *
+ * 原来是一整行 `btn-row` 里塞了 checkbox + 两个 label + 输入框 + 按钮 + 说明，
+ * 而全局 `label` 是 `flex-direction: column`，checkbox 和「保存图片」会上下错开、
+ * 挤成一个奇怪的方块；说明文字（「开启后新收到的图片会下载留档…」）又把整行
+ * 撑到换行，右侧的「保存」跟说明叠在一起。现在按 `.mute-row` 的语言做成一条
+ * 浅色设置条：控件一行、说明一行，窄屏自动折行也不会互相穿插。
+ */
+.ledger-media {
+  display: flex;
+  align-items: center;
+  /* 开关靠左、上限组靠右；折行后单行只有一个元素时会被推到行首，正好左对齐 */
+  justify-content: space-between;
+  gap: 10px 16px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  padding: 10px 14px;
+  background: var(--panel-2);
+  border-radius: 8px;
+}
+/* `.switch-slider` 默认 `width: 100%`（整行可点区域），这里只占自己那一段 */
+.ledger-media .ledger-media-sw { width: auto; flex: none; gap: 9px; }
+.ledger-media .ledger-media-sw .label { font-size: 13px; color: var(--text-2); }
+.ledger-media .ledger-media-cap {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.ledger-media .ledger-media-cap label { font-size: 12.5px; color: var(--muted); }
+.ledger-media .ledger-media-cap input {
+  width: 92px;
+  padding: 5px 9px;
+  text-align: right;          /* 数字右对齐：位数变了输入框不跳 */
+  font-family: var(--mono);
+  font-size: 13px;
+}
+.ledger-media .ledger-media-unit { margin-left: -2px; }
+/* 说明单独占一行（`flex-basis: 100%`），没填内容时整行塌掉不留空白 */
+.ledger-media .ledger-media-hint {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.ledger-media .ledger-media-hint:empty { display: none; }
+
 /* 概览里的时间范围：两行短格式，字号小一档，别撑破卡片 */
 #tab-ledger .card .v.lg-range-v {
   font-size: 12.5px;

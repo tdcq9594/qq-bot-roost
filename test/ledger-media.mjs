@@ -1,11 +1,13 @@
 /**
  * 账本 v6：入账清洗 + 图片留档。
  *
- * 这里锁四件事：
+ * 这里锁五件事：
  *   1. **老库能升上来**（v5 → v6 加两列，重复迁移不炸）；
  *   2. 清洗结果进 `content`、原文进 `content_raw`，且只有真有差异才写；
  *   3. 图片落盘、回填 `media`、删账本时文件跟着删；
- *   4. **路径穿越必须挡住**——面板图片接口的唯一入口就是 `resolve()`。
+ *   4. **路径穿越必须挡住**——面板图片接口的唯一入口就是 `resolve()`；
+ *   5. **去重共享的文件按引用计数删**——同一张图被多条消息引用时，
+ *      删一条不能把别人的图打成破图，最后一个引用消失才 unlink。
  *
  * 跑法：node --test test/ledger-media.mjs
  */
@@ -174,6 +176,102 @@ test('删账本：行删掉时图片文件跟着删', async (t) => {
   await new Promise((r) => setTimeout(r, 60));
   assert.equal(fs.existsSync(abs), false, '行删了，图不该留在磁盘上');
   assert.equal(ledger.mediaStats().rows, 0);
+});
+
+test('去重共享：删一条消息不删另一条还在用的图，最后一个引用没了才删', async (t) => {
+  const { dir, ledger, mediaDir } = rig(t);
+  const src = path.join(dir, 'src.png');
+  fs.writeFileSync(src, PNG);
+  const r1 = add(ledger, 'm1', '[图片]');
+  const r2 = add(ledger, 'm2', '[图片]');
+  const [a] = await ledger.saveMedia(r1, [{ path: src }]);
+  const [b] = await ledger.saveMedia(r2, [{ path: src }]);
+  /** 前提：内容哈希去重，两条消息指向同一个文件 */
+  assert.equal(a.file, b.file, '同一张图应只存一份');
+  const abs = path.join(mediaDir, a.file);
+  assert.ok(fs.existsSync(abs));
+
+  ledger.remove({ ids: [r1.id] });
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(fs.existsSync(abs), true, 'm2 还指着它，文件不能删');
+  assert.equal(ledger.mediaStats().rows, 1);
+
+  ledger.remove({ ids: [r2.id] });
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(fs.existsSync(abs), false, '引用计数归零，文件才删');
+  assert.equal(ledger.mediaStats().rows, 0);
+});
+
+test('去重共享：按「只保留最近 N 条」/ 时间点清理同样不误删', async (t) => {
+  const { dir, ledger, mediaDir } = rig(t);
+  const src = path.join(dir, 'src.png');
+  fs.writeFileSync(src, PNG);
+  const r1 = add(ledger, 'm1', '[图片]');
+  const r2 = add(ledger, 'm2', '[图片]');
+  const [a] = await ledger.saveMedia(r1, [{ path: src }]);
+  await ledger.saveMedia(r2, [{ path: src }]);
+  const abs = path.join(mediaDir, a.file);
+
+  /** 只留最近 1 条：m1 被清掉，但 m2 还引用同一张图 */
+  const out = ledger.remove({ chatId: 'G1', keepLast: 1 });
+  assert.equal(out.removed, 1);
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(fs.existsSync(abs), true, 'm2 还在，图要留');
+
+  /** 一次删掉所有引用（同一批里重复出现的文件只 unlink 一次） */
+  const all = ledger.remove({ before: Date.now() + 1000 });
+  assert.equal(all.removed, 1);
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(fs.existsSync(abs), false, '最后一个引用也没了');
+});
+
+test('引用计数按整段路径比对：前缀相同的文件不算引用', async (t) => {
+  const { dir, ledger, mediaDir } = rig(t);
+  const src = path.join(dir, 'src.png');
+  fs.writeFileSync(src, PNG);
+  const r1 = add(ledger, 'm1', '[图片]');
+  const [a] = await ledger.saveMedia(r1, [{ path: src }]);
+  const abs = path.join(mediaDir, a.file);
+
+  /** 造一条「文件名是它加个后缀」的记录：SQL 里 `instr` 会命中，但不应算作引用 */
+  const other = add(ledger, 'm9', '');
+  ledger.setMedia(other.id, [{ t: 'image', file: `${a.file}.bak`, w: 1, h: 1, size: 1 }]);
+
+  ledger.remove({ ids: [r1.id] });
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(fs.existsSync(abs), false, '`a.png.bak` 不是 `a.png` 的引用');
+});
+
+test('面板开关：关掉留档后，删账本仍要把已存下的图清掉', async (t) => {
+  const { dir, ledger, mediaDir } = rig(t);
+  const src = path.join(dir, 'src.png');
+  fs.writeFileSync(src, PNG);
+  const rec = add(ledger, 'm1', '[图片]');
+  const [saved] = await ledger.saveMedia(rec, [{ path: src }]);
+  const abs = path.join(mediaDir, saved.file);
+  assert.ok(fs.existsSync(abs));
+
+  /** 面板关掉「图片留档」就是这个效果：store 置空，磁盘上的图还在 */
+  ledger.mediaStore = null;
+  assert.equal(ledger.mediaStore, null);
+  assert.equal(ledger.mediaDir, mediaDir, '目录要记住，否则关档后文件永远删不掉');
+
+  ledger.remove({ ids: [rec.id] });
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(fs.existsSync(abs), false, '关档只停存新的，已经存下的图仍随账本删');
+});
+
+test('面板开关：换 store 立刻生效，不用重建账本', async (t) => {
+  const { dir, ledger, mediaDir } = rig(t);
+  const src = path.join(dir, 'src.png');
+  fs.writeFileSync(src, PNG);
+  const rec = add(ledger, 'm1', '[图片]');
+
+  ledger.mediaStore = null;
+  assert.deepEqual(await ledger.saveMedia(rec, [{ path: src }]), [], '关着就存不下来');
+
+  ledger.mediaStore = createMediaStore({ dir: mediaDir });
+  assert.equal((await ledger.saveMedia(rec, [{ path: src }])).length, 1, '挂上就该立刻能存');
 });
 
 test('导出再导入：content_raw 与 media 原样带回', async (t) => {
