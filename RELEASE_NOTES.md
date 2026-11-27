@@ -1,3 +1,45 @@
+## v1.1.19：开了图片留档就启动崩溃的 bug 修好了，崩溃堆栈也终于能落盘
+
+> `latest` 从 **1.1.18** 升到 **1.1.19**。三个修复，都不用改配置、更新即生效。**如果你正卡在「开了图片留档后启动失败」**：升到这个版本，或先把那份 bot 配置里的 `saveImages` 改回 `false`（改文件请用无 BOM 的 UTF-8）。
+
+### 一、开过「图片留档」的机器人每次启动都崩（P0）
+
+- **现象**：面板报「Roost 启动后马上退出了」，框架日志每次只写到两行就断——
+  `[identity] 身份表已载入` → `[host] 宿主协议已监听 127.0.0.1:6807`，
+  之后既没有「插件加载完成」也没有任何 error，重试多少次都死在同一位置。
+- **原因**：`bot.js` 在 `cfg.ledger.saveImages === true` 分支里调用了 `path.join()`，
+  而整个文件没有 `import path` → 运行到 init 中段抛 `ReferenceError: path is not defined`。
+- **为什么只有少数人遇到**：这一项默认关（`config.js` 里 `saveImages: false`，注释写着「用户自己开」），
+  默认配置永远走不到那个分支，所以测试一直是绿的、绝大多数用户也正常；
+  只有真正在面板里打开过图片留档的机器，每次启动必崩。1.1.17 与 1.1.18 都带着这一行，更新版本并不能躲开。
+- **修法**：补 `import path from 'node:path'`；同时把这段抽成导出函数 `createBotMediaStore(cfg, dataDir)`，
+  让「开 / 关 / 缺省」三个分支都能被单测直接钉住，而不是藏在构造函数里没人测得到。
+
+### 二、以前的崩溃堆栈留不下来
+
+- `main().catch` 是先 `log.error(e.stack)` 再 `process.exit(1)`，而 logger 是**异步写流**——
+  进程一退，缓冲区里还没落盘的堆栈就被截断了。dsh-roost 拉起子进程时又是 `stdio: 'ignore'`，
+  `console.error` 的输出同样丢失。两边一起丢，结果就是「日志里没有 error」，看着像进程被谁静默杀了。
+- 现在退出前先 `await flushLogs()`。这类崩溃下次会在 `logs/bot.log` 里留下完整堆栈，
+  不必再靠手工启动到控制台里抓。
+
+### 三、npm 包装完没有 `start.bat`
+
+- `package.json` 的 `files` 白名单漏了这个文件：Gitee 源可用时包里有，走了 npm 兜底的机器装完就没有。
+  框架启动不依赖它（启动靠 `node src/main.js`），但教程里让人双击的那个文件确实不在。
+- 已补进白名单，`.gitattributes` 本来就锁了 CRLF，打包不会带成 LF。
+
+### 验证
+
+- 新增 `test/bot-runtime-init.mjs` 4 项：`saveImages` 开 / 关 / 缺省三态，外加一条静态扫描
+  「用了 `path.` 却没 `import node:path`」直接失败——这类未定义变量 Node 只有运行时才报，
+  不静态兜一层就会反复漏。
+- **反向验证**：临时删掉那行 import，3 项立刻变红（其中 2 项抛 `ReferenceError`），
+  「默认关」那项仍然绿——精确复刻了线上「开了才崩、没开正常」的形态。
+- **端到端**：用 `saveImages: true` 的配置真起一次框架，跑过 init、进到插件加载，不再抛 `ReferenceError`。
+- 全量测试 1543 项（自检 719 + qrlogin 8 + deps 11 + npm-registry 12 + deps-external 4 + node:test 789），
+  e2e 258 项，指纹已重算并校验一致。
+
 ## v1.1.18：面板能直接绑主人了，静默上限不再被绕过，顺手修了过时文档
 
 > `latest` 从 **1.1.17** 升到 **1.1.18**。三个小改动，都不用改配置、升级即生效：权限页能绑定/解绑主人并看人员一览；静默上限统一在唯一出口夹 30 天，面板传 400 天也不再写进去；README 与几份文档里对不上的数字和说法一并纠正。

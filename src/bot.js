@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { createLogger, attachLogFile, detachLogFile } from './logger.js';
 import { TokenManager } from './token.js';
 import { QQApi } from './api.js';
@@ -26,6 +27,30 @@ import { OneBotBridge } from './onebot/index.js';
 import { onebotAllowsCore } from './onebot/keep.js';
 import { HostBridge } from './host/index.js';
 import { isOfficialDuplicate, shouldForwardInbound } from './host/inbound-forward.js';
+
+/**
+ * 账本图片存储：**随 `cfg.ledger.saveImages` 一起开关**。
+ *
+ * 单独抽成函数，是为了让单测能直接钉住这个分支。它有段惨痛历史：这里曾经写成
+ * `path.join(...)` 却忘了 `import path`，而它又藏在 `saveImages === true` 后面、
+ * 默认配置永远走不到——于是「开了图片留档」的用户每次启动都 ReferenceError 崩在
+ * init 中途，默认配置的用户一切正常，测试也全绿，线上只能靠手工启动才看到堆栈。
+ *
+ * @param {object} cfg 机器人配置
+ * @param {string} dataDir 该机器人的数据目录（`data/bots/<id>`）
+ * @returns {object|null} 关着时返回 null，调用方不必再判空
+ */
+export function createBotMediaStore(cfg, dataDir) {
+  if (cfg?.ledger?.saveImages !== true) return null;
+  return createMediaStore({
+    dir: path.join(dataDir, 'ledger-media'),
+    /**
+     * 上限夹在 64KB–50MB：小于 64KB 连表情都存不下，
+     * 大于 50MB 一张图就能把磁盘吃穿，都不该让配置里写出来。
+     */
+    maxBytes: Math.max(64, Math.min(Number(cfg.ledger?.imageMaxKb ?? 2048) || 2048, 51200)) * 1024,
+  });
+}
 
 /**
  * 一个机器人的完整运行时。
@@ -327,16 +352,7 @@ export class BotRuntime {
      * 关着的时候连 store 都不建，`saveMedia()` 直接返回空数组，
      * 收消息路径上一个分支都不多走。
      */
-    this.mediaStore = cfg.ledger?.saveImages === true
-      ? createMediaStore({
-        dir: path.join(this.paths.data, 'ledger-media'),
-        /**
-         * 上限夹在 64KB–50MB：小于 64KB 连表情都存不下，
-         * 大于 50MB 一张图就能把磁盘吃穿，都不该让配置里写出来。
-         */
-        maxBytes: Math.max(64, Math.min(Number(cfg.ledger?.imageMaxKb ?? 2048) || 2048, 51200)) * 1024,
-      })
-      : null;
+    this.mediaStore = createBotMediaStore(cfg, this.paths.data);
 
     this.ledger = createLedger({
       file: this.paths.events,
