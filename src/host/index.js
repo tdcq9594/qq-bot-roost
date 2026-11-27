@@ -61,15 +61,46 @@ export function serializeRpcError(e) {
   };
 }
 
-/** 与 OneBot 的 6700–6799 分开，方便面板上两个出口各写各的端口 */
+/**
+ * 与 OneBot 的 6700–6799 分开，方便面板上两个出口各写各的端口。
+ *
+ * 但 Windows 开了 Hyper-V / WSL 后常把 6501–7100 整段列为保留端口，
+ * 6800–6899 会整段 bind 失败，报的是 EACCES 而不是 EADDRINUSE。
+ * 所以自动端口在某段全失败时退到备用段；显式端口仍只在附近顺延，
+ * 不跨到备用段（跨段才会让对端彻底找不到）。
+ */
 const PORT_BASE = 6800;
 const PORT_SPAN = 100;
 const PORT_TRIES = 20;
+const FALLBACK_BASE = 18300;
 const HEARTBEAT_MS = 25_000;
+
+/** 只有这两种 bind 错误值得换端口再试；别的错误换端口也没用 */
+const BIND_RETRY_CODES = new Set(['EADDRINUSE', 'EACCES']);
+
+export function shouldRetryBind(e) {
+  return BIND_RETRY_CODES.has(String(e?.code ?? ''));
+}
+
+/** EACCES 必须说人话：让用户去「依赖」卡找不存在的依赖是最糟的提示 */
+export function describeBindError(e, port) {
+  const code = String(e?.code ?? '');
+  if (code === 'EACCES') {
+    return `端口 ${port} 被系统保留或没有权限监听（Windows 开了 Hyper-V / WSL 时常见），请到「外接」换一个端口`;
+  }
+  if (code === 'EADDRINUSE') return `端口 ${port} 被占用，顺延后仍起不来`;
+  return `端口 ${port} 起不来：${e?.message ?? '未知原因'}`;
+}
 
 function portOf(botId) {
   const h = crypto.createHash('sha1').update(String(botId)).digest();
   return PORT_BASE + (h.readUInt16BE(0) % PORT_SPAN);
+}
+
+/** 自动端口先按原公式试，整段不可用时才退到备用段；显式端口只试自己那一段 */
+function* candidatePorts(wanted, auto) {
+  for (let i = 0; i < PORT_TRIES; i++) yield wanted + i;
+  if (auto) for (let i = 0; i < PORT_TRIES; i++) yield FALLBACK_BASE + i;
 }
 
 export class HostBridge {
@@ -78,11 +109,13 @@ export class HostBridge {
    * @param {object} p.runtime BotRuntime
    * @param {object} p.cfg     该机器人的 `host` 配置
    * @param {string} p.botId
+   * @param {Function} [p.createServer] 可注入的监听工厂，只为把端口失败路径钉进单测
    */
-  constructor({ runtime, cfg, botId }) {
+  constructor({ runtime, cfg, botId, createServer = createHostServer }) {
     this.runtime = runtime;
     this.cfg = cfg ?? {};
     this.botId = botId;
+    this.createServer = createServer;
     this.server = null;
     this.methods = null;
     this.state = 'stopped';
@@ -199,7 +232,7 @@ export class HostBridge {
 
     await this.#version();
     /** 端口写在构造参数里，被占只能重建实例；每次只建一个，别让失败的实例堆着计时器 */
-    const make = (p) => createHostServer({
+    const make = (p) => this.createServer({
       host: listenHost,
       port: p,
       token: String(this.cfg.token ?? ''),
@@ -215,9 +248,11 @@ export class HostBridge {
     });
 
     const wanted = Number(this.cfg.port) || portOf(this.botId);
+    const auto = !Number(this.cfg.port);
     let lastErr = null;
-    for (let i = 0; i < PORT_TRIES; i++) {
-      const p = wanted + i;
+    let lastPort = wanted;
+    for (const p of candidatePorts(wanted, auto)) {
+      lastPort = p;
       const attempt = make(p);
       try {
         this.port = await attempt.start();
@@ -226,13 +261,13 @@ export class HostBridge {
       } catch (e) {
         lastErr = e;
         await attempt.stop().catch(() => {});
-        if (e?.code !== 'EADDRINUSE') break;
+        if (!shouldRetryBind(e)) break;
       }
     }
 
     if (!this.server) {
       this.state = 'error';
-      this.error = `端口 ${wanted} 起不来：${lastErr?.message ?? '未知原因'}`;
+      this.error = describeBindError(lastErr, lastPort);
       log.error(this.error);
       return this;
     }

@@ -1543,6 +1543,64 @@ window.addEventListener('hashchange', () => {
 
 /* ---------------- 概览 ---------------- */
 
+/** 宿主协议状态：概览卡与「外接」页的实时行共用同一份 status 快照 */
+const HOST_STATE_TEXT = {
+  running: '运行中',
+  disabled: '未开启',
+  stopped: '已停止',
+  'missing-deps': '缺依赖',
+  error: '启动失败',
+};
+
+function hostStatusTone(state) {
+  if (state === 'running') return 'var(--ok)';
+  if (state === 'error' || state === 'missing-deps') return 'var(--err)';
+  return 'var(--warn)';
+}
+
+function hostDot(color) {
+  return '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;'
+    + `background:${color};margin-right:6px;vertical-align:middle"></span>`;
+}
+
+function renderHostOverview(host) {
+  const el = $('#c-host');
+  if (!el) return;
+  const state = host?.state ?? 'disabled';
+  const label = HOST_STATE_TEXT[state] ?? state;
+  const detail = state === 'running'
+    ? `${label} · ${Number(host?.connections ?? 0)} 连接`
+    : label;
+  el.innerHTML = hostDot(hostStatusTone(state)) + escapeHtml(detail);
+  el.title = state === 'running'
+    ? `实际监听 ${host?.host ?? '127.0.0.1'}:${host?.port ?? 0}` +
+      ` · seq ${host?.seq ?? 0} · 点击查看`
+    : escapeHtml(host?.error || '点击查看外接协议');
+  el.onclick = () => { location.hash = 'onebot'; };
+}
+
+function renderHostLive(host) {
+  const el = $('#hostLiveStatus');
+  if (!el || !host) return;
+  const state = host.state ?? 'disabled';
+  const label = HOST_STATE_TEXT[state] ?? state;
+  const tr = host.transports ?? {};
+  const channels = [tr.ws ? 'WS' : null, tr.sse ? 'SSE' : null, tr.http ? 'HTTP' : null]
+    .filter(Boolean).join('/') || '—';
+  const text = state === 'running'
+    ? `${label} · ${host.host ?? '127.0.0.1'}:${host.port ?? 0}` +
+      ` · ${Number(host.connections ?? 0)} 个连接 · ${channels} · seq ${host.seq ?? 0}`
+    : label;
+  el.innerHTML = hostDot(hostStatusTone(state)) + escapeHtml(text)
+    + (host.error ? `<div style="color:var(--err);margin-top:4px">${escapeHtml(host.error)}</div>` : '');
+  const hint = $('#hostStateHint');
+  if (hint) {
+    hint.textContent = state === 'running'
+      ? `实时：${label} · ${host.port ?? 0} · ${Number(host.connections ?? 0)} 连接`
+      : `实时：${label}`;
+  }
+}
+
 function renderStatus(s) {
   // 迟到的别的机器人的状态包，直接丢掉
   if (s && s.botId && CURRENT_BOT && s.botId !== CURRENT_BOT) return;
@@ -1573,6 +1631,9 @@ function renderStatus(s) {
   $('#botName').textContent = online ? s.botName || '已连接' : '未连接';
 
   $('#c-conn').textContent = online ? '在线' : state === 'error' ? '连接失败' : '离线';
+  /** 外接协议状态跟着同一份 5 秒 status 走，概览卡和外接页实时行一起刷 */
+  renderHostOverview(s.host);
+  renderHostLive(s.host);
   $('#c-uptime').textContent = fmtDuration(s.uptimeMs);
   $('#c-cred').textContent = s.credentialExpiresIn
     ? `${Math.floor(s.credentialExpiresIn / 60)} 分`
@@ -6584,14 +6645,6 @@ async function loadOnebot() {
   }
 }
 
-const HOST_STATE_TEXT = {
-  running: '运行中',
-  disabled: '未开启',
-  stopped: '已停止',
-  'missing-deps': '缺依赖',
-  error: '启动失败',
-};
-
 /** 宿主协议那半边：配置表单 + 运行状态 + 方法表 */
 function renderHost(d) {
   const cfg = d?.cfg ?? {};
@@ -6670,9 +6723,12 @@ function renderHost(d) {
           ? '<div class="hint" style="margin-top:6px;color:var(--err)"><b>机器人本体没上线</b>：' +
             '客户端能连上，但发消息、调官方接口会失败——先到「运行」页让它上线</div>'
           : '');
-    } else if (st.state === 'missing-deps' || st.state === 'error') {
-      hint.innerHTML = `<b>${escapeHtml(st.error || '没起来')}</b>` +
-        '。缺依赖就到下面「依赖」卡装，装完会自动重连。';
+    } else if (st.state === 'missing-deps') {
+      hint.innerHTML = `<b>${escapeHtml(st.error || '缺依赖')}</b>` +
+        '。到下面「依赖」卡装，装完会自动重连。';
+    } else if (st.state === 'error') {
+      /** 端口被系统保留 / 被占都不是缺依赖，别再一律让用户去装依赖 */
+      hint.innerHTML = `<b>${escapeHtml(st.error || '没起来')}</b>`;
     } else {
       hint.textContent = '开启后这里会显示连接串和运行状态。';
     }

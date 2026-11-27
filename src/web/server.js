@@ -4,6 +4,7 @@ import fsSync from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { ROOT } from '../config.js';
+import { RESET_CONFIRM, resetFrameworkConfigs } from '../config-reset.js';
 import { redactText } from '../runtime.js';
 import { DIRS, botPaths, listBotIds, rel } from '../paths.js';
 import { createLogger, recentLogs, onLog, getLevel, setLevel } from '../logger.js';
@@ -747,6 +748,11 @@ async function startWebServerInstance({
      * 暂停是个紧急操作，等用户点进某个页签才发现「原来还暂停着」就太晚了。
      */
     snap.gate = rt?.gate?.peek?.() ?? null;
+    /**
+     * 外接协议状态：概览页的卡片和「外接」页的实时行共用这一份快照。
+     * snapshot() 不含 token，跟着 5 秒一次的 status 走，不必再开轮询接口。
+     */
+    snap.host = rt?.host?.snapshot?.() ?? null;
     return snap;
   };
 
@@ -2254,6 +2260,27 @@ async function startWebServerInstance({
                 }
               : {}),
           });
+        }
+
+        /**
+         * 恢复默认设置（只设置，不动 data/）。给 dsh-roost 面板的支持弹窗用：
+         * 它自己不写框架配置，而是带面板密钥调这里，避免跨进程抢同一份状态。
+         *
+         * 二次确认放在服务端也做一遍——前端按钮只是一层 UI，裸调接口不该生效。
+         * 成功后的配置由 config-watch 在 ~3s 内热加载；端口不会重新 bind，
+         * 所以 webui.host/port 是保留项（见 config-reset.js）。
+         */
+        if (pathname === '/api/config/reset' && req.method === 'POST') {
+          const body = await readBody(req);
+          if (body?.confirm !== RESET_CONFIRM) {
+            return json(res, 400, { ok: false, error: `需要 confirm: "${RESET_CONFIRM}"` });
+          }
+          try {
+            const r = await resetFrameworkConfigs({ confirm: body.confirm });
+            return json(res, r.ok ? 200 : 500, r);
+          } catch (e) {
+            return json(res, 500, { ok: false, error: `恢复默认失败：${e?.message || e}` });
+          }
         }
 
         // 插件

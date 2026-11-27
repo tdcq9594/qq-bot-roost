@@ -17,7 +17,7 @@ export const CONFIG_PATH = PATHS.globalConfig;
 /* ------------------------------------------------------------------ */
 
 /** 全局配置：管进程本身（面板、日志、插件依赖策略） */
-const GLOBAL_DEFAULTS = {
+export const GLOBAL_DEFAULTS = {
   logLevel: 'info',
   cooldownHint: true,
 
@@ -249,7 +249,7 @@ const GLOBAL_DEFAULTS = {
 };
 
 /** 机器人配置：管连接与行为，每个机器人一份 */
-const BOT_DEFAULTS = {
+export const BOT_DEFAULTS = {
   name: '',
   enabled: true,
 

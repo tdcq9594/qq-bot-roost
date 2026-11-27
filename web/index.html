@@ -235,6 +235,9 @@
       <div class="card" title="开着时消息不真发，只记下本来会发什么（只影响内建插件；点击切换）">
         <div class="k">dry 模式</div><div class="v" id="c-dry">-</div>
       </div>
+      <div class="card" id="hostStatusCard" title="点击查看外接协议状态" style="cursor:pointer">
+        <div class="k">外接协议</div><div class="v" id="c-host">-</div>
+      </div>
     </div>
 
     <div class="row">
@@ -1607,6 +1610,7 @@ curl 'https://bot.q.qq.com/cgi-bin/v2/info/list_bots' \
         <button class="btn small" id="btnHostReload">刷新状态</button>
       </div>
       <div class="hint" id="hostConnHint" style="margin-top:8px"></div>
+      <div class="hint" id="hostLiveStatus" style="margin-top:8px"></div>
     </div>
 
     <div class="box">
