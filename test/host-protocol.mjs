@@ -13,7 +13,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHostServer } from '../src/host/server.js';
 import { HostBridge } from '../src/host/index.js';
-import { serializeRpcError } from '../src/host/index.js';
+import { serializeRpcError, shouldRetryBind, describeBindError } from '../src/host/index.js';
 import * as extDeps from '../src/ext-deps.js';
 import {
   createMethods, effectiveScopes, HostError, HOST_PROTOCOL,
@@ -1044,4 +1044,68 @@ test('新增只读方法：quota.get 给用量与上限，system.events 给事�
   const st = await methods.call('runtime.status', {}, { scopes });
   assert.equal(st.gatewayIntents, 1 << 25, '当前连接实际用的 intents 要能读到');
   assert.equal(st.intents, 1 << 25, '配置值仍保留');
+});
+
+/* ------------------------------------------------------------------ */
+/* 端口失败路径：Windows 保留端口报 EACCES，不是 EADDRINUSE             */
+/* ------------------------------------------------------------------ */
+
+test('bind 失败分类：EACCES / EADDRINUSE 才顺延，提示不再甩锅依赖', () => {
+  assert.equal(shouldRetryBind({ code: 'EADDRINUSE' }), true);
+  assert.equal(shouldRetryBind({ code: 'EACCES' }), true, 'Windows 保留端口报的是 EACCES');
+  assert.equal(shouldRetryBind({ code: 'EPERM' }), false);
+  assert.match(describeBindError({ code: 'EACCES' }, 6807), /被系统保留.*Hyper-V/);
+  assert.match(describeBindError({ code: 'EADDRINUSE' }, 6807), /被占用/);
+  assert.match(describeBindError({ code: 'ENOENT' }, 6807), /6807/);
+});
+
+test('自动端口整段被系统保留时退到备用段，EACCES 也继续顺延', async (t) => {
+  const seen = [];
+  const createServer = ({ port }) => ({
+    async start() {
+      seen.push(port);
+      if (port < 18000) {
+        throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+      }
+      return port;
+    },
+    async stop() {},
+  });
+  const bridge = new HostBridge({
+    runtime: makeRuntime(),
+    cfg: { enabled: true, token: TOKEN, host: '127.0.0.1', port: 0 },
+    botId: 'test-bot',
+    createServer,
+  });
+  t.after(() => bridge.stop());
+  await bridge.start();
+
+  assert.equal(bridge.state, 'running', `没能起来：${bridge.error}`);
+  assert.equal(bridge.port, 18300, '备用段首个端口应该起来了');
+  assert.ok(seen[0] >= 6800 && seen[0] < 7000, '先按原公式试');
+  assert.equal(seen.length, 21, '原段 20 次失败后退到备用段，至少再试 1 次');
+});
+
+test('显式端口被系统保留：只在原段顺延，不跨备用段，错误说清是保留', async (t) => {
+  const seen = [];
+  const createServer = ({ port }) => ({
+    async start() {
+      seen.push(port);
+      throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    },
+    async stop() {},
+  });
+  const bridge = new HostBridge({
+    runtime: makeRuntime(),
+    cfg: { enabled: true, token: TOKEN, host: '127.0.0.1', port: 6807 },
+    botId: 'test-bot',
+    createServer,
+  });
+  t.after(() => bridge.stop());
+  await bridge.start();
+
+  assert.equal(bridge.state, 'error');
+  assert.equal(seen.length, 20, '显式端口只在附近顺延，不跨到备用段');
+  assert.ok(seen.every((p) => p < 6900));
+  assert.match(bridge.error, /被系统保留/);
 });
