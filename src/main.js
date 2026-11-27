@@ -1603,7 +1603,15 @@ async function main() {
   process.on('SIGTERM', shutdown);
 }
 
-main().catch((e) => {
+main().catch(async (e) => {
   log.error(e.stack || e.message);
+  /**
+   * 退出前必须把日志刷完。
+   *
+   * `process.exit()` 会直接砍掉还没落盘的写流（logger 是 `createWriteStream` 异步写），
+   * 崩溃原因就此消失。真实教训：1.1.17 / 1.1.18 里 `path is not defined` 在 bot.log
+   * 里一个字都没留下，最后只能靠手工启动才看到堆栈——排查成本全压在用户身上。
+   */
+  await flushLogs().catch(() => {});
   process.exit(1);
 });

@@ -1385,15 +1385,24 @@ curl 'https://bot.q.qq.com/cgi-bin/v2/info/list_bots' \
         <button id="ledgerExport" class="btn small">导出 CSV</button>
         <button id="ledgerExportJson" class="btn small">导出 JSON</button>
       </div>
-      <div class="btn-row" style="align-items:center">
-        <label for="ledgerSaveImages" class="hint" style="margin:0;display:flex;align-items:center;gap:6px">
-          <input type="checkbox" id="ledgerSaveImages"> 保存图片
+      <!--
+        图片留档：开关用滑块（`label` 全局是竖排，原生 checkbox + 文字会上下错开），
+        上限与保存在右侧成组，说明单独一行——原来全塞一个 `btn-row` 里，
+        说明文字会把这一行撑到换行，看着很挤。
+      -->
+      <div class="ledger-media">
+        <label class="switch-slider ledger-media-sw">
+          <input type="checkbox" id="ledgerSaveImages">
+          <span class="track"></span>
+          <span class="label">保存图片</span>
         </label>
-        <label for="ledgerImageMax" class="hint" style="margin:0">单张上限</label>
-        <input id="ledgerImageMax" type="number" min="64" max="51200" step="64"
-               style="width:110px"> <span class="hint" style="margin:0">KB</span>
-        <button id="ledgerImagesSave" class="btn small">保存</button>
-        <span class="hint" style="margin:0" id="ledgerMediaHint"></span>
+        <div class="ledger-media-cap">
+          <label for="ledgerImageMax">单张上限</label>
+          <input id="ledgerImageMax" type="number" min="64" max="51200" step="64" inputmode="numeric">
+          <span class="ledger-media-unit">KB</span>
+          <button id="ledgerImagesSave" class="btn small">保存</button>
+        </div>
+        <p class="hint ledger-media-hint" id="ledgerMediaHint"></p>
       </div>
       <div class="btn-row">
         <button id="ledgerImport" class="btn small">导入…</button>
