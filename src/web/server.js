@@ -747,6 +747,11 @@ async function startWebServerInstance({
      * 暂停是个紧急操作，等用户点进某个页签才发现「原来还暂停着」就太晚了。
      */
     snap.gate = rt?.gate?.peek?.() ?? null;
+    /**
+     * 外接协议状态：概览页的卡片和「外接」页的实时行共用这一份快照。
+     * snapshot() 不含 token，跟着 5 秒一次的 status 走，不必再开轮询接口。
+     */
+    snap.host = rt?.host?.snapshot?.() ?? null;
     return snap;
   };
 
