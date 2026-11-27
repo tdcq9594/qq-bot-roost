@@ -6670,9 +6670,12 @@ function renderHost(d) {
           ? '<div class="hint" style="margin-top:6px;color:var(--err)"><b>机器人本体没上线</b>：' +
             '客户端能连上，但发消息、调官方接口会失败——先到「运行」页让它上线</div>'
           : '');
-    } else if (st.state === 'missing-deps' || st.state === 'error') {
-      hint.innerHTML = `<b>${escapeHtml(st.error || '没起来')}</b>` +
-        '。缺依赖就到下面「依赖」卡装，装完会自动重连。';
+    } else if (st.state === 'missing-deps') {
+      hint.innerHTML = `<b>${escapeHtml(st.error || '缺依赖')}</b>` +
+        '。到下面「依赖」卡装，装完会自动重连。';
+    } else if (st.state === 'error') {
+      /** 端口被系统保留 / 被占都不是缺依赖，别再一律让用户去装依赖 */
+      hint.innerHTML = `<b>${escapeHtml(st.error || '没起来')}</b>`;
     } else {
       hint.textContent = '开启后这里会显示连接串和运行状态。';
     }
