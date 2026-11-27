@@ -6,10 +6,12 @@
 // 日志只写到「宿主协议已监听 127.0.0.1:xxxx」就断，退出前又没 flush，堆栈一个字都
 // 没落盘，最后只能靠手工启动才看见。
 //
-// 这里锁三件事：
+// 这里锁四件事：
 //   1. `saveImages: true` 时真能建出 store，且落在 `data/bots/<id>/ledger-media`；
 //   2. 关着时不建（保住「关着就零成本」的承诺）；
-//   3. `src/` 下**没有**「用了 path API 却没 import node:path」的文件 ——
+//   3. 入站取图**只看 `ledger.mediaStore` 当前值**——面板开关要立刻生效，
+//      不能读构造期快照（否则「面板打开了、群里发图却没缩略图」，要重启）；
+//   4. `src/` 下**没有**「用了 path API 却没 import node:path」的文件 ——
 //      这类未定义变量 Node 只有运行时才报，不静态扫一遍就永远漏。
 //
 // 跑法：node --test test/bot-runtime-init.mjs
@@ -25,7 +27,7 @@ import assert from 'node:assert/strict';
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'roost-init-'));
 process.env.ROOST_HOME = HOME;
 
-const { createBotMediaStore } = await import('../src/bot.js');
+const { createBotMediaStore, BotRuntime } = await import('../src/bot.js');
 
 const DATA = path.join(HOME, 'data', 'bots', 't1');
 
@@ -53,6 +55,39 @@ test('图片留档：关着或没写，一律不建 store', () => {
   assert.equal(createBotMediaStore({ ledger: {} }, DATA), null);
   assert.equal(createBotMediaStore({}, DATA), null, '整个 ledger 段都没有时也要照常返回');
   assert.equal(createBotMediaStore(undefined, DATA), null);
+});
+
+/* ---------------- 入站取图：开关的唯一真相是 ledger.mediaStore ---------------- */
+
+test('入站取图：交给 ledger.saveMedia 判定，不看构造期快照', async () => {
+  const calls = [];
+  const fake = {
+    /** 面板关档后就是这个状态：store 是空的 */
+    ledger: {
+      mediaStore: null,
+      saveMedia: (rec, src) => {
+        calls.push([rec, src]);
+        return Promise.resolve([]);
+      },
+    },
+  };
+  const msg = {
+    attachments: [
+      { type: 'image', url: 'https://example.com/a.png', contentType: 'image/png', width: 2, height: 3 },
+      { type: 'image', url: '' },
+      { type: 'file', url: 'https://example.com/x.txt' },
+    ],
+  };
+
+  await BotRuntime.prototype.saveInboundMedia.call(fake, { id: 'm1' }, msg);
+  assert.equal(calls.length, 1, 'store 为空也要交给 saveMedia 自己判断，不能在这里短路');
+  assert.deepEqual(calls[0][1], [{ url: 'https://example.com/a.png', ct: 'image/png', w: 2, h: 3 }],
+    '只挑真带 url 的图片附件');
+
+  calls.length = 0;
+  await BotRuntime.prototype.saveInboundMedia.call(fake, { id: 'm2' }, { attachments: [] });
+  await BotRuntime.prototype.saveInboundMedia.call(fake, null, msg);
+  assert.equal(calls.length, 0, '没图 / 没入账都别调');
 });
 
 /* ---------------- 静态扫描：path API 用了却没导入 ---------------- */
