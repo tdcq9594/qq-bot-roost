@@ -82,3 +82,21 @@ test('接线：bot.js 用 msg.id 判重推，并把结果交给 shouldForwardInb
   assert.ok(at > 0, '广播处必须调用 shouldForwardInbound');
   assert.ok(src.slice(at, at + 400).includes('duplicate'), '调用时必须把 duplicate 传进去');
 });
+
+test('命中命令表的命令不交给协议层（否则模型会把它当聊天）', () => {
+  /**
+   * 2026-11-28 用户反馈：群里发 `/help 插件`，命令正常回了菜单，
+   * 但同一句也被当成聊天喂给了 dsh-roost，还写进了记忆召回。
+   * 判定在框架侧做——只有**命令表里真的有**这个名字才拦。
+   */
+  assert.equal(shouldForwardInbound({ hasContent: true, isCommand: true }), false);
+  assert.equal(shouldForwardInbound({ hasContent: true, isCommand: false }), true);
+});
+
+test('接线：bot.js 只把「前缀开头且命令表命中」判成命令', () => {
+  const src = readFileSync(new URL('../src/bot.js', import.meta.url), 'utf8');
+  const at = src.indexOf('shouldForwardInbound({');
+  assert.ok(at > 0);
+  const block = src.slice(at, at + 700);
+  assert.ok(block.includes('registry.commands.has(msg.command)'), '不能只按前缀判：`/xyz` 这类未知命令仍该当普通消息');
+});

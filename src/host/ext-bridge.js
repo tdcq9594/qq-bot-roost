@@ -49,28 +49,54 @@ const MAX_ALIASES = 4;
 const CMD_NAME_RE = /^[\p{L}\p{N}_-]{1,16}$/u;
 
 /**
+ * 宿主本体在命令表里的内部 id。
+ *
+ * 以前写死 `__host`，它会一路漏进 `/help 插件` 的列表里，用户看到的是
+ * 「__host DSH」——一个谁也认不出的内部代号。改成按对方**自报的名字**
+ * 生成（`host.name`，默认 `dsh-roost`），对内唯一、对外只显示名字。
+ *
+ * 保留 `__` 前缀有两个用处：分群「只启用列表」的插件开关对它放行
+ * （见 `bot.js` 的 `pluginAllowedIn`），`/help 插件` 也能一眼把它筛掉。
+ *
+ * 后续要接别的程序时，各自在 `host.name` 里报不同的名字就各占一个命名空间，
+ * 不用再抢 `__host` 这个固定 id；真正的多连接并行还需要协议层给每条连接
+ * 一个身份（`ext.register` 目前是一条连接一次全量上报）。
+ */
+function virtualPluginId(name) {
+  const slug = String(name ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}_-]+/gu, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32);
+  return `__${slug || 'dsh'}`;
+}
+
+/**
  * 把客户端上报的命令条目洗成内部结构。
  *
- * target = 'host' 表示宿主本体（伪插件 `__host`），'ext' 表示某个扩展
+ * target = 'host' 表示宿主本体（伪插件 `__<host.name>`），'ext' 表示某个扩展
  * （伪插件 `__ext:<id>`）。名字不合法直接丢——命令表是全局命名空间，
  * 不能让一个畸形条目把别的插件注册流程带崩。
  */
 function normalizeCommands(list, { target, extId = '', pluginName }) {
   const out = [];
+  const name = String(pluginName ?? '').trim() || (target === 'host' ? 'dsh-roost' : extId);
+  const pluginId = target === 'host' ? virtualPluginId(name) : `__ext:${extId}`;
   for (const c of Array.isArray(list) ? list : []) {
     if (!c || typeof c !== 'object') continue;
-    const name = String(c.name ?? '').trim().toLowerCase();
-    if (!CMD_NAME_RE.test(name)) continue;
+    const cmd = String(c.name ?? '').trim().toLowerCase();
+    if (!CMD_NAME_RE.test(cmd)) continue;
     const aliases = (Array.isArray(c.aliases) ? c.aliases : [])
       .map((a) => String(a ?? '').trim().toLowerCase())
-      .filter((a) => a && a !== name && CMD_NAME_RE.test(a))
+      .filter((a) => a && a !== cmd && CMD_NAME_RE.test(a))
       .slice(0, MAX_ALIASES);
     out.push({
       target,
       extId,
-      pluginId: target === 'host' ? '__host' : `__ext:${extId}`,
-      pluginName: String(pluginName ?? '').slice(0, 40) || (target === 'host' ? 'DSH' : extId),
-      name,
+      pluginId,
+      pluginName: name.slice(0, 40),
+      name: cmd,
       aliases,
       desc: String(c.desc ?? '').slice(0, 60),
       usage: String(c.usage ?? '').slice(0, 120),
@@ -239,7 +265,7 @@ export function createExtBridge({
       }));
 
     /**
-     * 命令清单：扩展的按扩展归属，宿主的归 `__host`。
+     * 命令清单：扩展的按扩展归属，宿主的归它自报的那个名字（`__<name>`）。
      * 总数超上限就整批丢（不静默截一半），并让客户端在 `rejected` 里看到原因。
      */
     const normalized = [];
@@ -250,7 +276,7 @@ export function createExtBridge({
       );
     }
     if (host && typeof host === 'object') {
-      normalized.push(...normalizeCommands(host.commands, { target: 'host', pluginName: String(host.name ?? 'DSH') }));
+      normalized.push(...normalizeCommands(host.commands, { target: 'host', pluginName: String(host.name ?? 'dsh-roost') }));
     }
 
     let rejected = [];

@@ -187,7 +187,7 @@ test('ext.register 上报的命令被归一化：别名、权限、伪插件归�
       actions: [{ id: 'share', label: '分享' }],
       commands: [{ name: 'Bili', aliases: ['哔哩', 'BILI'], desc: '投稿', admin: true, ownerOnly: true }],
     }],
-    host: { name: 'DSH', commands: [{ name: 'model', desc: '换模型', admin: true }] },
+    host: { name: 'dsh-roost', commands: [{ name: 'model', desc: '换模型', admin: true }] },
   });
 
   assert.equal(r.commands, 2);
@@ -200,9 +200,9 @@ test('ext.register 上报的命令被归一化：别名、权限、伪插件归�
   assert.equal(bili.admin, true);
   assert.equal(bili.ownerOnly, true);
   const host = list.find((c) => c.name === 'model');
-  assert.equal(host.pluginId, '__host');
+  assert.equal(host.pluginId, '__dsh-roost');
   assert.equal(host.target, 'host');
-  assert.equal(host.pluginName, 'DSH');
+  assert.equal(host.pluginName, 'dsh-roost');
 });
 
 test('名字不合法的命令整条丢弃，不把畸形条目带进 registry', () => {
@@ -329,7 +329,7 @@ test('ext.register 把宿主命令真装进 registry，别名成隐藏命令', a
   const { hb, registry, scopes } = hostRig();
   const r = await hb.methods.call(
     'ext.register',
-    { host: { name: 'DSH', commands: [{ name: 'model', desc: '换模型', admin: true, aliases: ['模型'] }] } },
+    { host: { name: 'dsh-roost', commands: [{ name: 'model', desc: '换模型', admin: true, aliases: ['模型'] }] } },
     { scopes },
   );
   assert.equal(r.ok, true);
@@ -337,12 +337,12 @@ test('ext.register 把宿主命令真装进 registry，别名成隐藏命令', a
   assert.deepEqual(r.rejected, []);
 
   const entry = registry.commands.get('model');
-  assert.equal(entry.pluginId, '__host');
+  assert.equal(entry.pluginId, '__dsh-roost');
   assert.equal(entry.admin, true);
   assert.equal(typeof entry.handler, 'function');
   assert.ok(registry.commands.has('模型'), '别名要能直呼');
-  assert.equal(registry.menus.get('__host').title, 'DSH');
-  const texts = registry.menus.get('__host').sections.flatMap((s) => s.items.map((i) => i.text));
+  assert.equal(registry.menus.get('__dsh-roost').title, 'dsh-roost');
+  const texts = registry.menus.get('__dsh-roost').sections.flatMap((s) => s.items.map((i) => i.text));
   assert.deepEqual(texts, ['model'], '别名不进菜单');
 });
 

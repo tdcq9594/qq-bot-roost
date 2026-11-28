@@ -1278,6 +1278,12 @@ export class BotRuntime {
         silent: msg.silent,
         forwardSilent,
         duplicate,
+        /**
+         * 命中命令表的命令由框架自己处理，别再交给协议层：
+         * 否则 dsh-roost 会把「/help 插件」当成用户说的一句话喂给模型。
+         * 只认命令表里有的名字，`/xyz` 这类未知命令仍按普通消息走。
+         */
+        isCommand: Boolean(msg.isCommand && registry.commands.has(msg.command)),
       })) {
         this.onebot?.onMessage(msg);
         /** 宿主协议：传完整 msg（原生结构），它自己挑字段 */
