@@ -7,6 +7,8 @@
 <title>栖 Roost · 控制台</title>
 <!-- 主题脚本必须外置：CSP 的 script-src 'self' 会拦掉内联脚本 -->
 <script src="/theme-boot.js"></script>
+<!-- 主题变量唯一真相源：面板与插件页共用；必须在 style.css 之前 -->
+<link rel="stylesheet" href="/theme-vars.css">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -601,7 +603,7 @@
       <p class="hint" id="apMsg"></p>
       <p class="hint">
         配色只存在这个浏览器的 localStorage；导出的 JSON 不含背景图。
-        插件页的 iframe 用的是服务端下发的固定配色，<b>不跟随</b>这里的自定义主色。
+        插件页会<b>跟随</b>这里的配色与玻璃效果；插件自己写的样式优先。
       </p>
     </div>
   </section>

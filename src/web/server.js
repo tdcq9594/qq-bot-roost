@@ -53,6 +53,7 @@ import { handleQqCall, capabilityPayload } from './qq-call.js';
 import { handleMediaList, handleMediaUpload, handleMediaDelete } from './media.js';
 import { getDevPlatform } from '../host/dev.js';
 import { requireBoundAppid } from '../dev/platform.js';
+import { buildPageTheme } from './page-theme.js';
 import { devErrorPayload, devErrorTable } from '../dev/errors.js';
 import * as extDeps from '../ext-deps.js';
 import { runDoctor, summarize } from '../doctor.js';
@@ -329,41 +330,10 @@ function listenWithFallback(server, host, startPort, { tries = 20, onBusy } = {}
 }
 
 /**
- * 插件页面的基础样式与主题变量。
- *
- * 目的是让插件作者**不用管深浅色**：直接用 `var(--panel)` `var(--text)` 就行。
- * 变量名和 web/style.css **必须保持一致**——插件作者在面板里看到的是
- * `var(--text)`，在插件页面里也应该是同一个名字，不能自创一套。
- * 面板切主题时 iframe 会带着 theme 参数重新加载，页面自动跟着变。
+ * 插件页的主题注入已搬到 src/web/page-theme.js：
+ * 色值唯一真相源是 web/theme-vars.css，这里不再维护两套静态表。
+ * 面板与插件页共用同一份 CSS，插件作者也能用自己的 CSS 覆盖。
  */
-const BASE_CSS = `
-body{margin:0;padding:16px;background:var(--panel);color:var(--text);
-font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
-a{color:var(--primary)}
-h1,h2,h3{color:var(--text);font-weight:600}
-table{border-collapse:collapse;width:100%}
-th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--border)}
-th{font-size:12px;font-weight:600;color:var(--muted)}
-code{background:var(--panel-2);padding:1px 5px;border-radius:4px}
-`;
-
-/** 两套主题的变量值，和 web/style.css 的 :root 一一对应 */
-const PAGE_THEME = {
-  light: `<style>
-:root{color-scheme:light;--bg:#f8f5f1;--panel:#fffdfb;--panel-2:#f6f2ed;--panel-3:#efeae4;
---border:#e2dbd4;--border-strong:#c5bcb3;--text:#251d19;--text-2:#534b45;--muted:#787069;
---faint:#a39d97;--primary:#af5504;--primary-hover:#993800;--ok:#137d41;--warn:#a56300;
---err:#b3382c;--radius:9px;--radius-sm:6px}
-${BASE_CSS}
-</style>`,
-  dark: `<style>
-:root{color-scheme:dark;--bg:#19120e;--panel:#211a16;--panel-2:#2a221d;--panel-3:#342c26;
---border:#372e29;--border-strong:#50453f;--text:#ede7df;--text-2:#c1b9b1;--muted:#928b83;
---faint:#635c56;--primary:#eca342;--primary-hover:#fdbd63;--ok:#63d18f;--warn:#f5b75b;
---err:#f97676;--radius:9px;--radius-sm:6px}
-${BASE_CSS}
-</style>`,
-};
 
 /**
  * id 会被拼进文件路径，这里挡掉分隔符和 `..`。
@@ -2776,14 +2746,16 @@ async function startWebServerInstance({
             // 插件页面可能随插件更新而变，不缓存
             'Cache-Control': 'no-store',
           });
-          // 带上主题变量，插件页面不用自己适配深浅色
-          const theme = url.searchParams.get('theme') === 'dark' ? 'dark' : 'light';
+          /**
+           * 把面板当前外观交给插件页：服务端只写 data-* 与种子变量，色值
+           * 由 web/theme-vars.css 同一份定义解析，和面板像素级一致。
+           */
+          const style = buildPageTheme(url.searchParams);
           /**
            * doctype 必须是文档里的第一个东西。
            * 直接拼在最前面会让浏览器进怪异模式（盒模型、行高全变），
            * 所以有 doctype 就插在它后面。
            */
-          const style = PAGE_THEME[theme];
           /**
            * 自动带令牌的补丁必须比页面自己的脚本**先**执行，所以跟主题样式
            * 一起插在最前面（doctype 之后 / 没有 doctype 就文档开头）。

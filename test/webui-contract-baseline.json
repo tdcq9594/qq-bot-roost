@@ -17,6 +17,7 @@
     "plugins",
     "reach",
     "roles",
+    "sandbox",
     "search",
     "stats"
   ],
@@ -364,6 +365,7 @@
     "pluginPageLabel",
     "pluginPageSep",
     "pluginPanelMask",
+    "pluginSafeMode",
     "pluginSearch",
     "pluginSort",
     "pluginStatus",
@@ -389,6 +391,12 @@
     "roleOpenid",
     "roleScope",
     "rosterList",
+    "sandboxHint",
+    "sandboxLog",
+    "sandboxSend",
+    "sandboxState",
+    "sandboxText",
+    "sandboxUser",
     "scopeList",
     "sendContent",
     "sendHint",
@@ -451,6 +459,7 @@
     "tab-plugins",
     "tab-reach",
     "tab-roles",
+    "tab-sandbox",
     "tab-search",
     "tab-stats",
     "trustHint",
@@ -868,11 +877,11 @@
     "--warn-text"
   ],
   "counts": {
-    "panels": 19,
+    "panels": 20,
     "tables": 17,
     "modals": 5,
-    "controls": 293,
-    "apiCalls": 129
+    "controls": 298,
+    "apiCalls": 131
   },
   "requiredIds": [
     {
@@ -976,6 +985,6 @@
     "tabItemClass": true,
     "cspScriptSelf": true,
     "pageThemeMirror": true,
-    "serverHash": "f47ba40603bd0a5740e6d806ab33f9343297f3f029b86ceaef7b308bc8a6e6e5"
+    "serverHash": "a6f36b19b06ceb7c54fd5ebdc821206a6edd1afe60e0c2ebb0ce2c278fcc4c86"
   }
 }

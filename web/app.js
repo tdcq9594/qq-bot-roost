@@ -868,6 +868,7 @@ async function loadBackground() {
       APPEARANCE.bg.on = false;
       saveAppearance();
       paintBackground();
+      reloadPluginFrames();
       return;
     }
     if (bgObjectUrl) URL.revokeObjectURL(bgObjectUrl);
@@ -876,6 +877,12 @@ async function loadBackground() {
     appearanceSay(`背景图读取失败：${e?.message || e}`, 'error');
   }
   paintBackground();
+  /**
+   * 背景图是异步读回来的：此刻玻璃开关才真正确定，而 iframe 地址里的
+   * glass 参数依赖 bgObjectUrl。补一次重载，否则首次打开面板时插件页
+   * 停在「无玻璃」版本，直到用户下次动外观。
+   */
+  reloadPluginFrames();
 }
 
 /* ---------------- 落地 ---------------- */
@@ -892,7 +899,6 @@ function applyAppearance(input, { persist = true } = {}) {
   const next = normalizeAppearance(input);
   const root = document.documentElement;
   const native = Boolean(PRESETS.find((p) => p.id === next.preset)?.native);
-  const prevTheme = root.dataset.theme;
 
   APPEARANCE = next;
   const theme = resolveTheme(next.mode);
@@ -932,7 +938,12 @@ function applyAppearance(input, { persist = true } = {}) {
   paintBackground();
 
   if (persist) saveAppearance();
-  if (prevTheme && prevTheme !== theme) reloadPluginFrames();
+  /**
+   * 插件页地址里带的是完整外观，不只明暗：换预设、调玻璃透明度都要让
+   * iframe 重新取一次样式。reloadPluginFrames 内部会比对 URL，相同就不动，
+   * 所以首次初始化、重复渲染都不会白白重载。
+   */
+  reloadPluginFrames();
 }
 
 function saveAppearance() {
@@ -3097,19 +3108,36 @@ async function loadPluginPages() {
 }
 
 /**
- * 插件页面 iframe 的地址：带**页面令牌**、当前机器人和主题。
+ * 插件页面 iframe 的地址：带**页面令牌**、当前机器人和完整外观状态。
  *
  * 这里刻意不带 accessKey —— iframe 是 opaque origin，插件页一行
  * `location.search` 就能读到地址上的所有参数，带 key 等于把面板密钥
  * 交给插件作者。令牌只对这一个插件的接口有效（服务端 pageTokenAllows 收口），
  * 泄露了也换不到面板权限。
+ *
+ * 外观参数也只含颜色与开关，不含背景图本体：blob 只在父页有效，
+ * 玻璃效果由服务端下发的 CSS 变量 + 父页 iframe 的背景负责。
  */
 function pluginPageUrl(key, token) {
   const q = new URLSearchParams();
   if (token) q.set('pt', token);
   if (CURRENT_BOT) q.set('bot', CURRENT_BOT);
-  // 带上主题，页面里的 CSS 变量就能跟着面板切换，插件作者不用自己适配
-  q.set('theme', document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
+  /**
+   * 服务端只认白名单，颜色一律按 hex 校验；这里发的是 APPEARANCE 里的
+   * 收敛值（normalizeAppearance 已校验过 hex），两边口径一致。
+   */
+  q.set('theme', resolveTheme());
+  if (APPEARANCE) {
+    q.set('preset', APPEARANCE.preset);
+    q.set('base', APPEARANCE.base);
+    q.set('seed', APPEARANCE.seed);
+    q.set('ink', APPEARANCE.ink);
+    const glass = APPEARANCE.bg.on && Boolean(bgObjectUrl);
+    if (glass) {
+      q.set('glass', '1');
+      q.set('alpha', String(APPEARANCE.bg.alpha));
+    }
+  }
   const s = q.toString();
   return `/api/pages/${encodeURIComponent(key)}/html${s ? `?${s}` : ''}`;
 }

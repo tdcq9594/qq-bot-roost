@@ -1,0 +1,375 @@
+/* ============================================================
+   主题变量唯一真相源：面板与插件页都引入这一份。
+   ------------------------------------------------------------
+   为什么包 @layer：插件页自己的 CSS 未分层，按 CSS 层叠规则
+   无条件压过这里的所有声明（连属性选择器都压得住）——这是
+   「插件可以用宿主配色，也可以自己写」的实现前提。
+   服务端只负责把当前外观写成 data-* 属性，不复制任何色值。
+   ============================================================ */
+@layer roost-theme {
+/* ============================================================
+   主题变量
+   ------------------------------------------------------------
+   日间是默认值，[data-theme="dark"] 覆盖同一批变量。
+   所有组件只用变量，不写死颜色，切换主题时自动跟随。
+   ============================================================ */
+:root {
+  color-scheme: light;
+
+  /* 背景与表面：暖纸色，不是冷灰 */
+  --bg: #f8f5f1;
+  /**
+   * --panel 统一由 --panel-solid 派生，各配色只改 --panel-solid。
+   * 这样「有背景图时把 --panel 换成半透明」那条规则才压得住配色块——
+   * 否则 :root[data-palette="b"] 的实心 --panel 会把它盖回去（2026-11-19 事故）。
+   */
+  --panel-solid: #fffdfb;
+  --panel: var(--panel-solid);
+  --panel-2-solid: #f6f2ed;
+  --panel-2: var(--panel-2-solid);
+  --panel-3-solid: #efeae4;
+  --panel-3: var(--panel-3-solid);
+  --border: #e2dbd4;
+  --border-strong: #c5bcb3;
+
+  /* 文字：深褐而非纯黑 */
+  --text: #251d19;
+  --text-2: #534b45;
+  --muted: #787069;
+  --faint: #a39d97;
+
+  /* 主色：巢中灯火（琥珀）。不用通用蓝 */
+  --primary: #af5504;
+  --primary-hover: #993800;
+  --primary-soft: #feeddb;
+  --primary-border: #e8c2a3;
+  --primary-ring: rgba(175, 85, 4, .16);
+  --primary-ink: #ffffff;
+
+  --ok: #137d41;
+  --ok-soft: #e4f5e8;
+  --warn: #a56300;
+  --warn-text: #a56300;
+  --warn-soft: #fff0d8;
+  --warn-border: #ebc79c;
+  --err: #ba2936;
+  --err-soft: #ffeae9;
+  --err-border: #f3bfbc;
+
+  --log-bg: #fcfaf7;
+  --log-hover: #f7f3ee;
+  --log-time: #a39d97;
+  --log-debug: #787069;
+
+  /* 模块色：色相拉开，日志里一眼能分开 */
+  --c-teal: #036f4f;    --c-teal-soft: #e2f6ec;
+  --c-blue: #285e9f;    --c-blue-soft: #e3f2ff;
+  --c-violet: #694b96;  --c-violet-soft: #f3ecff;
+  --c-green: #386c2d;   --c-green-soft: #e7f5e4;
+  --c-amber: #8d4a00;   --c-amber-soft: #ffecdd;
+  --c-cyan: #006e74;    --c-cyan-soft: #def6f7;
+  --c-sky: #00678f;     --c-sky-soft: #def4ff;
+  --c-slate: #4f5f71;   --c-slate-soft: #ecf1f6;
+  --c-pink: #8d3d67;    --c-pink-soft: #ffe8f3;
+
+  --radius: 9px;
+  --radius-sm: 6px;
+  --radius-lg: 12px;
+
+  /* 阴影：暖调、极淡，只用来分层 */
+  --shadow-sm: 0 1px 2px rgba(60, 40, 20, .05);
+  --shadow: 0 2px 8px rgba(60, 40, 20, .06), 0 1px 2px rgba(60, 40, 20, .04);
+  --shadow-lg: 0 12px 32px rgba(60, 40, 20, .12);
+
+  /* 缓动：ease-out-quart，收尾快不拖沓 */
+  --ease: cubic-bezier(.22, 1, .36, 1);
+
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Source Han Sans SC", sans-serif;
+  /* 衬线只给品牌字和标题。中文回退宋体，大字号下反而有味道 */
+  --display: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia,
+    "Songti SC", "STSong", "SimSun", serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+
+  /**
+   * 主色种子（「外观」页用）。
+   *
+   * 这四个值由 JS 按用户选的配色写到 :root 的行内样式上；下面 --seed / --seed-ink
+   * 只是把「当前主题该用哪一个」接起来——明暗切换纯靠 CSS，JS 不参与重算。
+   * 没写过时用 A 配色的值兜底，和内置配色一致。
+   */
+  --seed-light: #af5504;
+  --seed-dark: #eca342;
+  --ink-light: #ffffff;
+  /* 深色字取该底色暗色下的 --bg（跟着底色走才不脏，见实施方案 §1.2） */
+  --ink-dark: #15100d;
+  --seed: var(--seed-light);
+  --seed-ink: var(--ink-light);
+  --shift: -0.06;
+
+  /* 背景图：JS 会覆盖这三个；没图时是 none，html::before 那条规则就不生效 */
+  --bg-img: none;
+  --bg-blur: 0px;
+  --bg-bright: 100%;
+  --surface-alpha: 84%;
+
+  /**
+   * 主色的文字用色。
+   *
+   * 内置四套直接用 --primary（手挑值本来就能当文字），**零变化**；
+   * 自定义配色会换成「限过亮度」的版本——不然用户挑个浅黄，导航高亮、
+   * 链接、标签这些「主色当文字」的地方就全糊在底上了。
+   */
+  --primary-text: var(--primary);
+
+  /**
+   * 实心填充（按钮、logo、选中的分段按钮）。
+   *
+   * 亮色主题里就等于主色；暗色主题里是「主色深压 + 降饱和」的一版——
+   * 暗底上直接铺一块亮纯色会像贴上去的色卡，压暗之后才像这个界面的按钮。
+   * 文字（导航高亮、链接、标签）继续用 --primary-text / --primary 的亮色。
+   */
+  --primary-fill: var(--primary);
+  --primary-fill-hover: var(--primary-hover);
+
+  /**
+   * 滚动条：默认暖灰（比 --border 深一档，栅格才看得见），悬停点主色。
+   * 由现有变量派生，明暗主题切换时自动跟随，不用在两套主题里各写一遍。
+   */
+  --scrollbar-thumb: var(--border-strong);
+  --scrollbar-thumb-hover: var(--primary);
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  /**
+   * 深色主题是**固定的黑白**，不跟配色走。
+   *
+   * 参考 kun-galgame-forum：深色只给一套中性色，不提供换色入口——暗底上任何
+   * 「品牌色」都容易显脏或刺眼，选项越多越难选对。所以这一块**不再有**
+   * `[data-palette]` 覆盖：五套底色与十套配色只在浅色下生效。
+   *
+   * 分层靠 border 勾形状（卡片与页面底近乎同色），不靠逐级提亮背景：
+   *   --bg      页面底，最深
+   *   --panel   卡片 / .box
+   *   --panel-2 输入框底、hover、次级块
+   *   --panel-3 标签 / 胶囊 / 进度条槽
+   * 唯一不能退让的：--border 要比 --panel-3 再亮一档，否则线会消失在背景里。
+   */
+  --bg: #0a0a0a;
+  --panel-solid: #131313;
+  --panel-2-solid: #1a1a1a;
+  --panel-3-solid: #222222;
+  --border: #2e2e2e;
+  --border-strong: #3f3f3f;
+
+  /* 文字：不用纯白，避免夜里刺眼；层级靠明度拉开。
+     比早期整体提了一档：有背景图时卡片是半透明的，越暗的灰越容易糊在图上。 */
+  --text: #f2f2f2;
+  --text-2: #c8c8c8;
+  --muted: #9e9e9e;
+  --faint: #747474;
+
+  /* 主色 = 白：导航高亮 / 链接 / 焦点环；按钮是白底黑字 */
+  --primary: #f2f2f2;
+  --primary-hover: #ffffff;
+  --primary-soft: #232323;
+  --primary-border: #3a3a3a;
+  --primary-ring: rgba(255, 255, 255, .16);
+  --primary-fill: #ededed;
+  --primary-fill-hover: #ffffff;
+  --primary-ink: #0a0a0a;
+  --primary-text: #f2f2f2;
+
+  /**
+   * 语义色不参与「黑白」：红=失败、绿=成功是信息，不是装饰。
+   * 只把饱和度收一点，避免在纯中性底上显得跳。
+   */
+  --ok: #5ec98a;
+  --ok-soft: #0e2417;
+  --warn: #e8b25c;
+  --warn-text: #e8b25c;
+  --warn-soft: #2b1f0b;
+  --warn-border: #54400f;
+  --err: #f07171;
+  --err-soft: #2e1416;
+  --err-border: #5e2b2c;
+
+  /* 日志区比页面底再深一档（终端该是最暗的） */
+  --log-bg: #070707;
+  --log-hover: #171717;
+  --log-time: #5f5f5f;
+  --log-debug: #8a8a8a;
+
+  /* 模块色是「按来源区分」的信息色，同样保留 */
+  --c-teal: #7cd2ae;    --c-teal-soft: #10241b;
+  --c-blue: #88c1ff;    --c-blue-soft: #121f31;
+  --c-violet: #caacff;  --c-violet-soft: #1e1a2c;
+  --c-green: #98cf8b;   --c-green-soft: #142113;
+  --c-amber: #f6ab6b;   --c-amber-soft: #2a1a0c;
+  --c-cyan: #64d1d7;    --c-cyan-soft: #072022;
+  --c-sky: #6bcbf7;     --c-sky-soft: #091f29;
+  --c-slate: #adc0d4;   --c-slate-soft: #191d22;
+  --c-pink: #f89dc9;    --c-pink-soft: #2a1520;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, .3);
+  --shadow: 0 2px 10px rgba(0, 0, 0, .35), 0 1px 2px rgba(0, 0, 0, .3);
+  --shadow-lg: 0 16px 40px rgba(0, 0, 0, .5);
+
+  /* 种子在深色下不参与渲染，但定义要留着（契约测试会查悬空 var） */
+  --seed: var(--seed-dark);
+  --seed-ink: var(--ink-dark);
+  --shift: 0.05;
+}
+
+/* ============================================================
+   配色主题：**只在浅色下生效**
+   ------------------------------------------------------------
+   A 琥珀是 :root 的默认值，不写覆盖规则；B 靛蓝 / C 青 / D 紫罗兰只覆盖
+   底色、文字与主色相关的变量，变量名一个不新增，插件页主题契约不受影响。
+
+   黑夜主题是固定黑白（见上面 [data-theme="dark"]），所以这里没有暗色覆盖，
+   而且选择器都带 `:not([data-theme="dark"])`：`:root[data-palette="b"]` 的
+   特异性是 (0,2,0)，压得过 `[data-theme="dark"]` 的 (0,1,0)——不带这个 :not，
+   只要换过底色，黑夜就会被这几块重新染成浅色（2026-11-19 的事故）。
+   ============================================================ */
+
+/* B 夜航靛蓝 · 亮 */
+:root[data-palette="b"]:not([data-theme="dark"]) {
+  --bg: #f2f5fb; --panel-solid: #ffffff; --panel-2-solid: #eef2f9; --panel-3-solid: #e4eaf5;
+  --border: #d5dcea; --border-strong: #b3bfd3;
+  --text: #172033; --text-2: #3c4961; --muted: #64708a; --faint: #8b96ad;
+  --primary: #3b55d9; --primary-hover: #2c44bd; --primary-soft: #e6ecff;
+  --primary-border: #b9c8f5; --primary-ring: rgba(59, 86, 219, .16); --primary-ink: #ffffff;
+  --log-bg: #fcfdff; --log-hover: #eef3fc;
+}
+/* C 暮羽青灰 · 亮 */
+:root[data-palette="c"]:not([data-theme="dark"]) {
+  --bg: #f2efea; --panel-solid: #fffdf9; --panel-2-solid: #f0ede6; --panel-3-solid: #e5e1d8;
+  --border: #d7d2c7; --border-strong: #b8b1a3;
+  --text: #1b2628; --text-2: #3d4c4e; --muted: #667574; --faint: #8d9a98;
+  --primary: #2e6e76; --primary-hover: #23565c; --primary-soft: #dceceb;
+  --primary-border: #a8cecc; --primary-ring: rgba(46, 110, 118, .16); --primary-ink: #ffffff;
+  --log-bg: #fcfbf7; --log-hover: #f0ede5;
+}
+/* D 星夜紫 · 亮 */
+:root[data-palette="d"]:not([data-theme="dark"]) {
+  --bg: #f5f2fb; --panel-solid: #fdfbff; --panel-2-solid: #f1edfa; --panel-3-solid: #e8e1f6;
+  --border: #d9cfec; --border-strong: #bcafd9;
+  --text: #201a35; --text-2: #443a5e; --muted: #6f6587; --faint: #958cab;
+  --primary: #5a48cf; --primary-hover: #4938b2; --primary-soft: #e9e3fb;
+  --primary-border: #c4b6ef; --primary-ring: rgba(90, 72, 207, .16); --primary-ink: #ffffff;
+  --log-bg: #fdfbff; --log-hover: #f3eefc;
+}
+/**
+ * W 默认：白底 + 最常见的那种蓝按钮（#2563eb，白字 4.9:1）。
+ *
+ * 「正常网页最简单的默认配色」就是这个组合：白底、近黑文字、蓝主色、
+ * 灰色描边——不做任何色相染色，也就不会被我们的配色逻辑带偏。
+ * （只在白天生效；黑夜是固定黑白。）
+ */
+:root[data-palette="w"]:not([data-theme="dark"]) {
+  --bg: #ffffff; --panel-solid: #ffffff; --panel-2-solid: #f6f6f7; --panel-3-solid: #ededee;
+  --border: #e4e4e7; --border-strong: #cfcfd4;
+  --text: #18181b; --text-2: #3f3f46; --muted: #71717a; --faint: #a1a1aa;
+  --primary: #2563eb; --primary-hover: #1d4ed8; --primary-soft: #eff6ff;
+  --primary-border: #bfdbfe; --primary-ring: rgba(37, 99, 235, .18); --primary-ink: #ffffff;
+  --log-bg: #fafafa; --log-hover: #f0f0f1;
+}
+
+/* ============================================================
+   主色派生（「外观」页的自定义配色）
+   ------------------------------------------------------------
+   内置四套配色（a/b/c/d）走上面那些手挑值，**不**加 data-appearance，
+   所以它们一个像素都不会变；只有新预设和用户自己调的主色才走到这里。
+
+   为什么整块包 @supports：oklch(from …) 不被支持时，自定义属性里的值会在
+   「替换阶段」判定无效，结果是 background 整体失效（按钮变透明），而不是
+   回退到上一行的静态值。包起来才能干净降级成该底色的内置色。
+
+   混比 12% / 36% 是拿现有手挑值反解出来的（见实施方案 §1.2）。
+   注意 soft / border 会带入底色色相——这是有意的：胶囊和边框看起来属于
+   当前界面，而不是贴上去的色块。
+   ============================================================ */
+@supports (color: oklch(from red l c h)) {
+  /* 只在浅色下派生：深色是固定黑白，不允许被自定义染上去 */
+  :root[data-appearance="custom"]:not([data-theme="dark"]) {
+    --primary: var(--seed);
+    /* 亮色压暗、暗色提亮，方向由 --shift 的符号给 */
+    --primary-hover: oklch(from var(--seed) calc(l + var(--shift)) c h);
+    --primary-soft: color-mix(in oklch, var(--seed) 12%, var(--panel));
+    --primary-border: color-mix(in oklch, var(--seed) 36%, var(--panel));
+    --primary-ring: color-mix(in oklch, var(--seed) 22%, transparent);
+    --primary-ink: var(--seed-ink);
+    /**
+     * 文字用色限亮度：浅色底上压到 L≤0.52，深色底上抬到 L≥0.62。
+     * 实测浅黄 #ffd166 不限的话，导航高亮和链接的对比度只有 1.4:1。
+     */
+    --primary-text: oklch(from var(--seed) min(l, 0.52) c h);
+  }
+
+  /**
+   * **派生配色**（玫红 / 姜黄 / 松绿 / 品红 / 自定义）的底色也按主色生成。
+   *
+   * 为什么要这样：底色原本只有 4 套，8 个配色两两共用（琥珀+玫红都吃暖褐、
+   * 靛蓝+姜黄都吃冷蓝…），于是「换个配色底色没变」——2026-11-19 主人反馈的
+   * 就是这个。内置四套（a/b/c/d）保留手挑底色，非内置的统一按各自色相生成，
+   * 八套就各不相同了。
+   *
+   * 明度取固定档、色度按比例收，保证还是「浅底深字」。
+   */
+  :root[data-colorway="derived"]:not([data-theme="dark"]) {
+    --bg: oklch(from var(--seed) 0.970 calc(c * 0.25) h);
+    --panel-solid: oklch(from var(--seed) 0.995 calc(c * 0.12) h);
+    --panel-2-solid: oklch(from var(--seed) 0.955 calc(c * 0.18) h);
+    --panel-3-solid: oklch(from var(--seed) 0.925 calc(c * 0.22) h);
+    --border: oklch(from var(--seed) 0.885 calc(c * 0.30) h);
+    --border-strong: oklch(from var(--seed) 0.795 calc(c * 0.38) h);
+    --text: oklch(from var(--seed) 0.26 calc(c * 0.35) h);
+    --text-2: oklch(from var(--seed) 0.42 calc(c * 0.28) h);
+    --muted: oklch(from var(--seed) 0.55 calc(c * 0.22) h);
+    --faint: oklch(from var(--seed) 0.67 calc(c * 0.18) h);
+    --log-bg: oklch(from var(--seed) 0.985 calc(c * 0.10) h);
+  }
+}
+
+/* ---------- 有背景图时：磨砂玻璃 ----------
+   核心一招：**把 --panel 本身换成半透明**。
+   `background: var(--panel)` 在样式表里出现三十多次（.box / .card / .menu /
+   侧栏里的分组块 / 各种浮层），逐个列选择器永远漏；改变量就一次性全中。
+
+   --panel-solid 是原始的实心值（在 :root / 暗色 / 三套配色里各留一份），
+   不能写 `--panel-solid: var(--panel)` —— 自定义属性是延迟解析的，会自我循环。 */
+html[data-bg="image"] {
+  --glass-alpha: var(--surface-alpha, 78%);
+  --glass-border: color-mix(in srgb, var(--border) 55%, transparent);
+  --glass-sheen: color-mix(in srgb, var(--text) 7%, transparent);
+  --glass-shadow: 0 10px 28px rgba(0, 0, 0, .16), 0 2px 6px rgba(0, 0, 0, .08);
+  --glass-radius: 14px;
+  /**
+   * 玻璃底座**去掉色相**（chroma 归零，只留明度）：
+   * 直接用 `--panel-solid` 的话，照片会被底色染成一层（白底染色最明显，
+   * 看着就是「底色盖在图上」）。中性化之后照片显示自己的颜色，
+   * 文字对比靠明度而不是色相来保证。
+   */
+  --glass-neutral: oklch(from var(--panel-solid) l 0 h);
+  --panel: color-mix(in srgb, var(--glass-neutral) var(--glass-alpha), transparent);
+  /* 输入框/胶囊（panel-2）保持和卡片同档，再透就压不住字 */
+  --panel-2: color-mix(in srgb, oklch(from var(--panel-2-solid) l 0 h) var(--glass-alpha), transparent);
+  /* 轨道/浅色块（panel-3）本就该更淡 */
+  --panel-3: color-mix(in srgb, var(--panel-3-solid) calc(var(--glass-alpha) - 8%), transparent);
+}
+html[data-bg="image"][data-theme="dark"] {
+  /* 黑夜：纯 panel 压在深色照片上会糊成一团，抬一档到 panel-2 附近 */
+  --panel-solid: #1a1a1a;
+  /**
+   * 透明度下限 82%：滑杆仍可往实了调（到 96%），但不允许低于 82%。
+   * 底图是亮色时（照片、浅色插画），78% 的卡片会让 --muted 文字掉到 2:1 左右，
+   * 直接读不出来——主人 2026-11-19 的截图就是这个情况。
+   */
+  --glass-alpha: clamp(82%, var(--surface-alpha), 96%);
+  --glass-sheen: color-mix(in srgb, #ffffff 9%, transparent);
+  --glass-shadow: 0 10px 30px rgba(0, 0, 0, .38), 0 2px 8px rgba(0, 0, 0, .22);
+}
+}

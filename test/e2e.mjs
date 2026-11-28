@@ -729,8 +729,26 @@ async function testStatsAndPages() {
       '页面: 返回的是 HTML 而不是 JSON',
       (html.headers.get('content-type') || '').includes('text/html'),
     );
-    // 注入的主题变量要真的进去了，插件页面才能跟着面板切深浅色
-    ok('页面: 注入了主题变量', text.includes('--panel:') && text.includes('color-scheme:dark'));
+    /**
+     * 主题走「公共 CSS + data 属性」：色值来自 theme-vars.css，深浅由
+     * 注入脚本写 data-theme，不能再只查色值字面量。
+     */
+    ok(
+      '页面: 注入了完整主题（@layer + 深色属性）',
+      text.includes('@layer roost-theme') && text.includes("'data-theme',\"dark\"")
+        && text.includes('--panel:'),
+    );
+    // 派生配色与玻璃参数要能经 URL 传进去（面板换预设 / 开背景图时靠它）
+    const themed = await fetch(
+      `${BASE}/api/pages/${encodeURIComponent(key)}/html?theme=light&preset=rose&base=a&glass=1&alpha=72`,
+    );
+    const themedText = await themed.text();
+    ok(
+      '页面: 外观参数进入注入状态',
+      themedText.includes("'data-appearance',\"custom\"")
+        && themedText.includes("'data-bg',\"image\"")
+        && themedText.includes("'--surface-alpha',\"72%\""),
+    );
     // doctype 被挤到第二位会让浏览器进怪异模式
     if (/<!doctype/i.test(text)) {
       ok('页面: doctype 仍在最前面', /^<!doctype/i.test(text.trimStart()), text.slice(0, 40));
