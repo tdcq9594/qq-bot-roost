@@ -135,12 +135,22 @@ export class HostBridge {
      * 里面的 R.api / R.plugins 都是调用时现读，早建不会拿到过期对象。
      */
     /**
+     * 外接客户端注册过来的命令装在伪插件上（`__host` / `__ext:<id>`）。
+     * 记下来是为了重注册 / 断线时整组摘掉——命令表是全局命名空间，
+     * 留一条僵尸命令就会一直抢别人的同名命令。
+     */
+    this.extCommandPlugins = new Set();
+    /**
      * 反向调用桥：框架插件调 DSH 扩展。事件走协议自己的 SSE 流，
      * 回执走 RPC，所以不新开监听、不给 DSH 发第二套令牌。
+     *
+     * `installCommands` 让客户端上报的聊天命令真进 registry（1.2.0 起）；
+     * 桥自己保持纯逻辑，不 import Registry，好单测。
      */
     this.extBridge = createExtBridge({
       pushEvent: (event, data) => this.#push(event, data),
       log: (m) => log.info(`[ext-bridge] ${m}`),
+      installCommands: (list) => this.#installExtCommands(list),
     });
     this.methods = createMethods({
       runtime: this.runtime,
@@ -159,6 +169,82 @@ export class HostBridge {
     const run = this.chain.then(fn, fn);
     this.chain = run.then(() => undefined, () => undefined);
     return run;
+  }
+
+  /**
+   * 把外接客户端上报的命令装进 registry。
+   *
+   * 每次调用都是「整组重建」：先按伪插件 id 清空，再按清单重装。这样扩展
+   * 卸载、改命令名、断线都不会留下僵尸命令；也天然幂等（DSH 重连会重复上报）。
+   *
+   * @returns {Array<{name:string, plugin?:string, reason:string}>} 重名被拒的条目
+   */
+  #installExtCommands(list) {
+    const registry = this.runtime?.registry;
+    if (!registry) return [];
+    for (const pid of this.extCommandPlugins) registry.clearPlugin(pid);
+    this.extCommandPlugins.clear();
+
+    const rejected = [];
+    const prefix = String(this.runtime?.cfg?.commandPrefix ?? '/');
+    for (const c of Array.isArray(list) ? list : []) {
+      /**
+       * 客户端写的 usage 是按它自己以为的前缀拼的（多半是 `/`）。本框架改了
+       * 前缀时这里跟着换，否则菜单里显示 `/model`、实际要发 `!model`。
+       */
+      const rawUsage = c.usage || `${prefix}${c.name}`;
+      const usage = prefix === '/' ? rawUsage : rawUsage.replace(/^\//, prefix);
+      const meta = {
+        desc: c.desc,
+        usage,
+        pattern: c.name,
+        admin: c.admin,
+        globalAdmin: c.globalAdmin,
+        ownerOnly: c.ownerOnly,
+        /** 客户端可以要求「能直呼但不进菜单」，与插件命令的 hidden 同义 */
+        hidden: c.hidden,
+        plugin: c.pluginName,
+        pluginId: c.pluginId,
+        /** 宿主命令进「指令」组，扩展命令单独一组，免得把内核菜单挤乱 */
+        section: c.target === 'host' ? '指令' : '扩展',
+      };
+      const handler = (msg) => this.#runExtCommand(c, msg);
+      /** 别名单独注册成隐藏命令：菜单里只显示主名，名字仍可直呼 */
+      for (const name of [c.name, ...c.aliases]) {
+        try {
+          registry.addCommand(c.pluginId, name, name === c.name ? meta : { ...meta, hidden: true }, handler);
+        } catch (e) {
+          rejected.push({ name, plugin: c.pluginName, reason: String(e?.message ?? e).slice(0, 120) });
+        }
+      }
+      this.extCommandPlugins.add(c.pluginId);
+    }
+    if (rejected.length) {
+      log.warn(
+        `外接命令有 ${rejected.length} 条没装上：${rejected.map((r) => `${r.name}（${r.reason}）`).join('；')}`,
+      );
+    }
+    return rejected;
+  }
+
+  /**
+   * 命令命中：转发给外接客户端，等它回执。
+   *
+   * 回执带 `reply` 就由框架发（`msg.reply` 自带引用与限频），不带说明客户端
+   * 自己发过了。失败一律回一句人话——群里「发了命令没反应」比报错更难查。
+   */
+  async #runExtCommand(c, msg) {
+    const payload = serializeMessage(msg, {
+      groupName: this.runtime?.groupNames?.get?.(msg.groupId)?.name ?? '',
+    });
+    try {
+      const r = await this.extBridge.command({ target: c.target, extId: c.extId, name: c.name, msg: payload });
+      const text = String(r?.reply ?? '').trim();
+      if (text) await msg.reply(text);
+    } catch (e) {
+      log.warn(`外接命令 /${c.name} 失败：${e?.message ?? e}`);
+      await msg.reply(`「${c.pluginName}」没接住这个命令：${e?.message ?? e}`).catch(() => {});
+    }
   }
 
   start() {

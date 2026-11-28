@@ -8,6 +8,7 @@ import { PluginManager } from './plugin/loader.js';
 import { orderListeners, skipBecauseClaimed } from './plugin/dispatch.js';
 import { GroupStore } from './groups.js';
 import { RoleStore, LEVEL, NO_PERM, levelName, parseLevel, parseScope, scopeOf } from './roles.js';
+import { commandDenyReason, needsPermissionCheck } from './command-perm.js';
 import { Outbound } from './outbound.js';
 import { SessionManager } from './session.js';
 import { createDefaultPipeline } from './pipeline.js';
@@ -1405,24 +1406,19 @@ export class BotRuntime {
           return;
         }
         const scope = scopeOf(msg);
-        if (commandEntry.admin || commandEntry.globalAdmin) {
+        if (needsPermissionCheck(commandEntry)) {
           const lv = await roles.effective(scope, msg.userId, { owners: cfg.owners });
-          if (commandEntry.admin && lv > LEVEL.admin) {
-            return msg
-              .reply(
-                `需要管理员权限才能用这个命令（你当前是${levelName(lv)}）。\n` +
-                  `发 ${cfg.commandPrefix || '/'}admin me 查看自己的权限。`,
-              )
-              .catch(() => {});
-          }
-          if (commandEntry.globalAdmin) {
-            const gl = cfg.owners.includes(msg.userId)
+          /**
+           * 全局等级只在 globalAdmin 命令上才查：它要多一次 IO，
+           * 而绝大多数命令只看本群等级。
+           */
+          const globalLv = commandEntry.globalAdmin
+            ? cfg.owners.includes(msg.userId)
               ? LEVEL.owner
-              : await roles.levelIn('global', msg.userId);
-            if (gl > LEVEL.admin) {
-              return msg.reply('这个命令影响全局，需要「全局管理员」权限。').catch(() => {});
-            }
-          }
+              : await roles.levelIn('global', msg.userId)
+            : null;
+          const deny = commandDenyReason(commandEntry, { lv, globalLv, prefix: cfg.commandPrefix || '/' });
+          if (deny) return msg.reply(deny).catch(() => {});
         }
         const required = (commandEntry.pattern?.match(/<[^>]+>/g) ?? []).length;
         if (msg.args.length < required) {
@@ -1720,7 +1716,12 @@ function groupProfileOf(info) {
  * @returns {boolean}
  */
 export function pluginAllowedIn(spec, chatId, pluginId) {
-  if (!pluginId || pluginId === '__core') return true;
+  /**
+   * `__` 开头的是内核与伪插件（`__core`、外接客户端的 `__host` / `__ext:*`）。
+   * 它们不在分群开关的插件列表里，也没法被 `/disable` 关掉；
+   * 按「本群只启用列表里这些」去判会把它们整组静默，反而像命令失灵。
+   */
+  if (!pluginId || pluginId.startsWith('__')) return true;
   const own = spec?.groups?.[chatId];
   if (!own) return true; // 这个会话没单独配，跟着全局
   const mode = own.mode ?? 'include';

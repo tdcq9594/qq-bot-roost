@@ -149,11 +149,13 @@ function registerCoreCommands(rt) {
    * 把注册表里的菜单转成 renderMenuMd 需要的分组结构。
    * 命令项做成可点击标签，非命令项（被动触发的关键词）只显示文字。
    */
-  function menuGroupsOf(m, { withCommands = true } = {}) {
+  function menuGroupsOf(m, { withCommands = true, myLv = LEVEL.owner } = {}) {
     const groups = [];
     for (const sec of m.sections) {
-      if (!sec.items.length) continue;
-      groups.push({ title: sec.title, items: sec.items.map((it) => menuItemOf(it, withCommands)) });
+      /** 主人专属的命令对非主人不显示：列出来点了只会回一句「只有主人能用」 */
+      const items = sec.items.filter((it) => !(it.ownerOnly && myLv > LEVEL.owner));
+      if (!items.length) continue;
+      groups.push({ title: sec.title, items: items.map((it) => menuItemOf(it, withCommands)) });
     }
     return groups;
   }
@@ -192,6 +194,7 @@ function registerCoreCommands(rt) {
         for (const it of sec.items) {
           if (it.admin && myLv > LEVEL.admin) continue;
           if (it.globalAdmin && myLv > LEVEL.admin) continue;
+          if (it.ownerOnly && myLv > LEVEL.owner) continue;
           items.push(menuItemOf(it));
         }
         if (items.length) out.set(sec.title, items);
@@ -214,7 +217,7 @@ function registerCoreCommands(rt) {
       // 1) 插件 id
       const m = registry.menus.get(arg);
       if (m) {
-        return msg.replyMenu(`${m.title}${m.version ? ' v' + m.version : ''}`, menuGroupsOf(m));
+        return msg.replyMenu(`${m.title}${m.version ? ' v' + m.version : ''}`, menuGroupsOf(m, { myLv }));
       }
 
       // 2) 「插件」→ 插件列表
