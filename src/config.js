@@ -495,6 +495,13 @@ export const BOT_DEFAULTS = {
     mode: 'all',
     list: [],
     /**
+     * 安全模式：只加载内建插件（目录下有 index.js 的），跳过所有外部插件
+     * （有 plugin.json 的，包括市场装的与用户手写的）。内核命令不受影响。
+     * 用于插件出问题时快速定位——开一下就知道是不是插件导致的。
+     * 与 mode:all/include/exclude 叠加：safeMode 是额外的硬过滤，优先级更高。
+     */
+    safeMode: false,
+    /**
      * 启动时自动更新有新版的内邀/公开插件。默认 false：
      * 自动更新会覆盖 plugins/ 里的目录，用户自己改过的代码会丢，
      * 这种事必须先问过。打开后每次启动检查一次，只更市场里标记过的插件。

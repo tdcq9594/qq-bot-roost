@@ -7,6 +7,8 @@
 <title>栖 Roost · 控制台</title>
 <!-- 主题脚本必须外置：CSP 的 script-src 'self' 会拦掉内联脚本 -->
 <script src="/theme-boot.js"></script>
+<!-- 主题变量唯一真相源：面板与插件页共用；必须在 style.css 之前 -->
+<link rel="stylesheet" href="/theme-vars.css">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -107,6 +109,8 @@
           <button class="tab-item" data-tab="delivery">投递</button>
           <button class="tab-item" data-tab="ledger">账本</button>
           <button class="tab-item" data-tab="search">查询</button>
+          <!-- 沙盒：不接真 QQ 就能往管线里喂假消息，验证命令/中间件/插件 -->
+          <button class="tab-item" data-tab="sandbox">沙盒</button>
         </div>
       </div>
 
@@ -599,7 +603,7 @@
       <p class="hint" id="apMsg"></p>
       <p class="hint">
         配色只存在这个浏览器的 localStorage；导出的 JSON 不含背景图。
-        插件页的 iframe 用的是服务端下发的固定配色，<b>不跟随</b>这里的自定义主色。
+        插件页会<b>跟随</b>这里的配色与玻璃效果；插件自己写的样式优先。
       </p>
     </div>
   </section>
@@ -1169,6 +1173,12 @@ curl 'https://bot.q.qq.com/cgi-bin/v2/info/list_bots' \
       </div>
       <div class="upd-tip" id="pluginUpdateTip"></div>
 
+      <!-- 安全模式：只跑内建插件，用于插件出问题时快速定位（内核命令不受影响） -->
+      <label class="switch small" title="打开后只加载内建插件，跳过所有外部插件；重启后生效">
+        <input type="checkbox" id="pluginSafeMode"> 安全模式（只跑内建插件）
+      </label>
+      <span class="hint">外部插件出问题时打开它重启，确认是不是插件导致的</span>
+
       <!-- 插件一多就得能找：搜索 / 状态 / 排序 + 三种视图自选 -->
       <div class="plugin-filter">
         <div class="filter-fields">
@@ -1290,7 +1300,6 @@ curl 'https://bot.q.qq.com/cgi-bin/v2/info/list_bots' \
           <option value="">默认顺序</option>
           <option value="name">按名称</option>
           <option value="version">按版本</option>
-          <option value="added">最近收录</option>
         </select>
         <span class="hint filter-count" id="marketCount"></span>
         <div class="view-switch" role="group" aria-label="插件列表视图">
@@ -1540,6 +1549,28 @@ curl 'https://bot.q.qq.com/cgi-bin/v2/info/list_bots' \
           <tbody id="whoRows"><tr><td colspan="5" class="empty">还没有查询</td></tr></tbody>
         </table>
       </div>
+    </div>
+  </section>
+
+  <!-- 沙盒页：只有 --mock --serve 时可用。往管线喂假消息，验证命令/中间件/插件。
+       不做完整 AI 对话——那需要 dsh-roost + DSH，属真机验证。 -->
+  <section id="tab-sandbox" class="panel" hidden>
+    <div class="box">
+      <div class="box-hd">
+        <h3>聊天沙盒</h3>
+        <span class="hint" id="sandboxState">检测中…</span>
+      </div>
+      <p class="hint">不接真 QQ，假消息真跑命令 / 中间件 / 插件链路。消息只记在本页内存，刷新后清空，不写磁盘。</p>
+      <div class="form-row" style="margin-top:10px">
+        <input id="sandboxText" class="mini-input" placeholder="发一条假消息，例如 /help" aria-label="假消息内容" />
+        <input id="sandboxUser" class="mini-input" placeholder="mock-user" aria-label="假用户 ID" style="width:110px" />
+        <button id="sandboxSend" class="btn small">发送</button>
+      </div>
+      <div class="hint" id="sandboxHint" style="margin-top:8px">仅在 mock 模式可用；真实机器人不会显示本页。</div>
+    </div>
+    <div class="box" style="margin-top:12px">
+      <div class="box-hd"><h3>消息流水</h3><span class="hint">最近 200 条 · 自动刷新</span></div>
+      <div id="sandboxLog" class="log-view"><div class="empty">还没有假消息</div></div>
     </div>
   </section>
 

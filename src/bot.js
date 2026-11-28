@@ -1,4 +1,5 @@
 import path from 'node:path';
+import fsSync from 'node:fs';
 import { createLogger, attachLogFile, detachLogFile } from './logger.js';
 import { TokenManager } from './token.js';
 import { QQApi } from './api.js';
@@ -1668,12 +1669,29 @@ export function hasMessageContent(msg) {
  *   include → 只留名单内的
  *   exclude → 去掉名单内的
  */
-export function pluginFilterOf(spec) {
+export function pluginFilterOf(spec, pluginsDir = DIRS.plugins) {
   const mode = spec?.mode ?? 'include';
   const list = new Set(spec?.list ?? []);
-  if (mode === 'all') return () => true;
-  if (mode === 'exclude') return (id) => !list.has(id);
-  return (id) => list.has(id); // include
+  // safeMode 是硬过滤：有 plugin.json 的一律不加载（市场装 + 用户手写外部插件）
+  // 同步判断即可——plugin.json 存在与否是目录级事实，不需要 async
+  const safeMode = spec?.safeMode === true;
+  const base =
+    mode === 'all'
+      ? () => true
+      : mode === 'exclude'
+        ? (id) => !list.has(id)
+        : (id) => list.has(id); // include
+  if (!safeMode) return base;
+  return (id) => {
+    if (!base(id)) return false;
+    const dir = path.join(pluginsDir, id);
+    try {
+      if (!fsSync.existsSync(dir)) return false; // 目录不存在：不是内建插件，不放行
+      return !fsSync.existsSync(path.join(dir, 'plugin.json'));
+    } catch {
+      return false; // 读不到就当外部插件，宁可少加载也不误放
+    }
+  };
 }
 
 /**

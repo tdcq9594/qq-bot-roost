@@ -76,6 +76,9 @@ SHA256SUMS.sig
 /docs/账本保留策略.md
 /docs/ai-chat.md
 
+# TypeScript 阶段 2 影子编译产物（源 .ts 入库，编译出的 .js 不入库）
+/typecheck/shadow/out/
+
 # 开发过程文档统一不进仓库（2026-11-19 定）：设计方案、调研、与其它项目的对照、
 # 阶段进度、交接记录、历史 release-notes 草稿。全部归档在开发机
 # `D:\WorkBuddy\_archive\<日期>-开发过程文档\<仓库>\`，需要时查 git 历史。

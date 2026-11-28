@@ -44,7 +44,12 @@ const REQUIRED_FNS = [
 
 function snapshot() {
   const html = read('web/index.html');
-  const css = read('web/style.css');
+  /**
+   * 主题变量已抽到 theme-vars.css（唯一真相源），style.css 只剩组件规则。
+   * 契约按「面板实际生效的样式」校验，所以要把两份拼起来再看变量——
+   * 这样既覆盖变量定义，又能抓住把变量搬错文件导致的悬空 var()。
+   */
+  const css = read('web/theme-vars.css') + '\n' + read('web/style.css');
   const js = read('web/app.js');
   const server = read('src/web/server.js');
 
@@ -82,7 +87,9 @@ function snapshot() {
       tabMenuClass: html.includes('tab-menu'),
       tabItemClass: html.includes('tab-item'),
       cspScriptSelf: /script-src 'self'/.test(server),
-      pageThemeMirror: /PAGE_THEME/.test(server),
+      // 插件页主题已从静态两表换成公共 CSS + 服务端注入，色值不再出现在 server.js
+      pageThemeMirror: /buildPageTheme\(url\.searchParams\)/.test(server)
+        && !/const PAGE_THEME/.test(server),
       // 内容哈希而非文件大小：等长替换也能被抓到
       serverHash: crypto.createHash('sha256').update(server).digest('hex'),
     },

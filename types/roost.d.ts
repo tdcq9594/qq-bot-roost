@@ -118,6 +118,68 @@ declare interface RoostMsg {
   replyStream(opts?: any): { push(text: string): Promise<any>; end(text?: string): Promise<any> };
 }
 
+/** 账本只读视图：记的是「发生过的事实」，插件不能写。默认保留 7 天 */
+declare interface RoostLedgerView {
+  /** 某会话最近 N 条（正序）。`beforeSeq` 用于翻页 */
+  recent(opts?: { chatId?: string; limit?: number; beforeSeq?: number }): Promise<any[]>;
+  /** 以某条为锚点取前后邻文 */
+  timeline(opts?: { anchor?: any; before?: number; after?: number }): Promise<any[]>;
+  /** 按事件 id 取一条完整记录 */
+  get(id: string): Promise<any>;
+  /** 总量、时间范围、未解析引用数、保留天数 */
+  stats(): Promise<any>;
+}
+
+/** 身份对照只读视图：QQ 号 / 群号 ↔ openid。默认就是「这只鸟」 */
+declare interface RoostIdentityView {
+  /** 这个号码有没有有效绑定 */
+  has(kind: string, uin: string): boolean;
+  /** QQ 号 → openid（没绑返回空串） */
+  openidOf(uin: string, forBot?: string): string;
+  /** 群号 → group_openid */
+  groupOpenidOf(groupUin: string, forBot?: string): string;
+  /** 同 openidOf，但没绑就抛 IDENTITY_UNBOUND */
+  requireOpenid(opts?: { uin?: string; kind?: string; botId?: string }): string;
+  /** openid → QQ 号（不限机器人） */
+  uinOf(openid: string): string;
+  /** group_openid → 群号 */
+  groupUinOf(groupOpenid: string): string;
+  /** openid → `{ uin, identityId }`，没绑返回 null */
+  resolveUser(openid: string, forBot?: string): any;
+  resolveGroup(groupOpenid: string, forBot?: string): any;
+  /** 读旧记忆的备用键：号码 + 这个号码名下所有 openid */
+  aliasesOf(kind: string, uin: string, current?: string): string[];
+}
+
+/** 会话级暂停闸：插件只能停自己正在处理的会话，动不了全局和整只鸟 */
+declare interface RoostGateView {
+  /** 能不能对某个会话说话（含原因） */
+  check(chatId: string): any;
+  /** 这只鸟的闸状态（同步，不读盘） */
+  peek(): any;
+  /** 静默一段时间（毫秒）；`<= 0` 表示解除 */
+  silence(chatId: string, ms: number): void;
+  /** 暂停 / 恢复一个会话 */
+  pauseChat(chatId: string, paused: boolean): void;
+}
+
+/** 投递账本视图：只能标记失败，不能标记成功 */
+declare interface RoostDeliveryView {
+  /** 标记这条没发出去（截断、被跳过），允许以后重试 */
+  fail(requestId: string, code?: string): Promise<any>;
+  /** 查一条（只读） */
+  get(requestId: string): Promise<any>;
+}
+
+/** DSH 外接扩展桥：宿主没接 DSH 时 `available` 为 false */
+declare interface RoostExtView {
+  readonly available: boolean;
+  /** 列出已装扩展（含 usage / 更新时间） */
+  list(): Promise<{ extensions: any[]; updatedAt: number; pending: number }>;
+  /** 调扩展的一个 action */
+  call(extId: string, action: string, payload?: any, opts?: { chat?: string }): Promise<any>;
+}
+
 /** 命令注册选项 */
 declare interface RoostCommandOpts {
   /** 命令说明，会出现在 /help 菜单里 */
@@ -181,6 +243,24 @@ declare interface RoostCtx {
   md: RoostMd;
   /** 官方 HTTP API（禁言、撤回、发消息…） */
   api: any;
+  /** 邮件服务（零依赖 SMTP 客户端；宿主没配邮件时方法内部会报错） */
+  mail: any;
+  /** 开发环境平台门面（仅 dev 进程可用） */
+  dev: any;
+  /** 账本只读视图；宿主没启用时为 null */
+  ledger: RoostLedgerView | null;
+  /** 身份对照只读视图；宿主没启用时为 null */
+  identity: RoostIdentityView | null;
+  /** 会话级暂停闸；宿主没启用时为 null */
+  gate: RoostGateView | null;
+  /** 投递账本视图（只能标记失败）；宿主没启用时为 null */
+  delivery: RoostDeliveryView | null;
+  /** DSH 外接扩展桥 */
+  ext: RoostExtView;
+  /** 插件自己的文件目录：data/bots/<机器人>/plugins/<插件id>/ */
+  dataDir: string;
+  /** 权限等级的名字查询 */
+  levelName(level: RoostLevel): string;
 
   /** 注册命令。模式里的 `[可选]` `<必填>` 只是提示，实际用 msg.args 取 */
   command(pattern: string, opts: RoostCommandOpts, handler: (msg: RoostMsg) => any): void;

@@ -868,6 +868,7 @@ async function loadBackground() {
       APPEARANCE.bg.on = false;
       saveAppearance();
       paintBackground();
+      reloadPluginFrames();
       return;
     }
     if (bgObjectUrl) URL.revokeObjectURL(bgObjectUrl);
@@ -876,6 +877,12 @@ async function loadBackground() {
     appearanceSay(`背景图读取失败：${e?.message || e}`, 'error');
   }
   paintBackground();
+  /**
+   * 背景图是异步读回来的：此刻玻璃开关才真正确定，而 iframe 地址里的
+   * glass 参数依赖 bgObjectUrl。补一次重载，否则首次打开面板时插件页
+   * 停在「无玻璃」版本，直到用户下次动外观。
+   */
+  reloadPluginFrames();
 }
 
 /* ---------------- 落地 ---------------- */
@@ -892,7 +899,6 @@ function applyAppearance(input, { persist = true } = {}) {
   const next = normalizeAppearance(input);
   const root = document.documentElement;
   const native = Boolean(PRESETS.find((p) => p.id === next.preset)?.native);
-  const prevTheme = root.dataset.theme;
 
   APPEARANCE = next;
   const theme = resolveTheme(next.mode);
@@ -932,7 +938,12 @@ function applyAppearance(input, { persist = true } = {}) {
   paintBackground();
 
   if (persist) saveAppearance();
-  if (prevTheme && prevTheme !== theme) reloadPluginFrames();
+  /**
+   * 插件页地址里带的是完整外观，不只明暗：换预设、调玻璃透明度都要让
+   * iframe 重新取一次样式。reloadPluginFrames 内部会比对 URL，相同就不动，
+   * 所以首次初始化、重复渲染都不会白白重载。
+   */
+  reloadPluginFrames();
 }
 
 function saveAppearance() {
@@ -1460,6 +1471,8 @@ function activateTab(name) {
   }
   if (name === 'events') safeLoad('events', loadEvents);
   if (name === 'ledger') safeLoad('ledger', loadLedger);
+  if (name === 'sandbox') startSandboxPolling();
+  else stopSandboxPolling();
   /** 查询页：只在查过之后重跑一次，没查过就保持空状态，别一进来就打一次全表扫 */
   if (name === 'search') {
     /**
@@ -2037,6 +2050,8 @@ function fillForm(c) {
   // @ 回复策略（bot 级；与 message.js 的 plugins.* 对应）
   // @ 别的机器人静默：默认开，所以用 !== false（老配置没这个字段也算开）
   f.ignoreOtherBotMention.checked = c.plugins?.ignoreOtherBotMention !== false;
+  const safeBox = $("#pluginSafeMode");
+  if (safeBox) safeBox.checked = c.plugins?.safeMode === true;
   f.groupOnlyMentioned.checked = c.plugins?.groupOnlyMentioned === true;
   f.commandRequiresMention.checked = c.plugins?.commandRequiresMention === true;
   // 静默消息交给协议层：默认开，所以用 !== false（老配置没这个字段也算开）
@@ -2516,6 +2531,7 @@ function collectAutoPayload(f) {
     dedupWindowSec: Number(f.dedupWindowSec.value) || 0,
     plugins: {
       ignoreOtherBotMention: f.ignoreOtherBotMention.checked,
+      safeMode: $("#pluginSafeMode")?.checked === true,
       groupOnlyMentioned: f.groupOnlyMentioned.checked,
       commandRequiresMention: f.commandRequiresMention.checked,
       forwardSilentToProtocol: f.forwardSilentToProtocol.checked,
@@ -2618,6 +2634,7 @@ async function saveCfgForm({ fromQr = false } = {}) {
     dedupWindowSec: Number(f.dedupWindowSec.value) || 0,
     plugins: {
       ignoreOtherBotMention: f.ignoreOtherBotMention.checked,
+      safeMode: $("#pluginSafeMode")?.checked === true,
       groupOnlyMentioned: f.groupOnlyMentioned.checked,
       commandRequiresMention: f.commandRequiresMention.checked,
       forwardSilentToProtocol: f.forwardSilentToProtocol.checked,
@@ -3091,19 +3108,36 @@ async function loadPluginPages() {
 }
 
 /**
- * 插件页面 iframe 的地址：带**页面令牌**、当前机器人和主题。
+ * 插件页面 iframe 的地址：带**页面令牌**、当前机器人和完整外观状态。
  *
  * 这里刻意不带 accessKey —— iframe 是 opaque origin，插件页一行
  * `location.search` 就能读到地址上的所有参数，带 key 等于把面板密钥
  * 交给插件作者。令牌只对这一个插件的接口有效（服务端 pageTokenAllows 收口），
  * 泄露了也换不到面板权限。
+ *
+ * 外观参数也只含颜色与开关，不含背景图本体：blob 只在父页有效，
+ * 玻璃效果由服务端下发的 CSS 变量 + 父页 iframe 的背景负责。
  */
 function pluginPageUrl(key, token) {
   const q = new URLSearchParams();
   if (token) q.set('pt', token);
   if (CURRENT_BOT) q.set('bot', CURRENT_BOT);
-  // 带上主题，页面里的 CSS 变量就能跟着面板切换，插件作者不用自己适配
-  q.set('theme', document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
+  /**
+   * 服务端只认白名单，颜色一律按 hex 校验；这里发的是 APPEARANCE 里的
+   * 收敛值（normalizeAppearance 已校验过 hex），两边口径一致。
+   */
+  q.set('theme', resolveTheme());
+  if (APPEARANCE) {
+    q.set('preset', APPEARANCE.preset);
+    q.set('base', APPEARANCE.base);
+    q.set('seed', APPEARANCE.seed);
+    q.set('ink', APPEARANCE.ink);
+    const glass = APPEARANCE.bg.on && Boolean(bgObjectUrl);
+    if (glass) {
+      q.set('glass', '1');
+      q.set('alpha', String(APPEARANCE.bg.alpha));
+    }
+  }
   const s = q.toString();
   return `/api/pages/${encodeURIComponent(key)}/html${s ? `?${s}` : ''}`;
 }
@@ -4828,9 +4862,10 @@ function renderMarketRows() {
     shown.sort((a, b) => String(a.name || a.id).localeCompare(String(b.name || b.id), 'zh-CN'));
   } else if (MARKET.sort === 'version') {
     shown.sort((a, b) => compareVersion(b.version, a.version));
-  } else if (MARKET.sort === 'added') {
-    shown.sort((a, b) => String(b.addedAt || '').localeCompare(String(a.addedAt || '')));
   }
+  // 「最近收录」已移除：它依赖的 addedAt 在索引 schema 4 已退役，
+  // 排序恒为 0 等于没有功能。热度/最新发布要等索引采集 publishedAt/downloads
+  // 之后再上，别用假数据冒充。
 
   const count = $('#marketCount');
   if (count) count.textContent = `显示 ${shown.length} / ${MARKET.all.length}`;
@@ -10360,3 +10395,95 @@ $('#mediaFile')?.addEventListener('change', (e) => pickMediaFiles(e.target.files
 
 // hash 直达 #media 时，activateTab 可能在本块执行前就跑过了，补一次
 if (location.hash.slice(1) === 'media') activateTab('media');
+
+/* ---------------- 沙盒（仅 mock 模式） ---------------- */
+
+let sandboxTimer = null;
+let sandboxLastId = '';
+
+function startSandboxPolling() {
+  stopSandboxPolling();
+  refreshSandbox();
+  sandboxTimer = setInterval(refreshSandbox, 2000);
+}
+
+function stopSandboxPolling() {
+  if (sandboxTimer) clearInterval(sandboxTimer);
+  sandboxTimer = null;
+}
+
+async function refreshSandbox() {
+  const state = $('#sandboxState');
+  const log = $('#sandboxLog');
+  if (!state || !log) return;
+  let r;
+  try {
+    r = await api('/api/sandbox/messages');
+  } catch (e) {
+    state.textContent = '读取失败';
+    log.innerHTML = `<div class="empty">${escapeHtml(errText(e))}</div>`;
+    return;
+  }
+  if (r?.status === 404) {
+    state.textContent = '仅 mock 模式可用';
+    log.innerHTML = '<div class="empty">真实机器人下没有沙盒（正常）</div>';
+    return;
+  }
+  if (r?.status !== 200) {
+    state.textContent = `读取失败 ${r?.status}`;
+    return;
+  }
+  const msgs = Array.isArray(r.data?.messages) ? r.data.messages : [];
+  state.textContent = `${msgs.length} 条 · 仅 mock 模式`;
+  if (!msgs.length) {
+    log.innerHTML = '<div class="empty">还没有假消息，在上方输入一条试试</div>';
+    return;
+  }
+  log.innerHTML = msgs
+    .slice()
+    .reverse()
+    .map((m) => {
+      const t = new Date(Number(m.at) || Date.now()).toLocaleTimeString('zh-CN', { hour12: false });
+      return `<div class="log-line"><span class="t">${escapeHtml(t)}</span><span class="tag">${escapeHtml(m.userName || m.userId || '')}</span><span class="m">${escapeHtml(m.content || '')}</span></div>`;
+    })
+    .join('');
+  // 新消息来了就滚到底
+  const last = msgs[msgs.length - 1];
+  if (last && last.id !== sandboxLastId) {
+    sandboxLastId = last.id;
+    log.scrollTop = log.scrollHeight;
+  }
+}
+
+$('#sandboxSend')?.addEventListener('click', async () => {
+  const input = $('#sandboxText');
+  const user = $('#sandboxUser');
+  const text = String(input?.value || '').trim();
+  if (!text) {
+    toast('先输入一条消息', 'info');
+    return;
+  }
+  const btn = $('#sandboxSend');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api('/api/mock/message', {
+      method: 'POST',
+      body: JSON.stringify({ text, userId: String(user?.value || '').trim() || 'mock-user' }),
+    });
+    if (r?.status === 200) {
+      if (input) input.value = '';
+      toast('已注入管线', 'ok');
+      await refreshSandbox();
+    } else {
+      toast(`注入失败：${escapeHtml(r?.data?.error || r?.status)}`, 'error');
+    }
+  } catch (e) {
+    toast(`注入失败：${errText(e)}`, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+});
+
+$('#sandboxText')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') $('#sandboxSend')?.click();
+});

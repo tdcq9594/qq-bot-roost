@@ -1,0 +1,18 @@
+{
+  "//": "TS 迁移阶段 0：只让编辑器/工具认识类型，不检查、不输出、不参与运行。源码仍是纯 JS，用户侧零依赖。",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "strict": false,
+    "noImplicitAny": false,
+    "strictNullChecks": false,
+    "skipLibCheck": true,
+    "lib": ["ES2022"]
+  },
+  "include": ["src/**/*.js", "types/**/*.d.ts", "test/**/*.js", "test/**/*.mjs"],
+  "exclude": ["node_modules", "plugins", "data", "config", "web/vendor"]
+}

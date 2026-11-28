@@ -239,7 +239,10 @@ test('面板与配置：两个开关接线齐全', () => {
     '自动保存与完整保存两处都要提交');
   assert.match(app, /f\.groupOnlyMentioned\.checked = c\.plugins\?\.groupOnlyMentioned === true/);
   const server = fs.readFileSync(new URL('../src/web/server.js', import.meta.url), 'utf8');
-  assert.match(server, /\['groupOnlyMentioned', 'ignoreOtherBotMention', 'commandRequiresMention', 'forwardSilentToProtocol'\]/);
+  // 用「包含」而非精确数组：后续新增 plugins 布尔键（如 safeMode）不该让这条回归
+  for (const key of ['groupOnlyMentioned', 'ignoreOtherBotMention', 'commandRequiresMention', 'forwardSilentToProtocol']) {
+    assert.match(server, new RegExp(`'${key}'`), `保存白名单缺 ${key}`);
+  }
 });
 
 test('ignoreOtherBotMention：配置 / 面板 / 保存 / merge 四处接线齐全（默认开用 !== false）', () => {

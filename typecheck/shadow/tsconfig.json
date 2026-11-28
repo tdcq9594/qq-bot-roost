@@ -1,0 +1,17 @@
+{
+  "//": "阶段 2 影子编译：把 .ts 样本编译到 out/ 做行为对照，不参与主程序入口。编译产物不入库。",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "outDir": "./out",
+    "rootDir": ".",
+    "strict": false,
+    "noImplicitAny": false,
+    "strictNullChecks": false,
+    "skipLibCheck": true,
+    "lib": ["ES2022"],
+    "types": ["node"]
+  },
+  "include": ["./*.ts"]
+}
