@@ -8,6 +8,7 @@ import { PluginManager } from './plugin/loader.js';
 import { orderListeners, skipBecauseClaimed } from './plugin/dispatch.js';
 import { GroupStore } from './groups.js';
 import { RoleStore, LEVEL, NO_PERM, levelName, parseLevel, parseScope, scopeOf } from './roles.js';
+import { commandDenyReason, needsPermissionCheck } from './command-perm.js';
 import { Outbound } from './outbound.js';
 import { SessionManager } from './session.js';
 import { createDefaultPipeline } from './pipeline.js';
@@ -1277,6 +1278,12 @@ export class BotRuntime {
         silent: msg.silent,
         forwardSilent,
         duplicate,
+        /**
+         * 命中命令表的命令由框架自己处理，别再交给协议层：
+         * 否则 dsh-roost 会把「/help 插件」当成用户说的一句话喂给模型。
+         * 只认命令表里有的名字，`/xyz` 这类未知命令仍按普通消息走。
+         */
+        isCommand: Boolean(msg.isCommand && registry.commands.has(msg.command)),
       })) {
         this.onebot?.onMessage(msg);
         /** 宿主协议：传完整 msg（原生结构），它自己挑字段 */
@@ -1405,24 +1412,19 @@ export class BotRuntime {
           return;
         }
         const scope = scopeOf(msg);
-        if (commandEntry.admin || commandEntry.globalAdmin) {
+        if (needsPermissionCheck(commandEntry)) {
           const lv = await roles.effective(scope, msg.userId, { owners: cfg.owners });
-          if (commandEntry.admin && lv > LEVEL.admin) {
-            return msg
-              .reply(
-                `需要管理员权限才能用这个命令（你当前是${levelName(lv)}）。\n` +
-                  `发 ${cfg.commandPrefix || '/'}admin me 查看自己的权限。`,
-              )
-              .catch(() => {});
-          }
-          if (commandEntry.globalAdmin) {
-            const gl = cfg.owners.includes(msg.userId)
+          /**
+           * 全局等级只在 globalAdmin 命令上才查：它要多一次 IO，
+           * 而绝大多数命令只看本群等级。
+           */
+          const globalLv = commandEntry.globalAdmin
+            ? cfg.owners.includes(msg.userId)
               ? LEVEL.owner
-              : await roles.levelIn('global', msg.userId);
-            if (gl > LEVEL.admin) {
-              return msg.reply('这个命令影响全局，需要「全局管理员」权限。').catch(() => {});
-            }
-          }
+              : await roles.levelIn('global', msg.userId)
+            : null;
+          const deny = commandDenyReason(commandEntry, { lv, globalLv, prefix: cfg.commandPrefix || '/' });
+          if (deny) return msg.reply(deny).catch(() => {});
         }
         const required = (commandEntry.pattern?.match(/<[^>]+>/g) ?? []).length;
         if (msg.args.length < required) {
@@ -1720,7 +1722,14 @@ function groupProfileOf(info) {
  * @returns {boolean}
  */
 export function pluginAllowedIn(spec, chatId, pluginId) {
-  if (!pluginId || pluginId === '__core') return true;
+  /**
+   * 内核 `__core`、以及外接协议连接方（`ext:dsh`、`ext:<扩展id>`）都要放行。
+   *
+   * 前者放行是因为群里没了 `/help` 用户就没法自救；后者是命令**跟着连接走**的，
+   * 客户端没连上时根本不在命令表里，再用分群插件开关判一次只会让人以为命令失灵。
+   * 它们也不在插件面板的启用列表里，`/disable` 拿不到它们。
+   */
+  if (!pluginId || pluginId === '__core' || pluginId.startsWith('ext:')) return true;
   const own = spec?.groups?.[chatId];
   if (!own) return true; // 这个会话没单独配，跟着全局
   const mode = own.mode ?? 'include';

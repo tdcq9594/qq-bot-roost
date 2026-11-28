@@ -402,6 +402,7 @@
     "setupErr",
     "setupHost",
     "setupLead",
+    "setupLoginPassword",
     "setupMask",
     "setupNetSave",
     "setupPort",
@@ -870,7 +871,7 @@
     "panels": 19,
     "tables": 17,
     "modals": 5,
-    "controls": 291,
+    "controls": 293,
     "apiCalls": 129
   },
   "requiredIds": [
@@ -975,6 +976,6 @@
     "tabItemClass": true,
     "cspScriptSelf": true,
     "pageThemeMirror": true,
-    "serverHash": "38c3b5add27145af397e403a996d160ab7c107e06511086690bbf95bda3a4dcc"
+    "serverHash": "f47ba40603bd0a5740e6d806ab33f9343297f3f029b86ceaef7b308bc8a6e6e5"
   }
 }

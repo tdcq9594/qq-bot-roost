@@ -21,9 +21,19 @@
  * @param {boolean} o.silent       静默消息（@ 别的机器人 / 只回@模式的裸命令）
  * @param {boolean} o.forwardSilent `plugins.forwardSilentToProtocol`，默认 true
  * @param {boolean} o.duplicate    账本判定为官方重推
+ * @param {boolean} o.isCommand    命中框架命令表、会由框架自己执行的命令
  */
-export function shouldForwardInbound({ hasContent, silent, forwardSilent, duplicate } = {}) {
+export function shouldForwardInbound({ hasContent, silent, forwardSilent, duplicate, isCommand } = {}) {
   if (!hasContent) return false;
+  /**
+   * **命令不进 AI**：`/help 插件`、`/model` 这类已经由框架（或外接客户端）执行了，
+   * 再交给协议层，模型就会把它当成用户在说话，还会写进记忆——
+   * 2026-11-28 用户反馈「发指令结果被当成聊天喂给模型」就是这么来的。
+   *
+   * 只拦**命中命令表**的：`/xyz` 这种不存在的命令仍按普通消息走，
+   * 用户真想在聊天里说以 `/` 开头的内容时不会被吞。
+   */
+  if (isCommand) return false;
   /** 静默消息按用户开关决定要不要给协议层（issue #38），默认照旧全交 */
   if (silent && !forwardSilent) return false;
   /** 官方重推：协议层只该被触发一次 */

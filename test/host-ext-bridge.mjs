@@ -13,6 +13,8 @@ import assert from 'node:assert/strict';
 
 import { createExtBridge } from '../src/host/ext-bridge.js';
 import { createMethods, HOST_PROTOCOL } from '../src/host/methods.js';
+import { HostBridge } from '../src/host/index.js';
+import { Registry } from '../src/plugin/context.js';
 
 /** 协议方法表需要的最小 runtime */
 function runtime() {
@@ -25,6 +27,7 @@ function rig(over = {}) {
     pushEvent: (event, data) => events.push({ event, data }),
     timeoutMs: over.timeoutMs ?? 500,
     log: () => {},
+    installCommands: over.installCommands,
   });
   const methods = createMethods({
     runtime: runtime(),
@@ -120,10 +123,10 @@ test('register 只留合法扩展与动作，列表是副本不能被外部改',
 
 // ---------------------------------------------------------------- 协议方法
 
-test('注入桥后方法表多出 4 个 ext.*，scope 正确', () => {
+test('注入桥后方法表多出 5 个 ext.*，scope 正确', () => {
   const { methods } = rig();
   const names = methods.names();
-  for (const n of ['ext.list', 'ext.call', 'ext.call.reply', 'ext.register']) {
+  for (const n of ['ext.list', 'ext.call', 'ext.call.reply', 'ext.register', 'ext.command.reply']) {
     assert.ok(names.includes(n), `缺方法 ${n}`);
   }
   const describe = methods.describe();
@@ -158,4 +161,257 @@ test('ext.list 只需要 read scope；ext.call 没 message scope 会被挡', asy
     methods.call('ext.call', { extId: 'bili', action: 'share' }, { scopes: new Set(['read']) }),
     /需要 message 权限/,
   );
+});
+
+// ---------------------------------------------------------------- 聊天命令
+
+/** 记录 install 调用的假 registry：只看桥给它的清单，不掺 Registry 细节 */
+function installer() {
+  const calls = [];
+  return {
+    calls,
+    fn: (list) => {
+      calls.push(list);
+      return list.filter((c) => c.name === 'taken').map((c) => ({ name: c.name, reason: '重名' }));
+    },
+    last: () => calls[calls.length - 1],
+  };
+}
+
+test('ext.register 上报的命令被归一化：别名、权限、伪插件归属都对', () => {
+  const inst = installer();
+  const { bridge } = rig({ installCommands: inst.fn });
+  const r = bridge.register({
+    extensions: [{
+      id: 'bili', name: 'B 站',
+      actions: [{ id: 'share', label: '分享' }],
+      commands: [{ name: 'Bili', aliases: ['哔哩', 'BILI'], desc: '投稿', admin: true, ownerOnly: true }],
+    }],
+    host: { name: 'dsh', commands: [{ name: 'model', desc: '换模型', admin: true }] },
+  });
+
+  assert.equal(r.commands, 2);
+  const list = inst.last();
+  assert.deepEqual(list.map((c) => c.name), ['bili', 'model']);
+  const bili = list.find((c) => c.name === 'bili');
+  assert.equal(bili.pluginId, 'ext:bili');
+  assert.equal(bili.pluginName, 'B 站');
+  assert.deepEqual(bili.aliases, ['哔哩']);
+  assert.equal(bili.admin, true);
+  assert.equal(bili.ownerOnly, true);
+  const host = list.find((c) => c.name === 'model');
+  assert.equal(host.pluginId, 'ext:dsh');
+  assert.equal(host.target, 'host');
+  assert.equal(host.pluginName, 'dsh');
+});
+
+test('名字不合法的命令整条丢弃，不把畸形条目带进 registry', () => {
+  const inst = installer();
+  const { bridge } = rig({ installCommands: inst.fn });
+  const r = bridge.register({
+    host: { commands: [{ name: '带 空格' }, { name: '' }, { name: 'ok_1' }, null, 'x'] },
+  });
+  assert.equal(r.commands, 1);
+  assert.equal(inst.last()[0].name, 'ok_1');
+});
+
+test('重名不覆盖：冲突进 rejected，正常命令照装', () => {
+  const inst = installer();
+  const { bridge } = rig({ installCommands: inst.fn });
+  const r = bridge.register({ host: { commands: [{ name: 'taken' }, { name: 'free' }] } });
+  assert.equal(r.commands, 2);
+  assert.equal(r.rejected.length, 1);
+  assert.equal(r.rejected[0].name, 'taken');
+  assert.match(r.rejected[0].reason, /重名/);
+});
+
+test('命令总数超上限整批丢，并在 rejected 里说明', () => {
+  const inst = installer();
+  const { bridge } = rig({ installCommands: inst.fn });
+  const many = Array.from({ length: 61 }, (_, i) => ({ name: `c${i}` }));
+  const r = bridge.register({ host: { commands: many } });
+  assert.equal(r.commands, 0);
+  assert.match(r.rejected[0].reason, /超过上限/);
+  assert.deepEqual(inst.last(), []);
+});
+
+test('重复上报是幂等重建：清单以最后一次为准', () => {
+  const inst = installer();
+  const { bridge } = rig({ installCommands: inst.fn });
+  bridge.register({ host: { commands: [{ name: 'a' }, { name: 'b' }] } });
+  bridge.register({ host: { commands: [{ name: 'a' }] } });
+  assert.deepEqual(inst.last().map((c) => c.name), ['a']);
+  assert.equal(bridge.list().host.commands.length, 1);
+});
+
+test('断线时命令一起摘掉，不留僵尸命令', () => {
+  const inst = installer();
+  const { bridge } = rig({ installCommands: inst.fn });
+  bridge.register({ host: { commands: [{ name: 'model' }] } });
+  assert.equal(inst.last().length, 1);
+  bridge.clear('链路断开');
+  assert.deepEqual(inst.last(), []);
+  assert.equal(bridge.list().host.commands.length, 0);
+});
+
+test('命令触发推 ext.command.request，回执带正文就 resolve 成 { reply }', async () => {
+  const { bridge, events } = rig();
+  const p = bridge.command({ target: 'host', name: 'Model', msg: { chat: { chatId: 'g1' }, text: '/model' } });
+  const req = events.find((e) => e.event === 'ext.command.request');
+  assert.ok(req);
+  assert.equal(req.data.target, 'host');
+  assert.equal(req.data.name, 'model');
+  assert.equal(req.data.msg.chat.chatId, 'g1');
+
+  bridge.replyCommand({ requestId: req.data.requestId, ok: true, reply: '已切到 deepseek-v4' });
+  assert.deepEqual(await p, { reply: '已切到 deepseek-v4' });
+});
+
+test('命令回执不带正文 → resolve null（客户端自己发过了）', async () => {
+  const { bridge, events } = rig();
+  const p = bridge.command({ target: 'ext', extId: 'bili', name: 'bili' });
+  const req = events.find((e) => e.event === 'ext.command.request');
+  assert.equal(req.data.extId, 'bili');
+  bridge.replyCommand({ requestId: req.data.requestId, ok: true });
+  assert.equal(await p, null);
+});
+
+test('命令失败/超时都要能结束，不能挂死', async () => {
+  const { bridge, events } = rig({ timeoutMs: 20 });
+  const p = bridge.command({ target: 'host', name: 'slow' });
+  bridge.replyCommand({ requestId: events[0].data.requestId, ok: false, error: '没这个会话' });
+  await assert.rejects(p, /没这个会话/);
+
+  await assert.rejects(bridge.command({ target: 'host', name: 'slow2' }), /没在 20ms 内回执/);
+  assert.equal(bridge.pendingCount(), 0);
+});
+
+test('命令参数不合法直接拒，不发事件', async () => {
+  const { bridge, events } = rig();
+  await assert.rejects(bridge.command({ target: 'ext', name: 'x' }), /要给 extId/);
+  await assert.rejects(bridge.command({ target: 'host', name: '带 空格' }), /命令名不合法/);
+  assert.equal(events.length, 0);
+});
+
+test('命令回执认不出 id 一律拒绝（防伪造）', () => {
+  const { bridge } = rig();
+  assert.throws(() => bridge.replyCommand({ requestId: 'forged', reply: 'x' }), /没有这个待回执/);
+});
+
+// ---------------------------------------------------------------- 接到 registry
+
+/** 不启监听，只用到 constructor 里的方法表与桥 */
+function hostRig() {
+  const registry = new Registry();
+  const runtime = {
+    id: 'b1', name: '测试鸟', online: true, cfg: { commandPrefix: '/' },
+    registry, groupNames: new Map(),
+  };
+  const hb = new HostBridge({ runtime, cfg: {}, botId: 'b1' });
+  return { hb, registry, runtime, scopes: new Set(['read', 'message', 'manage']) };
+}
+
+/** 最小 msg：serializeMessage 只读这些字段，reply 用来收代发正文 */
+function fakeMsg(text = '/model') {
+  const sent = [];
+  return {
+    sent,
+    id: 'm1', kind: 'group', chatId: 'g1', groupId: 'g1', userId: 'u1',
+    content: text, args: [], receivedAt: Date.now(),
+    reply: async (t) => {
+      sent.push(String(t));
+      return { id: 'out1' };
+    },
+  };
+}
+
+test('ext.register 把宿主命令真装进 registry，别名成隐藏命令', async () => {
+  const { hb, registry, scopes } = hostRig();
+  const r = await hb.methods.call(
+    'ext.register',
+    { host: { name: 'dsh', commands: [{ name: 'model', desc: '换模型', admin: true, aliases: ['模型'] }] } },
+    { scopes },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.commands, 1);
+  assert.deepEqual(r.rejected, []);
+
+  const entry = registry.commands.get('model');
+  assert.equal(entry.pluginId, 'ext:dsh');
+  assert.equal(entry.admin, true);
+  assert.equal(typeof entry.handler, 'function');
+  assert.ok(registry.commands.has('模型'), '别名要能直呼');
+  assert.equal(registry.menus.get('ext:dsh').title, 'dsh');
+  const texts = registry.menus.get('ext:dsh').sections.flatMap((s) => s.items.map((i) => i.text));
+  assert.deepEqual(texts, ['model'], '别名不进菜单');
+});
+
+test('与内核/插件命令重名时改成 <程序名>-<命令名>，并在菜单里标出原名', async () => {
+  const { hb, registry, scopes } = hostRig();
+  registry.addCommand('__core', 'help', { pattern: 'help' }, () => {});
+  const r = await hb.methods.call(
+    'ext.register',
+    { host: { name: 'dsh', commands: [{ name: 'help' }, { name: 'dstatus' }] } },
+    { scopes },
+  );
+  assert.equal(r.commands, 2, '清单本身要如实反映上报了几条');
+  assert.deepEqual(r.rejected, [], '能改名就不该拒');
+  assert.deepEqual(r.renamed, [{ from: 'help', to: 'dsh-help', plugin: 'dsh' }]);
+
+  assert.equal(registry.commands.get('help').pluginId, '__core', '原命令不能被顶掉');
+  const alt = registry.commands.get('dsh-help');
+  assert.equal(alt.pluginId, 'ext:dsh');
+  assert.match(alt.desc, /原名 \/help/);
+  assert.ok(registry.commands.has('dstatus'));
+
+  const item = registry.menus
+    .get('ext:dsh')
+    .sections.flatMap((s) => s.items)
+    .find((x) => x.text === 'dsh-help');
+  assert.ok(item, '菜单里要用改后的名字，不能还写 /help');
+  assert.match(item.desc, /原名 \/help，与已有命令重名/, '改名要在菜单里标出来，否则用户对不上');
+});
+
+test('命令被触发 → 推 ext.command.request；回执带正文由框架代发', async () => {
+  const { hb, registry, scopes, runtime } = hostRig();
+  await hb.methods.call('ext.register', { host: { commands: [{ name: 'model', desc: 'x' }] } }, { scopes });
+
+  const msg = fakeMsg('/model list');
+  runtime.host = hb;
+  const handled = registry.commands.get('model').handler(msg);
+
+  /* 事件是同步 push 出来的，等一个微任务即可拿到 */
+  await Promise.resolve();
+  const req = hb.buffer.find((f) => f.event === 'ext.command.request');
+  assert.ok(req, '要推出 ext.command.request');
+  assert.equal(req.data.target, 'host');
+  assert.equal(req.data.name, 'model');
+  assert.equal(req.data.msg.chat.chatId, 'g1');
+
+  await hb.methods.call('ext.command.reply', { requestId: req.data.requestId, reply: '当前：deepseek-v4' }, { scopes });
+  await handled;
+  assert.deepEqual(msg.sent, ['当前：deepseek-v4']);
+});
+
+test('命令回执不带正文时框架不补话（客户端自己发过了）', async () => {
+  const { hb, registry, scopes } = hostRig();
+  await hb.methods.call('ext.register', { host: { commands: [{ name: 'mood' }] } }, { scopes });
+  const msg = fakeMsg('/mood');
+  const handled = registry.commands.get('mood').handler(msg);
+  await Promise.resolve();
+  const req = hb.buffer.find((f) => f.event === 'ext.command.request');
+  await hb.methods.call('ext.command.reply', { requestId: req.data.requestId }, { scopes });
+  await handled;
+  assert.deepEqual(msg.sent, []);
+});
+
+test('客户端一直不回执：超时后回一句人话，不让群里干等', async () => {
+  const { hb, registry, scopes } = hostRig();
+  hb.extBridge = createExtBridge({ pushEvent: () => {}, timeoutMs: 10, log: () => {} });
+  /* 直接验 handler 的超时分支：用 registry 里已装的那条，换成新桥不影响它的捕获变量 */
+  await hb.methods.call('ext.register', { host: { commands: [{ name: 'slow' }] } }, { scopes });
+  const msg = fakeMsg('/slow');
+  await registry.commands.get('slow').handler(msg);
+  assert.equal(msg.sent.length, 1);
+  assert.match(msg.sent[0], /没接住这个命令/);
 });

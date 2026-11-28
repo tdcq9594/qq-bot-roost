@@ -11,10 +11,19 @@
  * 遗留的旧键会永远留在文件里。这里按 `GLOBAL_DEFAULTS` / `BOT_DEFAULTS`
  * **删了重建**，才真的干净。
  *
- * 必须保留的东西（否则恢复完当场失联）：
+ * 必须保留的东西（否则恢复完当场失联 / 丢凭证）：
  *   - 全局：`webui.accessKey`（面板密钥，dsh-roost 调框架 API 也靠它）、
- *     `webui.host` / `webui.port`（运行中的进程不会因改端口重新 bind）。
- *   - 每只鸟：`appId` / `appSecret`（QQ 凭证）、`owners`（主人，绑定要真机扫码）。
+ *     `webui.loginPassword`（人登录面板的密码，与 accessKey 是两把钥匙）、
+ *     `webui.host` / `webui.port`（运行中的进程不会因改端口重新 bind）、
+ *     `network.giteeToken`（Gitee 镜像令牌）、`notifications.smtp`（整段 SMTP 配置：
+ *     `checkConfig()` 要求 host / port / from 齐全，`user` + `pass` 才组成认证，
+ *     只保 pass 等于留半套——重新填一遍不比重新申请授权码容易）。
+ *   - 每只鸟：`appId` / `appSecret`（QQ 凭证）、`owners`（主人，绑定要真机扫码）、
+ *     `onebot.token` / `host.token`（两个协议端口各自的对端令牌）。
+ *
+ * 「恢复默认设置」只对**配置项**生效：令牌 / 授权码是用户去别处申请才拿得到的，
+ * 重置一次就清空等于逼人重配一遍，而且返回文案还写着「凭证保留」，属于欺骗。
+ * 这些键一概要保住；`enabled` / `host` / `port` 这类开关仍回默认，用户按需要重开。
  *
  * 全部是纯函数 + 可注入 IO，测试不需要碰真实配置目录。
  */
@@ -27,14 +36,45 @@ import { DIRS, PATHS, listBotIds } from './paths.js';
 /** 前端必须带这个确认词；误点 / 老脚本裸调一律拒绝 */
 export const RESET_CONFIRM = 'RESET';
 
-/** 全局保留路径：连接引导 + 凭证 */
+/**
+ * 全局保留路径：连接引导 + 凭证 + 用户自己配的 SMTP 通道。
+ *
+ * SMTP 按**字段白名单**保留而不是整段复制：`checkConfig()` 要求 host / port / from
+ * 齐全，认证还要 user + pass，少一个就发不出信；但 enabled（恢复默认后不该偷偷
+ * 继续发邮件）与 timeoutMs / dailyLimit 这类高级限频属于「设置」，必须回默认。
+ * 逐字段搬还能顺手淘汰旧版遗留键（如 smtpPass / password）——整段复制会把它们
+ * 原样带回来，违背「删了重建才干净」的初衷。
+ */
 export const GLOBAL_KEEP_PATHS = [
   ['webui', 'accessKey'],
+  ['webui', 'loginPassword'],
   ['webui', 'host'],
   ['webui', 'port'],
+  ['network', 'giteeToken'],
+  ['notifications', 'smtp', 'host'],
+  ['notifications', 'smtp', 'port'],
+  ['notifications', 'smtp', 'security'],
+  ['notifications', 'smtp', 'user'],
+  ['notifications', 'smtp', 'pass'],
+  ['notifications', 'smtp', 'from'],
+  ['notifications', 'smtp', 'fromName'],
+  ['notifications', 'smtp', 'ownerEmail'],
 ];
 
-/** 每只鸟保留的顶层键：凭证 + 主人 */
+/** 每只鸟保留路径：凭证 / 主人 / 协议令牌；它们的 enabled、host、port 仍回默认 */
+export const BOT_KEEP_PATHS = [
+  ['appId'],
+  ['appSecret'],
+  ['owners'],
+  ['onebot', 'token'],
+  ['host', 'token'],
+];
+
+/**
+ * 兼容旧名：老调用方传的是单层 key 列表，语义仍是「只保这三个顶层键」。
+ * 不能从 BOT_KEEP_PATHS 派生——那样会把 `onebot` / `host` 整个对象（含开关与端口）
+ * 一起保留，和「只保令牌」的目标相反。
+ */
 export const BOT_KEEP_KEYS = ['appId', 'appSecret', 'owners'];
 
 function getAt(root, path) {
@@ -66,12 +106,17 @@ export function resetGlobalKeeping(current = {}, keep = GLOBAL_KEEP_PATHS) {
   return next;
 }
 
-/** 重置单只鸟：保留凭证与主人，其余回到 BOT_DEFAULTS */
-export function resetBotKeeping(current = {}, id = '', keep = BOT_KEEP_KEYS) {
+/** 默认参数写成路径数组；兼容老调用方传进来的单层 key 列表（字符串） */
+const asPath = (k) => (Array.isArray(k) ? k : [k]);
+
+/** 重置单只鸟：保留凭证 / 主人 / 协议令牌，其余回到 BOT_DEFAULTS */
+export function resetBotKeeping(current = {}, id = '', keep = BOT_KEEP_PATHS) {
   const next = structuredClone(BOT_DEFAULTS);
   next.id = String(id || '');
-  for (const k of keep) {
-    if (current?.[k] !== undefined) next[k] = structuredClone(current[k]);
+  for (const item of keep) {
+    const p = asPath(item);
+    const v = getAt(current, p);
+    if (v !== undefined) setAt(next, p, structuredClone(v));
   }
   if (!next.name) next.name = next.id;
   return next;
@@ -135,7 +180,7 @@ export async function resetFrameworkConfigs({ confirm, io = defaultIo } = {}) {
     bots,
     errors,
     message: ok
-      ? `已恢复 ${bots.length} 只鸟 + 全局设置的默认值；凭证与主人保留`
+      ? `已恢复 ${bots.length} 只鸟 + 全局设置的默认值；QQ 凭证、主人、面板密钥与 Gitee / SMTP / 外接协议令牌均已保留（协议开关回到关闭，需要时请重新打开）`
       : `部分恢复失败：${errors.join('；')}`,
   };
 }

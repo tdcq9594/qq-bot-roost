@@ -149,11 +149,13 @@ function registerCoreCommands(rt) {
    * 把注册表里的菜单转成 renderMenuMd 需要的分组结构。
    * 命令项做成可点击标签，非命令项（被动触发的关键词）只显示文字。
    */
-  function menuGroupsOf(m, { withCommands = true } = {}) {
+  function menuGroupsOf(m, { withCommands = true, myLv = LEVEL.owner } = {}) {
     const groups = [];
     for (const sec of m.sections) {
-      if (!sec.items.length) continue;
-      groups.push({ title: sec.title, items: sec.items.map((it) => menuItemOf(it, withCommands)) });
+      /** 主人专属的命令对非主人不显示：列出来点了只会回一句「只有主人能用」 */
+      const items = sec.items.filter((it) => !(it.ownerOnly && myLv > LEVEL.owner));
+      if (!items.length) continue;
+      groups.push({ title: sec.title, items: items.map((it) => menuItemOf(it, withCommands)) });
     }
     return groups;
   }
@@ -192,6 +194,7 @@ function registerCoreCommands(rt) {
         for (const it of sec.items) {
           if (it.admin && myLv > LEVEL.admin) continue;
           if (it.globalAdmin && myLv > LEVEL.admin) continue;
+          if (it.ownerOnly && myLv > LEVEL.owner) continue;
           items.push(menuItemOf(it));
         }
         if (items.length) out.set(sec.title, items);
@@ -207,14 +210,24 @@ function registerCoreCommands(rt) {
      * 这段正常走不到。留着是兜底——哪天放开 `help`（比如只对管理员回），
      * `msg.coreOnly` 标记还在，这条过滤依然生效，不用回来重写一遍。
      */
-    const pluginMenus = msg.coreOnly ? [] : [...registry.menus.values()].filter((m) => m.id !== '__core');
+    const allMenus = msg.coreOnly ? [] : [...registry.menus.values()].filter((m) => m.id !== '__core');
+    /**
+     * 普通插件 vs 外接协议连接方。
+     *
+     * `ext:` 开头的是外接协议连接方（`ext:dsh` 宿主本体、`ext:<id>` 它装的扩展）。
+     * 它们的命令注册在框架侧，但**它们不是插件**——混进「插件」列表，用户看到的
+     * 就是 `__host DSH · 13 条` 这种谁也认不出的内部代号。
+     * 单独一栏「协议」，栏标题用对方自报的名字。
+     */
+    const pluginMenus = allMenus.filter((m) => !m.id.startsWith('ext:'));
+    const extMenus = allMenus.filter((m) => m.id.startsWith('ext:'));
 
     /* ---------- 有参数：进下级 ---------- */
     if (arg) {
       // 1) 插件 id
       const m = registry.menus.get(arg);
       if (m) {
-        return msg.replyMenu(`${m.title}${m.version ? ' v' + m.version : ''}`, menuGroupsOf(m));
+        return msg.replyMenu(`${m.title}${m.version ? ' v' + m.version : ''}`, menuGroupsOf(m, { myLv }));
       }
 
       // 2) 「插件」→ 插件列表
@@ -237,12 +250,26 @@ function registerCoreCommands(rt) {
         ]);
       }
 
-      // 3) 内核分组名（基础 / 管理 / 绑定 / 其它）
+      // 3) 「协议」→ 外接协议连接方在框架侧注册的命令
+      if (raw === '协议' || arg === 'protocol' || raw === '外接' || arg === 'ext') {
+        if (!extMenus.length) {
+          return msg.reply('这会儿没有协议连接连着。连上 dsh-roost 之后，它注册的命令会出现在这里。');
+        }
+        return msg.replyMenu(
+          '协议',
+          extMenus.map((m) => ({
+            title: `${m.title}${m.version ? ' v' + m.version : ''}`,
+            items: menuGroupsOf(m, { myLv }).flatMap((g) => g.items),
+          })),
+        );
+      }
+
+      // 4) 内核分组名（基础 / 管理 / 绑定 / 其它）
       const secs = coreSections();
       const hit = secs.get(raw);
       if (hit) return msg.replyMenu(`框架 · ${raw}`, [{ title: raw, items: hit }]);
 
-      const names = [...secs.keys(), '插件', ...pluginMenus.map((x) => x.id)];
+      const names = [...secs.keys(), '插件', ...(extMenus.length ? ['协议'] : []), ...pluginMenus.map((x) => x.id)];
       return msg.reply(`没有「${raw}」这个分类或插件。\n可用：${names.join('、')}`);
     }
 
@@ -284,6 +311,14 @@ function registerCoreCommands(rt) {
         text: '插件',
         desc: `${pluginMenus.length} 个：${pluginMenus.map((x) => x.id).join('、')}`,
         cmd: `${P}help 插件`,
+      });
+    }
+    if (extMenus.length) {
+      const cnt = extMenus.reduce((n, m) => n + m.sections.reduce((k, s) => k + s.items.length, 0), 0);
+      entries.push({
+        text: '协议',
+        desc: `${extMenus.map((x) => x.title).join('、')} · ${cnt} 条`,
+        cmd: `${P}help 协议`,
       });
     }
     if (entries.length) groups.push({ title: '分类', items: entries });
