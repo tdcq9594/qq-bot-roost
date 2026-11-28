@@ -20,9 +20,17 @@ const HALT = Symbol('roost.halt');
  */
 
 export class Pipeline {
-  constructor({ metrics = null } = {}) {
+  /**
+   * @param {{metrics?:object, stopIfReplied?:boolean}} [opts]
+   *   stopIfReplied：中间件抛错时，若这条消息已经 reply 过就不再往下走。
+   *   默认 true——此时继续只会让模型再发一遍（双发），原本就没有意义。
+   *   老插件若依赖「出错后继续」可显式传 false 回退。
+   */
+  constructor({ metrics = null, stopIfReplied = true } = {}) {
     /** 该机器人自己的指标，中间件出错计数写这里 */
     this.metrics = metrics;
+    /** 已认领收口：抛错前已 reply 过就不再交给下游/模型 */
+    this.stopIfReplied = stopIfReplied !== false;
     /** @type {{name:string, fn:Function, pluginId:string|null}[]} */
     this.items = [];
   }
@@ -106,6 +114,18 @@ export class Pipeline {
         if (e === HALT) return;
         this.metrics?.bump('errors');
         log.error(`中间件 ${item.name} 出错，跳过该中间件继续:`, e.message);
+        /**
+         * 已认领收口：这条消息已经 reply 过（缓冲里或已发出），再往下走会让
+         * 模型补一句，用户看到同一件事说两遍。此时"继续"没有意义，直接停。
+         *
+         * msg.replied 标记的是"调用过 reply"，不是"发送成功"——对收口来说
+         * 够用：只要调用方已经认领了这次回复，就不该再有第二个产出者。
+         * 幂等键/投递账本（claim/settle）粒度是"一条消息"，不动它们。
+         */
+        if (this.stopIfReplied && scope.msg?.replied === true) {
+          halted = true;
+          return;
+        }
         // 中间件自己崩了不该把消息吞掉，继续往下走
         if (!called) await dispatch(idx + 1);
       }

@@ -2037,6 +2037,8 @@ function fillForm(c) {
   // @ 回复策略（bot 级；与 message.js 的 plugins.* 对应）
   // @ 别的机器人静默：默认开，所以用 !== false（老配置没这个字段也算开）
   f.ignoreOtherBotMention.checked = c.plugins?.ignoreOtherBotMention !== false;
+  const safeBox = $("#pluginSafeMode");
+  if (safeBox) safeBox.checked = c.plugins?.safeMode === true;
   f.groupOnlyMentioned.checked = c.plugins?.groupOnlyMentioned === true;
   f.commandRequiresMention.checked = c.plugins?.commandRequiresMention === true;
   // 静默消息交给协议层：默认开，所以用 !== false（老配置没这个字段也算开）
@@ -2516,6 +2518,7 @@ function collectAutoPayload(f) {
     dedupWindowSec: Number(f.dedupWindowSec.value) || 0,
     plugins: {
       ignoreOtherBotMention: f.ignoreOtherBotMention.checked,
+      safeMode: $("#pluginSafeMode")?.checked === true,
       groupOnlyMentioned: f.groupOnlyMentioned.checked,
       commandRequiresMention: f.commandRequiresMention.checked,
       forwardSilentToProtocol: f.forwardSilentToProtocol.checked,
@@ -2618,6 +2621,7 @@ async function saveCfgForm({ fromQr = false } = {}) {
     dedupWindowSec: Number(f.dedupWindowSec.value) || 0,
     plugins: {
       ignoreOtherBotMention: f.ignoreOtherBotMention.checked,
+      safeMode: $("#pluginSafeMode")?.checked === true,
       groupOnlyMentioned: f.groupOnlyMentioned.checked,
       commandRequiresMention: f.commandRequiresMention.checked,
       forwardSilentToProtocol: f.forwardSilentToProtocol.checked,

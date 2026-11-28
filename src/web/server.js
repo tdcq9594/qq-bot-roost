@@ -2263,7 +2263,7 @@ async function startWebServerInstance({
            */
           if (body.plugins && typeof body.plugins === 'object') {
             const patch = {};
-            for (const key of ['groupOnlyMentioned', 'ignoreOtherBotMention', 'commandRequiresMention', 'forwardSilentToProtocol']) {
+            for (const key of ['groupOnlyMentioned', 'ignoreOtherBotMention', 'commandRequiresMention', 'forwardSilentToProtocol', 'safeMode']) {
               if (typeof body.plugins[key] === 'boolean') patch[key] = body.plugins[key];
             }
             if (Object.keys(patch).length) {

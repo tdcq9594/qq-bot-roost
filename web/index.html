@@ -1169,6 +1169,12 @@ curl 'https://bot.q.qq.com/cgi-bin/v2/info/list_bots' \
       </div>
       <div class="upd-tip" id="pluginUpdateTip"></div>
 
+      <!-- 安全模式：只跑内建插件，用于插件出问题时快速定位（内核命令不受影响） -->
+      <label class="switch small" title="打开后只加载内建插件，跳过所有外部插件；重启后生效">
+        <input type="checkbox" id="pluginSafeMode"> 安全模式（只跑内建插件）
+      </label>
+      <span class="hint">外部插件出问题时打开它重启，确认是不是插件导致的</span>
+
       <!-- 插件一多就得能找：搜索 / 状态 / 排序 + 三种视图自选 -->
       <div class="plugin-filter">
         <div class="filter-fields">
