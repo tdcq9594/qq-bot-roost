@@ -187,22 +187,22 @@ test('ext.register 上报的命令被归一化：别名、权限、伪插件归�
       actions: [{ id: 'share', label: '分享' }],
       commands: [{ name: 'Bili', aliases: ['哔哩', 'BILI'], desc: '投稿', admin: true, ownerOnly: true }],
     }],
-    host: { name: 'DSH', commands: [{ name: 'model', desc: '换模型', admin: true }] },
+    host: { name: 'dsh', commands: [{ name: 'model', desc: '换模型', admin: true }] },
   });
 
   assert.equal(r.commands, 2);
   const list = inst.last();
   assert.deepEqual(list.map((c) => c.name), ['bili', 'model']);
   const bili = list.find((c) => c.name === 'bili');
-  assert.equal(bili.pluginId, '__ext:bili');
+  assert.equal(bili.pluginId, 'ext:bili');
   assert.equal(bili.pluginName, 'B 站');
   assert.deepEqual(bili.aliases, ['哔哩']);
   assert.equal(bili.admin, true);
   assert.equal(bili.ownerOnly, true);
   const host = list.find((c) => c.name === 'model');
-  assert.equal(host.pluginId, '__host');
+  assert.equal(host.pluginId, 'ext:dsh');
   assert.equal(host.target, 'host');
-  assert.equal(host.pluginName, 'DSH');
+  assert.equal(host.pluginName, 'dsh');
 });
 
 test('名字不合法的命令整条丢弃，不把畸形条目带进 registry', () => {
@@ -329,7 +329,7 @@ test('ext.register 把宿主命令真装进 registry，别名成隐藏命令', a
   const { hb, registry, scopes } = hostRig();
   const r = await hb.methods.call(
     'ext.register',
-    { host: { name: 'DSH', commands: [{ name: 'model', desc: '换模型', admin: true, aliases: ['模型'] }] } },
+    { host: { name: 'dsh', commands: [{ name: 'model', desc: '换模型', admin: true, aliases: ['模型'] }] } },
     { scopes },
   );
   assert.equal(r.ok, true);
@@ -337,28 +337,39 @@ test('ext.register 把宿主命令真装进 registry，别名成隐藏命令', a
   assert.deepEqual(r.rejected, []);
 
   const entry = registry.commands.get('model');
-  assert.equal(entry.pluginId, '__host');
+  assert.equal(entry.pluginId, 'ext:dsh');
   assert.equal(entry.admin, true);
   assert.equal(typeof entry.handler, 'function');
   assert.ok(registry.commands.has('模型'), '别名要能直呼');
-  assert.equal(registry.menus.get('__host').title, 'DSH');
-  const texts = registry.menus.get('__host').sections.flatMap((s) => s.items.map((i) => i.text));
+  assert.equal(registry.menus.get('ext:dsh').title, 'dsh');
+  const texts = registry.menus.get('ext:dsh').sections.flatMap((s) => s.items.map((i) => i.text));
   assert.deepEqual(texts, ['model'], '别名不进菜单');
 });
 
-test('与内核/插件命令重名时拒绝该条，其余照装', async () => {
+test('与内核/插件命令重名时改成 <程序名>-<命令名>，并在菜单里标出原名', async () => {
   const { hb, registry, scopes } = hostRig();
   registry.addCommand('__core', 'help', { pattern: 'help' }, () => {});
   const r = await hb.methods.call(
     'ext.register',
-    { host: { commands: [{ name: 'help' }, { name: 'dstatus' }] } },
+    { host: { name: 'dsh', commands: [{ name: 'help' }, { name: 'dstatus' }] } },
     { scopes },
   );
   assert.equal(r.commands, 2, '清单本身要如实反映上报了几条');
-  assert.equal(r.rejected.length, 1);
-  assert.equal(r.rejected[0].name, 'help');
+  assert.deepEqual(r.rejected, [], '能改名就不该拒');
+  assert.deepEqual(r.renamed, [{ from: 'help', to: 'dsh-help', plugin: 'dsh' }]);
+
   assert.equal(registry.commands.get('help').pluginId, '__core', '原命令不能被顶掉');
+  const alt = registry.commands.get('dsh-help');
+  assert.equal(alt.pluginId, 'ext:dsh');
+  assert.match(alt.desc, /原名 \/help/);
   assert.ok(registry.commands.has('dstatus'));
+
+  const item = registry.menus
+    .get('ext:dsh')
+    .sections.flatMap((s) => s.items)
+    .find((x) => x.text === 'dsh-help');
+  assert.ok(item, '菜单里要用改后的名字，不能还写 /help');
+  assert.match(item.desc, /原名 \/help，与已有命令重名/, '改名要在菜单里标出来，否则用户对不上');
 });
 
 test('命令被触发 → 推 ext.command.request；回执带正文由框架代发', async () => {

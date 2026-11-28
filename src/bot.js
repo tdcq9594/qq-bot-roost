@@ -1278,6 +1278,12 @@ export class BotRuntime {
         silent: msg.silent,
         forwardSilent,
         duplicate,
+        /**
+         * 命中命令表的命令由框架自己处理，别再交给协议层：
+         * 否则 dsh-roost 会把「/help 插件」当成用户说的一句话喂给模型。
+         * 只认命令表里有的名字，`/xyz` 这类未知命令仍按普通消息走。
+         */
+        isCommand: Boolean(msg.isCommand && registry.commands.has(msg.command)),
       })) {
         this.onebot?.onMessage(msg);
         /** 宿主协议：传完整 msg（原生结构），它自己挑字段 */
@@ -1717,11 +1723,13 @@ function groupProfileOf(info) {
  */
 export function pluginAllowedIn(spec, chatId, pluginId) {
   /**
-   * `__` 开头的是内核与伪插件（`__core`、外接客户端的 `__host` / `__ext:*`）。
-   * 它们不在分群开关的插件列表里，也没法被 `/disable` 关掉；
-   * 按「本群只启用列表里这些」去判会把它们整组静默，反而像命令失灵。
+   * 内核 `__core`、以及外接协议连接方（`ext:dsh`、`ext:<扩展id>`）都要放行。
+   *
+   * 前者放行是因为群里没了 `/help` 用户就没法自救；后者是命令**跟着连接走**的，
+   * 客户端没连上时根本不在命令表里，再用分群插件开关判一次只会让人以为命令失灵。
+   * 它们也不在插件面板的启用列表里，`/disable` 拿不到它们。
    */
-  if (!pluginId || pluginId.startsWith('__')) return true;
+  if (!pluginId || pluginId === '__core' || pluginId.startsWith('ext:')) return true;
   const own = spec?.groups?.[chatId];
   if (!own) return true; // 这个会话没单独配，跟着全局
   const mode = own.mode ?? 'include';
