@@ -82,7 +82,7 @@ test('真 HTTP：面板改 key 弱则 400 且配置未变，强则 200', async (
   };
   const svc = await startWebServer({
     globalCfg: {
-      webui: { host: '127.0.0.1', port, accessKey: 'initial-strong-key-123456', portTries: 1, openBrowser: false },
+      webui: { host: '127.0.0.1', port, accessKey: 'test-strong-key-1234567890', portTries: 1, openBrowser: false },
       plugins: {},
     },
     runtimes: [rt],
@@ -102,7 +102,7 @@ test('真 HTTP：面板改 key 弱则 400 且配置未变，强则 200', async (
   const put = (key) =>
     fetch(base + '/api/config', {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'X-Access-Key': 'initial-strong-key-123456' },
+      headers: { 'Content-Type': 'application/json', 'X-Access-Key': 'test-strong-key-1234567890' },
       body: JSON.stringify({ webui: { accessKey: key } }),
     });
 
@@ -121,7 +121,7 @@ test('真 HTTP：面板改 key 弱则 400 且配置未变，强则 200', async (
   // 换凭证后旧 key 立即失效（P1 回归）：旧 header 再请求必须 401
   const stale = await fetch(base + '/api/config', {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json', 'X-Access-Key': 'initial-strong-key-123456' },
+    headers: { 'Content-Type': 'application/json', 'X-Access-Key': 'test-strong-key-1234567890' },
     body: JSON.stringify({ webui: {} }),
   });
   assert.equal(stale.status, 401, '旧凭证必须立即失效');

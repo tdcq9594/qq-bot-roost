@@ -233,14 +233,14 @@ test('人/机凭证分流：登录只认 loginPassword，API 只认 accessKey，
     });
   const bad = await put({ webui: { loginPassword: '123456' } });
   assert.equal(bad.status, 400);
-  const changed = await put({ webui: { loginPassword: 'new-human-pass-456' } });
+  const changed = await put({ webui: { loginPassword: 'test-human-pass-456' } });
   assert.equal(changed.status, 200);
   const body = await changed.json();
   assert.equal(body.credentialsChanged, true);
 
   // 旧密码立即失效，新密码可用；机器 key 不受影响（API 仍能调）
   assert.equal((await post('/api/login', { key: PASS })).status, 401);
-  assert.equal((await post('/api/login', { key: 'new-human-pass-456' })).status, 200);
+  assert.equal((await post('/api/login', { key: 'test-human-pass-456' })).status, 200);
   assert.notEqual((await fetch(base + '/api/config', { headers: { 'X-Access-Key': KEY } })).status, 401);
 });
 
