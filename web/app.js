@@ -4832,9 +4832,10 @@ function renderMarketRows() {
     shown.sort((a, b) => String(a.name || a.id).localeCompare(String(b.name || b.id), 'zh-CN'));
   } else if (MARKET.sort === 'version') {
     shown.sort((a, b) => compareVersion(b.version, a.version));
-  } else if (MARKET.sort === 'added') {
-    shown.sort((a, b) => String(b.addedAt || '').localeCompare(String(a.addedAt || '')));
   }
+  // 「最近收录」已移除：它依赖的 addedAt 在索引 schema 4 已退役，
+  // 排序恒为 0 等于没有功能。热度/最新发布要等索引采集 publishedAt/downloads
+  // 之后再上，别用假数据冒充。
 
   const count = $('#marketCount');
   if (count) count.textContent = `显示 ${shown.length} / ${MARKET.all.length}`;
