@@ -26,6 +26,12 @@ export const GLOBAL_DEFAULTS = {
     host: '127.0.0.1',
     port: 15207,
     accessKey: '',
+    /**
+     * 给人登录面板用的密码（2026-11-28）。与 accessKey 分开：
+     * accessKey 给机器（dsh-roost / 脚本），loginPassword 给人在登录页输，
+     * 门槛 8+。留空时登录页退回 accessKey，老用户升级不断档。
+     */
+    loginPassword: '',
     portTries: 20,
     openBrowser: true,
     /**

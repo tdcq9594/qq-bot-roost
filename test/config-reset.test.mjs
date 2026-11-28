@@ -34,6 +34,32 @@ test('全局恢复：老 webui.token 兼容搬成 accessKey', () => {
   assert.equal(next.webui.accessKey, 'old-key-456');
 });
 
+test('全局恢复：Gitee 令牌与整套 SMTP 配置保留，只有开关回默认（P1 回归）', () => {
+  const cur = {
+    network: { giteeToken: 'gitee-secret', mirror: 'gitee' },
+    notifications: {
+      smtp: {
+        pass: 'smtp-app-pass', user: 'me@example.com', host: 'smtp.example.com',
+        port: 465, security: 'tls', from: 'me@example.com', fromName: '我',
+        enabled: true, dailyLimit: 99,
+      },
+    },
+  };
+  const next = resetGlobalKeeping(cur);
+  assert.equal(next.network.giteeToken, 'gitee-secret', 'Gitee 令牌丢了没法自己补');
+  const s = next.notifications.smtp;
+  // checkConfig() 要 host / port / from 齐全；认证要 user + pass——缺一邮件就发不出去
+  assert.equal(s.pass, 'smtp-app-pass');
+  assert.equal(s.user, 'me@example.com');
+  assert.equal(s.host, 'smtp.example.com');
+  assert.equal(s.port, 465);
+  assert.equal(s.from, 'me@example.com');
+  assert.equal(s.enabled, GLOBAL_DEFAULTS.notifications.smtp.enabled, '开关本身仍该回默认');
+  assert.equal(s.dailyLimit, GLOBAL_DEFAULTS.notifications.smtp.dailyLimit, '高级项回默认');
+  assert.equal(s.smtpPass, undefined, '旧版遗留键不能跟着整段搬回来');
+  assert.equal(s.password, undefined);
+});
+
 test('单只鸟恢复：保留 appId/appSecret/owners，intents 与旧键回默认', () => {
   const cur = {
     id: 'wrong-id', name: '大肥鱼', enabled: false,
@@ -50,6 +76,20 @@ test('单只鸟恢复：保留 appId/appSecret/owners，intents 与旧键回默�
   assert.deepEqual(next.owners, ['openid-a']);
   assert.equal(next.intents, BOT_DEFAULTS.intents);
   assert.equal(next.legacyThing, undefined);
+});
+
+test('单只鸟恢复：OneBot / 宿主协议令牌保留，端口与开关回默认（P1 回归）', () => {
+  const cur = {
+    id: 'main',
+    appId: '1', appSecret: 's', owners: ['o'],
+    onebot: { token: 'onebot-secret', port: 6700, enabled: true },
+    host: { token: 'host-secret', port: 6807, enabled: true },
+  };
+  const next = resetBotKeeping(cur, 'main');
+  assert.equal(next.onebot.token, 'onebot-secret');
+  assert.equal(next.host.token, 'host-secret');
+  assert.equal(next.onebot.port, BOT_DEFAULTS.onebot.port, '端口是设置项，回默认');
+  assert.equal(next.host.enabled, BOT_DEFAULTS.host.enabled, '协议开关是设置项，回默认');
 });
 
 test('恢复默认值对象不被共享引用污染（BOT_DEFAULTS 里多处引用同一对象）', () => {
@@ -106,5 +146,33 @@ test('执行恢复：全成功时 ok:true 且消息说清保留了什么', async
   };
   const r = await resetFrameworkConfigs({ confirm: RESET_CONFIRM, io });
   assert.equal(r.ok, true);
-  assert.match(r.message, /凭证与主人保留/);
+  assert.match(r.message, /QQ 凭证、主人、面板密钥与 Gitee \/ SMTP \/ 外接协议令牌均已保留/);
+});
+
+test('执行恢复：端到端把五类凭证都保住，文案与行为一致（P1 回归）', async () => {
+  const saved = { bot: null, global: null };
+  const io = {
+    listBots: async () => ['main'],
+    readBot: async () => ({
+      id: 'main', appId: 'app', appSecret: 'secret', owners: ['o'],
+      onebot: { token: 'onebot-t', port: 6700 }, host: { token: 'host-t', port: 6807 },
+    }),
+    readGlobal: async () => ({
+      webui: { accessKey: 'panel-key' },
+      network: { giteeToken: 'gitee-t' },
+      notifications: { smtp: { pass: 'smtp-t', user: 'u@x.com', host: 'smtp.x.com', from: 'u@x.com', port: 465 } },
+    }),
+    saveBot: async (_, cfg) => { saved.bot = cfg; },
+    saveGlobal: async (cfg) => { saved.global = cfg; },
+  };
+  const r = await resetFrameworkConfigs({ confirm: RESET_CONFIRM, io });
+  assert.equal(r.ok, true);
+  assert.equal(saved.bot.onebot.token, 'onebot-t');
+  assert.equal(saved.bot.host.token, 'host-t');
+  assert.equal(saved.global.network.giteeToken, 'gitee-t');
+  assert.equal(saved.global.notifications.smtp.pass, 'smtp-t');
+  assert.equal(saved.global.notifications.smtp.user, 'u@x.com');
+  assert.equal(saved.global.notifications.smtp.host, 'smtp.x.com');
+  assert.equal(saved.global.webui.accessKey, 'panel-key');
+  assert.match(r.message, /令牌均已保留/);
 });
