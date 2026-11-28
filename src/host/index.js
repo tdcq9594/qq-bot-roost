@@ -135,7 +135,7 @@ export class HostBridge {
      * 里面的 R.api / R.plugins 都是调用时现读，早建不会拿到过期对象。
      */
     /**
-     * 外接客户端注册过来的命令装在伪插件上（宿主本体 `__<自报名>`、扩展 `__ext:<id>`）。
+     * 外接客户端注册过来的命令装在伪插件上（宿主本体 `ext:<自报名>`、扩展 `ext:<id>`）。
      * 记下来是为了重注册 / 断线时整组摘掉——命令表是全局命名空间，
      * 留一条僵尸命令就会一直抢别人的同名命令。
      */
@@ -177,27 +177,75 @@ export class HostBridge {
    * 每次调用都是「整组重建」：先按伪插件 id 清空，再按清单重装。这样扩展
    * 卸载、改命令名、断线都不会留下僵尸命令；也天然幂等（DSH 重连会重复上报）。
    *
-   * @returns {Array<{name:string, plugin?:string, reason:string}>} 重名被拒的条目
+   * 重名**不直接丢**：改成 `<程序名>-<命令名>` 再试（见下面的 `namespaceOf`），
+   * 只有改了还撞才进 `rejected`。外接协议后续要接多个程序，固定前缀能保证
+   * `/dsh-model`、`/aurabot-model` 各用各的，不用抢 `/model`。
+   *
+   * @returns {{rejected: Array<{name:string, plugin?:string, reason:string}>, renamed: Array<{from:string,to:string,plugin?:string}>}}
    */
   #installExtCommands(list) {
     const registry = this.runtime?.registry;
-    if (!registry) return [];
+    const mine = Array.isArray(list) ? list : [];
+    if (!registry) return { rejected: [], renamed: [] };
     for (const pid of this.extCommandPlugins) registry.clearPlugin(pid);
     this.extCommandPlugins.clear();
 
     const rejected = [];
+    const renamed = [];
     const prefix = String(this.runtime?.cfg?.commandPrefix ?? '/');
-    for (const c of Array.isArray(list) ? list : []) {
+
+    /** 命令名上限 16（与命令表同口径）；冲突改名时超长就截断，宁可短也别装不上 */
+    const fit = (s) =>
+      String(s ?? '')
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}_-]+/gu, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 16);
+
+    /**
+     * 冲突时用的程序名：取外接方自报名字里的**第一段英文**（`dsh-roost` → `dsh`）。
+     * 中文名（`B 站`）提不出英文段时退回扩展 id——总得有个能拼进命令名的前缀。
+     */
+    /**
+     * 冲突时用的程序名：优先用内部 id 去掉 `ext:`（`ext:dsh` → `dsh`，
+     * `ext:bili` → `bili`），id 不是短英文时退回自报名字的第一段英文。
+     * 中文名（`B 站`）提不出英文段时兜底 `ext`——总得有个能拼进命令名的前缀。
+     */
+    const namespaceOf = (c) => {
+      const id = String(c.pluginId ?? '').replace(/^ext:/, '');
+      const first = (String(c.pluginName ?? '').match(/[a-z0-9]+/gi) ?? [])[0] ?? '';
+      const pick = /^[a-z0-9_-]{2,16}$/i.test(id) ? id : first;
+      return fit(pick).slice(0, 8) || 'ext';
+    };
+
+    for (const c of mine) {
+      const handler = (msg) => this.#runExtCommand(c, msg);
+      const ns = namespaceOf(c);
       /**
-       * 客户端写的 usage 是按它自己以为的前缀拼的（多半是 `/`）。本框架改了
-       * 前缀时这里跟着换，否则菜单里显示 `/model`、实际要发 `!model`。
+       * `usage` 要跟着实际注册名走：客户端写的 `/model [list|…]` 是它以为的名字，
+       * 改名成 `/dsh-model` 后菜单里还显示 `/model`，用户照着发就撞回原插件了。
+       * 做法是只保留原 usage 的**参数部分**，命令名用当前这个。
        */
-      const rawUsage = c.usage || `${prefix}${c.name}`;
-      const usage = prefix === '/' ? rawUsage : rawUsage.replace(/^\//, prefix);
-      const meta = {
-        desc: c.desc,
-        usage,
-        pattern: c.name,
+      const usageOf = (name) => {
+        const rest = String(c.usage ?? '').trim().replace(/^\S+\s*/, '');
+        const head = `${prefix}${name}`;
+        return (rest ? `${head} ${rest}` : head).slice(0, 120);
+      };
+      /**
+       * 因重名改过的命令要在菜单里标出来，写明它本来叫什么。
+       * 不标的话用户看到 `/dsh-model` 会以为是客户端的原始命令名，
+       * 排查「为什么我的 /model 没生效」时完全对不上。
+       */
+      const descOf = (from) => {
+        const base = String(c.desc ?? '');
+        if (!from) return base;
+        const note = `原名 ${prefix}${from}，与已有命令重名`;
+        return (base ? `${note} · ${base}` : note).slice(0, 120);
+      };
+      const metaOf = (name, extra = {}, from = '') => ({
+        desc: descOf(from),
+        usage: usageOf(name),
+        pattern: name,
         admin: c.admin,
         globalAdmin: c.globalAdmin,
         ownerOnly: c.ownerOnly,
@@ -207,24 +255,42 @@ export class HostBridge {
         pluginId: c.pluginId,
         /** 宿主命令进「指令」组，扩展命令单独一组，免得把内核菜单挤乱 */
         section: c.target === 'host' ? '指令' : '扩展',
-      };
-      const handler = (msg) => this.#runExtCommand(c, msg);
+        ...extra,
+      });
       /** 别名单独注册成隐藏命令：菜单里只显示主名，名字仍可直呼 */
-      for (const name of [c.name, ...c.aliases]) {
+      for (const [i, name] of [c.name, ...c.aliases].entries()) {
+        const isPrimary = i === 0;
         try {
-          registry.addCommand(c.pluginId, name, name === c.name ? meta : { ...meta, hidden: true }, handler);
+          registry.addCommand(c.pluginId, name, metaOf(name, isPrimary ? {} : { hidden: true }), handler);
+          continue;
         } catch (e) {
+          const alt = fit(`${ns}-${name}`);
+          if (alt && alt !== name) {
+            try {
+              /** 改名注册时把原名带进 desc，菜单里能看出「这条本来叫 /model」 */
+              registry.addCommand(c.pluginId, alt, metaOf(alt, isPrimary ? {} : { hidden: true }, name), handler);
+              renamed.push({ from: name, to: alt, plugin: c.pluginName });
+              log.info(`外接命令 /${name} 与已有命令冲突，改注册为 /${alt}`);
+              continue;
+            } catch (e2) {
+              rejected.push({ name, plugin: c.pluginName, reason: String(e2?.message ?? e2).slice(0, 120) });
+              continue;
+            }
+          }
           rejected.push({ name, plugin: c.pluginName, reason: String(e?.message ?? e).slice(0, 120) });
         }
       }
       this.extCommandPlugins.add(c.pluginId);
+    }
+    if (renamed.length) {
+      log.info(`外接命令有 ${renamed.length} 条因重名改了名：${renamed.map((r) => `/${r.from}→/${r.to}`).join('；')}`);
     }
     if (rejected.length) {
       log.warn(
         `外接命令有 ${rejected.length} 条没装上：${rejected.map((r) => `${r.name}（${r.reason}）`).join('；')}`,
       );
     }
-    return rejected;
+    return { rejected, renamed };
   }
 
   /**

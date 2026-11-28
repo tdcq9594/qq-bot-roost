@@ -49,18 +49,21 @@ const MAX_ALIASES = 4;
 const CMD_NAME_RE = /^[\p{L}\p{N}_-]{1,16}$/u;
 
 /**
- * 宿主本体在命令表里的内部 id。
+ * 命令表里的内部 id 统一加 `ext:` 前缀。
  *
  * 以前写死 `__host`，它会一路漏进 `/help 插件` 的列表里，用户看到的是
- * 「__host DSH」——一个谁也认不出的内部代号。改成按对方**自报的名字**
- * 生成（`host.name`，默认 `dsh-roost`），对内唯一、对外只显示名字。
+ * 「__host DSH」——一个谁也认不出的内部代号；后来改成 `__<自报名>`，
+ * 仍然带着两个下划线，像内部变量。现在宿主本体用 `ext:<自报名>`
+ * （默认 `ext:dsh`），扩展用 `ext:<extId>`。
  *
- * 保留 `__` 前缀有两个用处：分群「只启用列表」的插件开关对它放行
- * （见 `bot.js` 的 `pluginAllowedIn`），`/help 插件` 也能一眼把它筛掉。
+ * 前缀的作用只有一个：**它是外接协议方，不是插件**。分群「只启用列表」
+ * 对它放行（见 `bot.js` 的 `pluginAllowedIn`），`/help 插件` 靠它筛掉，
+ * `/help 协议` 靠它单列一栏。`:` 在 Windows 目录名里非法，所以永远不会
+ * 和真实插件 id 撞。
  *
- * 后续要接别的程序时，各自在 `host.name` 里报不同的名字就各占一个命名空间，
- * 不用再抢 `__host` 这个固定 id；真正的多连接并行还需要协议层给每条连接
- * 一个身份（`ext.register` 目前是一条连接一次全量上报）。
+ * 后续接别的程序时，各自在 `host.name` 里报不同名字就各占一个命名空间，
+ * 不用抢固定 id；真正的多连接并行还需要协议层给每条连接一个身份
+ * （`ext.register` 目前是一条连接一次全量上报）。
  */
 function virtualPluginId(name) {
   const slug = String(name ?? '')
@@ -69,20 +72,20 @@ function virtualPluginId(name) {
     .replace(/[^\p{L}\p{N}_-]+/gu, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 32);
-  return `__${slug || 'dsh'}`;
+  return `ext:${slug || 'dsh'}`;
 }
 
 /**
  * 把客户端上报的命令条目洗成内部结构。
  *
- * target = 'host' 表示宿主本体（伪插件 `__<host.name>`），'ext' 表示某个扩展
- * （伪插件 `__ext:<id>`）。名字不合法直接丢——命令表是全局命名空间，
+ * target = 'host' 表示宿主本体（`ext:<host.name>`），'ext' 表示某个扩展
+ * （`ext:<id>`）。名字不合法直接丢——命令表是全局命名空间，
  * 不能让一个畸形条目把别的插件注册流程带崩。
  */
 function normalizeCommands(list, { target, extId = '', pluginName }) {
   const out = [];
-  const name = String(pluginName ?? '').trim() || (target === 'host' ? 'dsh-roost' : extId);
-  const pluginId = target === 'host' ? virtualPluginId(name) : `__ext:${extId}`;
+  const name = String(pluginName ?? '').trim() || (target === 'host' ? 'dsh' : extId);
+  const pluginId = target === 'host' ? virtualPluginId(name) : `ext:${extId}`;
   for (const c of Array.isArray(list) ? list : []) {
     if (!c || typeof c !== 'object') continue;
     const cmd = String(c.name ?? '').trim().toLowerCase();
@@ -265,7 +268,7 @@ export function createExtBridge({
       }));
 
     /**
-     * 命令清单：扩展的按扩展归属，宿主的归它自报的那个名字（`__<name>`）。
+     * 命令清单：扩展的按扩展归属，宿主的归它自报的那个名字（`ext:<name>`）。
      * 总数超上限就整批丢（不静默截一半），并让客户端在 `rejected` 里看到原因。
      */
     const normalized = [];
@@ -276,10 +279,12 @@ export function createExtBridge({
       );
     }
     if (host && typeof host === 'object') {
-      normalized.push(...normalizeCommands(host.commands, { target: 'host', pluginName: String(host.name ?? 'dsh-roost') }));
+      normalized.push(...normalizeCommands(host.commands, { target: 'host', pluginName: String(host.name ?? 'dsh') }));
     }
 
     let rejected = [];
+    /** 因重名被改成 `<程序名>-<命令名>` 的条目，回执里告诉客户端，别让它悄悄改名 */
+    let renamed = [];
     if (normalized.length > MAX_COMMANDS) {
       rejected.push({ name: '*', reason: `命令总数 ${normalized.length} 超过上限 ${MAX_COMMANDS}` });
       commands = [];
@@ -288,8 +293,18 @@ export function createExtBridge({
     }
     if (installCommands) {
       try {
-        const conflicts = installCommands(commands) ?? [];
-        rejected = rejected.concat(conflicts);
+        const r = installCommands(commands);
+        /**
+         * 兼容两种返回：老口径直接给 `rejected` 数组，新口径给
+         * `{rejected, renamed}`。宿主侧是同一个仓改的，但外接桥也可
+         * 单独注入（单测），留一层兼容省得两边版本错开就炸。
+         */
+        if (Array.isArray(r)) {
+          rejected = rejected.concat(r);
+        } else {
+          rejected = rejected.concat(Array.isArray(r?.rejected) ? r.rejected : []);
+          renamed = Array.isArray(r?.renamed) ? r.renamed : [];
+        }
       } catch (e) {
         log(`安装外接命令失败：${e?.message ?? e}`);
         rejected.push({ name: '*', reason: `安装失败：${e?.message ?? e}` });
@@ -299,9 +314,10 @@ export function createExtBridge({
     catalogAt = Date.now();
     log(
       `外接清单已更新：${catalog.length} 个扩展 / ${catalog.reduce((n, e) => n + e.actions.length, 0)} 个动作 / ` +
-        `${commands.length} 条命令${rejected.length ? `，${rejected.length} 条被拒` : ''}`,
+        `${commands.length} 条命令${renamed.length ? `，${renamed.length} 条改名` : ''}` +
+        `${rejected.length ? `，${rejected.length} 条被拒` : ''}`,
     );
-    return { ok: true, count: catalog.length, commands: commands.length, rejected };
+    return { ok: true, count: catalog.length, commands: commands.length, rejected, renamed };
   }
 
   return {
@@ -316,7 +332,7 @@ export function createExtBridge({
         name: e.name,
         actions: e.actions.map((a) => ({ ...a })),
         commands: commands
-          .filter((c) => c.pluginId === `__ext:${e.extId}`)
+          .filter((c) => c.pluginId === `ext:${e.extId}`)
           .map((c) => ({ name: c.name, aliases: [...c.aliases], desc: c.desc })),
       })),
       host: {

@@ -214,13 +214,13 @@ function registerCoreCommands(rt) {
     /**
      * 普通插件 vs 外接协议连接方。
      *
-     * `__` 开头的是伪插件：外接客户端（dsh-roost 宿主本体）和它装的扩展，
-     * 它们的命令注册在框架侧，但**它们不是插件**——混进「插件」列表，
-     * 用户看到的就是 `__host DSH · 13 条` 这种谁也认不出的内部代号。
+     * `ext:` 开头的是外接协议连接方（`ext:dsh` 宿主本体、`ext:<id>` 它装的扩展）。
+     * 它们的命令注册在框架侧，但**它们不是插件**——混进「插件」列表，用户看到的
+     * 就是 `__host DSH · 13 条` 这种谁也认不出的内部代号。
      * 单独一栏「协议」，栏标题用对方自报的名字。
      */
-    const pluginMenus = allMenus.filter((m) => !m.id.startsWith('__'));
-    const extMenus = allMenus.filter((m) => m.id.startsWith('__'));
+    const pluginMenus = allMenus.filter((m) => !m.id.startsWith('ext:'));
+    const extMenus = allMenus.filter((m) => m.id.startsWith('ext:'));
 
     /* ---------- 有参数：进下级 ---------- */
     if (arg) {
