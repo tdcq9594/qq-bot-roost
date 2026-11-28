@@ -1460,6 +1460,8 @@ function activateTab(name) {
   }
   if (name === 'events') safeLoad('events', loadEvents);
   if (name === 'ledger') safeLoad('ledger', loadLedger);
+  if (name === 'sandbox') startSandboxPolling();
+  else stopSandboxPolling();
   /** 查询页：只在查过之后重跑一次，没查过就保持空状态，别一进来就打一次全表扫 */
   if (name === 'search') {
     /**
@@ -10365,3 +10367,95 @@ $('#mediaFile')?.addEventListener('change', (e) => pickMediaFiles(e.target.files
 
 // hash 直达 #media 时，activateTab 可能在本块执行前就跑过了，补一次
 if (location.hash.slice(1) === 'media') activateTab('media');
+
+/* ---------------- 沙盒（仅 mock 模式） ---------------- */
+
+let sandboxTimer = null;
+let sandboxLastId = '';
+
+function startSandboxPolling() {
+  stopSandboxPolling();
+  refreshSandbox();
+  sandboxTimer = setInterval(refreshSandbox, 2000);
+}
+
+function stopSandboxPolling() {
+  if (sandboxTimer) clearInterval(sandboxTimer);
+  sandboxTimer = null;
+}
+
+async function refreshSandbox() {
+  const state = $('#sandboxState');
+  const log = $('#sandboxLog');
+  if (!state || !log) return;
+  let r;
+  try {
+    r = await api('/api/sandbox/messages');
+  } catch (e) {
+    state.textContent = '读取失败';
+    log.innerHTML = `<div class="empty">${escapeHtml(errText(e))}</div>`;
+    return;
+  }
+  if (r?.status === 404) {
+    state.textContent = '仅 mock 模式可用';
+    log.innerHTML = '<div class="empty">真实机器人下没有沙盒（正常）</div>';
+    return;
+  }
+  if (r?.status !== 200) {
+    state.textContent = `读取失败 ${r?.status}`;
+    return;
+  }
+  const msgs = Array.isArray(r.data?.messages) ? r.data.messages : [];
+  state.textContent = `${msgs.length} 条 · 仅 mock 模式`;
+  if (!msgs.length) {
+    log.innerHTML = '<div class="empty">还没有假消息，在上方输入一条试试</div>';
+    return;
+  }
+  log.innerHTML = msgs
+    .slice()
+    .reverse()
+    .map((m) => {
+      const t = new Date(Number(m.at) || Date.now()).toLocaleTimeString('zh-CN', { hour12: false });
+      return `<div class="log-line"><span class="t">${escapeHtml(t)}</span><span class="tag">${escapeHtml(m.userName || m.userId || '')}</span><span class="m">${escapeHtml(m.content || '')}</span></div>`;
+    })
+    .join('');
+  // 新消息来了就滚到底
+  const last = msgs[msgs.length - 1];
+  if (last && last.id !== sandboxLastId) {
+    sandboxLastId = last.id;
+    log.scrollTop = log.scrollHeight;
+  }
+}
+
+$('#sandboxSend')?.addEventListener('click', async () => {
+  const input = $('#sandboxText');
+  const user = $('#sandboxUser');
+  const text = String(input?.value || '').trim();
+  if (!text) {
+    toast('先输入一条消息', 'info');
+    return;
+  }
+  const btn = $('#sandboxSend');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api('/api/mock/message', {
+      method: 'POST',
+      body: JSON.stringify({ text, userId: String(user?.value || '').trim() || 'mock-user' }),
+    });
+    if (r?.status === 200) {
+      if (input) input.value = '';
+      toast('已注入管线', 'ok');
+      await refreshSandbox();
+    } else {
+      toast(`注入失败：${escapeHtml(r?.data?.error || r?.status)}`, 'error');
+    }
+  } catch (e) {
+    toast(`注入失败：${errText(e)}`, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+});
+
+$('#sandboxText')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') $('#sandboxSend')?.click();
+});

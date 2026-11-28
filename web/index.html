@@ -107,6 +107,8 @@
           <button class="tab-item" data-tab="delivery">投递</button>
           <button class="tab-item" data-tab="ledger">账本</button>
           <button class="tab-item" data-tab="search">查询</button>
+          <!-- 沙盒：不接真 QQ 就能往管线里喂假消息，验证命令/中间件/插件 -->
+          <button class="tab-item" data-tab="sandbox">沙盒</button>
         </div>
       </div>
 
@@ -1545,6 +1547,28 @@ curl 'https://bot.q.qq.com/cgi-bin/v2/info/list_bots' \
           <tbody id="whoRows"><tr><td colspan="5" class="empty">还没有查询</td></tr></tbody>
         </table>
       </div>
+    </div>
+  </section>
+
+  <!-- 沙盒页：只有 --mock --serve 时可用。往管线喂假消息，验证命令/中间件/插件。
+       不做完整 AI 对话——那需要 dsh-roost + DSH，属真机验证。 -->
+  <section id="tab-sandbox" class="panel" hidden>
+    <div class="box">
+      <div class="box-hd">
+        <h3>聊天沙盒</h3>
+        <span class="hint" id="sandboxState">检测中…</span>
+      </div>
+      <p class="hint">不接真 QQ，假消息真跑命令 / 中间件 / 插件链路。消息只记在本页内存，刷新后清空，不写磁盘。</p>
+      <div class="form-row" style="margin-top:10px">
+        <input id="sandboxText" class="mini-input" placeholder="发一条假消息，例如 /help" aria-label="假消息内容" />
+        <input id="sandboxUser" class="mini-input" placeholder="mock-user" aria-label="假用户 ID" style="width:110px" />
+        <button id="sandboxSend" class="btn small">发送</button>
+      </div>
+      <div class="hint" id="sandboxHint" style="margin-top:8px">仅在 mock 模式可用；真实机器人不会显示本页。</div>
+    </div>
+    <div class="box" style="margin-top:12px">
+      <div class="box-hd"><h3>消息流水</h3><span class="hint">最近 200 条 · 自动刷新</span></div>
+      <div id="sandboxLog" class="log-view"><div class="empty">还没有假消息</div></div>
     </div>
   </section>
 

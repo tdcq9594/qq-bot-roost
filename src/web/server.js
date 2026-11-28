@@ -679,6 +679,16 @@ async function startWebServerInstance({
   const MAX_SSE = 32;
 
   /**
+   * 沙盒消息流水：只记 /api/mock/message 注入的假消息，不碰全局消息总线。
+   *
+   * 为什么不用 /api/stream 的 event:message：那一路是给外部 AI 宿主订阅真实
+   * 群消息的（面板故意不显示聊天内容，是隐私设计）。沙盒页若订阅它，会把
+   * 真消息一起显示出来。所以用独立缓冲，且只在 mock 模式写入。
+   */
+  const sandboxLog = [];
+  const MAX_SANDBOX_MESSAGES = 300;
+
+  /**
    * 按 ?bot=<id> 选机器人，没传就用第一个。
    * 下面每个 handler 开头都会用同名变量把外层的 cfg / plugins / groups … 遮住，
    * 这样 17 个接口的主体逻辑一行都不用改。
@@ -1903,17 +1913,34 @@ async function startWebServerInstance({
           const b = await readBody(req);
           const text = String(b?.text ?? '').trim();
           if (!text) return json(res, 400, { error: '缺 text' });
-          await rt.dispatch('GROUP_AT_MESSAGE_CREATE', {
-            id: `mock-inject-${Date.now()}`,
+          const msgId = `mock-inject-${Date.now()}`;
+          const groupId = String(b?.groupId ?? 'mock-group');
+          const userId = String(b?.userId ?? 'mock-user');
+          const userName = String(b?.userName ?? '测试用户');
+          sandboxLog.push({
+            id: msgId,
+            at: Date.now(),
+            direction: 'in',
+            groupId,
+            userId,
+            userName,
             content: text,
-            group_openid: String(b?.groupId ?? 'mock-group'),
-            author: {
-              member_openid: String(b?.userId ?? 'mock-user'),
-              username: String(b?.userName ?? '测试用户'),
-            },
+          });
+          if (sandboxLog.length > MAX_SANDBOX_MESSAGES) sandboxLog.shift();
+          await rt.dispatch('GROUP_AT_MESSAGE_CREATE', {
+            id: msgId,
+            content: text,
+            group_openid: groupId,
+            author: { member_openid: userId, username: userName },
             timestamp: String(Date.now()),
           }, 'mock');
           return json(res, 200, { ok: true });
+        }
+
+        /** 沙盒消息流水：面板轮询用，只返回 mock 注入的消息，不含真实群消息 */
+        if (pathname === '/api/sandbox/messages' && req.method === 'GET') {
+          if (!rt?.mock) return json(res, 404, { error: '只有 mock 模式能用' });
+          return json(res, 200, { messages: sandboxLog.slice(-200), max: MAX_SANDBOX_MESSAGES });
         }
 
   /* ---------------- 机器人管理（不依赖当前选中项） ---------------- */
