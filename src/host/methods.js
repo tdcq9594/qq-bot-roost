@@ -1157,9 +1157,18 @@ export function createMethods({ runtime: R, getState, log = () => {}, extBridge 
     def('ext.call.reply', 'message', 'DSH 回传扩展调用结果（内部）', async (p) =>
       extBridge.reply({ requestId: str(p.requestId), ok: p.ok !== false, result: p.result ?? null, error: str(p.error ?? '') }));
 
-    /** DSH 连上 / 扩展装卸后上报能力清单 */
-    def('ext.register', 'message', 'DSH 上报已装扩展能力清单（内部）', async (p) =>
-      extBridge.register({ extensions: p.extensions ?? [] }));
+    /**
+     * 命令回执：客户端处理完 `ext.command.request` 后回这一条。
+     * 带 `reply` 就由框架代发（带引用、受限频与被动窗口管），不带就是客户端自己发过了。
+     */
+    def('ext.command.reply', 'message', 'DSH 回传命令执行结果，可选代发正文（内部）', async (p) =>
+      extBridge.replyCommand({
+        requestId: str(p.requestId), ok: p.ok !== false, reply: str(p.reply ?? ''), error: str(p.error ?? ''),
+      }));
+
+    /** DSH 连上 / 扩展装卸后上报能力清单与命令（`host` 为宿主本体，1.2.0 起） */
+    def('ext.register', 'message', 'DSH 上报已装扩展能力清单与聊天命令（内部）', async (p) =>
+      extBridge.register({ extensions: p.extensions ?? [], host: p.host ?? null }));
   }
 
   /* ---------------- 插件工具 → 一等协议方法（方案 A） ---------------- */

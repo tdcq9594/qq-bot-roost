@@ -185,6 +185,7 @@ export class Registry {
         isCommand: Boolean(typeof it === 'object' && it.cmd) || false,
         admin: Boolean(typeof it === 'object' && it.admin),
         globalAdmin: Boolean(typeof it === 'object' && it.globalAdmin),
+        ownerOnly: Boolean(typeof it === 'object' && it.ownerOnly),
       });
     }
     return sec;
@@ -210,12 +211,23 @@ export class Registry {
      * 内核的十几个命令全靠这个分到「基础 / 管理 / 其它」三组——
      * 不然 `/help` 主菜单会把它们全部平铺出来，二十多行，
      * 在手机上要滑两屏才看得完。
+     *
+     * `hidden` 是给别名用的：别名要能直呼，但不该在菜单里和主名并列出现。
      */
+    if (meta.hidden === true) return;
     this.addMenuSection(
       pluginId,
       { name: meta.plugin },
       meta.section ?? '指令',
-      [{ cmd: meta.pattern ?? key, desc: meta.desc ?? '', admin: meta.admin, globalAdmin: meta.globalAdmin }],
+      [
+        {
+          cmd: meta.pattern ?? key,
+          desc: meta.desc ?? '',
+          admin: meta.admin,
+          globalAdmin: meta.globalAdmin,
+          ownerOnly: meta.ownerOnly,
+        },
+      ],
     );
   }
 
@@ -683,7 +695,21 @@ export function createContext({ meta, paths, registry, api, cfg, config, configS
         desc: meta2?.desc ?? '',
         usage: meta2?.usage ?? `${cfg.commandPrefix}${name}`,
         pattern: String(name).trim(),
+        /**
+         * 三个权限标记都要原样透传：
+         *   admin        ≥ 管理员（主人也算）
+         *   globalAdmin  另需全局作用域权限
+         *   ownerOnly    只有主人
+         *
+         * 以前只传了 `admin`，导致插件命令设 `globalAdmin` / `ownerOnly`
+         * 静默失效——命令表收下了字段，但这里压根没送进去。
+         */
         admin: Boolean(meta2?.admin),
+        globalAdmin: Boolean(meta2?.globalAdmin),
+        ownerOnly: Boolean(meta2?.ownerOnly),
+        hidden: Boolean(meta2?.hidden),
+        // 只影响 /help 分组，不传就落「指令」组
+        section: meta2?.section,
         plugin: meta.name ?? id,
         // 合并多插件回复时要靠 id 分组，name 只用来显示
         pluginId: id,
