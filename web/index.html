@@ -1047,7 +1047,8 @@ curl 'https://bot.q.qq.com/cgi-bin/v2/info/list_bots' \
         <div class="grid2">
           <label>监听地址<input name="webuiHost" placeholder="127.0.0.1"></label>
           <label>端口<input name="webuiPort" type="number"></label>
-          <label>面板访问密钥（留空则不校验；已设置时不会回显，想改就重填）<input name="webuiAccessKey" type="password" autocomplete="new-password"></label>
+          <label>登录密码（给人用，8 位以上；留空则不修改）<input name="webuiLoginPassword" type="password" autocomplete="new-password"></label>
+          <label>机器密钥（给 dsh-roost / 脚本用，16 位以上；留空则不修改）<input name="webuiAccessKey" type="password" autocomplete="new-password"></label>
           <label>日志级别
             <select name="logLevel">
               <option value="debug">debug</option>
@@ -2179,12 +2180,16 @@ curl 'https://bot.q.qq.com/cgi-bin/v2/info/list_bots' \
       </label>
       <div id="setupPublicFields" hidden>
         <p class="setup-note">
-          对外服务必须设置访问密钥，否则任何人都能接管面板（含装插件 = 执行任意代码）。
-          改监听地址和密钥都要<b>重启框架</b>才会生效；重启后用下面的地址加 <code>?key=你的密钥</code> 访问。
+          对外服务要设两把钥匙：<b>登录密码</b>给你在登录页输（8 位以上），<b>机器密钥</b>给 dsh-roost / 脚本调 API 用（16 位以上）。
+          不设的话任何人都能接管面板（含装插件 = 执行任意代码）。改监听地址和密钥都要<b>重启框架</b>才生效。
         </p>
         <div class="bot-form">
           <label>
-            <span>访问密钥</span>
+            <span>登录密码（给人用，8 位以上）</span>
+            <input id="setupLoginPassword" type="password" placeholder="设一个好记但不常见的密码" autocomplete="new-password">
+          </label>
+          <label>
+            <span>机器密钥（给脚本用，16 位以上）</span>
             <input id="setupAccessKey" type="password" placeholder="设一个长随机串" autocomplete="new-password">
           </label>
           <label>

@@ -38,6 +38,13 @@ import { toImportRow } from '../ledger.js';
 import { ledgerTextOf } from '../ledger-text.js';
 import { createMediaStore } from '../media-store.js';
 import { runRoute } from '../plugin/routes.js';
+import {
+  MIN_KEY_LENGTH,
+  MIN_LOGIN_PASSWORD_LENGTH,
+  checkKeyStrength,
+  checkLoginPasswordStrength,
+  warnWeakKey,
+} from './key-strength.js';
 import { toggleGroupPlugin } from '../plugin/groupscope.js';
 import { suspendPluginWatch } from '../services/plugin-watch.js';
 import { syncNickname } from '../services/nickname.js';
@@ -538,23 +545,73 @@ async function startWebServerInstance({
 
   const host = wc.host || '127.0.0.1';
   const port = Number(wc.port) || 15207;
-  const accessKey = wc.accessKey || wc.token || '';
+  /**
+   * 两把钥匙（2026-11-28）：
+   *   - `accessKey` 给**机器**用（dsh-roost / roost-mcp 的 X-Access-Key / ?key=），16+；
+   *   - `loginPassword` 给**人**用（登录页输入），8+。
+   *
+   * 必须是 `let` 而不是 const：面板改凭证后要即时生效并吊销旧凭证（旧版是
+   * const 固化，实测改完 key 旧 key 仍能进、新 key 反而 401——换了等于没换）。
+   * `loginPassword` 留空时登录页退回收 `accessKey`，老用户升级不断档。
+   */
+  let accessKey = wc.accessKey || wc.token || '';
+  let loginPassword = wc.loginPassword || '';
 
   /**
-   * 硬阻断：监听非 loopback 却没设 accessKey。
+   * 硬阻断：监听非 loopback 却没设/设了弱 accessKey。
    *
    * 以前只在 doctor 里软告警。`authorized()` 在 accessKey 为空时无条件放行，
    * 于是 `webui.host=0.0.0.0` 且忘设 key 的面板在全部网卡零认证开放——
    * 远程可建/删机器人、改配置、装任意插件（插件代码在子进程执行 = RCE）。
-   * 这种误配不该靠人记得去看 doctor，直接在启动期拒绝。
+   * 2026-11-28 起再加一道：外部暴露时弱 key 也拒绝（20 次/分钟的限流挡不住
+   * 短口令被穷举）。本机 loopback 完全不拦，只给弱 key 打 warn——升级不锁死
+   * 老用户（历史短 key 仍能用，但会被提醒去换）。
    */
   const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '']);
-  if (!LOOPBACK_HOSTS.has(String(host)) && !accessKey) {
+  const exposed = !LOOPBACK_HOSTS.has(String(host));
+  const keyStrength = checkKeyStrength(accessKey);
+  if (exposed && !accessKey) {
     throw new Error(
       `面板监听 ${host} 但未设置 webui.accessKey。\n` +
         `这样任何人访问该端口都能无认证接管面板（含安装插件=执行任意代码）。\n` +
         `请在 config/bot.json 里设置 webui.accessKey，或把 webui.host 改回 127.0.0.1。`,
     );
+  }
+  if (exposed && !keyStrength.ok) {
+    throw new Error(
+      `面板监听 ${host} 但 webui.accessKey 强度不足：${keyStrength.message}。\n` +
+        `这把钥匙给机器调用 API 用（dsh-roost / 脚本），外部暴露时弱密钥可被穷举。\n` +
+        `请换成至少 ${MIN_KEY_LENGTH} 位的随机字符串（如 node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"），` +
+        `或把 webui.host 改回 127.0.0.1。`,
+    );
+  }
+  /**
+   * 外网暴露 = 给人登录：必须设独立的 loginPassword（8+），不能只靠机器 key。
+   * 两把钥匙分开后，人不用记 16 位的机器令牌；机器也不用把人密码写在脚本里。
+   */
+  const loginStrength = checkLoginPasswordStrength(loginPassword);
+  if (exposed && !loginPassword) {
+    throw new Error(
+      `面板监听 ${host} 但未设置 webui.loginPassword。\n` +
+        `外网访问是给人在登录页输密码的：请单独设一个至少 ${MIN_LOGIN_PASSWORD_LENGTH} 位的登录密码，` +
+        `它和给机器用的 accessKey 分开，改完重启生效。\n` +
+        `或把 webui.host 改回 127.0.0.1（本机不需要独立登录密码）。`,
+    );
+  }
+  if (exposed && !loginStrength.ok) {
+    throw new Error(
+      `面板监听 ${host} 但 webui.loginPassword 强度不足：${loginStrength.message}。\n` +
+        `请换成至少 ${MIN_LOGIN_PASSWORD_LENGTH} 位、且不是常见口令的登录密码。`,
+    );
+  }
+  if (!exposed) {
+    if (accessKey) {
+      const hint = warnWeakKey(accessKey);
+      if (hint) log.warn(`面板机器密钥强度不足：${hint}`);
+    }
+    if (loginPassword && !loginStrength.ok) {
+      log.warn(`面板登录密码强度不足：${loginStrength.message}；建议更换`);
+    }
   }
 
   /**
@@ -1215,16 +1272,38 @@ async function startWebServerInstance({
       const sid0 = /(?:^|;\s*)roost_sid=([a-f0-9]{64})/.exec(ck)?.[1];
       const exp0 = sid0 ? sessions.get(sid0) : 0;
       if (!exp0 || exp0 <= Date.now()) {
+        /**
+         * 登录表单（2026-11-28）：密钥只在 POST body 里交给 /api/login，不再让用户
+         * 把密钥贴进网址。URL 会进历史 / 书签同步 / Referer / 反代 access_log，
+         * 每一条都是明文泄露面；表单 + HttpOnly Cookie 把这条路径堵上。
+         *
+         * 脚本仍是 `script-src 'self'`（见 CSP_MAIN），所以不能内联：
+         * 用同源的 /login.js，它在下面的鉴权闸门里显式放行——用户还没会话时
+         * 必须加载得到，否则表单就是个按不动的空壳。
+         *
+         * 保留兼容：`?key=` 首跳（1186 行）和 `authorized()` 的 query 分支都还在，
+         * dsh-roost / roost-mcp 那条路一行没动。这里只多一条给人走的入口。
+         */
         res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8' });
         return res.end(
-          '<!doctype html><meta charset="utf-8"><title>需要访问密钥</title>' +
+          '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
+            '<title>面板登录</title>' +
             '<body style="font:15px/1.6 system-ui;max-width:34em;margin:14vh auto;padding:0 1.2em">' +
-            '<h1 style="font-size:18px">需要访问密钥</h1>' +
-            '<p>面板已开启访问密钥，但当前浏览器还没有会话（进程重启后会话会全部失效）。</p>' +
-            '<p>请用带密钥的地址打开一次，之后会在浏览器里记住 7 天：</p>' +
-            '<pre style="background:rgba(128,128,128,.14);padding:10px 12px;border-radius:6px;overflow:auto">' +
-            `http://${shownHost}:${actualPort}/?key=你的密钥</pre>` +
-            '<p style="opacity:.65;font-size:13px">密钥在 config/bot.json 的 webui.accessKey，或启动时设置的环境变量里。</p>',
+            '<h1 style="font-size:18px">面板登录</h1>' +
+            '<p>请输入面板登录密码（<code>webui.loginPassword</code>；没设过时仍可用旧的访问密钥）。' +
+            '登录状态在浏览器里保留 7 天，程序重启后需要重新登录。</p>' +
+            '<form id="loginForm">' +
+            '<label for="panelKey">访问密钥</label><br>' +
+            '<input id="panelKey" type="password" autocomplete="current-password" required ' +
+            'style="box-sizing:border-box;width:100%;max-width:28em;padding:8px 10px;margin:6px 0 10px">' +
+            '<button type="submit" style="padding:8px 18px">登录</button>' +
+            '</form>' +
+            '<p id="loginError" role="alert" style="color:#e5484d;min-height:1.6em"></p>' +
+            '<p style="opacity:.65;font-size:13px">登录密码在 <code>config/bot.json</code> 的 ' +
+            '<code>webui.loginPassword</code>，或环境变量里。<br>' +
+            '程序化调用（dsh-roost / 脚本）用的是另一把 <code>webui.accessKey</code>，' +
+            '通过 <code>X-Access-Key</code> 头或 <code>?key=</code> 参数传递，照常工作。</p>' +
+            '<script src="/login.js" defer></script>',
         );
       }
     }
@@ -1342,6 +1421,83 @@ async function startWebServerInstance({
             'Access-Control-Allow-Headers': wantHeaders || 'Content-Type, X-Access-Key, X-Token',
           });
           return res.end();
+        }
+
+        /**
+         * 面板登录 / 登出（2026-11-28，**必须在 authorized() 之前**）。
+         *
+         * 登录是「拿密钥换会话」的入口，调用方此时还没有会话，走统一鉴权会
+         * 直接 401——自己和自己死锁。所以这两个端点在鉴权闸门前面处理，但
+         * 安全要求一条不少：
+         *   · 写操作必须 application/json（复用 isJsonRequest）
+         *   · 必须同源（复用 isSameOrigin，Referer 兜底）
+         *   · 失败走 authFails 同一份 per-IP 计数——不能让攻击者拿这个端点
+         *     把「20 次/分钟」的限流翻倍
+         *   · 成功新建 sid（crypto.randomBytes(32)），与 ?key= 首跳完全同构，
+         *     天然防 session fixation
+         *
+         * 登出删的是服务端 session + 清 Cookie。只清浏览器 Cookie 不删服务端
+         * 记录等于没登出——偷到 sid 的人还能继续用。
+         */
+        if ((pathname === '/api/login' || pathname === '/api/logout') && req.method === 'POST') {
+          if (!isJsonRequest(req)) {
+            return json(res, 415, { error: '写操作需要 Content-Type: application/json' });
+          }
+          if (!isSameOrigin(req)) {
+            return json(res, 403, { error: '跨站请求被拒绝' });
+          }
+          const ip = clientIp(req);
+          const now = Date.now();
+          const rec = authFails.get(ip);
+          if (rec && now - rec.start < AUTH_WINDOW && rec.count >= AUTH_MAX_FAILS) {
+            log.error(
+              `面板登录失败次数过多，已临时封禁 ${ip}（${Math.ceil((AUTH_WINDOW - (now - rec.start)) / 1000)} 秒后解除）`,
+            );
+            return json(res, 429, { error: '尝试次数过多，请稍后再试' });
+          }
+          let body;
+          try {
+            body = await readBody(req);
+          } catch (e) {
+            return json(res, 400, { error: `请求体不合法：${e?.message || e}` });
+          }
+          if (pathname === '/api/login') {
+            const given = body?.key;
+            /**
+             * 两把钥匙：设了 loginPassword 就只认它（人密码），没设才退回
+             * accessKey（老用户升级不断档）。机器令牌不能当登录密码用——
+             * 否则把它贴进登录页又回到「密钥进表单」的老路。
+             */
+            const expected = loginPassword || accessKey;
+            /** 没设任何凭证时本机本就无需鉴权，别开一道「空密码也能登」的门 */
+            if (!expected || !safeEqual(given, expected)) {
+              const cur = rec && now - rec.start < AUTH_WINDOW ? rec : { count: 0, start: now };
+              cur.count += 1;
+              authFails.set(ip, cur);
+              log.warn(`面板登录失败：来源 ${ip}，本窗口第 ${cur.count} 次`);
+              if (authFails.size > 5000) authFails.clear();
+              return json(res, 401, { error: '访问密钥无效' });
+            }
+            authFails.delete(ip);
+            const sid = crypto.randomBytes(32).toString('hex');
+            sessions.set(sid, Date.now() + SESSION_TTL_MS);
+            res.writeHead(200, {
+              'Content-Type': 'application/json; charset=utf-8',
+              'Cache-Control': 'no-store',
+              'Set-Cookie': `roost_sid=${sid}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.floor(
+                SESSION_TTL_MS / 1000,
+              )}`,
+            });
+            return res.end(JSON.stringify({ ok: true }));
+          }
+          const cookieSid = /(?:^|;\s*)roost_sid=([a-f0-9]{64})/.exec(String(req.headers.cookie || ''))?.[1];
+          if (cookieSid) sessions.delete(cookieSid);
+          res.writeHead(200, {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Cache-Control': 'no-store',
+            'Set-Cookie': 'roost_sid=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0',
+          });
+          return res.end(JSON.stringify({ ok: true }));
         }
 
         if (!authorized(req, url, ptPage)) return json(res, 401, { error: '访问密钥无效' });
@@ -1987,6 +2143,9 @@ async function startWebServerInstance({
               ...(globalCfg.webui ?? {}),
               accessKey: '',
               accessKeySet: Boolean(globalCfg.webui?.accessKey),
+              // 登录密码与机器密钥一样不回显（本机任意进程一条 GET 就能抄走）
+              loginPassword: '',
+              loginPasswordSet: Boolean(globalCfg.webui?.loginPassword),
             },
             logLevel: globalCfg.logLevel ?? 'info',
             /**
@@ -2132,15 +2291,51 @@ async function startWebServerInstance({
                 : [],
             };
           }
+          /** 凭证是否变更——变更后要即时生效 + 吊销所有会话 */
+          let credentialsChanged = false;
           if (body.webui && typeof body.webui === 'object') {
             // webui 是全局设置，不能写进机器人 cfg：
             // 写进去 saveBotConfig 也不保存它（白名单式保存），
             // 结果是面板提示「已保存」但什么都没变。
             const patch = { ...body.webui };
             // 面板不回显密钥，所以空值代表「不修改」，不是「清空」
-            if (!patch.accessKey) delete patch.accessKey;
+            const newAccessKey = patch.accessKey ? String(patch.accessKey).trim() : '';
+            const newLoginPassword = patch.loginPassword ? String(patch.loginPassword).trim() : '';
+            delete patch.accessKey;
+            delete patch.loginPassword;
             delete patch.accessKeySet;
+            delete patch.loginPasswordSet;
+
+            if (newAccessKey) {
+              // 只校验「本次真的改了」的值——历史弱 key 用户不填这栏照样能保存别的设置。
+              const strength = checkKeyStrength(newAccessKey);
+              if (!strength.ok) return json(res, 400, { ok: false, error: strength.message });
+              if (newAccessKey !== accessKey) {
+                accessKey = newAccessKey;
+                credentialsChanged = true;
+              }
+            }
+            if (newLoginPassword) {
+              const strength = checkLoginPasswordStrength(newLoginPassword);
+              if (!strength.ok) return json(res, 400, { ok: false, error: strength.message });
+              if (newLoginPassword !== loginPassword) {
+                loginPassword = newLoginPassword;
+                credentialsChanged = true;
+              }
+            }
+
             globalCfg.webui = { ...globalCfg.webui, ...patch };
+            if (newAccessKey) globalCfg.webui.accessKey = newAccessKey;
+            if (newLoginPassword) globalCfg.webui.loginPassword = newLoginPassword;
+            if (credentialsChanged) {
+              /**
+               * 吊销必须**紧跟凭证赋值**，不能挪到本请求末尾的 await 之后：
+               * 后面还有 syncBotName() 这类要几百毫秒甚至几秒的异步操作，
+               * 那段时间旧 cookie 仍有效——攻击者拿着旧会话就能继续操作。
+               */
+              sessions.clear();
+              log.warn('面板凭证已更新：旧密钥/密码立即失效，所有会话已吊销，请用新凭证重新登录');
+            }
             await saveGlobalConfig?.(globalCfg).catch(() => {});
             configureMirror(globalCfg);
             configureProxy(globalCfg);
@@ -2245,9 +2440,21 @@ async function startWebServerInstance({
 
           // 填完 AppID / AppSecret 顺手把「默认机器人」换成官方昵称
           const name = await syncBotName(rt);
+          if (credentialsChanged) {
+            /**
+             * 凭证换了必须即时吊销旧凭证换来的会话——只清浏览器 Cookie 不够，
+             * 偷到 sid 的人还能继续用。sessions 只存内存，清掉即全部失效。
+             * 前端收到 credentialsChanged 后跳登录页，用户用新密码重登。
+             */
+            sessions.clear();
+            log.warn('面板凭证已更新：旧密钥/密码立即失效，所有会话已吊销，请用新凭证重新登录');
+          }
           return json(res, 200, {
             ok: true,
             name: name ?? rt.name,
+            ...(credentialsChanged
+              ? { credentialsChanged: true, message: '凭证已更新，旧凭证立即失效，请用新凭证重新登录' }
+              : {}),
             // 换了连接方式必须重启才生效，明确告诉前端，别让用户以为已经切了
             ...(connectionChanged
               ? {
@@ -5120,7 +5327,7 @@ async function startWebServerInstance({
 
   log.info(`可视化面板: ${baseUrl}`);
   if (accessKey) {
-    log.info('面板已开启访问密钥：浏览器会自动带上；手动访问时在地址后加 ?key=<你的密钥>（日志里不打印）');
+    log.info('面板已开启访问密钥：打开面板后在登录页输入密钥即可（密钥只在 POST body 里传，不进网址/日志）；程序化调用仍可用 X-Access-Key 头或 ?key=');
   }
 
   let closed = false;

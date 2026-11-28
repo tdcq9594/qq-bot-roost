@@ -43,6 +43,17 @@ async function api(path, opts = {}) {
     err.status = res.status;
     throw err;
   }
+  /**
+   * 凭证（accessKey / loginPassword）刚被改过：服务端已即时吊销旧凭证和所有
+   * 会话，当前页面接下来每个请求都会 401。在这里直接跳登录页，别让用户对着
+   * 一片「访问密钥无效」猜发生了什么。
+   */
+  if (data?.credentialsChanged) {
+    const msg = data.message || '凭证已更新，请用新凭证重新登录';
+    try { sessionStorage.setItem('roostLoginNotice', msg); } catch { /* 隐私模式下忽略 */ }
+    location.reload();
+    return data;
+  }
   return data;
 }
 
@@ -2041,9 +2052,13 @@ function fillForm(c) {
 
   f.webuiHost.value = c.webui?.host || '127.0.0.1';
   f.webuiPort.value = c.webui?.port ?? 15207;
-  // 密钥不回显（后端只返回 accessKeySet）：留空 = 不修改
+  // 两把钥匙都不回显（后端只返回 *Set）：留空 = 不修改
   f.webuiAccessKey.value = '';
   f.webuiAccessKey.placeholder = c.webui?.accessKeySet ? '已设置（留空则保持不变）' : '未设置';
+  if (f.webuiLoginPassword) {
+    f.webuiLoginPassword.value = '';
+    f.webuiLoginPassword.placeholder = c.webui?.loginPasswordSet ? '已设置（留空则保持不变）' : '未设置';
+  }
   f.logLevel.value = c.logLevel || 'info';
 
   f.groupInvited.checked = Boolean(c.groupManage?.invited);
@@ -2518,6 +2533,7 @@ function collectAutoPayload(f) {
       host: f.webuiHost.value.trim() || '127.0.0.1',
       port: Number(f.webuiPort.value) || 15207,
       accessKey: f.webuiAccessKey.value.trim(),
+      ...(f.webuiLoginPassword?.value.trim() ? { loginPassword: f.webuiLoginPassword.value.trim() } : {}),
     },
     groupManage: { invited: f.groupInvited.checked },
     media: { placeholderSpace: f.mediaPlaceholderSpace.checked },
@@ -2619,6 +2635,7 @@ async function saveCfgForm({ fromQr = false } = {}) {
       host: f.webuiHost.value.trim() || '127.0.0.1',
       port: Number(f.webuiPort.value) || 15207,
       accessKey: f.webuiAccessKey.value.trim(),
+      ...(f.webuiLoginPassword?.value.trim() ? { loginPassword: f.webuiLoginPassword.value.trim() } : {}),
     },
     groupManage: {
       invited: f.groupInvited.checked,
@@ -2850,11 +2867,15 @@ function bindSetup() {
   // 保存访问方式（webui 全局配置，增量提交；重启才生效）
   $('#setupNetSave')?.addEventListener('click', async () => {
     const key = $('#setupAccessKey')?.value.trim() || '';
+    const loginPass = $('#setupLoginPassword')?.value.trim() || '';
     const host = $('#setupHost')?.value.trim() || '0.0.0.0';
     const port = Number($('#setupPort')?.value) || 15207;
     const err = $('#setupErr');
-    if (!key) {
-      if (err) { err.textContent = '对外服务必须设置访问密钥'; err.hidden = false; }
+    if (!key || !loginPass) {
+      if (err) {
+        err.textContent = '对外服务要设两把钥匙：登录密码（给人用）和机器密钥（给脚本用），缺一不可';
+        err.hidden = false;
+      }
       return;
     }
     const btn = $('#setupNetSave');
@@ -2863,15 +2884,17 @@ function bindSetup() {
     try {
       await api('/api/config', {
         method: 'PUT',
-        body: JSON.stringify({ webui: { host, port, accessKey: key } }),
+        body: JSON.stringify({ webui: { host, port, accessKey: key, loginPassword: loginPass } }),
       });
       if (err) {
-        err.textContent = '已保存。重启框架后生效：用局域网 / 公网地址加 ?key=你的密钥 访问面板。';
+        err.textContent = '已保存。重启框架后生效：用局域网 / 公网地址打开面板，在登录页输入登录密码。';
         err.hidden = false;
         err.classList.add('setup-ok');
       }
       const access = $('#setupAccessKey');
       if (access) access.value = '';
+      const passInput = $('#setupLoginPassword');
+      if (passInput) passInput.value = '';
     } catch (e) {
       if (err) { err.textContent = '保存失败：' + errText(e); err.hidden = false; }
     } finally {
